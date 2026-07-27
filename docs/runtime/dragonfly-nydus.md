@@ -69,9 +69,9 @@ The target performs these steps:
 - preheats the exported image through Dragonfly
 - starts `kova-nydus-test/kova-nydus-smoke`
 
-Preheat requests skip registry TLS verification by default to keep the local
-registry path simple. Use `kova preheat --insecure-skip-verify=false` when the
-target registry has valid TLS and strict verification is required.
+Preheat requests verify registry TLS by default. The local validation scripts
+pass `--insecure-skip-verify` explicitly because they use a development
+registry; do not use that flag with a registry that has valid TLS.
 
 A successful run ends with:
 

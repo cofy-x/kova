@@ -18,7 +18,7 @@ SINGLE_DIR_TARGET=${SINGLE_DIR_TARGET:-${CLUSTER_REGISTRY}/kova-examples/simple-
 SINGLE_DIR_PULL_TARGET=${SINGLE_DIR_PULL_TARGET:-${REGISTRY_HOST}/kova-examples/simple-dir:dev}
 E2E_BUILD_IMAGE=${E2E_BUILD_IMAGE:-true}
 
-make -C "${ROOT}" kova-host
+make -C "${ROOT}" kova
 if [[ "${E2E_BUILD_IMAGE}" == "true" ]]; then
   make -C "${ROOT}" image
 fi
@@ -63,7 +63,7 @@ KOVA_DAEMON_OTEL_RESOURCE_ATTRIBUTES=${KOVA_DAEMON_OTEL_RESOURCE_ATTRIBUTES:-dep
 "${KOVA[@]}" \
   --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" \
   --name "${RUNNER_NAME}" \
-  export -- --result "${ROOT}/${RESULT_JSONL}" --oci
+  export --result "${ROOT}/${RESULT_JSONL}" --oci
 
 docker pull "${REGISTRY_HOST}/kova-examples/simple:dev"
 

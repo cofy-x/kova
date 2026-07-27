@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	_ "net/http/pprof"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"github.com/cofy-x/kova/internal/logging"
 	"github.com/cofy-x/kova/internal/observability"
 	"github.com/cofy-x/kova/internal/service"
+	"github.com/cofy-x/kova/internal/version"
 
 	cli "github.com/urfave/cli/v2"
 )
@@ -40,8 +42,9 @@ func main() {
 		}
 	}()
 	app := &cli.App{
-		Name:  "kovad",
-		Usage: "Kova runtime daemon entrypoint",
+		Name:    "kovad",
+		Usage:   "Kova runtime daemon entrypoint",
+		Version: version.Version,
 		Flags: []cli.Flag{
 			&cli.StringFlag{
 				Name:  "pprof-server",
@@ -60,6 +63,14 @@ func main() {
 			return nil
 		},
 		Commands: []*cli.Command{
+			{
+				Name:  "version",
+				Usage: "print version and build information",
+				Action: func(c *cli.Context) error {
+					_, err := fmt.Fprintln(c.App.Writer, version.String("kovad"))
+					return err
+				},
+			},
 			daemon.CLICommand(),
 			service.CLICommand(),
 		},

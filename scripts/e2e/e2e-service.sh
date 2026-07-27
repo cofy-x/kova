@@ -32,7 +32,7 @@ require_cmd jq
 require_cmd kubectl
 require_cmd zip
 
-make -C "${ROOT}" kova-host
+make -C "${ROOT}" kova
 if [[ "${E2E_SERVICE_BUILD_IMAGE}" == "true" ]]; then
   make -C "${ROOT}" image
 fi

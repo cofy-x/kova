@@ -8,10 +8,10 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/cofy-x/kova/internal/batch"
 	"github.com/cofy-x/kova/internal/ctxconfig"
 	"github.com/cofy-x/kova/internal/logging"
 	"github.com/cofy-x/kova/internal/runner"
+	"github.com/cofy-x/kova/internal/version"
 
 	cli "github.com/urfave/cli/v2"
 )
@@ -22,6 +22,7 @@ var undefinedFlagPattern = regexp.MustCompile(`flag provided but not defined: -+
 
 func NewCLIApp() *cli.App {
 	commands := withUsageErrorHint([]*cli.Command{
+		versionCLICommand(),
 		prepareCLICommand(),
 		listCLICommand(),
 		scaleCLICommand(),
@@ -36,8 +37,9 @@ func NewCLIApp() *cli.App {
 		destroyCLICommand(),
 	})
 	return &cli.App{
-		Name:  "kova",
-		Usage: "distributed image build client for build, export, and preheat workflows",
+		Name:    "kova",
+		Usage:   "distributed image build client for build, export, and preheat workflows",
+		Version: version.Version,
 		Flags: []cli.Flag{
 			&cli.StringFlag{
 				Name:  "pprof-server",
@@ -136,7 +138,6 @@ func exportCLICommand() *cli.Command {
 		Name:  "export",
 		Usage: "export stored build results as JSONL",
 		Flags: []cli.Flag{
-			&cli.StringFlag{Name: "from-result", Value: "result.lmdb", Usage: "path to the LMDB result database to read"},
 			&cli.StringFlag{Name: "result", Value: "result.jsonl", Usage: "path to write exported JSONL"},
 			&cli.StringSliceFlag{Name: "target", Usage: "export only the exact image target; repeat for multiple targets"},
 			&cli.BoolFlag{Name: "oci", Usage: "export only OCI (non-nydus) targets without suffix filtering changes"},
@@ -147,20 +148,10 @@ func exportCLICommand() *cli.Command {
 			if err != nil {
 				return err
 			}
-			if cfg.Enabled() {
-				args := c.Args().Slice()
-				if len(args) == 0 {
-					args = runnerExportArgsFromContext(c)
-				}
-				return runner.NewClient(cfg).Export(args)
+			if c.NArg() != 0 {
+				return fmt.Errorf("export does not accept positional arguments")
 			}
-			return batch.RunExport(batch.Options{
-				FromResultPath: c.String("from-result"),
-				ResultPath:     c.String("result"),
-				ExportTargets:  c.StringSlice("target"),
-				OCI:            c.Bool("oci"),
-				WithFail:       c.Bool("with-fail"),
-			})
+			return runner.NewClient(cfg).Export(runnerExportArgsFromContext(c))
 		},
 	}
 }
@@ -170,7 +161,6 @@ func preheatCLICommand() *cli.Command {
 		Name:  "preheat",
 		Usage: "preheat built images through Dragonfly",
 		Flags: []cli.Flag{
-			&cli.StringFlag{Name: "from-result", Value: "result.lmdb", Usage: "path to the LMDB result database to read and update"},
 			&cli.StringFlag{Name: "target", Usage: "preheat only the exact image target"},
 			&cli.StringFlag{Name: "dragonfly-scheduler-addr", Usage: "Dragonfly Scheduler gRPC address (e.g. 10.1.70.58:8002)"},
 			&cli.IntFlag{Name: "concurrency", Value: 1, Usage: "number of concurrent grpcurl invocations"},
@@ -179,32 +169,17 @@ func preheatCLICommand() *cli.Command {
 			&cli.BoolFlag{Name: "fail-fast", Usage: "stop immediately after the first preheat failure"},
 			&cli.BoolFlag{Name: "oci", Usage: "only preheat OCI (non-nydus) targets"},
 			&cli.BoolFlag{Name: "verbose", Usage: "stream grpcurl subprocess output to the console"},
-			&cli.BoolFlag{Name: "insecure-skip-verify", Value: true, Usage: "skip registry TLS verification in Dragonfly preheat requests"},
+			&cli.BoolFlag{Name: "insecure-skip-verify", Usage: "skip registry TLS verification in Dragonfly preheat requests"},
 		},
 		Action: func(c *cli.Context) error {
 			cfg, err := runnerConfigFromContext(c)
 			if err != nil {
 				return err
 			}
-			if cfg.Enabled() {
-				args := c.Args().Slice()
-				if len(args) == 0 {
-					args = runnerPreheatArgsFromContext(c)
-				}
-				return runner.NewClient(cfg).Preheat(args)
+			if c.NArg() != 0 {
+				return fmt.Errorf("preheat does not accept positional arguments")
 			}
-			return batch.RunPreheat(batch.Options{
-				FromResultPath:            c.String("from-result"),
-				Target:                    c.String("target"),
-				DragonflySchedulerAddr:    c.String("dragonfly-scheduler-addr"),
-				Concurrency:               c.Int("concurrency"),
-				Interval:                  c.Int("interval"),
-				Timeout:                   c.Int("timeout"),
-				Failfast:                  c.Bool("fail-fast"),
-				OCI:                       c.Bool("oci"),
-				Verbose:                   c.Bool("verbose"),
-				PreheatInsecureSkipVerify: c.Bool("insecure-skip-verify"),
-			})
+			return runner.NewClient(cfg).Preheat(runnerPreheatArgsFromContext(c))
 		},
 	}
 }

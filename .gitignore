@@ -4,6 +4,7 @@
 /.kova.state
 /bin/*
 !/bin/.gitkeep
+/dist/
 /source
 /.kind
 /.generated

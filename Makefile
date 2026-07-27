@@ -3,25 +3,19 @@ SHELL := /bin/bash
 GO ?= go
 HOST_GOOS := $(shell $(GO) env GOOS)
 HOST_GOARCH := $(shell $(GO) env GOARCH)
-DOCKER_ARCH := $(shell docker info --format '{{.Architecture}}' 2>/dev/null | sed -e 's/aarch64/arm64/' -e 's/x86_64/amd64/')
 
 BINARY := ./bin/kova
 RUNTIME_BINARY := ./bin/kovad
 PKG := ./cmd/kova
 RUNTIME_PKG := ./cmd/kovad
 TAGS ?= netgo,osusergo
-INSTALL_LDFLAGS ?=
-
-KOVA_GOOS ?= $(HOST_GOOS)
-KOVA_GOARCH ?= $(HOST_GOARCH)
+VERSION ?= dev
+COMMIT ?= $(shell git rev-parse --short=12 HEAD 2>/dev/null || printf unknown)
+BUILD_DATE ?= unknown
+VERSION_PACKAGE := github.com/cofy-x/kova/internal/version
+VERSION_LDFLAGS := -s -w -X $(VERSION_PACKAGE).Version=$(VERSION) -X $(VERSION_PACKAGE).Commit=$(COMMIT) -X $(VERSION_PACKAGE).BuildDate=$(BUILD_DATE)
 CGO_ENABLED ?= 1
 CC ?= cc
-
-ifeq ($(KOVA_GOOS),linux)
-LDFLAGS ?= -linkmode external -extldflags '-static'
-else
-LDFLAGS ?=
-endif
 
 DRAGONFLY_CHART_VERSION ?= 1.7.4
 NYDUS_SNAPSHOTTER_CHART_VERSION ?= 0.0.10
@@ -63,7 +57,7 @@ export REGISTRY_NAME REGISTRY_IMAGE REGISTRY_HOST REGISTRY_PORT CLUSTER_REGISTRY
 export RELEASE_NAME NAMESPACE WORK_DIR RUNNER_NAME SOURCE_ZIP RESULT_JSONL
 export CONCURRENT_RUNNER_NAME CONCURRENT_SOURCE_ZIP CONCURRENT_RESULT_JSONL NYDUS_RESULT_JSONL RUNTIME_OCI_SOURCE_ZIP RUNTIME_NYDUS_SOURCE_ZIP RUNTIME_OCI_RESULT_JSONL RUNTIME_NYDUS_RESULT_JSONL EXAMPLE_COUNT BUILD_CONCURRENCY
 
-.PHONY: all kova kovad kova-linux kova-host install install-kovad generate-crds image kind-registry kind-create kind-load deploy-kind diagnose-kind observability-up observability-down observability-status dragonfly-nydus-install e2e e2e-service e2e-concurrent e2e-dragonfly-nydus e2e-runtime-preflight e2e-runtime e2e-observability clean clean-kind test lint-scripts helm-template package-example package-concurrent-example FORCE
+.PHONY: all kova kovad install generate-crds image kind-registry kind-create kind-load deploy-kind diagnose-kind observability-up observability-down observability-status dragonfly-nydus-install e2e e2e-service e2e-concurrent e2e-dragonfly-nydus e2e-runtime-preflight e2e-runtime e2e-observability clean clean-kind test lint-scripts helm-template package-example package-concurrent-example FORCE
 
 all: kova
 
@@ -71,29 +65,23 @@ kova: $(BINARY)
 
 kovad: $(RUNTIME_BINARY)
 
-kova-linux:
-	KOVA_GOOS=linux KOVA_GOARCH=$(or $(DOCKER_ARCH),$(HOST_GOARCH)) ./scripts/build/build-binary-linux.sh
-
-kova-host:
-	KOVA_GOOS=$(HOST_GOOS) KOVA_GOARCH=$(HOST_GOARCH) $(MAKE) kova
-
 install:
-	CGO_ENABLED=$(CGO_ENABLED) GOOS=$(HOST_GOOS) GOARCH=$(HOST_GOARCH) CC=$(CC) \
-		$(GO) install -tags '$(TAGS)' -ldflags "$(INSTALL_LDFLAGS)" $(PKG)
-
-install-kovad:
-	CGO_ENABLED=$(CGO_ENABLED) GOOS=$(HOST_GOOS) GOARCH=$(HOST_GOARCH) CC=$(CC) \
-		$(GO) install -tags '$(TAGS)' -ldflags "$(INSTALL_LDFLAGS)" $(RUNTIME_PKG)
+	CGO_ENABLED=0 GOOS=$(HOST_GOOS) GOARCH=$(HOST_GOARCH) \
+		$(GO) install -trimpath -tags '$(TAGS)' -ldflags "$(VERSION_LDFLAGS)" $(PKG)
 
 $(BINARY): FORCE
 	mkdir -p $(dir $(BINARY))
-	CGO_ENABLED=$(CGO_ENABLED) GOOS=$(KOVA_GOOS) GOARCH=$(KOVA_GOARCH) CC=$(CC) \
-		$(GO) build -tags '$(TAGS)' -ldflags "$(LDFLAGS)" -o $(BINARY) $(PKG)
+	CGO_ENABLED=0 GOOS=$(HOST_GOOS) GOARCH=$(HOST_GOARCH) \
+		$(GO) build -trimpath -tags '$(TAGS)' -ldflags "$(VERSION_LDFLAGS)" -o $(BINARY) $(PKG)
 
 $(RUNTIME_BINARY): FORCE
+	@if [[ "$(HOST_GOOS)" != linux ]]; then \
+		echo "kovad is a Linux runtime; use 'make image' on $(HOST_GOOS)" >&2; \
+		exit 1; \
+	fi
 	mkdir -p $(dir $(RUNTIME_BINARY))
-	CGO_ENABLED=$(CGO_ENABLED) GOOS=$(KOVA_GOOS) GOARCH=$(KOVA_GOARCH) CC=$(CC) \
-		$(GO) build -tags '$(TAGS)' -ldflags "$(LDFLAGS)" -o $(RUNTIME_BINARY) $(RUNTIME_PKG)
+	CGO_ENABLED=$(CGO_ENABLED) GOOS=$(HOST_GOOS) GOARCH=$(HOST_GOARCH) CC=$(CC) \
+		$(GO) build -trimpath -tags '$(TAGS)' -ldflags "$(VERSION_LDFLAGS)" -o $(RUNTIME_BINARY) $(RUNTIME_PKG)
 
 generate-crds:
 	$(GO) run sigs.k8s.io/controller-tools/cmd/controller-gen@$(CONTROLLER_GEN_VERSION) object crd paths=./internal/apis/kova/v1alpha1 output:crd:artifacts:config=charts/kova/crds
@@ -179,7 +167,7 @@ helm-template:
 		--set grafana.admin.existingSecret=test-secret >/dev/null
 
 clean:
-	rm -rf bin $(WORK_DIR) .generated
+	rm -rf bin dist $(WORK_DIR) .generated
 
 clean-kind:
 	./scripts/kind/clean-kind.sh

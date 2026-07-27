@@ -26,7 +26,7 @@ NYDUS_TEST_POD=${NYDUS_TEST_POD:-kova-nydus-smoke}
 require_cmd docker
 require_cmd kubectl
 
-make -C "${ROOT}" kova-host
+make -C "${ROOT}" kova
 KOVA=("${ROOT}/bin/kova")
 KUBECONFIG="${ROOT}/${KIND_KUBECONFIG}"
 export KUBECONFIG
@@ -71,7 +71,7 @@ KOVA_DAEMON_OTEL_RESOURCE_ATTRIBUTES=${KOVA_DAEMON_OTEL_RESOURCE_ATTRIBUTES:-dep
 "${KOVA[@]}" \
   --kubeconfig "${KUBECONFIG}" \
   --name "${RUNNER_NAME}" \
-  export -- --result "${ROOT}/${RESULT_JSONL}"
+  export --result "${ROOT}/${RESULT_JSONL}"
 
 if ! grep -q '"success":true' "${ROOT}/${RESULT_JSONL}"; then
   echo "error: ${RESULT_JSONL} does not contain a successful build" >&2
@@ -85,7 +85,7 @@ fi
 "${KOVA[@]}" \
   --kubeconfig "${KUBECONFIG}" \
   --name "${RUNNER_NAME}" \
-  preheat -- --dragonfly-scheduler-addr "${DRAGONFLY_SCHEDULER_ADDR}" --concurrency 1 --timeout 60 --verbose
+  preheat --dragonfly-scheduler-addr "${DRAGONFLY_SCHEDULER_ADDR}" --concurrency 1 --timeout 60 --verbose --insecure-skip-verify
 
 for node in $(kind_worker_nodes "${KIND_CLUSTER}"); do
   docker exec "${node}" bash -lc "grep -q 'snapshotter = \"nydus\"' /etc/containerd/config.toml"

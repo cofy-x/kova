@@ -97,10 +97,6 @@ func observabilityEnvFromHost(defaultServiceName string) map[string]string {
 	return env
 }
 
-func (c Config) Enabled() bool {
-	return strings.TrimSpace(c.Kubeconfig) != ""
-}
-
 func (c Config) requireKubeconfig() error {
 	if strings.TrimSpace(c.Kubeconfig) == "" {
 		return fmt.Errorf("--kubeconfig is required")

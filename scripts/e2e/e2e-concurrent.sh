@@ -33,7 +33,7 @@ if ! [[ "${MIN_BUILDKIT_NODE_IPS}" =~ ^[0-9]+$ ]]; then
   exit 1
 fi
 
-make -C "${ROOT}" kova-host
+make -C "${ROOT}" kova
 KOVA=("${ROOT}/bin/kova")
 
 dump_debug() {
@@ -89,7 +89,7 @@ KOVA_DAEMON_OTEL_RESOURCE_ATTRIBUTES=${KOVA_DAEMON_OTEL_RESOURCE_ATTRIBUTES:-dep
 "${KOVA[@]}" \
   --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" \
   --name "${RUNNER_NAME}" \
-  export -- --result "${ROOT}/${RESULT_JSONL}" --oci
+  export --result "${ROOT}/${RESULT_JSONL}" --oci
 
 line_count=$(wc -l < "${ROOT}/${RESULT_JSONL}" | tr -d ' ')
 if [[ "${line_count}" -ne "${EXAMPLE_COUNT}" ]]; then

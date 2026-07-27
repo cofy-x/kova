@@ -279,7 +279,9 @@ func runnerPreheatArgsFromContext(c *cli.Context) []string {
 	if c.Bool("verbose") {
 		args = append(args, "--verbose")
 	}
-	args = append(args, "--insecure-skip-verify", fmt.Sprint(c.Bool("insecure-skip-verify")))
+	if c.Bool("insecure-skip-verify") {
+		args = append(args, "--insecure-skip-verify", "true")
+	}
 	return args
 }
 

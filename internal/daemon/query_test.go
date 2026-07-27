@@ -99,7 +99,6 @@ func TestPreheatOptionsFromQueryRequiresScheduler(t *testing.T) {
 func TestPreheatOptionsFromQueryConfiguresTLSVerification(t *testing.T) {
 	opts, err := preheatOptionsFromQuery(url.Values{
 		"dragonfly-scheduler-addr": []string{"dragonfly:8002"},
-		"insecure-skip-verify":     []string{"false"},
 		"target":                   []string{"registry.example.com/ns/image:dev"},
 	}, "/tmp/result.lmdb")
 	if err != nil {
@@ -110,5 +109,18 @@ func TestPreheatOptionsFromQueryConfiguresTLSVerification(t *testing.T) {
 	}
 	if opts.Target != "registry.example.com/ns/image:dev" {
 		t.Fatalf("unexpected target %q", opts.Target)
+	}
+}
+
+func TestPreheatOptionsFromQueryAllowsExplicitInsecureRegistry(t *testing.T) {
+	opts, err := preheatOptionsFromQuery(url.Values{
+		"dragonfly-scheduler-addr": []string{"dragonfly:8002"},
+		"insecure-skip-verify":     []string{"true"},
+	}, "/tmp/result.lmdb")
+	if err != nil {
+		t.Fatalf("expected success, got %v", err)
+	}
+	if !opts.PreheatInsecureSkipVerify {
+		t.Fatal("expected insecure registry opt-in to be enabled")
 	}
 }

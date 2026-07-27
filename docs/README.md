@@ -13,6 +13,8 @@ Start with the [CLI quickstart guide](quickstart.md) for the daily flow and the
   for service-style usage.
 - [Validation matrix](testing.md): static checks, E2E targets, and runtime smoke
   expectations.
+- [Release artifacts](releases.md): versioning, CLI archives, runtime images,
+  checksums, SBOMs, and provenance.
 - [Telemetry operations](observability.md): production OpenTelemetry stack and
   local Compose LGTM validation.
 

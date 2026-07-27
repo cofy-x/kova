@@ -98,8 +98,6 @@ func ExportQuery(args []string) (string, string, error) {
 		case strings.HasPrefix(arg, "--target="):
 			values.Add("target", strings.TrimPrefix(arg, "--target="))
 			i++
-		case arg == "--from-result" || strings.HasPrefix(arg, "--from-result="):
-			return "", "", fmt.Errorf("export manages %s automatically", arg)
 		case arg == "--oci" || arg == "--with-fail":
 			values.Set(strings.TrimPrefix(arg, "--"), "true")
 			i++
@@ -120,8 +118,6 @@ func PreheatQuery(args []string) (string, error) {
 	for i := 0; i < len(args); {
 		arg := args[i]
 		switch {
-		case arg == "--from-result" || strings.HasPrefix(arg, "--from-result="):
-			return "", fmt.Errorf("preheat manages %s automatically", arg)
 		case arg == "--fail-fast" || arg == "--oci" || arg == "--verbose":
 			values.Set(strings.TrimPrefix(arg, "--"), "true")
 			i++

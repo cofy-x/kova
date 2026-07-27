@@ -15,7 +15,7 @@ RUNNER_NAME=${RUNNER_NAME:-e2e}
 CONCURRENT_RUNNER_NAME=${CONCURRENT_RUNNER_NAME:-e2e-concurrent}
 
 if [[ -f "${ROOT}/${KIND_KUBECONFIG}" ]]; then
-  make -C "${ROOT}" kova-host
+  make -C "${ROOT}" kova
   "${ROOT}/bin/kova" --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" --name "${RUNNER_NAME}" destroy || true
   "${ROOT}/bin/kova" --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" --name "${CONCURRENT_RUNNER_NAME}" destroy || true
   helm uninstall "${RELEASE_NAME}" --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" --namespace "${NAMESPACE}" || true

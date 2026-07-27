@@ -2,8 +2,6 @@ package app
 
 import (
 	"bytes"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -40,6 +38,60 @@ func TestRuntimeCommandsAreNotRegisteredInUserCLI(t *testing.T) {
 		if command.Name == "daemon" || command.Name == "service" {
 			t.Fatalf("runtime command %q should only be registered in kovad", command.Name)
 		}
+	}
+}
+
+func TestVersionCommand(t *testing.T) {
+	app := NewCLIApp()
+	var out bytes.Buffer
+	app.Writer = &out
+	app.ErrWriter = &out
+
+	if err := app.Run([]string{"kova", "version"}); err != nil {
+		t.Fatalf("run version: %v", err)
+	}
+	if !strings.HasPrefix(strings.TrimSpace(out.String()), "kova ") {
+		t.Fatalf("version output = %q", out.String())
+	}
+}
+
+func TestBuildRequiresKubernetesConfiguration(t *testing.T) {
+	t.Setenv("KOVA_KUBECONFIG", "")
+	app := NewCLIApp()
+	app.Writer = &bytes.Buffer{}
+	app.ErrWriter = &bytes.Buffer{}
+
+	err := app.Run([]string{
+		"kova",
+		"--ctx-config", t.TempDir() + "/config.json",
+		"--name", "runner",
+		"build",
+		"--target", "registry.example.com/team/app:test",
+	})
+	if err == nil || !strings.Contains(err.Error(), "--kubeconfig is required") {
+		t.Fatalf("expected Kubernetes configuration error, got %v", err)
+	}
+}
+
+func TestExportRejectsLegacyTrailingFlags(t *testing.T) {
+	app := NewCLIApp()
+	app.Writer = &bytes.Buffer{}
+	app.ErrWriter = &bytes.Buffer{}
+
+	err := app.Run([]string{"kova", "--kubeconfig", "unused", "--name", "runner", "export", "--", "--result", "result.jsonl"})
+	if err == nil || !strings.Contains(err.Error(), "does not accept positional arguments") {
+		t.Fatalf("expected legacy trailing flags to be rejected, got %v", err)
+	}
+}
+
+func TestPreheatRejectsLegacyTrailingFlags(t *testing.T) {
+	app := NewCLIApp()
+	app.Writer = &bytes.Buffer{}
+	app.ErrWriter = &bytes.Buffer{}
+
+	err := app.Run([]string{"kova", "--kubeconfig", "unused", "--name", "runner", "preheat", "--", "--oci"})
+	if err == nil || !strings.Contains(err.Error(), "does not accept positional arguments") {
+		t.Fatalf("expected legacy trailing flags to be rejected, got %v", err)
 	}
 }
 
@@ -89,69 +141,5 @@ func TestUsageErrorHintsNestedCommandPath(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "kova --ctx <value> ctx show") {
 		t.Fatalf("expected nested command path in hint:\n%s", err)
-	}
-}
-
-func TestParseBuildTrailingArgsAcceptsDirectoryThenFlags(t *testing.T) {
-	imageDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(imageDir, "Dockerfile"), []byte("FROM scratch\n"), 0o644); err != nil {
-		t.Fatalf("write Dockerfile: %v", err)
-	}
-
-	opts := buildCLIOptions{
-		Concurrency: 1,
-		BuildFormat: "nydus",
-		Timeout:     300,
-	}
-	err := parseBuildTrailingArgs([]string{
-		imageDir,
-		"--target", "localhost:5002/example/app:dev",
-		"--format", "oci",
-		"--concurrency=2",
-		"--var", "KOVA_TAG=dev",
-		"--fail-fast",
-		"--verbose=false",
-	}, &opts)
-	if err != nil {
-		t.Fatalf("parse trailing args: %v", err)
-	}
-	if opts.ImageDir != imageDir {
-		t.Fatalf("image dir = %q", opts.ImageDir)
-	}
-	if opts.Target != "localhost:5002/example/app:dev" {
-		t.Fatalf("target = %q", opts.Target)
-	}
-	if opts.BuildFormat != "oci" || opts.Concurrency != 2 {
-		t.Fatalf("format/concurrency = %q/%d", opts.BuildFormat, opts.Concurrency)
-	}
-	if len(opts.Vars) != 1 || opts.Vars[0] != "KOVA_TAG=dev" {
-		t.Fatalf("vars = %#v", opts.Vars)
-	}
-	if !opts.Failfast {
-		t.Fatal("expected fail-fast")
-	}
-	if opts.Verbose {
-		t.Fatal("expected verbose=false to override")
-	}
-}
-
-func TestParseBuildTrailingArgsRejectsTargetConflict(t *testing.T) {
-	opts := buildCLIOptions{Target: "localhost:5002/example/app:dev"}
-	err := parseBuildTrailingArgs([]string{"localhost:5002/example/other:dev"}, &opts)
-	if err == nil || !strings.Contains(err.Error(), "either --target or a positional target") {
-		t.Fatalf("expected target conflict, got %v", err)
-	}
-}
-
-func TestParseBuildTrailingArgsRejectsDirectoryAndPositionalTarget(t *testing.T) {
-	imageDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(imageDir, "Dockerfile"), []byte("FROM scratch\n"), 0o644); err != nil {
-		t.Fatalf("write Dockerfile: %v", err)
-	}
-
-	opts := buildCLIOptions{}
-	err := parseBuildTrailingArgs([]string{imageDir, "localhost:5002/example/app:dev"}, &opts)
-	if err == nil || !strings.Contains(err.Error(), "only with --target") {
-		t.Fatalf("expected directory target error, got %v", err)
 	}
 }

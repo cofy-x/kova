@@ -164,7 +164,7 @@ kova --name quickstart wait --timeout 600
 Export successful OCI results to JSONL:
 
 ```bash
-kova --name quickstart export -- --result .work/result.jsonl --oci
+kova --name quickstart export --result .work/result.jsonl --oci
 ```
 
 Runner result stores live for the runner Pod lifetime, so an unfiltered export
@@ -172,7 +172,7 @@ contains every matching result accumulated by that runner. Build wrappers
 should pass repeatable exact targets when the output must describe one batch:
 
 ```bash
-kova --name quickstart export -- \
+kova --name quickstart export \
   --result .work/current-batch.jsonl \
   --oci \
   --target registry.example.com/team/app:dev \

@@ -248,7 +248,7 @@ func preheatOptionsFromQuery(q url.Values, resultDB string) (batch.Options, erro
 	if err != nil {
 		return batch.Options{}, err
 	}
-	insecureSkipVerify, err := queryBoolStrict(q, "insecure-skip-verify", true)
+	insecureSkipVerify, err := queryBoolStrict(q, "insecure-skip-verify", false)
 	if err != nil {
 		return batch.Options{}, err
 	}

@@ -11,9 +11,13 @@ the categorized paths below.
 
 ## Build
 
-- `build/build-binary-linux.sh`: cross-build the Linux `kova` binary.
 - `build/build-image.sh`: build the Kova runtime image.
 - `build/build-python-smoke-base.sh`: build the local Python smoke base image.
+
+## Release
+
+- `release/build-cli.sh`: build the CGO-free `kova` release archives for Linux,
+  macOS, and Windows.
 
 ## Package
 

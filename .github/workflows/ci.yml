@@ -50,6 +50,24 @@ jobs:
         run: |
           make generate-crds
           git diff --exit-code -- charts/kova/crds
+      - name: Verify CLI dependency boundary
+        shell: bash
+        run: |
+          runtime_dependencies="$(
+            go list -deps ./cmd/kova \
+              | grep -E '^github.com/cofy-x/kova/internal/(batch|daemon|service|store)(/.*)?$' \
+              || true
+          )"
+          if [[ -n "${runtime_dependencies}" ]]; then
+            printf 'kova CLI must not link runtime packages:\n%s\n' "${runtime_dependencies}" >&2
+            exit 1
+          fi
+      - name: Verify cross-platform CLI builds
+        run: |
+          for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 windows/arm64; do
+            GOOS="${target%/*}" GOARCH="${target#*/}" CGO_ENABLED=0 \
+              go build -trimpath -o /tmp/kova ./cmd/kova
+          done
 
   manifests:
     name: Scripts and charts
@@ -84,7 +102,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Build binary image stage
         if: github.event_name == 'pull_request'
-        run: docker build --platform linux/amd64 --target kova-artifact --file docker/Dockerfile .
+        run: docker build --platform linux/amd64 --target runtime-artifact --file docker/Dockerfile .
       - name: Build complete image
         if: github.event_name == 'push'
         run: docker build --platform linux/amd64 --tag kova:ci --file docker/Dockerfile .

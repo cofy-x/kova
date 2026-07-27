@@ -8,6 +8,24 @@ by BuildKit. It builds batches of Dockerfile contexts into OCI or Nydus images,
 pushes them to OCI registries, and can preheat successful results through a
 Dragonfly P2P cluster.
 
+## Install The CLI
+
+Download a provenance-attested archive for Linux, macOS, or Windows from the
+[GitHub releases](https://github.com/cofy-x/kova/releases), verify it with the
+published `checksums.txt`, and place `kova` on `PATH`. Linux and macOS builds
+are available for `amd64` and `arm64`; Windows builds are available as `.zip`
+archives for both architectures.
+
+You can also build and install the client from source:
+
+```bash
+make install
+kova version
+```
+
+The client is CGO-free and runs on the workstation. Build execution and LMDB
+state stay in the Linux `kovad` runtime image.
+
 ## Documentation
 
 - [Documentation Index](docs/README.md): organized guide to the project docs.
@@ -19,6 +37,8 @@ Dragonfly P2P cluster.
   registry credentials, worker sizing, and production configuration.
 - [Validation matrix](docs/testing.md): static checks, E2E targets, and runtime
   smoke expectations.
+- [Release process](docs/releases.md): CLI archives, runtime images, SBOMs,
+  provenance, and version tags.
 - [Examples](examples/README.md): build input examples and runtime smoke
   service details.
 
@@ -127,11 +147,8 @@ Build a host-platform binary for local debugging:
 make kova
 ```
 
-Build a Linux runner binary for container images:
-
-```bash
-make kova-linux
-```
+`kovad` is a Linux runtime component and is distributed in the Kova container
+image rather than as a workstation binary.
 
 The local `kova` CLI defaults to `tcp://kova.kova.svc:9094`. Override it with
 `--buildkit-addr` or `KOVA_BUILDKIT_ADDR` for another release, namespace, or

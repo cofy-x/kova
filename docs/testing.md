@@ -13,6 +13,23 @@ make helm-template
 git diff --check
 ```
 
+## Network Overrides
+
+Kova defaults to the official Ubuntu image, upstream GitHub release URLs,
+`go.dev`, and `proxy.golang.org`. `scripts/build/build-image.sh` forwards the
+standard `HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY` variables and accepts these
+optional source overrides:
+
+- `UBUNTU_IMAGE`
+- `BUILDKIT_DOWNLOAD_BASE_URL`
+- `GRPCURL_DOWNLOAD_BASE_URL`
+- `NYDUS_DOWNLOAD_BASE_URL`
+- `GO_DOWNLOAD_BASE_URL`
+- `GOPROXY`
+
+These inputs are generic build controls. Keep provider-specific mirror values
+and environment policy in the consuming workspace rather than this repository.
+
 ## E2E Matrix
 
 | Target | Coverage | Main Artifacts |

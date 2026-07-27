@@ -8,6 +8,13 @@
 - Be careful with dirty worktrees. Do not revert user changes unless asked.
 - Prefer existing package boundaries and helper APIs over introducing new
   abstractions.
+- Keep `kova` a CGO-free, cross-platform Kubernetes client. Linux-only build
+  execution, LMDB state, and daemon APIs belong to `kovad` and its runtime
+  image.
+- Keep official upstream sources as Dockerfile defaults. Generic proxy,
+  download-base, base-image, and `GOPROXY` overrides may be exposed for
+  consuming environments; provider-specific values belong in those
+  environments rather than this repository.
 - Keep examples aligned with the documented local registry addresses:
   `localhost:5002` on the host and `host.docker.internal:5002` from Pods or
   build outputs.
