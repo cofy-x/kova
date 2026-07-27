@@ -1,0 +1,18 @@
+image:
+  pullPolicy: IfNotPresent
+
+dragonfly:
+  enable: true
+  mirrorConfig:
+    - host: "http://127.0.0.1:4001"
+      auth_through: false
+      headers:
+        X-Dragonfly-Registry: "http://kind-registry:5000"
+      ping_url: "http://127.0.0.1:4003/healthy"
+
+containerRuntime:
+  initContainer:
+    image:
+      pullPolicy: IfNotPresent
+  containerd:
+    enable: false

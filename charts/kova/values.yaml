@@ -1,0 +1,209 @@
+namespaceOverride: ""
+
+image:
+  repository: localhost:5002/kova
+  tag: dev
+  pullPolicy: IfNotPresent
+# Optional full image reference for scripts or one-off deployments.
+imageOverride: ""
+imagePullPolicy: IfNotPresent
+
+nameOverride: ""
+fullnameOverride: ""
+
+imagePullSecrets:
+  create: false
+  name: ""
+
+imageRegistries: []
+
+observability:
+  enabled: false
+  serviceName: kova-worker
+  endpoint: ""
+  insecure: true
+  resourceAttributes: {}
+  metricInterval: 15s
+  traces:
+    enabled: true
+  metrics:
+    enabled: true
+  logs:
+    enabled: true
+
+serviceAccount:
+  create: false
+  name: ""
+  annotations: {}
+  automountServiceAccountToken: false
+
+service:
+  type: ClusterIP
+  port: 9094
+  targetPort: tcp
+  clusterIP: None
+  clusterIPs:
+    - None
+  internalTrafficPolicy: Cluster
+  ipFamilies:
+    - IPv4
+  ipFamilyPolicy: SingleStack
+  sessionAffinity: None
+
+sourceStore:
+  mountPath: /var/lib/kova/sources
+  pvc:
+    create: false
+    existingClaim: ""
+    name: ""
+    accessModes:
+      - ReadWriteMany
+    storageClassName: ""
+    size: 10Gi
+
+serviceDaemon:
+  enabled: false
+  replicas: 1
+  listen: ":8080"
+  port: 8080
+  service:
+    type: ClusterIP
+    port: 8080
+  authTokenSecret:
+    name: ""
+    key: token
+  jobTTL: 2h
+  wait: 3m
+  pollInterval: 5s
+  leaderElect: true
+  runnerNamespace: ""
+  runnerImage: ""
+  runnerImagePullPolicy: ""
+  runnerImagePullSecret: ""
+  # Pins runner Pods when the source PVC is ReadWriteOnce. Production should
+  # prefer ReadWriteMany storage and leave this empty.
+  runnerNodeSelector: {}
+  buildkitAddr: ""
+  serviceAccount:
+    create: true
+    name: ""
+    annotations: {}
+    automountServiceAccountToken: true
+  podAnnotations: {}
+  podLabels: {}
+  resources: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  securityContext: {}
+
+container:
+  name: buildkitd
+  command:
+    - buildkitd
+    - --config
+    - /etc/buildkit/buildkitd.toml
+    - --addr
+    - tcp://0.0.0.0:9094
+  portName: tcp
+  port: 9094
+  protocol: TCP
+  securityContext:
+    privileged: true
+    allowPrivilegeEscalation: true
+  livenessProbe:
+    enabled: true
+    failureThreshold: 3
+    initialDelaySeconds: 15
+    periodSeconds: 20
+    successThreshold: 1
+    timeoutSeconds: 3
+  readinessProbe:
+    enabled: true
+    failureThreshold: 3
+    initialDelaySeconds: 5
+    periodSeconds: 10
+    successThreshold: 1
+    timeoutSeconds: 3
+
+resources:
+  limits:
+    ephemeral-storage: 80Gi
+    # cpu: 16
+    # memory: 32Gi
+  requests:
+    ephemeral-storage: 40Gi
+    # cpu: 16
+    # memory: 32Gi
+podSecurityContext: {}
+
+nodeSelector: {}
+tolerations: []
+topologySpreadConstraints: []
+priorityClassName: ""
+runtimeClassName: ""
+hostAliases: []
+
+affinity: {}
+
+scheduling:
+  singlePodPerNode: false
+  topologySpread:
+    enabled: false
+    maxSkew: 1
+    topologyKey: kubernetes.io/hostname
+    whenUnsatisfiable: ScheduleAnyway
+
+podDisruptionBudget:
+  enabled: false
+  minAvailable: 1
+  maxUnavailable: ""
+
+autoscaling:
+  enabled: false
+  minReplicas: 3
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+  targetMemoryUtilizationPercentage: null
+  behavior: {}
+  metrics: []
+
+volumes:
+  - name: run-buildkit
+    emptyDir: {}
+  - name: lib-buildkit
+    emptyDir:
+      sizeLimit: 80Gi
+
+volumeMounts:
+  - name: run-buildkit
+    mountPath: /run/buildkit
+  - name: lib-buildkit
+    mountPath: /var/lib/buildkit
+  - name: buildkit-config
+    mountPath: /etc/buildkit
+
+extraVolumes: []
+extraVolumeMounts: []
+
+buildkitdConfig: |
+  debug = false
+
+deployment:
+  replicas: 5
+  progressDeadlineSeconds: 600
+  revisionHistoryLimit: 10
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 25%
+      maxUnavailable: 25%
+
+podAnnotations: {}
+podLabels: {}
+restartPolicy: Always
+dnsPolicy: ClusterFirst
+schedulerName: default-scheduler
+terminationGracePeriodSeconds: 30
+terminationMessagePath: /dev/termination-log
+terminationMessagePolicy: File

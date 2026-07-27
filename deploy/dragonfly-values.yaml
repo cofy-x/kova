@@ -1,0 +1,9 @@
+manager:
+  replicas: 1
+
+scheduler:
+  replicas: 1
+
+client:
+  dfinit:
+    enable: false

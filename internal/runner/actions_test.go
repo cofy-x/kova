@@ -1,0 +1,39 @@
+package runner
+
+import (
+	"slices"
+	"testing"
+)
+
+func TestPreheatCurlCommandFailsOnHTTPErrorAndKeepsBody(t *testing.T) {
+	command := preheatCurlCommand("target=image")
+	if !slices.Contains(command, "--fail-with-body") {
+		t.Fatalf("command must propagate daemon HTTP failures: %#v", command)
+	}
+}
+
+func TestParseListArgs(t *testing.T) {
+	wide, err := parseListArgs([]string{"-o", "wide"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !wide {
+		t.Fatal("expected wide output")
+	}
+	if _, err := parseListArgs([]string{"-o", "json"}); err == nil {
+		t.Fatal("expected unsupported output error")
+	}
+}
+
+func TestParseLogsArgs(t *testing.T) {
+	tail, err := parseLogsArgs([]string{"--tail=25"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tail != 25 {
+		t.Fatalf("tail = %d", tail)
+	}
+	if _, err := parseLogsArgs([]string{"--tail", "-1"}); err == nil {
+		t.Fatal("expected negative tail error")
+	}
+}

@@ -1,0 +1,23 @@
+{{- if .Values.serviceDaemon.enabled }}
+{{- $name := printf "%s-service" (include "kova.fullname" .) | trunc 63 | trimSuffix "-" }}
+{{- $selectorName := printf "%s-service" (include "kova.name" .) | trunc 63 | trimSuffix "-" }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  namespace: {{ include "kova.namespace" . }}
+  labels:
+    {{- include "kova.labels" . | nindent 4 }}
+    app.kubernetes.io/component: service
+spec:
+  type: {{ .Values.serviceDaemon.service.type }}
+  ports:
+    - name: http
+      port: {{ .Values.serviceDaemon.service.port }}
+      protocol: TCP
+      targetPort: http
+  selector:
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/name: {{ $selectorName }}
+    app.kubernetes.io/component: service
+{{- end }}

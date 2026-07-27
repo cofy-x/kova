@@ -1,0 +1,102 @@
+{{- if not .Values.grafana.admin.existingSecret }}
+{{- fail "grafana.admin.existingSecret is required" }}
+{{- end }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "kova-observability.componentName" (dict "root" . "component" "grafana-config") }}
+  labels:
+    {{- include "kova-observability.labels" (dict "root" . "component" "grafana") | nindent 4 }}
+data:
+  dashboards.yaml: |
+{{ .Files.Get "files/grafana/provisioning/dashboards.yaml" | indent 4 }}
+  datasources.yaml: |
+{{ tpl (.Files.Get "files/grafana/provisioning/datasources.yaml") . | indent 4 }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "kova-observability.componentName" (dict "root" . "component" "grafana-dashboards") }}
+  labels:
+    {{- include "kova-observability.labels" (dict "root" . "component" "grafana") | nindent 4 }}
+data:
+  kova-core.json: |
+{{ .Files.Get "files/grafana/dashboards/kova-core.json" | indent 4 }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "kova-observability.componentName" (dict "root" . "component" "grafana") }}
+  labels:
+    {{- include "kova-observability.labels" (dict "root" . "component" "grafana") | nindent 4 }}
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector:
+    matchLabels:
+      {{- include "kova-observability.selectorLabels" (dict "root" . "component" "grafana") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "kova-observability.selectorLabels" (dict "root" . "component" "grafana") | nindent 8 }}
+      annotations:
+        checksum/config: {{ printf "%s%s%s" (.Files.Get "files/grafana/provisioning/dashboards.yaml") (.Files.Get "files/grafana/provisioning/datasources.yaml") (.Files.Get "files/grafana/dashboards/kova-core.json") | sha256sum }}
+    spec:
+      {{- include "kova-observability.podScheduling" (dict "root" . "component" "grafana") | nindent 6 }}
+      securityContext: {fsGroup: 472, fsGroupChangePolicy: OnRootMismatch}
+      containers:
+        - name: grafana
+          image: {{ include "kova-observability.image" .Values.grafana.image | quote }}
+          imagePullPolicy: {{ .Values.grafana.image.pullPolicy }}
+          ports: [{name: http, containerPort: 3000}]
+          env:
+            - name: GF_SECURITY_ADMIN_USER
+              valueFrom: {secretKeyRef: {name: {{ .Values.grafana.admin.existingSecret | quote }}, key: {{ .Values.grafana.admin.userKey | quote }}}}
+            - name: GF_SECURITY_ADMIN_PASSWORD
+              valueFrom: {secretKeyRef: {name: {{ .Values.grafana.admin.existingSecret | quote }}, key: {{ .Values.grafana.admin.passwordKey | quote }}}}
+            - {name: GF_PATHS_DATA, value: /var/lib/grafana}
+            - {name: GF_ANALYTICS_CHECK_FOR_UPDATES, value: "false"}
+            - {name: GF_PLUGINS_CHECK_FOR_UPDATES, value: "false"}
+            - {name: GF_PLUGINS_PREINSTALL_DISABLED, value: "true"}
+          readinessProbe: {httpGet: {path: /api/health, port: http}}
+          livenessProbe: {httpGet: {path: /api/health, port: http}}
+          resources:
+            {{- toYaml .Values.grafana.resources | nindent 12 }}
+          volumeMounts:
+            - {name: data, mountPath: /var/lib/grafana}
+            - {name: config, mountPath: /etc/grafana/provisioning/dashboards/kova.yaml, subPath: dashboards.yaml, readOnly: true}
+            - {name: config, mountPath: /etc/grafana/provisioning/datasources/kova.yaml, subPath: datasources.yaml, readOnly: true}
+            - {name: dashboards, mountPath: /var/lib/grafana/dashboards/kova, readOnly: true}
+      volumes:
+        - name: data
+          persistentVolumeClaim: {claimName: {{ include "kova-observability.componentName" (dict "root" . "component" "grafana") }}}
+        - name: config
+          configMap: {name: {{ include "kova-observability.componentName" (dict "root" . "component" "grafana-config") }}}
+        - name: dashboards
+          configMap: {name: {{ include "kova-observability.componentName" (dict "root" . "component" "grafana-dashboards") }}}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: {name: {{ include "kova-observability.componentName" (dict "root" . "component" "grafana") }}}
+spec:
+  accessModes: [ReadWriteOnce]
+  {{- with .Values.storageClassName }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+  resources: {requests: {storage: {{ .Values.grafana.persistence.size }}}}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "kova-observability.componentName" (dict "root" . "component" "grafana") }}
+  labels:
+    {{- include "kova-observability.labels" (dict "root" . "component" "grafana") | nindent 4 }}
+  {{- with .Values.grafana.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.grafana.service.type }}
+  selector:
+    {{- include "kova-observability.selectorLabels" (dict "root" . "component" "grafana") | nindent 4 }}
+  ports: [{name: http, port: 3000, targetPort: http}]

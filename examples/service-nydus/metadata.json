@@ -1,0 +1,3 @@
+{
+  "target": "$KOVA_IMAGE_REGISTRY/kova-examples/service-nydus:dev"
+}

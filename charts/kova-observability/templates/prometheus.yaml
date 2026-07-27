@@ -1,0 +1,97 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "kova-observability.componentName" (dict "root" . "component" "prometheus") }}
+  labels:
+    {{- include "kova-observability.labels" (dict "root" . "component" "prometheus") | nindent 4 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "kova-observability.componentName" (dict "root" . "component" "prometheus") }}
+rules:
+  - apiGroups: [""]
+    resources: [services, endpoints, pods]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "kova-observability.componentName" (dict "root" . "component" "prometheus") }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "kova-observability.componentName" (dict "root" . "component" "prometheus") }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "kova-observability.componentName" (dict "root" . "component" "prometheus") }}
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "kova-observability.componentName" (dict "root" . "component" "prometheus") }}
+  labels:
+    {{- include "kova-observability.labels" (dict "root" . "component" "prometheus") | nindent 4 }}
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector:
+    matchLabels:
+      {{- include "kova-observability.selectorLabels" (dict "root" . "component" "prometheus") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "kova-observability.selectorLabels" (dict "root" . "component" "prometheus") | nindent 8 }}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/prometheus-config.yaml") . | sha256sum }}
+    spec:
+      serviceAccountName: {{ include "kova-observability.componentName" (dict "root" . "component" "prometheus") }}
+      {{- include "kova-observability.podScheduling" (dict "root" . "component" "prometheus") | nindent 6 }}
+      securityContext: {fsGroup: 65534, fsGroupChangePolicy: OnRootMismatch}
+      containers:
+        - name: prometheus
+          image: {{ include "kova-observability.image" .Values.prometheus.image | quote }}
+          imagePullPolicy: {{ .Values.prometheus.image.pullPolicy }}
+          args:
+            - --config.file=/etc/prometheus/prometheus.yaml
+            - --storage.tsdb.path=/var/lib/prometheus
+            - --storage.tsdb.retention.time={{ .Values.prometheus.retention }}
+            - --web.enable-lifecycle
+          ports: [{name: http, containerPort: 9090}]
+          readinessProbe: {httpGet: {path: /-/ready, port: http}}
+          livenessProbe: {httpGet: {path: /-/healthy, port: http}}
+          resources:
+            {{- toYaml .Values.prometheus.resources | nindent 12 }}
+          volumeMounts:
+            - {name: config, mountPath: /etc/prometheus, readOnly: true}
+            - {name: data, mountPath: /var/lib/prometheus}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "kova-observability.componentName" (dict "root" . "component" "prometheus-config") }}
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ include "kova-observability.componentName" (dict "root" . "component" "prometheus") }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "kova-observability.componentName" (dict "root" . "component" "prometheus") }}
+spec:
+  accessModes: [ReadWriteOnce]
+  {{- with .Values.storageClassName }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+  resources: {requests: {storage: {{ .Values.prometheus.persistence.size }}}}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "kova-observability.componentName" (dict "root" . "component" "prometheus") }}
+  labels:
+    {{- include "kova-observability.labels" (dict "root" . "component" "prometheus") | nindent 4 }}
+spec:
+  selector:
+    {{- include "kova-observability.selectorLabels" (dict "root" . "component" "prometheus") | nindent 4 }}
+  ports: [{name: http, port: 9090, targetPort: http}]

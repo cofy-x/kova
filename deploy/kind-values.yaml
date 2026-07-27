@@ -1,0 +1,67 @@
+image:
+  repository: localhost:5002/kova
+  tag: dev
+  pullPolicy: IfNotPresent
+
+imagePullSecrets:
+  create: false
+  name: ""
+
+imageRegistries: []
+
+observability:
+  enabled: true
+  serviceName: kova-worker
+  endpoint: host.docker.internal:14317
+  insecure: true
+  resourceAttributes:
+    deployment.environment: kind
+  metricInterval: 5s
+  traces:
+    enabled: true
+  metrics:
+    enabled: true
+  logs:
+    enabled: true
+
+deployment:
+  replicas: 3
+  progressDeadlineSeconds: 600
+  revisionHistoryLimit: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 0
+      maxUnavailable: 1
+
+resources:
+  limits:
+    ephemeral-storage: 8Gi
+  requests:
+    ephemeral-storage: 1Gi
+
+podSecurityContext: {}
+
+affinity:
+  nodeAffinity: null
+
+scheduling:
+  singlePodPerNode: true
+  topologySpread:
+    enabled: true
+    maxSkew: 1
+    topologyKey: kubernetes.io/hostname
+    whenUnsatisfiable: ScheduleAnyway
+
+volumes:
+  - name: run-buildkit
+    emptyDir: {}
+  - name: lib-buildkit
+    emptyDir:
+      sizeLimit: 8Gi
+
+buildkitdConfig: |
+  debug = false
+
+  [registry."host.docker.internal:5002"]
+    http = true

@@ -1,0 +1,49 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "kova-observability.componentName" (dict "root" . "component" "collector-config") }}
+  labels:
+    {{- include "kova-observability.labels" (dict "root" . "component" "collector") | nindent 4 }}
+data:
+  collector.yaml: |
+    receivers:
+      otlp:
+        protocols:
+          grpc: {endpoint: 0.0.0.0:4317}
+          http: {endpoint: 0.0.0.0:4318}
+    processors:
+      memory_limiter:
+        check_interval: 1s
+        limit_mib: {{ .Values.collector.memoryLimiter.limitMiB }}
+        spike_limit_mib: {{ .Values.collector.memoryLimiter.spikeLimitMiB }}
+      batch: {}
+    exporters:
+      prometheus: {endpoint: 0.0.0.0:9464}
+      otlp_grpc/tempo:
+        endpoint: {{ include "kova-observability.componentName" (dict "root" . "component" "tempo") }}:4317
+        tls: {insecure: true}
+        sending_queue: {enabled: true, queue_size: 10000, storage: file_storage}
+        retry_on_failure: {enabled: true}
+      otlp_http/loki:
+        endpoint: http://{{ include "kova-observability.componentName" (dict "root" . "component" "loki") }}:3100/otlp
+        sending_queue: {enabled: true, queue_size: 10000, storage: file_storage}
+        retry_on_failure: {enabled: true}
+    extensions:
+      health_check: {endpoint: 0.0.0.0:13133}
+      file_storage:
+        directory: /var/lib/otelcol/queue
+        create_directory: true
+        timeout: 10s
+    service:
+      extensions: [health_check, file_storage]
+      telemetry:
+        metrics:
+          level: normal
+          readers:
+            - pull:
+                exporter:
+                  prometheus: {host: 0.0.0.0, port: 8888, without_type_suffix: true, without_units: true}
+      pipelines:
+        metrics: {receivers: [otlp], processors: [memory_limiter, batch], exporters: [prometheus]}
+        traces: {receivers: [otlp], processors: [memory_limiter, batch], exporters: [otlp_grpc/tempo]}
+        logs: {receivers: [otlp], processors: [memory_limiter, batch], exporters: [otlp_http/loki]}

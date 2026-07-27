@@ -1,0 +1,24 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "kova-observability.componentName" (dict "root" . "component" "loki-config") }}
+  labels:
+    {{- include "kova-observability.labels" (dict "root" . "component" "loki") | nindent 4 }}
+data:
+  loki.yaml: |
+    auth_enabled: false
+    server: {http_listen_port: 3100}
+    common:
+      path_prefix: /var/loki
+      replication_factor: 1
+      ring: {kvstore: {store: inmemory}}
+    schema_config:
+      configs:
+        - from: "2024-01-01"
+          store: tsdb
+          object_store: filesystem
+          schema: v13
+          index: {prefix: index_, period: 24h}
+    storage_config: {filesystem: {directory: /var/loki/chunks}}
+    compactor: {working_directory: /var/loki/compactor, retention_enabled: true, delete_request_store: filesystem}
+    limits_config: {allow_structured_metadata: true, retention_period: {{ .Values.loki.retention }}}

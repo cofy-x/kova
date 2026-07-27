@@ -1,0 +1,22 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "kova-observability.componentName" (dict "root" . "component" "prometheus-config") }}
+  labels:
+    {{- include "kova-observability.labels" (dict "root" . "component" "prometheus") | nindent 4 }}
+data:
+  prometheus.yaml: |
+    global: {scrape_interval: 10s, evaluation_interval: 10s}
+    scrape_configs:
+      - job_name: prometheus
+        static_configs: [{targets: [127.0.0.1:9090]}]
+      - job_name: otel-collector-exporter
+        kubernetes_sd_configs: [{role: endpoints, namespaces: {names: [{{ .Release.Namespace | quote }}]}}]
+        relabel_configs:
+          - {source_labels: [__meta_kubernetes_service_label_app_kubernetes_io_component], regex: collector, action: keep}
+          - {source_labels: [__meta_kubernetes_endpoint_port_name], regex: metrics, action: keep}
+      - job_name: otel-collector-internal
+        kubernetes_sd_configs: [{role: endpoints, namespaces: {names: [{{ .Release.Namespace | quote }}]}}]
+        relabel_configs:
+          - {source_labels: [__meta_kubernetes_service_label_app_kubernetes_io_component], regex: collector, action: keep}
+          - {source_labels: [__meta_kubernetes_endpoint_port_name], regex: telemetry, action: keep}
