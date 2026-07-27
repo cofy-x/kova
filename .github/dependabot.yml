@@ -1,0 +1,91 @@
+version: 2
+updates:
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: Asia/Shanghai
+    open-pull-requests-limit: 5
+    groups:
+      kubernetes:
+        patterns:
+          - k8s.io/*
+          - sigs.k8s.io/controller-runtime
+        update-types:
+          - minor
+          - patch
+      opentelemetry:
+        patterns:
+          - go.opentelemetry.io/*
+        update-types:
+          - minor
+          - patch
+      go-dependencies:
+        patterns:
+          - "*"
+        exclude-patterns:
+          - k8s.io/*
+          - sigs.k8s.io/controller-runtime
+          - go.opentelemetry.io/*
+        update-types:
+          - minor
+          - patch
+    labels:
+      - dependencies
+      - go
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:30"
+      timezone: Asia/Shanghai
+    open-pull-requests-limit: 5
+    groups:
+      github-actions:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
+    labels:
+      - dependencies
+      - github-actions
+  - package-ecosystem: docker
+    directory: /docker
+    schedule:
+      interval: weekly
+      day: monday
+      time: "10:00"
+      timezone: Asia/Shanghai
+    open-pull-requests-limit: 5
+    groups:
+      docker-images:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
+    labels:
+      - dependencies
+      - docker
+  - package-ecosystem: docker
+    directory: /deploy/local
+    schedule:
+      interval: weekly
+      day: monday
+      time: "10:15"
+      timezone: Asia/Shanghai
+    open-pull-requests-limit: 5
+    groups:
+      local-observability:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
+    labels:
+      - dependencies
+      - docker

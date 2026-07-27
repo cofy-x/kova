@@ -1,0 +1,174 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.21.0
+  name: kovabuilds.kova.cofy.dev
+spec:
+  group: kova.cofy.dev
+  names:
+    kind: KovaBuild
+    listKind: KovaBuildList
+    plural: kovabuilds
+    shortNames:
+    - kb
+    singular: kovabuild
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .status.runnerPodName
+      name: Runner
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            properties:
+              build:
+                properties:
+                  concurrency:
+                    minimum: 1
+                    type: integer
+                  failFast:
+                    type: boolean
+                  format:
+                    enum:
+                    - oci
+                    - nydus
+                    - both
+                    type: string
+                  oomCooldown:
+                    type: string
+                  retry:
+                    minimum: 0
+                    type: integer
+                  skipFail:
+                    type: boolean
+                  target:
+                    type: string
+                  timeout:
+                    minimum: 0
+                    type: integer
+                  vars:
+                    items:
+                      type: string
+                    type: array
+                  verbose:
+                    type: boolean
+                type: object
+              idempotencyKey:
+                type: string
+              source:
+                properties:
+                  pvc:
+                    properties:
+                      claimName:
+                        minLength: 1
+                        type: string
+                      mountPath:
+                        minLength: 1
+                        type: string
+                      path:
+                        pattern: ^builds/[A-Za-z0-9._-]+/source\.zip$
+                        type: string
+                    required:
+                    - claimName
+                    - path
+                    type: object
+                  ready:
+                    description: Ready is set only after the immutable source archive
+                      has been committed.
+                    type: boolean
+                required:
+                - pvc
+                - ready
+                type: object
+              sourceDigest:
+                type: string
+            required:
+            - source
+            type: object
+          status:
+            properties:
+              finishedAt:
+                format: date-time
+                type: string
+              idempotencyKey:
+                type: string
+              message:
+                type: string
+              phase:
+                enum:
+                - Queued
+                - Starting
+                - Running
+                - Succeeded
+                - Failed
+                - Cancelled
+                type: string
+              resultSummary:
+                type: string
+              results:
+                items:
+                  properties:
+                    error:
+                      type: string
+                    format:
+                      type: string
+                    manifestDigest:
+                      type: string
+                    mediaType:
+                      type: string
+                    repository:
+                      type: string
+                    size:
+                      format: int64
+                      type: integer
+                    status:
+                      type: string
+                  required:
+                  - format
+                  - repository
+                  - status
+                  type: object
+                type: array
+              runnerPodName:
+                type: string
+              sourceDigest:
+                type: string
+              startedAt:
+                format: date-time
+                type: string
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

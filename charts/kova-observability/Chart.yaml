@@ -1,0 +1,6 @@
+apiVersion: v2
+name: kova-observability
+description: Production observability data plane for Kova
+type: application
+version: 0.1.0
+appVersion: "1"

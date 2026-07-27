@@ -1,0 +1,9 @@
+.env
+.env*
+/.work/
+/.kova.state
+/bin/*
+!/bin/.gitkeep
+/source
+/.kind
+/.generated
