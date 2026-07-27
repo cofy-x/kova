@@ -1,0 +1,18 @@
+{{- if and .Values.serviceDaemon.enabled .Values.sourceStore.pvc.create }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "kova.sourcePVCName" . }}
+  namespace: {{ include "kova.namespace" . }}
+  labels:
+    {{- include "kova.labels" . | nindent 4 }}
+spec:
+  accessModes:
+    {{- toYaml .Values.sourceStore.pvc.accessModes | nindent 4 }}
+  resources:
+    requests:
+      storage: {{ .Values.sourceStore.pvc.size }}
+  {{- with .Values.sourceStore.pvc.storageClassName }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+{{- end }}

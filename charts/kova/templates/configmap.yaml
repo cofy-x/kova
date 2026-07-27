@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "kova.fullname" . }}-config
+  namespace: {{ include "kova.namespace" . }}
+  labels:
+    {{- include "kova.labels" . | nindent 4 }}
+data:
+  buildkitd.toml: |
+    {{- .Values.buildkitdConfig | nindent 4 }}

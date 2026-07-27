@@ -1,0 +1,59 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "kova-observability.componentName" (dict "root" . "component" "loki") }}
+  labels:
+    {{- include "kova-observability.labels" (dict "root" . "component" "loki") | nindent 4 }}
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector:
+    matchLabels:
+      {{- include "kova-observability.selectorLabels" (dict "root" . "component" "loki") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "kova-observability.selectorLabels" (dict "root" . "component" "loki") | nindent 8 }}
+      annotations: {checksum/config: {{ include (print $.Template.BasePath "/loki-config.yaml") . | sha256sum }}}
+    spec:
+      {{- include "kova-observability.podScheduling" (dict "root" . "component" "loki") | nindent 6 }}
+      securityContext: {fsGroup: 10001, fsGroupChangePolicy: OnRootMismatch}
+      containers:
+        - name: loki
+          image: {{ include "kova-observability.image" .Values.loki.image | quote }}
+          imagePullPolicy: {{ .Values.loki.image.pullPolicy }}
+          args: [-config.file=/etc/loki/loki.yaml]
+          ports: [{name: http, containerPort: 3100}]
+          readinessProbe: {httpGet: {path: /ready, port: http}}
+          livenessProbe: {httpGet: {path: /ready, port: http}}
+          resources:
+            {{- toYaml .Values.loki.resources | nindent 12 }}
+          volumeMounts:
+            - {name: config, mountPath: /etc/loki, readOnly: true}
+            - {name: data, mountPath: /var/loki}
+      volumes:
+        - name: config
+          configMap: {name: {{ include "kova-observability.componentName" (dict "root" . "component" "loki-config") }}}
+        - name: data
+          persistentVolumeClaim: {claimName: {{ include "kova-observability.componentName" (dict "root" . "component" "loki") }}}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: {name: {{ include "kova-observability.componentName" (dict "root" . "component" "loki") }}}
+spec:
+  accessModes: [ReadWriteOnce]
+  {{- with .Values.storageClassName }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+  resources: {requests: {storage: {{ .Values.loki.persistence.size }}}}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "kova-observability.componentName" (dict "root" . "component" "loki") }}
+  labels:
+    {{- include "kova-observability.labels" (dict "root" . "component" "loki") | nindent 4 }}
+spec:
+  selector:
+    {{- include "kova-observability.selectorLabels" (dict "root" . "component" "loki") | nindent 4 }}
+  ports: [{name: http, port: 3100, targetPort: http}]

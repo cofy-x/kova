@@ -1,0 +1,130 @@
+{{- if .Values.serviceDaemon.enabled }}
+{{- $name := printf "%s-service" (include "kova.fullname" .) | trunc 63 | trimSuffix "-" }}
+{{- $selectorName := printf "%s-service" (include "kova.name" .) | trunc 63 | trimSuffix "-" }}
+{{- $saName := default "default" .Values.serviceDaemon.serviceAccount.name }}
+{{- if .Values.serviceDaemon.serviceAccount.create }}
+{{- $saName = default $name .Values.serviceDaemon.serviceAccount.name }}
+{{- end }}
+{{- $registrySecret := default (include "kova.imagePullSecretName" .) .Values.serviceDaemon.runnerImagePullSecret }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  namespace: {{ include "kova.namespace" . }}
+  labels:
+    {{- include "kova.labels" . | nindent 4 }}
+    app.kubernetes.io/component: service
+spec:
+  replicas: {{ .Values.serviceDaemon.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/name: {{ $selectorName }}
+      app.kubernetes.io/component: service
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/name: {{ $selectorName }}
+        app.kubernetes.io/component: service
+        {{- with .Values.serviceDaemon.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.serviceDaemon.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      automountServiceAccountToken: {{ .Values.serviceDaemon.serviceAccount.automountServiceAccountToken }}
+      serviceAccountName: {{ $saName }}
+      containers:
+        - name: kova-service
+          image: {{ include "kova.image" . }}
+          imagePullPolicy: {{ include "kova.imagePullPolicy" . }}
+          command:
+            - kovad
+            - service
+            - --listen={{ .Values.serviceDaemon.listen }}
+            - --namespace={{ default (include "kova.namespace" .) .Values.serviceDaemon.runnerNamespace }}
+            - --runner-image={{ default (include "kova.image" .) .Values.serviceDaemon.runnerImage }}
+            - --runner-image-pull-policy={{ default (include "kova.imagePullPolicy" .) .Values.serviceDaemon.runnerImagePullPolicy }}
+            - --runner-image-pull-secret={{ default (include "kova.imagePullSecretName" .) .Values.serviceDaemon.runnerImagePullSecret }}
+            {{- range $key, $value := .Values.serviceDaemon.runnerNodeSelector }}
+            - {{ printf "--runner-node-selector=%s=%s" $key ($value | toString) | quote }}
+            {{- end }}
+            - --buildkit-addr={{ default (printf "tcp://%s.%s.svc:%v" (include "kova.fullname" .) (include "kova.namespace" .) .Values.service.port) .Values.serviceDaemon.buildkitAddr }}
+            - --source-pvc-claim={{ include "kova.sourcePVCName" . }}
+            - --source-root={{ .Values.sourceStore.mountPath }}
+            - --job-ttl={{ .Values.serviceDaemon.jobTTL }}
+            - --wait={{ .Values.serviceDaemon.wait }}
+            - --poll-interval={{ .Values.serviceDaemon.pollInterval }}
+            - --leader-elect={{ .Values.serviceDaemon.leaderElect }}
+            - --leader-election-namespace={{ include "kova.namespace" . }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.serviceDaemon.port }}
+              protocol: TCP
+          {{- if or $registrySecret .Values.serviceDaemon.authTokenSecret.name }}
+          env:
+            {{- if .Values.serviceDaemon.authTokenSecret.name }}
+            - name: KOVA_SERVICE_AUTH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.serviceDaemon.authTokenSecret.name }}
+                  key: {{ .Values.serviceDaemon.authTokenSecret.key }}
+            {{- end }}
+            {{- if $registrySecret }}
+            - name: DOCKER_CONFIG
+              value: /var/run/kova-registry-auth
+            {{- end }}
+          {{- end }}
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+          resources:
+            {{- toYaml .Values.serviceDaemon.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.serviceDaemon.securityContext | nindent 12 }}
+          volumeMounts:
+            - name: kova-source-store
+              mountPath: {{ .Values.sourceStore.mountPath }}
+            {{- if $registrySecret }}
+            - name: registry-auth
+              mountPath: /var/run/kova-registry-auth
+              readOnly: true
+            {{- end }}
+      {{- $imagePullSecrets := include "kova.renderImagePullSecrets" . }}
+      {{- if $imagePullSecrets }}
+      imagePullSecrets:
+        {{- $imagePullSecrets | nindent 8 }}
+      {{- end }}
+      {{- with .Values.serviceDaemon.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.serviceDaemon.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.serviceDaemon.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      volumes:
+        - name: kova-source-store
+          persistentVolumeClaim:
+            claimName: {{ include "kova.sourcePVCName" . }}
+        {{- if $registrySecret }}
+        - name: registry-auth
+          secret:
+            secretName: {{ $registrySecret }}
+            items:
+              - key: .dockerconfigjson
+                path: config.json
+        {{- end }}
+{{- end }}

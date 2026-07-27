@@ -1,0 +1,165 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "kova.fullname" . }}
+  namespace: {{ include "kova.namespace" . }}
+  labels:
+    {{- include "kova.labels" . | nindent 4 }}
+spec:
+  {{- if not .Values.autoscaling.enabled }}
+  replicas: {{ .Values.deployment.replicas }}
+  {{- end }}
+  progressDeadlineSeconds: {{ .Values.deployment.progressDeadlineSeconds }}
+  revisionHistoryLimit: {{ .Values.deployment.revisionHistoryLimit }}
+  strategy:
+    {{- toYaml .Values.deployment.strategy | nindent 4 }}
+  selector:
+    matchLabels:
+      {{- include "kova.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "kova.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        checksum/buildkit-config: {{ include (print $.Template.BasePath "/configmap.yaml") $ | sha256sum }}
+        {{- toYaml . | nindent 8 }}
+      {{- else }}
+      annotations:
+        checksum/buildkit-config: {{ include (print $.Template.BasePath "/configmap.yaml") $ | sha256sum }}
+      {{- end }}
+    spec:
+      automountServiceAccountToken: {{ .Values.serviceAccount.automountServiceAccountToken }}
+      {{- $affinity := .Values.affinity | default dict }}
+      {{- $podAntiAffinity := $affinity.podAntiAffinity | default dict }}
+      {{- $hasRequiredPodAntiAffinity := or .Values.scheduling.singlePodPerNode $podAntiAffinity.requiredDuringSchedulingIgnoredDuringExecution }}
+      {{- if or $affinity.nodeAffinity $affinity.podAffinity $podAntiAffinity.preferredDuringSchedulingIgnoredDuringExecution $hasRequiredPodAntiAffinity }}
+      affinity:
+        {{- with $affinity.nodeAffinity }}
+        nodeAffinity:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
+        {{- with $affinity.podAffinity }}
+        podAffinity:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
+        {{- if or .Values.scheduling.singlePodPerNode $podAntiAffinity }}
+        podAntiAffinity:
+          {{- with $podAntiAffinity.preferredDuringSchedulingIgnoredDuringExecution }}
+          preferredDuringSchedulingIgnoredDuringExecution:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- if $hasRequiredPodAntiAffinity }}
+          requiredDuringSchedulingIgnoredDuringExecution:
+            {{- with $podAntiAffinity.requiredDuringSchedulingIgnoredDuringExecution }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+            {{- if .Values.scheduling.singlePodPerNode }}
+            - labelSelector:
+                matchLabels:
+                  {{- include "kova.selectorLabels" . | nindent 18 }}
+              topologyKey: kubernetes.io/hostname
+            {{- end }}
+          {{- end }}
+        {{- end }}
+      {{- end }}
+      containers:
+        - name: {{ .Values.container.name }}
+          command:
+            {{- toYaml .Values.container.command | nindent 12 }}
+          image: {{ include "kova.image" . }}
+          imagePullPolicy: {{ include "kova.imagePullPolicy" . }}
+          {{- if .Values.observability.enabled }}
+          env:
+            {{- include "kova.observabilityEnv" . | nindent 12 }}
+          {{- end }}
+          {{- if .Values.container.livenessProbe.enabled }}
+          livenessProbe:
+            failureThreshold: {{ .Values.container.livenessProbe.failureThreshold }}
+            initialDelaySeconds: {{ .Values.container.livenessProbe.initialDelaySeconds }}
+            periodSeconds: {{ .Values.container.livenessProbe.periodSeconds }}
+            successThreshold: {{ .Values.container.livenessProbe.successThreshold }}
+            tcpSocket:
+              port: {{ .Values.container.portName }}
+            timeoutSeconds: {{ .Values.container.livenessProbe.timeoutSeconds }}
+          {{- end }}
+          ports:
+            - containerPort: {{ .Values.container.port }}
+              name: {{ .Values.container.portName }}
+              protocol: {{ .Values.container.protocol }}
+          {{- if .Values.container.readinessProbe.enabled }}
+          readinessProbe:
+            failureThreshold: {{ .Values.container.readinessProbe.failureThreshold }}
+            initialDelaySeconds: {{ .Values.container.readinessProbe.initialDelaySeconds }}
+            periodSeconds: {{ .Values.container.readinessProbe.periodSeconds }}
+            successThreshold: {{ .Values.container.readinessProbe.successThreshold }}
+            tcpSocket:
+              port: {{ .Values.container.portName }}
+            timeoutSeconds: {{ .Values.container.readinessProbe.timeoutSeconds }}
+          {{- end }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.container.securityContext | nindent 12 }}
+          terminationMessagePath: {{ .Values.terminationMessagePath }}
+          terminationMessagePolicy: {{ .Values.terminationMessagePolicy }}
+          volumeMounts:
+            {{- toYaml .Values.volumeMounts | nindent 12 }}
+            {{- with .Values.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+      dnsPolicy: {{ .Values.dnsPolicy }}
+      {{- $imagePullSecrets := include "kova.renderImagePullSecrets" . }}
+      {{- if $imagePullSecrets }}
+      imagePullSecrets:
+        {{- $imagePullSecrets | nindent 8 }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      restartPolicy: {{ .Values.restartPolicy }}
+      {{- with .Values.runtimeClassName }}
+      runtimeClassName: {{ . }}
+      {{- end }}
+      schedulerName: {{ .Values.schedulerName }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      serviceAccountName: {{ include "kova.serviceAccountName" . }}
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if or .Values.scheduling.topologySpread.enabled .Values.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- if .Values.scheduling.topologySpread.enabled }}
+        - maxSkew: {{ .Values.scheduling.topologySpread.maxSkew }}
+          topologyKey: {{ .Values.scheduling.topologySpread.topologyKey }}
+          whenUnsatisfiable: {{ .Values.scheduling.topologySpread.whenUnsatisfiable }}
+          labelSelector:
+            matchLabels:
+              {{- include "kova.selectorLabels" . | nindent 14 }}
+        {{- end }}
+        {{- with .Values.topologySpreadConstraints }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- end }}
+      {{- with .Values.hostAliases }}
+      hostAliases:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      volumes:
+        {{- toYaml .Values.volumes | nindent 8 }}
+        - name: buildkit-config
+          configMap:
+            name: {{ include "kova.fullname" . }}-config
+        {{- with .Values.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}

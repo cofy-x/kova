@@ -1,0 +1,19 @@
+manager:
+  replicas: 1
+
+scheduler:
+  replicas: 1
+
+mysql:
+  image:
+    repository: bitnamilegacy/mysql
+    tag: 8.4.3-debian-12-r0
+
+redis:
+  image:
+    repository: bitnamilegacy/redis
+    tag: 7.2.5-debian-12-r0
+
+client:
+  dfinit:
+    enable: false

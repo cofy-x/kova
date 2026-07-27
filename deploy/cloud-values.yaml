@@ -1,0 +1,85 @@
+# Template for non-local deployments. Override image, credentials, resources,
+# scheduling, and registry config for the target Kubernetes environment.
+
+image:
+  repository: registry.example.com/kova
+  tag: dev
+  pullPolicy: IfNotPresent
+
+imagePullSecrets:
+  # Set name to an existing pull secret, or set create=true with
+  # imageRegistries entries to let the chart create one.
+  create: false
+  name: ""
+
+imageRegistries: []
+
+observability:
+  enabled: false
+  serviceName: kova-worker
+  endpoint: ""
+  insecure: true
+  resourceAttributes: {}
+  metricInterval: 15s
+  traces:
+    enabled: true
+  metrics:
+    enabled: true
+  logs:
+    enabled: true
+
+serviceAccount:
+  create: false
+  name: ""
+  automountServiceAccountToken: false
+
+deployment:
+  replicas: 3
+  progressDeadlineSeconds: 600
+  revisionHistoryLimit: 10
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+
+resources:
+  limits:
+    ephemeral-storage: 80Gi
+    # cpu: 16
+    # memory: 32Gi
+  requests:
+    ephemeral-storage: 40Gi
+    # cpu: 8
+    # memory: 16Gi
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 2
+  maxUnavailable: ""
+
+autoscaling:
+  enabled: false
+  minReplicas: 3
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+  targetMemoryUtilizationPercentage: null
+  behavior: {}
+  metrics: []
+
+nodeSelector: {}
+tolerations: []
+topologySpreadConstraints: []
+
+affinity: {}
+
+scheduling:
+  singlePodPerNode: false
+  topologySpread:
+    enabled: true
+    maxSkew: 1
+    topologyKey: kubernetes.io/hostname
+    whenUnsatisfiable: ScheduleAnyway
+
+buildkitdConfig: |
+  debug = false

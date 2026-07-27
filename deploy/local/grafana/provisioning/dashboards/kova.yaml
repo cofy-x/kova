@@ -1,0 +1,12 @@
+apiVersion: 1
+
+providers:
+  - name: kova
+    orgId: 1
+    folder: Kova
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 10
+    allowUiUpdates: true
+    options:
+      path: /otel-lgtm/grafana/dashboards

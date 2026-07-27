@@ -1,0 +1,89 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "kova-observability.componentName" (dict "root" . "component" "collector") }}
+  labels:
+    {{- include "kova-observability.labels" (dict "root" . "component" "collector") | nindent 4 }}
+spec:
+  serviceName: {{ include "kova-observability.componentName" (dict "root" . "component" "collector-headless") }}
+  replicas: {{ .Values.collector.replicas }}
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels:
+      {{- include "kova-observability.selectorLabels" (dict "root" . "component" "collector") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "kova-observability.selectorLabels" (dict "root" . "component" "collector") | nindent 8 }}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/collector-config.yaml") . | sha256sum }}
+    spec:
+      {{- include "kova-observability.podScheduling" (dict "root" . "component" "collector") | nindent 6 }}
+      securityContext: {fsGroup: 10001, fsGroupChangePolicy: OnRootMismatch}
+      containers:
+        - name: collector
+          image: {{ include "kova-observability.image" .Values.collector.image | quote }}
+          imagePullPolicy: {{ .Values.collector.image.pullPolicy }}
+          args: [--config=/etc/otel/collector.yaml]
+          ports:
+            - {name: otlp-grpc, containerPort: 4317}
+            - {name: otlp-http, containerPort: 4318}
+            - {name: metrics, containerPort: 9464}
+            - {name: telemetry, containerPort: 8888}
+            - {name: health, containerPort: 13133}
+          readinessProbe: {httpGet: {path: /, port: health}}
+          livenessProbe: {httpGet: {path: /, port: health}}
+          resources:
+            {{- toYaml .Values.collector.resources | nindent 12 }}
+          volumeMounts:
+            - {name: config, mountPath: /etc/otel, readOnly: true}
+            - {name: data, mountPath: /var/lib/otelcol}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "kova-observability.componentName" (dict "root" . "component" "collector-config") }}
+  volumeClaimTemplates:
+    - metadata: {name: data}
+      spec:
+        accessModes: [ReadWriteOnce]
+        {{- with .Values.storageClassName }}
+        storageClassName: {{ . | quote }}
+        {{- end }}
+        resources: {requests: {storage: {{ .Values.collector.persistence.size }}}}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "kova-observability.componentName" (dict "root" . "component" "collector") }}
+  labels:
+    {{- include "kova-observability.labels" (dict "root" . "component" "collector") | nindent 4 }}
+spec:
+  selector:
+    {{- include "kova-observability.selectorLabels" (dict "root" . "component" "collector") | nindent 4 }}
+  ports:
+    - {name: otlp-grpc, port: 4317, targetPort: otlp-grpc}
+    - {name: otlp-http, port: 4318, targetPort: otlp-http}
+    - {name: metrics, port: 9464, targetPort: metrics}
+    - {name: telemetry, port: 8888, targetPort: telemetry}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "kova-observability.componentName" (dict "root" . "component" "collector-headless") }}
+  labels:
+    {{- include "kova-observability.labels" (dict "root" . "component" "collector") | nindent 4 }}
+spec:
+  clusterIP: None
+  selector:
+    {{- include "kova-observability.selectorLabels" (dict "root" . "component" "collector") | nindent 4 }}
+  ports: [{name: otlp-grpc, port: 4317, targetPort: otlp-grpc}]
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "kova-observability.componentName" (dict "root" . "component" "collector") }}
+spec:
+  minAvailable: {{ .Values.collector.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "kova-observability.selectorLabels" (dict "root" . "component" "collector") | nindent 6 }}

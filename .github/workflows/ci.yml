@@ -1,0 +1,86 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Check formatting
+        shell: bash
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [[ -n "$unformatted" ]]; then
+            printf 'The following files need gofmt:\n%s\n' "$unformatted"
+            exit 1
+          fi
+      - name: Check module files
+        run: go mod tidy -diff
+      - name: Run vet
+        run: go vet ./...
+      - name: Run tests with race detection
+        run: go test -race ./...
+      - name: Scan reachable Go vulnerabilities
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...
+      - name: Verify generated CRDs
+        run: |
+          make generate-crds
+          git diff --exit-code -- charts/kova/crds
+
+  manifests:
+    name: Scripts and charts
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install ShellCheck
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes shellcheck
+      - name: Set up Helm
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: v4.1.3
+      - name: Check shell scripts
+        run: make lint-scripts
+      - name: Lint Helm charts
+        run: |
+          helm lint charts/kova --values deploy/kind-values.yaml
+          helm lint charts/kova-observability --set grafana.admin.existingSecret=test-secret
+      - name: Render Helm charts
+        run: make helm-template
+
+  container:
+    name: Container build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Build binary image stage
+        if: github.event_name == 'pull_request'
+        run: docker build --platform linux/amd64 --target kova-artifact --file docker/Dockerfile .
+      - name: Build complete image
+        if: github.event_name == 'push'
+        run: docker build --platform linux/amd64 --tag kova:ci --file docker/Dockerfile .

@@ -1,0 +1,136 @@
+# Kova
+
+[![CI](https://github.com/cofy-x/kova/actions/workflows/ci.yml/badge.svg)](https://github.com/cofy-x/kova/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+
+Kova is a Kubernetes-native, cloud-provider-neutral image build service powered
+by BuildKit. It builds batches of Dockerfile contexts into OCI or Nydus images,
+pushes them to OCI registries, and can preheat successful results through a
+Dragonfly P2P cluster.
+
+## Documentation
+
+- [Documentation Index](docs/README.md): organized guide to the project docs.
+- [CLI workflow](docs/quickstart.md): daily usage, local contexts, prepare,
+  build, logs, wait, export, and cleanup.
+- [Runtime design](docs/architecture.md): roles, topology, build/export,
+  preheat, and scaling flows.
+- [Kubernetes Deployment](docs/deployment/kubernetes.md): Helm installation,
+  registry credentials, worker sizing, and production configuration.
+- [Validation matrix](docs/testing.md): static checks, E2E targets, and runtime
+  smoke expectations.
+- [Examples](examples/README.md): build input examples and runtime smoke
+  service details.
+
+## Local Development Requirements
+
+- Docker
+- kind
+- Helm
+- kubectl
+- curl
+- `zip`
+- Go 1.25.5 available as `go`
+- Local `ubuntu:24.04` image, or network access for Docker to pull it
+
+## Quick Start
+
+Build the service image, create a dedicated kind cluster, deploy the Helm chart,
+run a sample build, and verify the pushed image:
+
+```bash
+make image
+make e2e
+```
+
+The E2E target builds `examples/simple`, pushes it to the local registry, exports
+`result.jsonl`, and verifies the image can be pulled from the host:
+
+```bash
+docker pull localhost:5002/kova-examples/simple:dev
+```
+
+Clean the local environment:
+
+```bash
+make clean-kind
+```
+
+Run broader validation targets as needed:
+
+```bash
+make e2e-concurrent
+make e2e-dragonfly-nydus
+make e2e-runtime
+```
+
+See the [target coverage guide](docs/testing.md) for when to run each check.
+
+## Contributing
+
+Contributions are welcome. Read the [contribution guide](CONTRIBUTING.md) for the development workflow and the [security policy](SECURITY.md) before reporting a vulnerability.
+
+Kova is licensed under the [Apache License 2.0](LICENSE).
+
+## Daily CLI Flow
+
+Use the [operator quickstart](docs/quickstart.md) for the normal sequence:
+`prepare`, `build`, `logs`, `wait`, `export`, and `destroy`.
+
+## Build Input Format
+
+`kova build` accepts a single build context directory for one-off builds:
+
+```bash
+kova build ./image-1 --target host.docker.internal:5002/kova-examples/simple:dev
+```
+
+For batch builds, `kova build` also reads a zip stream from stdin. The zip root
+must contain one directory per image:
+
+```text
+image-1/
+  Dockerfile
+  metadata.json
+  ...
+image-2/
+  Dockerfile
+  metadata.json
+  ...
+```
+
+Each `metadata.json` must contain a `target` field:
+
+```json
+{
+  "target": "$KOVA_IMAGE_REGISTRY/kova-examples/simple:dev"
+}
+```
+
+Dockerfiles and metadata can use `$KOVA_*` variables. Pass values with
+repeatable `--var KEY=value` flags.
+
+## Development Commands
+
+Run checks:
+
+```bash
+make test
+make helm-template
+```
+
+Build a host-platform binary for local debugging:
+
+```bash
+make kova
+```
+
+Build a Linux runner binary for container images:
+
+```bash
+make kova-linux
+```
+
+The local `kova` CLI defaults to `tcp://kova.kova.svc:9094`. Override it with
+`--buildkit-addr` or `KOVA_BUILDKIT_ADDR` for another release, namespace, or
+Kubernetes cluster.
