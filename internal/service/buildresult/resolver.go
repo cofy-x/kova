@@ -103,9 +103,11 @@ func Pending(build *kovav1.KovaBuild) []kovav1.BuildResult {
 	if err != nil {
 		return nil
 	}
-	results := make([]kovav1.BuildResult, 0, len(formats))
-	for _, format := range formats {
-		results = append(results, kovav1.BuildResult{Format: string(format), Status: "pending", Repository: source.NormalizeTargetForFormat(build.Spec.Build.Target, format)})
+	results := make([]kovav1.BuildResult, 0, len(formats)*len(build.Spec.Targets))
+	for _, target := range build.Spec.Targets {
+		for _, format := range formats {
+			results = append(results, kovav1.BuildResult{Format: string(format), Status: "pending", Repository: source.NormalizeTargetForFormat(target, format)})
+		}
 	}
 	return results
 }

@@ -64,9 +64,6 @@ func buildRequestFromMultipart(c echo.Context) (createBuildRequest, error) {
 	if request.SourceDigest != "" && !sha256Pattern.MatchString(request.SourceDigest) {
 		return createBuildRequest{}, fmt.Errorf("form field source_digest must be a lowercase sha256 digest")
 	}
-	if strings.TrimSpace(request.Options.Target) == "" {
-		return createBuildRequest{}, fmt.Errorf("form field target is required")
-	}
 	if request.IdempotencyKey != "" {
 		if len(request.IdempotencyKey) > 256 {
 			return createBuildRequest{}, fmt.Errorf("form field idempotency_key is too long")

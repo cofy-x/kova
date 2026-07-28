@@ -121,52 +121,82 @@ func ValidateBuildArchive(zipPath string) (int, error) {
 // ValidateSingleBuildArchiveTarget makes the service request target and the
 // target executed by the runner one immutable contract.
 func ValidateSingleBuildArchiveTarget(zipPath, target string) error {
-	count, err := ValidateBuildArchive(zipPath)
+	targets, err := BuildArchiveTargets(zipPath)
 	if err != nil {
 		return err
 	}
-	if count != 1 {
-		return fmt.Errorf("service builds with an explicit target require exactly one image directory, got %d", count)
+	if len(targets) != 1 {
+		return fmt.Errorf("service builds with an explicit target require exactly one image directory, got %d", len(targets))
+	}
+	if targets[0] != strings.TrimSpace(target) {
+		return fmt.Errorf("archive target %q does not match requested target %q", targets[0], target)
+	}
+	return nil
+}
+
+func BuildArchiveTargets(zipPath string) ([]string, error) {
+	count, err := ValidateBuildArchive(zipPath)
+	if err != nil {
+		return nil, err
 	}
 	r, err := zip.OpenReader(zipPath)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer r.Close()
+	targetsByDirectory := make(map[string]string, count)
+	directoriesByTarget := make(map[string]string, count)
 	for _, file := range r.File {
 		cleaned, err := ValidateBuildArchivePath(file.Name)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		parts := strings.Split(cleaned, "/")
 		if len(parts) != 2 || parts[1] != "metadata.json" {
 			continue
 		}
 		if file.UncompressedSize64 > maxArchiveMetadataBytes {
-			return fmt.Errorf("metadata.json exceeds 1 MiB")
+			return nil, fmt.Errorf("%s exceeds 1 MiB", cleaned)
 		}
 		reader, err := file.Open()
 		if err != nil {
-			return err
+			return nil, err
 		}
 		raw, readErr := io.ReadAll(io.LimitReader(reader, maxArchiveMetadataBytes+1))
 		closeErr := reader.Close()
 		if readErr != nil {
-			return readErr
+			return nil, readErr
 		}
 		if closeErr != nil {
-			return closeErr
+			return nil, closeErr
 		}
 		var metadata ImageMetadata
 		if err := json.Unmarshal(raw, &metadata); err != nil {
-			return fmt.Errorf("invalid metadata.json: %w", err)
+			return nil, fmt.Errorf("invalid %s: %w", cleaned, err)
 		}
-		if strings.TrimSpace(metadata.Target) != strings.TrimSpace(target) {
-			return fmt.Errorf("archive target %q does not match requested target %q", metadata.Target, target)
+		target := strings.TrimSpace(metadata.Target)
+		if target == "" {
+			return nil, fmt.Errorf("%s target is required", cleaned)
 		}
-		return nil
+		if previous, exists := directoriesByTarget[target]; exists {
+			return nil, fmt.Errorf("image directories %q and %q use duplicate target %q", previous, parts[0], target)
+		}
+		targetsByDirectory[parts[0]] = target
+		directoriesByTarget[target] = parts[0]
 	}
-	return fmt.Errorf("archive is missing metadata.json")
+	if len(targetsByDirectory) != count {
+		return nil, fmt.Errorf("expected %d metadata targets, found %d", count, len(targetsByDirectory))
+	}
+	directories := make([]string, 0, len(targetsByDirectory))
+	for directory := range targetsByDirectory {
+		directories = append(directories, directory)
+	}
+	sort.Strings(directories)
+	targets := make([]string, 0, len(directories))
+	for _, directory := range directories {
+		targets = append(targets, targetsByDirectory[directory])
+	}
+	return targets, nil
 }
 
 func ValidateBuildArchivePath(name string) (string, error) {

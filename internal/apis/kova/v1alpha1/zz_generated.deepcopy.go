@@ -152,6 +152,11 @@ func (in *KovaBuildSourceSpec) DeepCopy() *KovaBuildSourceSpec {
 func (in *KovaBuildSpec) DeepCopyInto(out *KovaBuildSpec) {
 	*out = *in
 	out.Requester = in.Requester
+	if in.Targets != nil {
+		in, out := &in.Targets, &out.Targets
+		*out = make([]string, len(*in))
+		copy(*out, *in)
+	}
 	out.Source = in.Source
 	in.Build.DeepCopyInto(&out.Build)
 }

@@ -190,13 +190,17 @@ func (s *Server) handleCreateBuild(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("source digest mismatch: expected %s, got %s", request.SourceDigest, actualDigest)})
 	}
 	request.SourceDigest = actualDigest
-	if request.Options.Target != "" {
-		err = source.ValidateSingleBuildArchiveTarget(tmpPath, request.Options.Target)
-	} else {
-		_, err = source.ValidateBuildArchive(tmpPath)
-	}
+	targets, err := source.BuildArchiveTargets(tmpPath)
 	if err != nil {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
+	}
+	if request.Options.Target != "" {
+		if len(targets) != 1 {
+			return c.JSON(http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("explicit target requires one image, got %d", len(targets))})
+		}
+		if targets[0] != strings.TrimSpace(request.Options.Target) {
+			return c.JSON(http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("archive target %q does not match requested target %q", targets[0], request.Options.Target)})
+		}
 	}
 	staged, err := os.Open(tmpPath)
 	if err != nil {
@@ -232,6 +236,7 @@ func (s *Server) handleCreateBuild(c echo.Context) error {
 		},
 		Spec: kovav1.KovaBuildSpec{
 			Requester:      kovav1.KovaBuildRequester{Username: principal.Username, UID: principal.UID},
+			Targets:        targets,
 			Source:         kovav1.KovaBuildSourceSpec{URI: artifactURI, Digest: actualDigest},
 			Build:          request.Options,
 			IdempotencyKey: request.IdempotencyKey,

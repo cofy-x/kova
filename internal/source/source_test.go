@@ -43,6 +43,40 @@ func TestValidateBuildArchiveRejectsRootFile(t *testing.T) {
 	}
 }
 
+func TestBuildArchiveTargetsReturnsSortedBatchTargets(t *testing.T) {
+	zipPath := filepath.Join(t.TempDir(), "source.zip")
+	file, err := os.Create(zipPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	zw := zip.NewWriter(file)
+	for _, entry := range []struct{ name, target string }{{"b", "registry.example/b:dev"}, {"a", "registry.example/a:dev"}} {
+		dockerfile, createErr := zw.Create(entry.name + "/Dockerfile")
+		if createErr != nil {
+			t.Fatal(createErr)
+		}
+		_, _ = dockerfile.Write([]byte("FROM scratch\n"))
+		metadata, createErr := zw.Create(entry.name + "/metadata.json")
+		if createErr != nil {
+			t.Fatal(createErr)
+		}
+		_, _ = metadata.Write([]byte(`{"target":"` + entry.target + `"}`))
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	targets, err := BuildArchiveTargets(zipPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(targets) != 2 || targets[0] != "registry.example/a:dev" || targets[1] != "registry.example/b:dev" {
+		t.Fatalf("targets = %#v", targets)
+	}
+}
+
 func TestParseBuildFormatsRejectsInvalidValue(t *testing.T) {
 	if _, err := ParseBuildFormats("invalid"); err == nil {
 		t.Fatal("expected invalid format to fail")

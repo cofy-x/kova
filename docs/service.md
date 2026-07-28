@@ -90,6 +90,17 @@ kova job results <job-id>
 kova job cancel <job-id>
 ```
 
+For a batch archive whose top-level image directories already contain
+`Dockerfile` and `metadata.json`, omit `--target`. Kova records every immutable
+archive target in the job spec and verifies each pushed result:
+
+```bash
+kova job submit source.zip --format oci --concurrency 3
+```
+
+`--target` remains required when submitting a context directory and, when
+provided for a zip, requires exactly one matching archive target.
+
 Use `--service-ca-file` for a private Service CA. The
 `--service-insecure` option is intended only for isolated TLS testing.
 
@@ -162,7 +173,8 @@ Supported form fields are:
 - `format`: `oci`, `nydus`, or `both` when `formats` is omitted
 - `source_digest`: optional lowercase SHA-256 assertion
 - `idempotency_key`: optional stable request key, up to 256 characters
-- `target`: required output image reference matching archive metadata
+- `target`: optional single-image override; when omitted, all archive metadata
+  targets are built
 - `concurrency`, `timeout`, `retry`, and `oom-cooldown`
 - `fail-fast`, `skip-fail`, and `verbose`
 - repeated `var` values in `NAME=value` form

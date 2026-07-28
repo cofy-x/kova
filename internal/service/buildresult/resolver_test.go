@@ -46,7 +46,7 @@ func (fn exporterFunc) Post(ctx context.Context, build *kovav1.KovaBuild, path, 
 }
 
 func TestResolvePreservesTypedPartialFailures(t *testing.T) {
-	build := &kovav1.KovaBuild{Spec: kovav1.KovaBuildSpec{Build: kovav1.KovaBuildOptions{Format: "both", Target: "registry.example/demo:payload"}}}
+	build := &kovav1.KovaBuild{Spec: kovav1.KovaBuildSpec{Targets: []string{"registry.example/demo:payload"}, Build: kovav1.KovaBuildOptions{Format: "both"}}}
 	var queries []string
 	results := Resolve(context.Background(), exporterFunc(func(_ context.Context, _ *kovav1.KovaBuild, path, query string) ([]byte, error) {
 		if path != "export" {
@@ -65,7 +65,7 @@ func TestResolvePreservesTypedPartialFailures(t *testing.T) {
 }
 
 func TestResolvePreservesSuccessfulVariantWhenOtherExportFails(t *testing.T) {
-	build := &kovav1.KovaBuild{Spec: kovav1.KovaBuildSpec{Build: kovav1.KovaBuildOptions{Format: "both", Target: "registry.example/demo:payload"}}}
+	build := &kovav1.KovaBuild{Spec: kovav1.KovaBuildSpec{Targets: []string{"registry.example/demo:payload"}, Build: kovav1.KovaBuildOptions{Format: "both"}}}
 	results := Resolve(context.Background(), exporterFunc(func(_ context.Context, _ *kovav1.KovaBuild, _, query string) ([]byte, error) {
 		if query == "with-fail=true&oci=true" {
 			return nil, context.DeadlineExceeded
@@ -79,12 +79,26 @@ func TestResolvePreservesSuccessfulVariantWhenOtherExportFails(t *testing.T) {
 
 func TestCancelledResultsDoNotCallExporter(t *testing.T) {
 	called := false
-	build := &kovav1.KovaBuild{Spec: kovav1.KovaBuildSpec{Build: kovav1.KovaBuildOptions{Format: "oci", Target: "registry.example/demo:payload"}}, Status: kovav1.KovaBuildStatus{Phase: kovav1.PhaseCancelled}}
+	build := &kovav1.KovaBuild{Spec: kovav1.KovaBuildSpec{Targets: []string{"registry.example/demo:payload"}, Build: kovav1.KovaBuildOptions{Format: "oci"}}, Status: kovav1.KovaBuildStatus{Phase: kovav1.PhaseCancelled}}
 	results := Resolve(context.Background(), exporterFunc(func(context.Context, *kovav1.KovaBuild, string, string) ([]byte, error) {
 		called = true
 		return nil, nil
 	}), build, nil)
 	if called || len(results) != 1 || results[0].Status != "cancelled" {
 		t.Fatalf("called=%v results=%#v", called, results)
+	}
+}
+
+func TestPendingExpandsBatchTargetsAndFormats(t *testing.T) {
+	build := &kovav1.KovaBuild{Spec: kovav1.KovaBuildSpec{
+		Targets: []string{"registry.example/a:dev", "registry.example/b:dev"},
+		Build:   kovav1.KovaBuildOptions{Format: "both"},
+	}}
+	results := Pending(build)
+	if len(results) != 4 || results[0].Repository != "registry.example/a:dev_nydus_v3" ||
+		results[1].Repository != "registry.example/a:dev" ||
+		results[2].Repository != "registry.example/b:dev_nydus_v3" ||
+		results[3].Repository != "registry.example/b:dev" {
+		t.Fatalf("results = %#v", results)
 	}
 }

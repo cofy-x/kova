@@ -22,8 +22,9 @@ integration.
 ## Job and Storage Model
 
 `KovaBuild` is the canonical service job. Its spec is immutable and contains
-the authenticated requester, an artifact URI, SHA-256 digest, build options,
-and an optional caller-scoped idempotency key. Status contains
+the authenticated requester, immutable archive targets, an artifact URI,
+SHA-256 digest, build options, and an optional caller-scoped idempotency key.
+Status contains
 `observedGeneration`, a `Ready` Condition, timestamps, the assigned runner,
 allocated concurrency, a typed result summary, and at most 100 inline results.
 

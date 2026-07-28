@@ -115,8 +115,9 @@ LABEL org.opencontainers.image.source="https://github.com/cofy-x/kova" \
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
-    && groupadd --gid 65532 kova \
-    && useradd --uid 65532 --gid 65532 --create-home kova
+    && groupadd --system --gid 65532 kova \
+    && useradd --system --uid 65532 --gid 65532 --key SYS_UID_MAX=65532 --home-dir /home/kova \
+        --create-home --shell /usr/sbin/nologin kova
 COPY --from=runtime-builder /out/kova-controller /usr/bin/kova-controller
 USER 65532:65532
 ENTRYPOINT ["kova-controller", "service"]
@@ -132,8 +133,9 @@ LABEL org.opencontainers.image.source="https://github.com/cofy-x/kova" \
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
-    && groupadd --gid 65532 kova \
-    && useradd --uid 65532 --gid 65532 --create-home kova
+    && groupadd --system --gid 65532 kova \
+    && useradd --system --uid 65532 --gid 65532 --key SYS_UID_MAX=65532 --home-dir /home/kova \
+        --create-home --shell /usr/sbin/nologin kova
 COPY --from=buildkit-rootless /usr/bin/buildctl /usr/bin/buildctl
 COPY --from=grpcurl-downloader /out/grpcurl /usr/bin/grpcurl
 COPY --from=nydus-downloader /out/nydusify /usr/bin/nydusify

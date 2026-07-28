@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -146,6 +147,13 @@ func multipartBuildRequest(t *testing.T, fields map[string]string) *http.Request
 }
 
 func multipartBuildRequestWithTarget(t *testing.T, fields map[string]string, archiveTarget string) *http.Request {
+	if archiveTarget == "" {
+		archiveTarget = "registry.local/example:dev"
+	}
+	return multipartBuildRequestWithTargets(t, fields, []string{archiveTarget})
+}
+
+func multipartBuildRequestWithTargets(t *testing.T, fields map[string]string, archiveTargets []string) *http.Request {
 	t.Helper()
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)
@@ -155,20 +163,19 @@ func multipartBuildRequestWithTarget(t *testing.T, fields map[string]string, arc
 	}
 	var archive bytes.Buffer
 	zw := zip.NewWriter(&archive)
-	dockerfile, err := zw.Create("image/Dockerfile")
-	if err != nil {
-		t.Fatal(err)
+	for index, target := range archiveTargets {
+		directory := fmt.Sprintf("image-%d", index)
+		dockerfile, err := zw.Create(directory + "/Dockerfile")
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _ = dockerfile.Write([]byte("FROM scratch\n"))
+		metadata, err := zw.Create(directory + "/metadata.json")
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _ = metadata.Write([]byte(`{"target":"` + target + `"}`))
 	}
-	_, _ = dockerfile.Write([]byte("FROM scratch\n"))
-	metadata, err := zw.Create("image/metadata.json")
-	if err != nil {
-		t.Fatal(err)
-	}
-	target := archiveTarget
-	if target == "" {
-		target = "registry.local/example:dev"
-	}
-	_, _ = metadata.Write([]byte(`{"target":"` + target + `"}`))
 	if err := zw.Close(); err != nil {
 		t.Fatal(err)
 	}

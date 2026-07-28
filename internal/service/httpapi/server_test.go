@@ -129,6 +129,9 @@ func TestCreateBuildWritesSourceAndCreatesCR(t *testing.T) {
 	if build.Spec.Build.Format != "oci" || build.Spec.Build.Concurrency != 2 {
 		t.Fatalf("build options = %#v", build.Spec.Build)
 	}
+	if len(build.Spec.Targets) != 1 || build.Spec.Targets[0] != "registry.local/example:dev" {
+		t.Fatalf("build targets = %#v", build.Spec.Targets)
+	}
 	uri, err := url.Parse(build.Spec.Source.URI)
 	if err != nil || uri.Scheme != "file" || build.Spec.Source.Digest == "" {
 		t.Fatalf("source = %#v err=%v", build.Spec.Source, err)
@@ -138,7 +141,7 @@ func TestCreateBuildWritesSourceAndCreatesCR(t *testing.T) {
 	}
 }
 
-func TestCreateBuildRequiresTarget(t *testing.T) {
+func TestCreateBuildUsesArchiveTargetWithoutOverride(t *testing.T) {
 	srv := newTestServer(t, &fakeKube{})
 	req := multipartBuildRequest(t, map[string]string{"format": "oci"})
 	req.Header.Set("Authorization", "Bearer token")
@@ -146,8 +149,33 @@ func TestCreateBuildRequiresTarget(t *testing.T) {
 
 	srv.routes().ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "target is required") {
+	if rec.Code != http.StatusAccepted {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestCreateBuildStoresBatchArchiveTargets(t *testing.T) {
+	srv := newTestServer(t, &fakeKube{})
+	targets := []string{"registry.local/example:a", "registry.local/example:b"}
+	req := multipartBuildRequestWithTargets(t, map[string]string{"format": "both"}, targets)
+	req.Header.Set("Authorization", "Bearer token")
+	rec := httptest.NewRecorder()
+
+	srv.routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var job BuildJob
+	if err := json.Unmarshal(rec.Body.Bytes(), &job); err != nil {
+		t.Fatal(err)
+	}
+	var build kovav1.KovaBuild
+	if err := srv.client.Get(context.Background(), kubeObjectKey("jobs", job.ID), &build); err != nil {
+		t.Fatal(err)
+	}
+	if fmt.Sprint(build.Spec.Targets) != fmt.Sprint(targets) {
+		t.Fatalf("build targets = %#v, want %#v", build.Spec.Targets, targets)
 	}
 }
 

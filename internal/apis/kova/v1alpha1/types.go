@@ -40,6 +40,8 @@ type KovaBuild struct {
 type KovaBuildSpec struct {
 	// +kubebuilder:validation:Required
 	Requester KovaBuildRequester `json:"requester"`
+	// +kubebuilder:validation:MinItems=1
+	Targets []string `json:"targets"`
 	// +kubebuilder:validation:Required
 	Source KovaBuildSourceSpec `json:"source,omitempty"`
 	Build  KovaBuildOptions    `json:"build,omitempty"`

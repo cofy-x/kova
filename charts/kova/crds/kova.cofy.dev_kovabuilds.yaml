@@ -110,9 +110,15 @@ spec:
                 - digest
                 - uri
                 type: object
+              targets:
+                items:
+                  type: string
+                minItems: 1
+                type: array
             required:
             - requester
             - source
+            - targets
             type: object
           status:
             properties:

@@ -35,7 +35,7 @@ func jobSubmitCLICommand() *cli.Command {
 		Usage:     "submit a directory or source zip to the Kova service",
 		ArgsUsage: "<context-directory|source.zip>",
 		Flags: []cli.Flag{
-			&cli.StringFlag{Name: "target", Required: true, Usage: "output image target"},
+			&cli.StringFlag{Name: "target", Usage: "output image target; required for a directory and optional for a batch zip"},
 			&cli.StringFlag{Name: "format", Value: "oci", Usage: "build output format: oci, nydus, or both"},
 			&cli.StringSliceFlag{Name: "var", Usage: "build variable in KEY=value form; repeatable"},
 			&cli.IntFlag{Name: "concurrency", Value: 1, Usage: "maximum concurrent targets"},
@@ -231,10 +231,17 @@ func prepareServiceArchive(input, target string) (string, func(), error) {
 		return "", func() {}, err
 	}
 	if !info.IsDir() {
-		if err := source.ValidateSingleBuildArchiveTarget(input, target); err != nil {
+		if strings.TrimSpace(target) != "" {
+			if err := source.ValidateSingleBuildArchiveTarget(input, target); err != nil {
+				return "", func() {}, err
+			}
+		} else if _, err := source.BuildArchiveTargets(input); err != nil {
 			return "", func() {}, err
 		}
 		return input, func() {}, nil
+	}
+	if strings.TrimSpace(target) == "" {
+		return "", func() {}, fmt.Errorf("job submit requires --target for a context directory")
 	}
 	tmp, err := os.CreateTemp("", "kova-service-source-*.zip")
 	if err != nil {
