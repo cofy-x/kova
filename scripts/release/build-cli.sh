@@ -30,7 +30,14 @@ targets=(
   windows/arm64
 )
 
+MAX_PARALLEL=${KOVA_RELEASE_BUILD_JOBS:-2}
+if ! [[ "${MAX_PARALLEL}" =~ ^[1-9][0-9]*$ ]]; then
+  echo "KOVA_RELEASE_BUILD_JOBS must be a positive integer" >&2
+  exit 2
+fi
+
 pids=()
+failed=0
 for target in "${targets[@]}"; do
   (
   goos=${target%/*}
@@ -56,9 +63,14 @@ for target in "${targets[@]}"; do
   fi
   ) &
   pids+=("$!")
+  if (( ${#pids[@]} == MAX_PARALLEL )); then
+    for pid in "${pids[@]}"; do
+      wait "${pid}" || failed=1
+    done
+    pids=()
+  fi
 done
 
-failed=0
 for pid in "${pids[@]}"; do
   wait "${pid}" || failed=1
 done
