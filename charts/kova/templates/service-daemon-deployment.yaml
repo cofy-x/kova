@@ -50,7 +50,7 @@ spec:
         {{- toYaml .Values.serviceDaemon.podSecurityContext | nindent 8 }}
       containers:
         - name: kova-service
-          image: {{ include "kova.roleImage" (dict "root" . "role" "controller") }}
+          image: {{ include "kova.roleImage" (dict "root" . "role" "controller") | quote }}
           imagePullPolicy: {{ include "kova.roleImagePullPolicy" (dict "root" . "role" "controller") }}
           args:
             - --listen={{ .Values.serviceDaemon.listen }}

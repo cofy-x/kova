@@ -34,10 +34,26 @@ kova version
 The client is CGO-free and runs on the workstation. Linux runtime images are
 split into controller, runner, and rootless BuildKit worker roles.
 
+## Install Kova
+
+Install an exact OCI Helm chart without cloning the repository:
+
+```bash
+helm upgrade --install kova oci://ghcr.io/cofy-x/charts/kova \
+  --version 0.1.0-rc.3 \
+  --namespace kova \
+  --create-namespace \
+  --wait
+```
+
+The chart selects matching controller, runner, and worker images automatically.
+See the [Quick Start](docs/quickstart.md) before running the first build.
+
 ## Documentation
 
 - [Documentation Index](docs/README.md): organized guide to the project docs.
-- [CLI workflow](docs/quickstart.md): daily usage, local contexts, prepare,
+- [Quick Start](docs/quickstart.md): install the public OCI Helm chart and CLI.
+- [CLI workflow](docs/cli-workflow.md): contexts, prepare,
   build, logs, wait, export, and cleanup.
 - [Runtime design](docs/architecture.md): roles, topology, build/export,
   preheat, and scaling flows.
@@ -45,8 +61,8 @@ split into controller, runner, and rootless BuildKit worker roles.
   registry credentials, worker sizing, and production configuration.
 - [Validation matrix](docs/testing.md): static checks, E2E targets, and runtime
   smoke expectations.
-- [Release process](docs/releases.md): CLI archives, runtime images, SBOMs,
-  provenance, and version tags.
+- [Release process](docs/releases.md): CLI archives, OCI Helm charts, runtime
+  images, SBOMs, provenance, and version tags.
 - [Examples](examples/README.md): build input examples and runtime smoke
   service details.
 
@@ -61,14 +77,13 @@ split into controller, runner, and rootless BuildKit worker roles.
 - The Go version declared in `go.mod` available as `go`
 - Network access for Docker to pull the pinned Ubuntu base image
 
-## Quick Start
+## Development Quick Start
 
-Build the role images, create a dedicated kind cluster, deploy the Helm chart,
-run a sample build, and verify the pushed image:
+Package the Helm chart, build the role images, create a minimal kind cluster,
+run sample builds, and verify the pushed images:
 
 ```bash
-make image
-make e2e
+make e2e-helm-quickstart
 ```
 
 The E2E target builds `examples/simple`, pushes it to the local registry, exports
@@ -104,7 +119,7 @@ Kova is licensed under the [Apache License 2.0](LICENSE).
 
 ## Daily CLI Flow
 
-Use the [operator quickstart](docs/quickstart.md) for the normal sequence:
+Use the [CLI workflow](docs/cli-workflow.md) for the normal sequence:
 `prepare`, `build`, `logs`, `wait`, `export`, and `destroy`.
 
 ## Build Input Format

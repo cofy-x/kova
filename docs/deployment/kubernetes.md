@@ -32,35 +32,38 @@ role tags and the registry mapping described in the
 
 ## Cluster Installation
 
-Start with the
-[provider-neutral deployment baseline](../../deploy/kubernetes-values.yaml)
-and add an environment-owned overlay:
+Install an exact public OCI chart and add an environment-owned values file when
+the defaults need to change:
 
 ```bash
-helm upgrade --install kova ./charts/kova \
+helm upgrade --install kova oci://ghcr.io/cofy-x/charts/kova \
+  --version 0.1.0-rc.3 \
   --namespace kova \
   --create-namespace \
-  -f deploy/kubernetes-values.yaml \
   -f <environment-values.yaml>
 ```
 
-Set each role explicitly:
+The packaged chart automatically selects controller, runner, and worker image
+tags from its application version. Override a role only when an environment
+mirrors or pins the published image:
 
 ```yaml
 images:
   controller:
     repository: ghcr.io/cofy-x/kova
-    tag: controller-v0.1.0
+    tag: controller-v0.1.0-rc.3
   runner:
     repository: ghcr.io/cofy-x/kova
-    tag: runner-v0.1.0
+    tag: runner-v0.1.0-rc.3
   worker:
     repository: ghcr.io/cofy-x/kova
-    tag: worker-v0.1.0
+    tag: worker-v0.1.0-rc.3
 ```
 
-The default chart mode installs workers only. Enable `serviceDaemon` for a
-stable authenticated HTTP API and managed `KovaBuild` jobs.
+The default chart mode installs one worker only. Use the
+[provider-neutral production baseline](../../deploy/kubernetes-values.yaml) as
+a starting point for capacity and availability settings. Enable
+`serviceDaemon` for an authenticated HTTP API and managed `KovaBuild` jobs.
 
 ## Artifact Storage
 
@@ -135,7 +138,7 @@ The CLI can create a short-lived runner without the service API:
 kova --kubeconfig <kubeconfig> \
   --name <runner-name> \
   prepare \
-  --image ghcr.io/cofy-x/kova:runner-v0.1.0
+  --image ghcr.io/cofy-x/kova:runner-v0.1.0-rc.3
 ```
 
 Delete it after the batch:
@@ -152,9 +155,9 @@ integrations should prefer the authenticated service and immutable job API.
 Render an environment overlay before installation:
 
 ```bash
-helm template kova ./charts/kova \
+helm template kova oci://ghcr.io/cofy-x/charts/kova \
+  --version 0.1.0-rc.3 \
   --namespace kova \
-  -f deploy/kubernetes-values.yaml \
   -f <environment-values.yaml>
 ```
 

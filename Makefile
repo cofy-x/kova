@@ -30,6 +30,10 @@ KIND_NODE_IMAGE ?= kindest/node:v1.36.1@sha256:3489c7674813ba5d8b1a9977baea8a6e5
 KIND_CONFIG ?= deploy/kind-cluster.yaml
 KIND_KUBECONFIG ?= .kind/$(KIND_CLUSTER).kubeconfig
 KIND_WORKERS ?= 3
+QUICKSTART_KIND_CLUSTER ?= kova-quickstart
+QUICKSTART_KIND_CONFIG ?= deploy/quickstart-kind-cluster.yaml
+QUICKSTART_KIND_KUBECONFIG ?= .kind/$(QUICKSTART_KIND_CLUSTER).kubeconfig
+QUICKSTART_KIND_VALUES ?= deploy/quickstart-kind-values.yaml
 
 REGISTRY_NAME ?= kind-registry
 REGISTRY_IMAGE ?= registry:2@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373
@@ -59,7 +63,7 @@ export REGISTRY_NAME REGISTRY_IMAGE REGISTRY_HOST REGISTRY_PORT CLUSTER_REGISTRY
 export RELEASE_NAME NAMESPACE WORK_DIR RUNNER_NAME SOURCE_ZIP RESULT_JSONL
 export CONCURRENT_RUNNER_NAME CONCURRENT_SOURCE_ZIP CONCURRENT_RESULT_JSONL NYDUS_RESULT_JSONL RUNTIME_OCI_SOURCE_ZIP RUNTIME_NYDUS_SOURCE_ZIP RUNTIME_OCI_RESULT_JSONL RUNTIME_NYDUS_RESULT_JSONL EXAMPLE_COUNT BUILD_CONCURRENCY
 
-.PHONY: all kova kovad install generate-crds image kind-registry kind-create kind-load deploy-kind diagnose-kind observability-up observability-down observability-status dragonfly-nydus-install e2e e2e-service e2e-concurrent e2e-dragonfly-nydus e2e-runtime-preflight e2e-runtime e2e-observability clean clean-kind test lint-scripts helm-template package-example package-concurrent-example FORCE
+.PHONY: all kova kovad install generate-crds image kind-registry kind-create kind-load deploy-kind diagnose-kind observability-up observability-down observability-status dragonfly-nydus-install e2e e2e-helm-quickstart e2e-service e2e-concurrent e2e-dragonfly-nydus e2e-runtime-preflight e2e-runtime e2e-observability clean clean-kind test lint-scripts helm-template package-example package-concurrent-example FORCE
 
 all: kova
 
@@ -131,6 +135,14 @@ $(SOURCE_ZIP):
 
 e2e:
 	./scripts/e2e/e2e.sh
+
+e2e-helm-quickstart:
+	KIND_CLUSTER=$(QUICKSTART_KIND_CLUSTER) \
+	KIND_CONFIG=$(QUICKSTART_KIND_CONFIG) \
+	KIND_KUBECONFIG=$(QUICKSTART_KIND_KUBECONFIG) \
+	KIND_WORKERS=1 \
+	KIND_VALUES=$(QUICKSTART_KIND_VALUES) \
+	./scripts/e2e/e2e-helm-quickstart.sh
 
 e2e-service:
 	SOURCE_ZIP=$(WORK_DIR)/source-service.zip RESULT_JSONL=$(WORK_DIR)/result-service.jsonl ./scripts/e2e/e2e-service.sh

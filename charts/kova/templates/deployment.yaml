@@ -70,7 +70,7 @@ spec:
         - name: {{ .Values.worker.name }}
           args:
             {{- toYaml .Values.worker.args | nindent 12 }}
-          image: {{ include "kova.roleImage" (dict "root" . "role" "worker") }}
+          image: {{ include "kova.roleImage" (dict "root" . "role" "worker") | quote }}
           imagePullPolicy: {{ include "kova.roleImagePullPolicy" (dict "root" . "role" "worker") }}
           {{- if .Values.worker.livenessProbe.enabled }}
           livenessProbe:

@@ -1,11 +1,14 @@
 # Kova Documentation
 
-Start with the [CLI quickstart guide](quickstart.md) for the daily flow and the
+Start with the [installation quick start](quickstart.md), then use the
+[complete CLI workflow](cli-workflow.md) for build operations and the
 [runtime architecture overview](architecture.md) for the system model.
 
 ## Core
 
-- [CLI workflow](quickstart.md): prepare, build, logs, wait, export, and
+- [Public installation](quickstart.md): install the OCI Helm chart and matching
+  CLI.
+- [CLI workflow](cli-workflow.md): prepare, build, logs, wait, export, and
   cleanup.
 - [Runtime design](architecture.md): roles, topology, build/export,
   preheat, and scaling flows.

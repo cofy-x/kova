@@ -53,7 +53,8 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- define "kova.roleImage" -}}
 {{- $image := required (printf "Values.images.%s is required" .role) (index .root.Values.images .role) -}}
 {{- $repository := required (printf "Values.images.%s.repository is required" .role) $image.repository -}}
-{{- $tag := required (printf "Values.images.%s.tag is required" .role) $image.tag -}}
+{{- $defaultTag := printf "%s-%s" .role .root.Chart.AppVersion -}}
+{{- $tag := default $defaultTag $image.tag -}}
 {{- printf "%s:%s" $repository $tag -}}
 {{- end -}}
 

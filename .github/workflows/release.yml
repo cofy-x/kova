@@ -68,6 +68,94 @@ jobs:
           go run github.com/CycloneDX/cyclonedx-gomod/cmd/cyclonedx-gomod@v1.10.0 \
             app -json -output "dist/kova_${GITHUB_REF_NAME#v}.cdx.json" \
             -main cmd/kova .
+      - name: Attest CLI artifacts
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        with:
+          subject-path: dist/*
+      - name: Upload CLI assets
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: cli-assets
+          path: dist/*
+          if-no-files-found: error
+
+  chart:
+    name: Helm chart
+    needs: validate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up Helm
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: v4.1.3
+      - name: Package Helm chart
+        run: scripts/release/package-chart.sh "${GITHUB_REF_NAME}"
+      - name: Log in to GitHub Container Registry
+        env:
+          HELM_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          printf '%s' "${HELM_PASSWORD}" | helm registry login ghcr.io \
+            --username "${GITHUB_ACTOR}" \
+            --password-stdin
+      - name: Publish Helm chart
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          chart="dist/kova-${version}.tgz"
+          destination="oci://ghcr.io/${GITHUB_REPOSITORY_OWNER}/charts"
+          output=$(helm push "${chart}" "${destination}" 2>&1)
+          printf '%s\n' "${output}"
+          digest=$(printf '%s\n' "${output}" | awk '/^Digest: sha256:/ {print $2}')
+          if [[ ! "${digest}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "published chart did not return an OCI digest" >&2
+            exit 1
+          fi
+          printf 'oci://ghcr.io/%s/charts/kova@%s\n' \
+            "${GITHUB_REPOSITORY_OWNER}" "${digest}" \
+            >"dist/kova_${version}.chart-digest.txt"
+      - name: Attest Helm chart
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        with:
+          subject-path: dist/kova-*.tgz
+      - name: Upload Helm chart assets
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: chart-assets
+          path: dist/*
+          if-no-files-found: error
+      - name: Log out of GitHub Container Registry
+        if: always()
+        run: helm registry logout ghcr.io || true
+
+  assets:
+    name: Release assets
+    needs:
+      - cli
+      - chart
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Download CLI assets
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: cli-assets
+          path: dist
+      - name: Download Helm chart assets
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: chart-assets
+          path: dist
       - name: Generate checksums
         shell: bash
         run: |
@@ -76,10 +164,6 @@ jobs:
             find . -maxdepth 1 -type f ! -name checksums.txt -print0 | sort -z
           )
           sha256sum "${artifacts[@]}" > checksums.txt
-      - name: Attest CLI artifacts
-        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
-        with:
-          subject-path: dist/*
       - name: Upload release assets
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -150,7 +234,7 @@ jobs:
   smoke:
     name: Release smoke
     needs:
-      - cli
+      - assets
       - image
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -158,6 +242,10 @@ jobs:
       contents: read
       packages: read
     steps:
+      - name: Set up Helm
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: v4.1.3
       - name: Download release assets
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -172,6 +260,30 @@ jobs:
           tar -tzf "${archive}" | grep -qx LICENSE
           tar -xzf "${archive}" kova LICENSE
           ./kova version | grep -F "${GITHUB_REF_NAME}"
+      - name: Verify public Helm chart
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          mkdir pulled
+          helm registry logout ghcr.io >/dev/null 2>&1 || true
+          helm pull "oci://ghcr.io/${GITHUB_REPOSITORY_OWNER}/charts/kova" \
+            --version "${version}" \
+            --destination pulled
+          cmp "dist/kova-${version}.tgz" "pulled/kova-${version}.tgz"
+          helm show chart "pulled/kova-${version}.tgz" \
+            | grep -Fx "version: ${version}" >/dev/null
+          helm show chart "pulled/kova-${version}.tgz" \
+            | grep -Fx "appVersion: ${GITHUB_REF_NAME}" >/dev/null
+          helm template kova "pulled/kova-${version}.tgz" \
+            --namespace kova \
+            --set serviceDaemon.enabled=true \
+            --set artifactStore.filesystem.pvc.create=true >rendered.yaml
+          grep -F "image: \"ghcr.io/${GITHUB_REPOSITORY}:controller-${GITHUB_REF_NAME}\"" \
+            rendered.yaml >/dev/null
+          grep -F "image: \"ghcr.io/${GITHUB_REPOSITORY}:worker-${GITHUB_REF_NAME}\"" \
+            rendered.yaml >/dev/null
+          grep -F -- "--runner-image=ghcr.io/${GITHUB_REPOSITORY}:runner-${GITHUB_REF_NAME}" \
+            rendered.yaml >/dev/null
       - name: Verify public role images and boundaries
         shell: bash
         run: |
@@ -200,7 +312,7 @@ jobs:
   release:
     name: GitHub release
     needs:
-      - cli
+      - assets
       - image
       - smoke
     runs-on: ubuntu-24.04

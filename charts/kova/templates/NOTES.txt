@@ -1,0 +1,12 @@
+Kova {{ .Chart.AppVersion }} is installed in namespace {{ include "kova.namespace" . }}.
+
+Check the rootless BuildKit workers:
+
+  kubectl -n {{ include "kova.namespace" . }} rollout status deployment/{{ include "kova.fullname" . }}
+  kubectl -n {{ include "kova.namespace" . }} get pods,service
+
+The worker endpoint is:
+
+  tcp://{{ include "kova.fullname" . }}.{{ include "kova.namespace" . }}.svc:{{ .Values.service.port }}
+
+Documentation: https://github.com/cofy-x/kova/blob/main/docs/quickstart.md

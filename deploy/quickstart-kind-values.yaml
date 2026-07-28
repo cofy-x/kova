@@ -1,0 +1,45 @@
+images:
+  controller:
+    repository: localhost:5002/kova
+    tag: controller-dev
+    pullPolicy: IfNotPresent
+  runner:
+    repository: localhost:5002/kova
+    tag: runner-dev
+    pullPolicy: IfNotPresent
+  worker:
+    repository: localhost:5002/kova
+    tag: worker-dev
+    pullPolicy: IfNotPresent
+
+observability:
+  enabled: false
+
+deployment:
+  replicas: 1
+
+worker:
+  resources:
+    limits:
+      ephemeral-storage: 8Gi
+    requests:
+      ephemeral-storage: 1Gi
+  volumes:
+    - name: run-buildkit
+      emptyDir: {}
+    - name: lib-buildkit
+      emptyDir:
+        sizeLimit: 8Gi
+  volumeMounts:
+    - name: run-buildkit
+      mountPath: /run/user/1000
+    - name: lib-buildkit
+      mountPath: /home/user/.local/share/buildkit
+    - name: buildkit-config
+      mountPath: /etc/buildkit
+
+buildkitdConfig: |
+  debug = false
+
+  [registry."host.docker.internal:5002"]
+    http = true

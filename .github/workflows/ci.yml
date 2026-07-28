@@ -110,16 +110,33 @@ jobs:
   container:
     name: Container build
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Set up Helm
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: v4.1.3
+      - name: Install kind
+        run: go install sigs.k8s.io/kind@v0.32.0
       - name: Build and verify role images
         shell: bash
         run: |
           for role in controller runner worker; do
-            docker build --platform linux/amd64 --target "${role}" --tag "kova:${role}-ci" --file docker/Dockerfile .
+            docker build --platform linux/amd64 --target "${role}" \
+              --tag "localhost:5002/kova:${role}-dev" \
+              --file docker/Dockerfile .
           done
-          docker run --rm --entrypoint sh kova:controller-ci -c 'test "$(id -u)" = 65532; command -v kova-controller; ! command -v kovad; ! command -v buildkitd'
-          docker run --rm --entrypoint sh kova:runner-ci -c 'test "$(id -u)" = 65532; command -v kovad; command -v buildctl; ! command -v buildkitd'
-          docker run --rm --entrypoint sh kova:worker-ci -c 'test "$(id -u)" = 1000; command -v buildkitd; command -v rootlesskit; ! command -v kovad'
+          docker run --rm --entrypoint sh localhost:5002/kova:controller-dev -c 'test "$(id -u)" = 65532; command -v kova-controller; ! command -v kovad; ! command -v buildkitd'
+          docker run --rm --entrypoint sh localhost:5002/kova:runner-dev -c 'test "$(id -u)" = 65532; command -v kovad; command -v buildctl; ! command -v buildkitd'
+          docker run --rm --entrypoint sh localhost:5002/kova:worker-dev -c 'test "$(id -u)" = 1000; command -v buildkitd; command -v rootlesskit; ! command -v kovad'
+      - name: Verify packaged Helm quickstart
+        env:
+          E2E_BUILD_IMAGE: "false"
+        run: make e2e-helm-quickstart

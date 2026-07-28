@@ -18,6 +18,7 @@ the categorized paths below.
 
 - `release/build-cli.sh`: build the CGO-free `kova` release archives for Linux,
   macOS, and Windows.
+- `release/package-chart.sh`: lint and package a version-aligned Helm chart.
 
 ## Package
 
@@ -50,6 +51,8 @@ the categorized paths below.
 
 - `e2e/e2e-runtime-preflight.sh`: validate local tools and registry readiness
   before the full runtime smoke.
+- `e2e/e2e-helm-quickstart.sh`: install a packaged chart into a minimal kind
+  cluster and run the public CLI build flow.
 - `e2e/e2e.sh`: run the basic local OCI build smoke.
 - `e2e/e2e-service.sh`: run the service daemon HTTP build smoke.
 - `e2e/e2e-concurrent.sh`: run concurrent local builds.

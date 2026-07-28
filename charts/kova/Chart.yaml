@@ -1,6 +1,14 @@
 apiVersion: v2
 name: kova
-description: Helm chart for deploying Kova BuildKit workers
+description: Kubernetes-native distributed image builds powered by BuildKit
 type: application
 version: 0.1.0
-appVersion: "v1"
+appVersion: "dev"
+home: https://github.com/cofy-x/kova
+sources:
+  - https://github.com/cofy-x/kova
+maintainers:
+  - name: Wayne
+    email: rcywjo@gmail.com
+annotations:
+  artifacthub.io/license: Apache-2.0

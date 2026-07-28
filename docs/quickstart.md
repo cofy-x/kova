@@ -1,200 +1,107 @@
-# Quickstart
+# Quick Start
 
-This guide shows the normal operator flow for one Kova build batch:
+This guide installs a released Kova Helm chart and verifies its rootless
+BuildKit worker. The chart is cloud-provider-neutral and uses public images from
+GitHub Container Registry by default.
 
-```text
-prepare -> build -> logs -> wait -> export -> destroy
-```
+## Prerequisites
 
-The same CLI flow works against a local kind cluster or any Kubernetes cluster
-accepted by the supplied kubeconfig. The runner image must
-already be pullable from the target cluster.
+- a Kubernetes cluster that permits Kova's rootless BuildKit security profile
+- Helm with OCI registry support
+- `kubectl` access that can create namespaced workloads
 
-## Local kind Setup
-
-Create the local cluster, build the role images, and deploy the shared
-BuildKit workers:
+Set the release once so the chart and CLI remain aligned:
 
 ```bash
-make kind-create
-make image
-make deploy-kind
-make install
+export KOVA_VERSION=v0.1.0-rc.3
+export KOVA_CHART_VERSION=${KOVA_VERSION#v}
 ```
 
-The local runner image is usually:
+## Install Kova
 
-```text
-localhost:5002/kova:runner-dev
-```
-
-`make install` installs the local CLI as `kova` into your Go bin directory. Use
-`bin/kova` instead if you prefer the repository-local binary from `make kova`.
-
-Pods use `host.docker.internal:5002` for build output targets inside the kind
-cluster.
-
-## Configure Contexts
-
-Kova contexts store local defaults for kubeconfig, namespace, BuildKit address,
-and runner image. They are stored under your user config directory, usually
-`~/.config/kova/config.json`.
-
-Create a local kind context:
+Install the public OCI chart without cloning the repository:
 
 ```bash
+helm upgrade --install kova oci://ghcr.io/cofy-x/charts/kova \
+  --version "${KOVA_CHART_VERSION}" \
+  --namespace kova \
+  --create-namespace \
+  --wait
+```
+
+The default installation creates one rootless BuildKit worker and its headless
+discovery Service. Published charts bind the controller, runner, and worker
+image tags to the same Kova release automatically.
+
+Verify the installation:
+
+```bash
+kubectl -n kova rollout status deployment/kova
+kubectl -n kova get pods,service
+```
+
+## Install The CLI
+
+Install the matching workstation client with Go:
+
+```bash
+go install "github.com/cofy-x/kova/cmd/kova@${KOVA_VERSION}"
+kova version
+```
+
+Release archives for Linux, macOS, and Windows are also available from the
+[GitHub release page](https://github.com/cofy-x/kova/releases).
+
+## Run A Build
+
+Kova pushes build results to an OCI registry. Before the first build, choose a
+target registry reachable from both the cluster and your workstation. When it
+requires authentication, create a Docker registry Secret in the runner
+namespace:
+
+```bash
+kubectl -n kova create secret docker-registry kova-registry \
+  --docker-server <registry> \
+  --docker-username <username> \
+  --docker-password <password>
+```
+
+Keep the command out of shared shell history in real environments. Prefer the
+environment's external secret controller for durable credentials.
+
+Set the Secret name, or leave it empty for an anonymous development registry:
+
+```bash
+export KOVA_REGISTRY_SECRET=kova-registry
+```
+
+Create a CLI context for the installed worker Service:
+
+```bash
+export KOVA_KUBECONFIG=${KUBECONFIG:-$HOME/.kube/config}
+
 kova ctx set \
-  --kubeconfig .kind/kova-local.kubeconfig \
-  --namespace default \
+  --kubeconfig "${KOVA_KUBECONFIG}" \
+  --namespace kova \
   --buildkit-addr tcp://kova.kova.svc:9094 \
-  --image localhost:5002/kova:runner-dev \
+  --image "ghcr.io/cofy-x/kova:runner-${KOVA_VERSION}" \
   --image-pull-policy IfNotPresent \
-  --image-pull-secret "" \
+  --image-pull-secret "${KOVA_REGISTRY_SECRET}" \
   --use \
-  kind
+  quickstart
 ```
 
-Create another context for a remote Kubernetes cluster:
+Then follow the [complete CLI workflow](cli-workflow.md) for `prepare`, `build`,
+`wait`, `export`, and `destroy`. The
+[Kubernetes deployment guide](deployment/kubernetes.md) covers private registry
+credentials, service mode, artifact storage, capacity, and production overlays.
+
+## Uninstall
 
 ```bash
-kova ctx set \
-  --kubeconfig /path/to/remote.kubeconfig \
-  --namespace default \
-  --buildkit-addr tcp://kova.kova.svc:9094 \
-  --image <registry>/<repo>/kova:runner-<tag> \
-  --image-pull-policy IfNotPresent \
-  --image-pull-secret kova-registry \
-  remote
+helm uninstall kova --namespace kova
 ```
 
-Switch or inspect contexts:
-
-```bash
-kova ctx list
-kova ctx use kind
-kova ctx current
-kova ctx show remote
-```
-
-You can also select a context for one command:
-
-```bash
-kova --ctx remote list
-```
-
-## Prepare A Runner
-
-Create one runner Pod for the batch. This command runs from your workstation
-and uses the kubeconfig to create the Pod in the target cluster:
-
-```bash
-kova --name quickstart prepare
-```
-
-The runner Pod starts `kovad daemon` from the runner image.
-
-## Start Builds
-
-For a single image, pass the build context directory directly. If the directory
-does not have `metadata.json`, provide the image name with `--target`:
-
-```bash
-kova --name quickstart \
-  build examples/simple \
-  --target host.docker.internal:5002/kova-examples/simple:dev \
-  --format oci --concurrency 1 --timeout 600 --fail-fast --verbose
-```
-
-If the directory already has `metadata.json`, you can use its `target` field and
-only provide variable values:
-
-```bash
-kova --name quickstart \
-  build examples/simple \
-  --format oci --concurrency 1 --timeout 600 --fail-fast --verbose \
-  --var KOVA_IMAGE_REGISTRY=host.docker.internal:5002
-```
-
-Use `--format both` when the same context should produce both the OCI target and
-the Nydus target in one build pass. The Nydus target uses the `_nydus_v3` suffix:
-
-```bash
-kova --name quickstart \
-  build examples/simple \
-  --target host.docker.internal:5002/kova-examples/simple:dev \
-  --format both
-```
-
-For batch or CI input, Kova also reads a zip stream from stdin. Each image
-directory in the zip must contain a `Dockerfile` and `metadata.json`. The
-built-in example target uses `$KOVA_IMAGE_REGISTRY`, supplied during `build`:
-
-```bash
-mkdir -p .work
-cd examples && zip -qr ../.work/source.zip simple && cd ..
-
-kova --name quickstart \
-  build --format oci --concurrency 1 --timeout 600 --fail-fast --verbose \
-  --var KOVA_IMAGE_REGISTRY=host.docker.internal:5002 \
-  < .work/source.zip
-```
-
-The runner daemon unpacks the zip, resolves the `kova` headless Service to
-worker Pod IPs, and starts `buildctl` subprocesses that connect to BuildKit
-workers.
-
-## Check Logs
-
-Inspect recent runner logs:
-
-```bash
-kova --name quickstart logs --tail 100
-```
-
-Current `logs` output fetches the latest lines from the runner Pod.
-
-## Wait And Export
-
-Wait for the build to finish:
-
-```bash
-kova --name quickstart wait --timeout 600
-```
-
-Export successful OCI results to JSONL:
-
-```bash
-kova --name quickstart export --result .work/result.jsonl --oci
-```
-
-Runner result stores live for the runner Pod lifetime, so an unfiltered export
-contains every matching result accumulated by that runner. Build wrappers
-should pass repeatable exact targets when the output must describe one batch:
-
-```bash
-kova --name quickstart export \
-  --result .work/current-batch.jsonl \
-  --oci \
-  --target registry.example.com/team/app:dev \
-  --target registry.example.com/team/base:dev
-```
-
-An explicitly requested target that is missing, failed, or excluded by the
-selected OCI/Nydus mode makes export fail instead of silently producing a
-partial result.
-
-Verify the example image from the host:
-
-```bash
-docker pull localhost:5002/kova-examples/simple:dev
-```
-
-## Clean Up
-
-Delete the runner Pod when the batch is complete:
-
-```bash
-kova --name quickstart destroy
-```
-
-Use `make clean-kind` when you want to remove the local cluster.
+The chart does not create clusters, cloud accounts, output registries, or
+provider credentials. Those resources remain owned by the consuming
+environment.

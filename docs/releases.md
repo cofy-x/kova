@@ -15,6 +15,8 @@ Each tag publishes:
 
 - `kova` archives for Linux, macOS, and Windows on `amd64` and `arm64`
 - `checksums.txt`, a CycloneDX CLI SBOM, and build-provenance attestations
+- `oci://ghcr.io/cofy-x/charts/kova` with a chart version matching the tag
+- the packaged Helm chart, its OCI digest, and build-provenance attestation
 - `ghcr.io/cofy-x/kova:controller-<version>`
 - `ghcr.io/cofy-x/kova:runner-<version>`
 - `ghcr.io/cofy-x/kova:worker-<version>`
@@ -37,12 +39,13 @@ use but follows the version selected by the Go module proxy.
 The tag workflow:
 
 1. validates the semantic version;
-2. builds the six CLI archives in parallel and generates checksums and SBOM;
-3. builds and attests controller, runner, and worker images for Linux `amd64`
-   and `arm64`;
-4. verifies archive contents, the native CLI version, image role boundaries,
-   runtime users, and anonymous pulls;
-5. creates the GitHub release only after every smoke check succeeds.
+2. builds the six CLI archives in parallel and generates the CLI SBOM;
+3. packages, publishes, and attests the OCI Helm chart;
+4. assembles checksums while building and attesting controller, runner, and
+   worker images for Linux `amd64` and `arm64`;
+5. verifies archive contents, the native CLI version, the anonymously pullable
+   Helm chart, image role boundaries, runtime users, and anonymous image pulls;
+6. creates the GitHub release only after every smoke check succeeds.
 
 Create a tag only from a commit whose required CI and CodeQL checks have
 passed. The GHCR package must be public before the first tag workflow can pass

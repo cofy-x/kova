@@ -45,7 +45,7 @@ func DefaultConfig() Config {
 		ImagePullSecret:           envDefault("KOVA_IMAGE_PULL_SECRET", "kova-registry"),
 		DaemonReadyTimeoutSeconds: envIntDefault("KOVA_DAEMON_READY_TIMEOUT", 60),
 		WaitBuildIntervalSeconds:  envIntDefault("KOVA_STATUS_INTERVAL", 5),
-		DaemonPprofServer:         envDefault("KOVA_DAEMON_PPROF_SERVER", "0.0.0.0:6060"),
+		DaemonPprofServer:         strings.TrimSpace(os.Getenv("KOVA_DAEMON_PPROF_SERVER")),
 		DaemonEnv:                 observabilityEnvFromHost("kova-runner"),
 	}
 }

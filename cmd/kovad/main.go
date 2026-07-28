@@ -41,27 +41,36 @@ func main() {
 			os.Exit(exitCode)
 		}
 	}()
-	app := &cli.App{
+	app := newCLIApp()
+	if err := app.Run(os.Args); err != nil {
+		logging.Errorf("%v", err)
+		exitCode = 1
+		return
+	}
+}
+
+func newCLIApp() *cli.App {
+	daemonCommand := daemon.CLICommand()
+	daemonCommand.Flags = append(daemonCommand.Flags, &cli.StringFlag{
+		Name:  "pprof-server",
+		Usage: "listen address for net/http/pprof server, e.g. 0.0.0.0:5241",
+	})
+	daemonCommand.Before = func(c *cli.Context) error {
+		if addr := resolvePprofServerAddr(c.String("pprof-server")); addr != "" {
+			go func() {
+				logging.Infof("Starting pprof server on %s", addr)
+				if err := http.ListenAndServe(addr, nil); err != nil {
+					logging.Errorf("pprof server: %v", err)
+				}
+			}()
+		}
+		return nil
+	}
+
+	return &cli.App{
 		Name:    "kovad",
 		Usage:   "Kova runtime daemon entrypoint",
 		Version: version.Version,
-		Flags: []cli.Flag{
-			&cli.StringFlag{
-				Name:  "pprof-server",
-				Usage: "listen address for net/http/pprof server, e.g. 0.0.0.0:5241",
-			},
-		},
-		Before: func(c *cli.Context) error {
-			if addr := resolvePprofServerAddr(c.String("pprof-server")); addr != "" {
-				go func() {
-					logging.Infof("Starting pprof server on %s", addr)
-					if err := http.ListenAndServe(addr, nil); err != nil {
-						logging.Errorf("pprof server: %v", err)
-					}
-				}()
-			}
-			return nil
-		},
 		Commands: []*cli.Command{
 			{
 				Name:  "version",
@@ -73,13 +82,8 @@ func main() {
 			},
 			artifactcmd.CLICommand(),
 			daemon.TransportCLICommand(),
-			daemon.CLICommand(),
+			daemonCommand,
 		},
-	}
-	if err := app.Run(os.Args); err != nil {
-		logging.Errorf("%v", err)
-		exitCode = 1
-		return
 	}
 }
 

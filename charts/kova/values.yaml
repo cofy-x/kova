@@ -2,16 +2,19 @@ namespaceOverride: ""
 
 images:
   controller:
-    repository: localhost:5002/kova
-    tag: controller-dev
+    repository: ghcr.io/cofy-x/kova
+    # Empty uses controller-<Chart.appVersion>.
+    tag: ""
     pullPolicy: IfNotPresent
   runner:
-    repository: localhost:5002/kova
-    tag: runner-dev
+    repository: ghcr.io/cofy-x/kova
+    # Empty uses runner-<Chart.appVersion>.
+    tag: ""
     pullPolicy: IfNotPresent
   worker:
-    repository: localhost:5002/kova
-    tag: worker-dev
+    repository: ghcr.io/cofy-x/kova
+    # Empty uses worker-<Chart.appVersion>.
+    tag: ""
     pullPolicy: IfNotPresent
 
 nameOverride: ""
@@ -167,11 +170,11 @@ worker:
 
   resources:
     limits:
-      ephemeral-storage: 80Gi
+      ephemeral-storage: 20Gi
       # cpu: 16
       # memory: 32Gi
     requests:
-      ephemeral-storage: 40Gi
+      ephemeral-storage: 1Gi
       # cpu: 16
       # memory: 32Gi
   podSecurityContext:
@@ -184,7 +187,7 @@ worker:
       emptyDir: {}
     - name: lib-buildkit
       emptyDir:
-        sizeLimit: 80Gi
+        sizeLimit: 20Gi
   volumeMounts:
     - name: run-buildkit
       mountPath: /run/user/1000
@@ -231,7 +234,7 @@ buildkitdConfig: |
   debug = false
 
 deployment:
-  replicas: 5
+  replicas: 1
   progressDeadlineSeconds: 600
   revisionHistoryLimit: 10
   strategy:
