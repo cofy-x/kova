@@ -10,12 +10,17 @@ and worker images from the same Kova release.
 # Replace vX.Y.Z with a tag from https://github.com/cofy-x/kova/releases.
 export KOVA_VERSION=vX.Y.Z
 
+helm show crds oci://ghcr.io/cofy-x/charts/kova \
+  --version "${KOVA_VERSION#v}" | kubectl apply -f -
 helm upgrade --install kova oci://ghcr.io/cofy-x/charts/kova \
   --version "${KOVA_VERSION#v}" \
   --namespace kova \
   --create-namespace \
   --wait
 ```
+
+Always apply the selected release CRD before upgrading. Helm installs files in
+`crds/` for a new release but does not update them on later upgrades.
 
 The default installs one worker. Production environments should provide an
 environment-owned values file for capacity, storage, registry credentials,

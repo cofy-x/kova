@@ -42,12 +42,17 @@ then install that exact OCI Helm chart without cloning the repository:
 ```bash
 export KOVA_VERSION=vX.Y.Z
 
+helm show crds oci://ghcr.io/cofy-x/charts/kova \
+  --version "${KOVA_VERSION#v}" | kubectl apply -f -
 helm upgrade --install kova oci://ghcr.io/cofy-x/charts/kova \
   --version "${KOVA_VERSION#v}" \
   --namespace kova \
   --create-namespace \
   --wait
 ```
+
+Applying the release CRD before every Helm upgrade is required because Helm
+does not upgrade files from a chart's `crds/` directory.
 
 The chart selects matching controller, runner, and worker images automatically.
 Continue with the [installation and first-build guide](docs/quickstart.md).

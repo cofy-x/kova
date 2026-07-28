@@ -22,15 +22,21 @@ export KOVA_CHART_VERSION=${KOVA_VERSION#v}
 
 ## Install Kova
 
-Install the public OCI chart without cloning the repository:
+Apply the selected release CRD, then install or upgrade the public OCI chart
+without cloning the repository:
 
 ```bash
+helm show crds oci://ghcr.io/cofy-x/charts/kova \
+  --version "${KOVA_CHART_VERSION}" | kubectl apply -f -
 helm upgrade --install kova oci://ghcr.io/cofy-x/charts/kova \
   --version "${KOVA_CHART_VERSION}" \
   --namespace kova \
   --create-namespace \
   --wait
 ```
+
+The explicit CRD apply is required on upgrades because Helm does not update
+files in a chart's `crds/` directory.
 
 The default installation creates one rootless BuildKit worker and its headless
 discovery Service. Published charts bind the controller, runner, and worker
