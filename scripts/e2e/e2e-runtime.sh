@@ -10,7 +10,7 @@ CURL_IMAGE=${CURL_IMAGE:-docker.io/curlimages/curl:8.16.0@sha256:463eaf6072688fe
 BUILDKIT_ADDR=${BUILDKIT_ADDR:-tcp://kova.kova.svc:9094}
 KIND_CLUSTER=${KIND_CLUSTER:-kova-local}
 KIND_KUBECONFIG=${KIND_KUBECONFIG:-.kind/${KIND_CLUSTER}.kubeconfig}
-RUNNER_NAME=${RUNNER_NAME:-e2e-runtime}
+KOVA_RUNNER_NAME=${KOVA_RUNNER_NAME:-e2e-runtime}
 WORK_DIR=${WORK_DIR:-.work}
 OCI_SOURCE_ZIP=${OCI_SOURCE_ZIP:-${WORK_DIR}/source-runtime-oci.zip}
 NYDUS_SOURCE_ZIP=${NYDUS_SOURCE_ZIP:-${WORK_DIR}/source-runtime-nydus.zip}
@@ -44,7 +44,7 @@ dump_debug() {
   echo "---- runtime events ----" >&2
   kubectl get events -n "${RUNTIME_NAMESPACE}" --sort-by=.lastTimestamp >&2 || true
   echo "---- runner logs ----" >&2
-  "${KOVA[@]}" --kubeconfig "${KUBECONFIG}" --name "${RUNNER_NAME}" logs --tail=120 >&2 || true
+  "${KOVA[@]}" --kubeconfig "${KUBECONFIG}" --name "${KOVA_RUNNER_NAME}" logs --tail=120 >&2 || true
 }
 
 trap 'dump_debug' ERR
@@ -54,7 +54,7 @@ trap 'dump_debug' ERR
 
 KOVA_IMAGE_PULL_SECRET='' "${KOVA[@]}" \
   --kubeconfig "${KUBECONFIG}" \
-  --name "${RUNNER_NAME}" \
+  --name "${KOVA_RUNNER_NAME}" \
   destroy || true
 
 KOVA_DAEMON_OTEL_ENABLED=${KOVA_DAEMON_OTEL_ENABLED:-true} \
@@ -66,7 +66,7 @@ KOVA_DAEMON_OTEL_RESOURCE_ATTRIBUTES=${KOVA_DAEMON_OTEL_RESOURCE_ATTRIBUTES:-dep
 "${KOVA[@]}" \
   --kubeconfig "${KUBECONFIG}" \
   --buildkit-addr "${BUILDKIT_ADDR}" \
-  --name "${RUNNER_NAME}" \
+  --name "${KOVA_RUNNER_NAME}" \
   prepare \
   --image "${RUNNER_IMAGE}" \
   --image-pull-policy IfNotPresent \
@@ -76,27 +76,27 @@ SOURCE_ZIP="${OCI_SOURCE_ZIP}" EXAMPLE_DIRS=service-oci "${ROOT}/scripts/package
 "${KOVA[@]}" \
   --kubeconfig "${KUBECONFIG}" \
   --buildkit-addr "${BUILDKIT_ADDR}" \
-  --name "${RUNNER_NAME}" \
+  --name "${KOVA_RUNNER_NAME}" \
   build --format oci --concurrency 1 --timeout 600 --fail-fast --verbose \
   --var "KOVA_IMAGE_REGISTRY=${CLUSTER_REGISTRY}" \
   < "${ROOT}/${OCI_SOURCE_ZIP}"
 
-"${KOVA[@]}" --kubeconfig "${KUBECONFIG}" --name "${RUNNER_NAME}" wait --timeout 600
-"${KOVA[@]}" --kubeconfig "${KUBECONFIG}" --name "${RUNNER_NAME}" export --result "${ROOT}/${OCI_RESULT_JSONL}" --oci
-"${KOVA[@]}" --kubeconfig "${KUBECONFIG}" --name "${RUNNER_NAME}" preheat --oci --dragonfly-scheduler-addr "${DRAGONFLY_SCHEDULER_ADDR}" --concurrency 1 --timeout 60 --verbose --insecure-skip-verify
+"${KOVA[@]}" --kubeconfig "${KUBECONFIG}" --name "${KOVA_RUNNER_NAME}" wait --timeout 600
+"${KOVA[@]}" --kubeconfig "${KUBECONFIG}" --name "${KOVA_RUNNER_NAME}" export --result "${ROOT}/${OCI_RESULT_JSONL}" --oci
+"${KOVA[@]}" --kubeconfig "${KUBECONFIG}" --name "${KOVA_RUNNER_NAME}" preheat --oci --dragonfly-scheduler-addr "${DRAGONFLY_SCHEDULER_ADDR}" --concurrency 1 --timeout 60 --verbose --insecure-skip-verify
 
 SOURCE_ZIP="${NYDUS_SOURCE_ZIP}" EXAMPLE_DIRS=service-nydus "${ROOT}/scripts/package/package-example.sh"
 "${KOVA[@]}" \
   --kubeconfig "${KUBECONFIG}" \
   --buildkit-addr "${BUILDKIT_ADDR}" \
-  --name "${RUNNER_NAME}" \
+  --name "${KOVA_RUNNER_NAME}" \
   build --concurrency 1 --timeout 600 --fail-fast --verbose \
   --var "KOVA_IMAGE_REGISTRY=${CLUSTER_REGISTRY}" \
   < "${ROOT}/${NYDUS_SOURCE_ZIP}"
 
-"${KOVA[@]}" --kubeconfig "${KUBECONFIG}" --name "${RUNNER_NAME}" wait --timeout 600
-"${KOVA[@]}" --kubeconfig "${KUBECONFIG}" --name "${RUNNER_NAME}" export --result "${ROOT}/${NYDUS_RESULT_JSONL}"
-"${KOVA[@]}" --kubeconfig "${KUBECONFIG}" --name "${RUNNER_NAME}" preheat --dragonfly-scheduler-addr "${DRAGONFLY_SCHEDULER_ADDR}" --concurrency 1 --timeout 60 --verbose --insecure-skip-verify
+"${KOVA[@]}" --kubeconfig "${KUBECONFIG}" --name "${KOVA_RUNNER_NAME}" wait --timeout 600
+"${KOVA[@]}" --kubeconfig "${KUBECONFIG}" --name "${KOVA_RUNNER_NAME}" export --result "${ROOT}/${NYDUS_RESULT_JSONL}"
+"${KOVA[@]}" --kubeconfig "${KUBECONFIG}" --name "${KOVA_RUNNER_NAME}" preheat --dragonfly-scheduler-addr "${DRAGONFLY_SCHEDULER_ADDR}" --concurrency 1 --timeout 60 --verbose --insecure-skip-verify
 
 if ! grep -q '"success":true' "${ROOT}/${OCI_RESULT_JSONL}"; then
   echo "error: ${OCI_RESULT_JSONL} does not contain a successful OCI build" >&2

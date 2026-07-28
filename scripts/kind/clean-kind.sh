@@ -11,13 +11,13 @@ REGISTRY_NAME=${REGISTRY_NAME:-kind-registry}
 RELEASE_NAME=${RELEASE_NAME:-kova}
 WORK_DIR=${WORK_DIR:-.work}
 NAMESPACE=${NAMESPACE:-kova}
-RUNNER_NAME=${RUNNER_NAME:-e2e}
-CONCURRENT_RUNNER_NAME=${CONCURRENT_RUNNER_NAME:-e2e-concurrent}
+KOVA_RUNNER_NAME=${KOVA_RUNNER_NAME:-e2e}
+KOVA_CONCURRENT_RUNNER_NAME=${KOVA_CONCURRENT_RUNNER_NAME:-e2e-concurrent}
 
 if [[ -f "${ROOT}/${KIND_KUBECONFIG}" ]]; then
   make -C "${ROOT}" kova
-  "${ROOT}/bin/kova" --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" --name "${RUNNER_NAME}" destroy || true
-  "${ROOT}/bin/kova" --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" --name "${CONCURRENT_RUNNER_NAME}" destroy || true
+  "${ROOT}/bin/kova" --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" --name "${KOVA_RUNNER_NAME}" destroy || true
+  "${ROOT}/bin/kova" --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" --name "${KOVA_CONCURRENT_RUNNER_NAME}" destroy || true
   helm uninstall "${RELEASE_NAME}" --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" --namespace "${NAMESPACE}" || true
 fi
 

@@ -10,7 +10,7 @@ BUILDKIT_ADDR=${BUILDKIT_ADDR:-tcp://kova.kova.svc:9094}
 KIND_KUBECONFIG=${KIND_KUBECONFIG:-.kind/kova-local.kubeconfig}
 NAMESPACE=${NAMESPACE:-kova}
 RUNNER_NAMESPACE=${KOVA_NAMESPACE:-default}
-RUNNER_NAME=${RUNNER_NAME:-e2e-concurrent}
+KOVA_RUNNER_NAME=${KOVA_RUNNER_NAME:-e2e-concurrent}
 WORK_DIR=${WORK_DIR:-.work}
 SOURCE_ZIP=${SOURCE_ZIP:-${WORK_DIR}/source-concurrent.zip}
 RESULT_JSONL=${RESULT_JSONL:-${WORK_DIR}/result-concurrent.jsonl}
@@ -39,7 +39,7 @@ KOVA=("${ROOT}/bin/kova")
 dump_debug() {
   echo "---- runner pod ----" >&2
   "${KOVA[@]}" --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" --namespace "${RUNNER_NAMESPACE}" list -o wide >&2 || true
-  "${KOVA[@]}" --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" --namespace "${RUNNER_NAMESPACE}" --name "${RUNNER_NAME}" logs --tail=100 >&2 || true
+  "${KOVA[@]}" --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" --namespace "${RUNNER_NAMESPACE}" --name "${KOVA_RUNNER_NAME}" logs --tail=100 >&2 || true
   echo "---- buildkit pods ----" >&2
   "${KOVA[@]}" --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" --namespace "${NAMESPACE}" list -o wide >&2 || true
   if [[ -f "${ROOT}/${RESULT_JSONL}" ]]; then
@@ -55,7 +55,7 @@ SOURCE_ZIP="${SOURCE_ZIP}" EXAMPLE_COUNT="${EXAMPLE_COUNT}" "${ROOT}/scripts/pac
 
 KOVA_IMAGE_PULL_SECRET='' "${KOVA[@]}" \
   --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" \
-  --name "${RUNNER_NAME}" \
+  --name "${KOVA_RUNNER_NAME}" \
   destroy || true
 
 KOVA_DAEMON_OTEL_ENABLED=${KOVA_DAEMON_OTEL_ENABLED:-true} \
@@ -67,7 +67,7 @@ KOVA_DAEMON_OTEL_RESOURCE_ATTRIBUTES=${KOVA_DAEMON_OTEL_RESOURCE_ATTRIBUTES:-dep
 "${KOVA[@]}" \
   --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" \
   --buildkit-addr "${BUILDKIT_ADDR}" \
-  --name "${RUNNER_NAME}" \
+  --name "${KOVA_RUNNER_NAME}" \
   prepare \
   --image "${RUNNER_IMAGE}" \
   --image-pull-policy IfNotPresent \
@@ -76,19 +76,19 @@ KOVA_DAEMON_OTEL_RESOURCE_ATTRIBUTES=${KOVA_DAEMON_OTEL_RESOURCE_ATTRIBUTES:-dep
 "${KOVA[@]}" \
   --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" \
   --buildkit-addr "${BUILDKIT_ADDR}" \
-  --name "${RUNNER_NAME}" \
+  --name "${KOVA_RUNNER_NAME}" \
   build --format oci --concurrency "${BUILD_CONCURRENCY}" --timeout 600 --fail-fast --verbose \
   --var "KOVA_IMAGE_REGISTRY=${CLUSTER_REGISTRY}" \
   < "${ROOT}/${SOURCE_ZIP}"
 
 "${KOVA[@]}" \
   --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" \
-  --name "${RUNNER_NAME}" \
+  --name "${KOVA_RUNNER_NAME}" \
   wait --timeout 600
 
 "${KOVA[@]}" \
   --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" \
-  --name "${RUNNER_NAME}" \
+  --name "${KOVA_RUNNER_NAME}" \
   export --result "${ROOT}/${RESULT_JSONL}" --oci
 
 line_count=$(wc -l < "${ROOT}/${RESULT_JSONL}" | tr -d ' ')

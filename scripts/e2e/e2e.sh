@@ -8,7 +8,7 @@ ROOT=$(repo_root)
 RUNNER_IMAGE=${RUNNER_IMAGE:-localhost:5002/kova:runner-dev}
 BUILDKIT_ADDR=${BUILDKIT_ADDR:-tcp://kova.kova.svc:9094}
 KIND_KUBECONFIG=${KIND_KUBECONFIG:-.kind/kova-local.kubeconfig}
-RUNNER_NAME=${RUNNER_NAME:-e2e}
+KOVA_RUNNER_NAME=${KOVA_RUNNER_NAME:-e2e}
 WORK_DIR=${WORK_DIR:-.work}
 SOURCE_ZIP=${SOURCE_ZIP:-${WORK_DIR}/source.zip}
 RESULT_JSONL=${RESULT_JSONL:-${WORK_DIR}/result.jsonl}
@@ -29,7 +29,7 @@ KOVA=("${ROOT}/bin/kova")
 
 KOVA_IMAGE_PULL_SECRET='' "${KOVA[@]}" \
   --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" \
-  --name "${RUNNER_NAME}" \
+  --name "${KOVA_RUNNER_NAME}" \
   destroy || true
 
 KOVA_DAEMON_OTEL_ENABLED=${KOVA_DAEMON_OTEL_ENABLED:-true} \
@@ -41,7 +41,7 @@ KOVA_DAEMON_OTEL_RESOURCE_ATTRIBUTES=${KOVA_DAEMON_OTEL_RESOURCE_ATTRIBUTES:-dep
 "${KOVA[@]}" \
   --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" \
   --buildkit-addr "${BUILDKIT_ADDR}" \
-  --name "${RUNNER_NAME}" \
+  --name "${KOVA_RUNNER_NAME}" \
   prepare \
   --image "${RUNNER_IMAGE}" \
   --image-pull-policy IfNotPresent \
@@ -50,19 +50,19 @@ KOVA_DAEMON_OTEL_RESOURCE_ATTRIBUTES=${KOVA_DAEMON_OTEL_RESOURCE_ATTRIBUTES:-dep
 "${KOVA[@]}" \
   --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" \
   --buildkit-addr "${BUILDKIT_ADDR}" \
-  --name "${RUNNER_NAME}" \
+  --name "${KOVA_RUNNER_NAME}" \
   build --format oci --concurrency 1 --timeout 600 --fail-fast --verbose \
   --var "KOVA_IMAGE_REGISTRY=${CLUSTER_REGISTRY}" \
   < "${ROOT}/${SOURCE_ZIP}"
 
 "${KOVA[@]}" \
   --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" \
-  --name "${RUNNER_NAME}" \
+  --name "${KOVA_RUNNER_NAME}" \
   wait --timeout 600
 
 "${KOVA[@]}" \
   --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" \
-  --name "${RUNNER_NAME}" \
+  --name "${KOVA_RUNNER_NAME}" \
   export --result "${ROOT}/${RESULT_JSONL}" --oci
 
 docker pull "${REGISTRY_HOST}/kova-examples/simple:dev"
@@ -70,14 +70,14 @@ docker pull "${REGISTRY_HOST}/kova-examples/simple:dev"
 "${KOVA[@]}" \
   --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" \
   --buildkit-addr "${BUILDKIT_ADDR}" \
-  --name "${RUNNER_NAME}" \
+  --name "${KOVA_RUNNER_NAME}" \
   build "${ROOT}/examples/simple" \
   --target "${SINGLE_DIR_TARGET}" \
   --format oci --concurrency 1 --timeout 600 --fail-fast --verbose
 
 "${KOVA[@]}" \
   --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" \
-  --name "${RUNNER_NAME}" \
+  --name "${KOVA_RUNNER_NAME}" \
   wait --timeout 600
 
 docker pull "${SINGLE_DIR_PULL_TARGET}"

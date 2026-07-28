@@ -11,7 +11,7 @@ KIND_CONFIG=${KIND_CONFIG:-deploy/quickstart-kind-cluster.yaml}
 KIND_KUBECONFIG=${KIND_KUBECONFIG:-.kind/${KIND_CLUSTER}.kubeconfig}
 KIND_WORKERS=${KIND_WORKERS:-1}
 KIND_VALUES=${KIND_VALUES:-deploy/quickstart-kind-values.yaml}
-RUNNER_NAME=${RUNNER_NAME:-quickstart}
+KOVA_RUNNER_NAME=${KOVA_RUNNER_NAME:-quickstart}
 
 require_cmd helm
 
@@ -22,7 +22,7 @@ DIST_DIR=${chart_dir} "${ROOT}/scripts/release/package-chart.sh" \
   "${QUICKSTART_TAG}" >/dev/null
 chart=${chart_dir}/kova-${QUICKSTART_TAG#v}.tgz
 
-export KIND_CLUSTER KIND_CONFIG KIND_KUBECONFIG KIND_WORKERS KIND_VALUES RUNNER_NAME
+export KIND_CLUSTER KIND_CONFIG KIND_KUBECONFIG KIND_WORKERS KIND_VALUES KOVA_RUNNER_NAME
 export KOVA_CHART=${chart}
 export START_OBSERVABILITY=false
 export KOVA_DAEMON_OTEL_ENABLED=false

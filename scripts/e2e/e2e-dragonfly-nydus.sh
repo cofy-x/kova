@@ -9,7 +9,7 @@ RUNNER_IMAGE=${RUNNER_IMAGE:-localhost:5002/kova:runner-dev}
 BUILDKIT_ADDR=${BUILDKIT_ADDR:-tcp://kova.kova.svc:9094}
 KIND_CLUSTER=${KIND_CLUSTER:-kova-local}
 KIND_KUBECONFIG=${KIND_KUBECONFIG:-.kind/${KIND_CLUSTER}.kubeconfig}
-RUNNER_NAME=${RUNNER_NAME:-e2e-nydus}
+KOVA_RUNNER_NAME=${KOVA_RUNNER_NAME:-e2e-nydus}
 WORK_DIR=${WORK_DIR:-.work}
 SOURCE_ZIP=${SOURCE_ZIP:-${WORK_DIR}/source.zip}
 RESULT_JSONL=${RESULT_JSONL:-${WORK_DIR}/result-nydus.jsonl}
@@ -37,7 +37,7 @@ EXAMPLE_DIRS=nydus-smoke "${ROOT}/scripts/package/package-example.sh"
 
 KOVA_IMAGE_PULL_SECRET='' "${KOVA[@]}" \
   --kubeconfig "${KUBECONFIG}" \
-  --name "${RUNNER_NAME}" \
+  --name "${KOVA_RUNNER_NAME}" \
   destroy || true
 
 KOVA_DAEMON_OTEL_ENABLED=${KOVA_DAEMON_OTEL_ENABLED:-true} \
@@ -49,7 +49,7 @@ KOVA_DAEMON_OTEL_RESOURCE_ATTRIBUTES=${KOVA_DAEMON_OTEL_RESOURCE_ATTRIBUTES:-dep
 "${KOVA[@]}" \
   --kubeconfig "${KUBECONFIG}" \
   --buildkit-addr "${BUILDKIT_ADDR}" \
-  --name "${RUNNER_NAME}" \
+  --name "${KOVA_RUNNER_NAME}" \
   prepare \
   --image "${RUNNER_IMAGE}" \
   --image-pull-policy IfNotPresent \
@@ -58,19 +58,19 @@ KOVA_DAEMON_OTEL_RESOURCE_ATTRIBUTES=${KOVA_DAEMON_OTEL_RESOURCE_ATTRIBUTES:-dep
 "${KOVA[@]}" \
   --kubeconfig "${KUBECONFIG}" \
   --buildkit-addr "${BUILDKIT_ADDR}" \
-  --name "${RUNNER_NAME}" \
+  --name "${KOVA_RUNNER_NAME}" \
   build --concurrency 1 --timeout 600 --fail-fast --verbose \
   --var "KOVA_IMAGE_REGISTRY=${CLUSTER_REGISTRY}" \
   < "${ROOT}/${SOURCE_ZIP}"
 
 "${KOVA[@]}" \
   --kubeconfig "${KUBECONFIG}" \
-  --name "${RUNNER_NAME}" \
+  --name "${KOVA_RUNNER_NAME}" \
   wait --timeout 600
 
 "${KOVA[@]}" \
   --kubeconfig "${KUBECONFIG}" \
-  --name "${RUNNER_NAME}" \
+  --name "${KOVA_RUNNER_NAME}" \
   export --result "${ROOT}/${RESULT_JSONL}"
 
 if ! grep -q '"success":true' "${ROOT}/${RESULT_JSONL}"; then
@@ -84,7 +84,7 @@ fi
 
 "${KOVA[@]}" \
   --kubeconfig "${KUBECONFIG}" \
-  --name "${RUNNER_NAME}" \
+  --name "${KOVA_RUNNER_NAME}" \
   preheat --dragonfly-scheduler-addr "${DRAGONFLY_SCHEDULER_ADDR}" --concurrency 1 --timeout 60 --verbose --insecure-skip-verify
 
 for node in $(kind_worker_nodes "${KIND_CLUSTER}"); do
