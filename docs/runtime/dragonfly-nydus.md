@@ -1,4 +1,4 @@
-# Dragonfly And Nydus
+# Dragonfly and Nydus
 
 Kova can build Nydus images and preheat the exported image list into a
 Dragonfly P2P cluster. The local kind environment exercises the same core
@@ -25,7 +25,7 @@ flowchart LR
 The host reaches the registry as `localhost:5002`. Pods and kind worker nodes
 use `kind-registry:5000` inside the Docker `kind` network.
 
-## Build And Runtime Flow
+## Build and Runtime Flow
 
 ```mermaid
 sequenceDiagram

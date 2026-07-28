@@ -1,9 +1,8 @@
 # Kova Service
 
 `kova-controller service` is the long-running HTTP gateway and `KovaBuild`
-controller.
-It authenticates callers, stores immutable source artifacts, admits jobs by
-capacity, and creates one short-lived runner Pod per build.
+controller. It authenticates callers, stores immutable source artifacts,
+admits jobs by capacity, and creates one short-lived runner Pod per build.
 
 ## Authentication
 
@@ -32,7 +31,7 @@ Filesystem mode uses a PVC-mounted root:
 ```bash
 kova-controller service \
   --namespace=kova \
-  --runner-image=registry.example/kova:runner-v0.1.0 \
+  --runner-image=registry.example/kova:runner-vX.Y.Z \
   --buildkit-addr=tcp://kova.kova.svc:9094 \
   --artifact-driver=filesystem \
   --artifact-root=/var/lib/kova/artifacts \
@@ -44,7 +43,7 @@ S3 mode accepts any S3-compatible endpoint:
 ```bash
 kova-controller service \
   --namespace=kova \
-  --runner-image=registry.example/kova:runner-v0.1.0 \
+  --runner-image=registry.example/kova:runner-vX.Y.Z \
   --buildkit-addr=tcp://kova.kova.svc:9094 \
   --artifact-driver=s3 \
   --artifact-secret=kova-artifact-credentials \

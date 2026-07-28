@@ -8,7 +8,7 @@ by BuildKit. It builds batches of Dockerfile contexts into OCI or Nydus images,
 pushes them to OCI registries, and can preheat successful results through a
 Dragonfly P2P cluster.
 
-## Install The CLI
+## Install the CLI
 
 Download a provenance-attested archive for Linux, macOS, or Windows from the
 [GitHub releases](https://github.com/cofy-x/kova/releases), verify it with the
@@ -36,28 +36,32 @@ split into controller, runner, and rootless BuildKit worker roles.
 
 ## Install Kova
 
-Install an exact OCI Helm chart without cloning the repository:
+Choose a tag from [GitHub releases](https://github.com/cofy-x/kova/releases),
+then install that exact OCI Helm chart without cloning the repository:
 
 ```bash
+export KOVA_VERSION=vX.Y.Z
+
 helm upgrade --install kova oci://ghcr.io/cofy-x/charts/kova \
-  --version 0.1.0-rc.3 \
+  --version "${KOVA_VERSION#v}" \
   --namespace kova \
   --create-namespace \
   --wait
 ```
 
 The chart selects matching controller, runner, and worker images automatically.
-See the [Quick Start](docs/quickstart.md) before running the first build.
+Continue with the [installation and first-build guide](docs/quickstart.md).
 
 ## Documentation
 
-- [Documentation Index](docs/README.md): organized guide to the project docs.
-- [Quick Start](docs/quickstart.md): install the public OCI Helm chart and CLI.
+- [Documentation map](docs/README.md): choose the guide for a task.
+- [Installation and first build](docs/quickstart.md): install the public OCI
+  Helm chart and matching CLI, then verify a build.
 - [CLI workflow](docs/cli-workflow.md): contexts, prepare,
   build, logs, wait, export, and cleanup.
 - [Runtime design](docs/architecture.md): roles, topology, build/export,
   preheat, and scaling flows.
-- [Kubernetes Deployment](docs/deployment/kubernetes.md): Helm installation,
+- [Kubernetes deployment](docs/deployment/kubernetes.md): Helm installation,
   registry credentials, worker sizing, and production configuration.
 - [Validation matrix](docs/testing.md): static checks, E2E targets, and runtime
   smoke expectations.
@@ -66,113 +70,27 @@ See the [Quick Start](docs/quickstart.md) before running the first build.
 - [Examples](examples/README.md): build input examples and runtime smoke
   service details.
 
-## Local Development Requirements
+## Develop Kova
 
-- Docker
-- kind 0.32.0 or newer
-- Helm
-- kubectl
-- curl
-- `zip`
-- The Go version declared in `go.mod` available as `go`
-- Network access for Docker to pull the pinned Ubuntu base image
+The repository requires the Go version declared in `go.mod`, Docker, kind,
+Helm, kubectl, curl, zip, and LMDB development headers. Run the fast checks
+with:
 
-## Development Quick Start
+```bash
+make test
+make lint-scripts
+make helm-template
+```
 
-Package the Helm chart, build the role images, create a minimal kind cluster,
-run sample builds, and verify the pushed images:
+Run the released-chart installation path locally with:
 
 ```bash
 make e2e-helm-quickstart
 ```
 
-The E2E target builds `examples/simple`, pushes it to the local registry, exports
-`result.jsonl`, and verifies the image can be pulled from the host:
-
-```bash
-docker pull localhost:5002/kova-examples/simple:dev
-```
-
-Clean the local environment:
-
-```bash
-make clean-kind
-```
-
-Run broader validation targets as needed:
-
-```bash
-make e2e-concurrent
-make e2e-dragonfly-nydus
-make e2e-runtime
-```
-
-See the [target coverage guide](docs/testing.md) for when to run each check.
-
-## Contributing
-
-Contributions are welcome. Read the [contribution guide](CONTRIBUTING.md) for
-the development workflow and the [security policy](SECURITY.md) before
-reporting a vulnerability.
+Use the [validation guide](docs/testing.md) to choose broader E2E coverage.
+Contributions are welcome; the [contribution workflow](CONTRIBUTING.md) covers
+the full setup and pull request process. Report vulnerabilities through the
+private process in the [security policy](SECURITY.md).
 
 Kova is licensed under the [Apache License 2.0](LICENSE).
-
-## Daily CLI Flow
-
-Use the [CLI workflow](docs/cli-workflow.md) for the normal sequence:
-`prepare`, `build`, `logs`, `wait`, `export`, and `destroy`.
-
-## Build Input Format
-
-`kova build` accepts a single build context directory for one-off builds:
-
-```bash
-kova build ./image-1 --target registry.example.com/team/simple:dev
-```
-
-For batch builds, `kova build` also reads a zip stream from stdin. The zip root
-must contain one directory per image:
-
-```text
-image-1/
-  Dockerfile
-  metadata.json
-  ...
-image-2/
-  Dockerfile
-  metadata.json
-  ...
-```
-
-Each `metadata.json` must contain a `target` field:
-
-```json
-{
-  "target": "$KOVA_IMAGE_REGISTRY/kova-examples/simple:dev"
-}
-```
-
-Dockerfiles and metadata can use `$KOVA_*` variables. Pass values with
-repeatable `--var KEY=value` flags.
-
-## Development Commands
-
-Run checks:
-
-```bash
-make test
-make helm-template
-```
-
-Build a host-platform binary for local debugging:
-
-```bash
-make kova
-```
-
-`kova-controller` and `kovad` are Linux runtime components distributed in the
-controller and runner images rather than as workstation binaries.
-
-The local `kova` CLI defaults to `tcp://kova.kova.svc:9094`. Override it with
-`--buildkit-addr` or `KOVA_BUILDKIT_ADDR` for another release, namespace, or
-Kubernetes cluster.

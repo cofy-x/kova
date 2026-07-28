@@ -9,6 +9,11 @@ Tags use semantic versions such as `v0.1.0`. A suffix such as
 `v0.1.0-rc.1` creates a prerelease and does not update stable image tags.
 Kova is pre-1.0, so release notes may document intentional API changes.
 
+Durable installation docs use `vX.Y.Z` instead of naming the newest release.
+Users select an exact tag from GitHub Releases, and the chart, CLI, and runtime
+images derive from that one value. Concrete versions belong in release notes,
+asset names, checksums, and immutable deployment records.
+
 ## Published Artifacts
 
 Each tag publishes:
@@ -28,7 +33,7 @@ Stable releases also update `controller-latest`, `runner-latest`, and
 Install an exact CLI version with Go:
 
 ```bash
-go install github.com/cofy-x/kova/cmd/kova@v0.1.0
+go install github.com/cofy-x/kova/cmd/kova@vX.Y.Z
 ```
 
 Use an explicit version in automation. `@latest` is convenient for interactive

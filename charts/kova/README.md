@@ -7,7 +7,8 @@ and worker images from the same Kova release.
 ## Install
 
 ```bash
-export KOVA_VERSION=v0.1.0-rc.3
+# Replace vX.Y.Z with a tag from https://github.com/cofy-x/kova/releases.
+export KOVA_VERSION=vX.Y.Z
 
 helm upgrade --install kova oci://ghcr.io/cofy-x/charts/kova \
   --version "${KOVA_VERSION#v}" \

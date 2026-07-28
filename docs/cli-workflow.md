@@ -82,7 +82,7 @@ You can also select a context for one command:
 kova --ctx remote list
 ```
 
-## Prepare A Runner
+## Prepare a Runner
 
 Create one runner Pod for the batch. This command runs from your workstation
 and uses the kubeconfig to create the Pod in the target cluster:
@@ -151,9 +151,9 @@ Inspect recent runner logs:
 kova --name quickstart logs --tail 100
 ```
 
-Current `logs` output fetches the latest lines from the runner Pod.
+`logs` fetches the latest lines from the runner Pod.
 
-## Wait And Export
+## Wait and Export
 
 Wait for the build to finish:
 

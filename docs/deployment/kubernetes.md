@@ -36,12 +36,18 @@ Install an exact public OCI chart and add an environment-owned values file when
 the defaults need to change:
 
 ```bash
+export KOVA_VERSION=vX.Y.Z
+
 helm upgrade --install kova oci://ghcr.io/cofy-x/charts/kova \
-  --version 0.1.0-rc.3 \
+  --version "${KOVA_VERSION#v}" \
   --namespace kova \
   --create-namespace \
   -f <environment-values.yaml>
 ```
+
+Replace `vX.Y.Z` with an exact tag from the
+[GitHub release page](https://github.com/cofy-x/kova/releases). Keep the same
+value for the CLI and runtime images used with this deployment.
 
 The packaged chart automatically selects controller, runner, and worker image
 tags from its application version. Override a role only when an environment
@@ -51,13 +57,13 @@ mirrors or pins the published image:
 images:
   controller:
     repository: ghcr.io/cofy-x/kova
-    tag: controller-v0.1.0-rc.3
+    tag: controller-vX.Y.Z
   runner:
     repository: ghcr.io/cofy-x/kova
-    tag: runner-v0.1.0-rc.3
+    tag: runner-vX.Y.Z
   worker:
     repository: ghcr.io/cofy-x/kova
-    tag: worker-v0.1.0-rc.3
+    tag: worker-vX.Y.Z
 ```
 
 The default chart mode installs one worker only. Use the
@@ -138,7 +144,7 @@ The CLI can create a short-lived runner without the service API:
 kova --kubeconfig <kubeconfig> \
   --name <runner-name> \
   prepare \
-  --image ghcr.io/cofy-x/kova:runner-v0.1.0-rc.3
+  --image "ghcr.io/cofy-x/kova:runner-${KOVA_VERSION}"
 ```
 
 Delete it after the batch:
@@ -156,7 +162,7 @@ Render an environment overlay before installation:
 
 ```bash
 helm template kova oci://ghcr.io/cofy-x/charts/kova \
-  --version 0.1.0-rc.3 \
+  --version "${KOVA_VERSION#v}" \
   --namespace kova \
   -f <environment-values.yaml>
 ```

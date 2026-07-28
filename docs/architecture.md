@@ -19,7 +19,7 @@ The cross-platform `kova` CLI is distributed separately. It can operate a
 runner directly for development or call a service deployment for platform
 integration.
 
-## Job And Storage Model
+## Job and Storage Model
 
 `KovaBuild` is the canonical service job. Its spec is immutable and contains
 an artifact URI, SHA-256 digest, build options, and an optional idempotency
@@ -44,7 +44,7 @@ controller use a typed Go client and invoke the hidden `kovad transport`
 command through Kubernetes exec. The transport streams request files and
 responses over the Unix socket without constructing shell or `curl` commands.
 
-## Worker Discovery And Scheduling
+## Worker Discovery and Scheduling
 
 The Helm chart creates a headless Service for worker Pods. Runners resolve its
 DNS name into independent BuildKit endpoints, keep the address pool refreshed,
