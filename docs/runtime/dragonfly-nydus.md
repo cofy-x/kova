@@ -23,8 +23,7 @@ flowchart LR
 ```
 
 The host reaches the registry as `localhost:5002`. Pods and kind worker nodes
-use `host.docker.internal:5002` for image names and `kind-registry:5000` as the
-registry upstream inside the Docker `kind` network.
+use `kind-registry:5000` inside the Docker `kind` network.
 
 ## Build And Runtime Flow
 
@@ -106,7 +105,7 @@ worker-specific runtime configuration:
 - `disable_snapshot_annotations = false`
 - `discard_unpacked_layers = false`
 - `[proxy_plugins.nydus]`
-- local registry mirrors for `localhost:5002` and `host.docker.internal:5002`
+- local registry mirrors for `localhost:5002` and `kind-registry:5000`
 - Dragonfly mirror headers pointing at `kind-registry:5000`
 
 During install or upgrade, the script temporarily restores `overlayfs` before
@@ -118,7 +117,7 @@ the Nydus snapshotter itself.
 The local environment intentionally uses two registry names:
 
 - `localhost:5002`: host endpoint for Docker push/pull
-- `host.docker.internal:5002`: image name used by Pods and BuildKit output
+- `kind-registry:5000`: image name used by Pods and BuildKit output
 
 Both names are mapped on kind workers to `kind-registry:5000`, and the runtime
 pull path goes through the Dragonfly client at `127.0.0.1:4001`.

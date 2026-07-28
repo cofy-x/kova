@@ -9,7 +9,7 @@ container, not a Kubernetes Pod or Service.
 - Docker container name: `kind-registry`
 - Registry port inside the Docker container: `5000`
 - kind node mirror endpoint: `http://kind-registry:5000`
-- BuildKit push target from Pods: `host.docker.internal:5002`
+- BuildKit push target from Pods: `kind-registry:5000`
 
 ## Flow
 
@@ -32,7 +32,7 @@ flowchart LR
 
   runner -->|"tcp://kova...:9094"| buildkitSvc
   buildkitSvc --> buildkit
-  buildkit -->|"push target<br/>host.docker.internal:5002/..."| hostPort
+  buildkit -->|"push target<br/>kind-registry:5000/..."| registry
 ```
 
 ## Why `localhost:5002` Works for Pod Images
@@ -52,18 +52,19 @@ node uses the mirror endpoint and pulls from the Docker container named
 Without this mirror, `localhost:5002` would mean localhost inside the kind node,
 not the host machine.
 
-## Why BuildKit Uses `host.docker.internal:5002`
+## Why BuildKit Uses `kind-registry:5000`
 
 The example build runs inside Pods and pushes the output image from BuildKit.
 For that push path, the target registry is passed as:
 
 ```text
-KOVA_IMAGE_REGISTRY=host.docker.internal:5002
+KOVA_IMAGE_REGISTRY=kind-registry:5000
 ```
 
-This lets the Pod reach the host-exposed registry port. The kind values also
-configure BuildKit to treat `host.docker.internal:5002` as an HTTP registry for
-local development.
+The registry container and kind nodes share the Docker `kind` network, so this
+name works on Linux and Docker Desktop without a platform-specific host alias.
+The kind values configure BuildKit to treat it as an HTTP development registry.
+Host-side verification still pulls the same content through `localhost:5002`.
 
 ## Related Targets
 

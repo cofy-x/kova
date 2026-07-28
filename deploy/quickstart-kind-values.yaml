@@ -41,5 +41,5 @@ worker:
 buildkitdConfig: |
   debug = false
 
-  [registry."host.docker.internal:5002"]
+  [registry."kind-registry:5000"]
     http = true

@@ -13,9 +13,9 @@ the archive to `kova build`.
 ## Image Registry Variable
 
 Examples use `$KOVA_IMAGE_REGISTRY` in `metadata.json` and sometimes in the
-Dockerfile. Local E2E scripts set it to `host.docker.internal:5002` so images
-can be pulled from Pods and kind worker nodes while still using the host
-registry at `localhost:5002`.
+Dockerfile. Local E2E scripts set it to `kind-registry:5000`, the stable name
+on the Docker `kind` network. Host-side verification pulls the same content
+through the published port at `localhost:5002`.
 
 ## Example Matrix
 

@@ -31,8 +31,8 @@ localhost:5002/kova:runner-dev
 `make install` installs the local CLI as `kova` into your Go bin directory. Use
 `bin/kova` instead if you prefer the repository-local binary from `make kova`.
 
-Pods use `host.docker.internal:5002` for build output targets inside the kind
-cluster.
+Pods use `kind-registry:5000` for build output targets inside the Docker `kind`
+network. The host reaches the same registry at `localhost:5002`.
 
 ## Configure Contexts
 
@@ -101,7 +101,7 @@ does not have `metadata.json`, provide the image name with `--target`:
 ```bash
 kova --name quickstart \
   build examples/simple \
-  --target host.docker.internal:5002/kova-examples/simple:dev \
+  --target kind-registry:5000/kova-examples/simple:dev \
   --format oci --concurrency 1 --timeout 600 --fail-fast --verbose
 ```
 
@@ -112,7 +112,7 @@ only provide variable values:
 kova --name quickstart \
   build examples/simple \
   --format oci --concurrency 1 --timeout 600 --fail-fast --verbose \
-  --var KOVA_IMAGE_REGISTRY=host.docker.internal:5002
+  --var KOVA_IMAGE_REGISTRY=kind-registry:5000
 ```
 
 Use `--format both` when the same context should produce both the OCI target and
@@ -121,7 +121,7 @@ the Nydus target in one build pass. The Nydus target uses the `_nydus_v3` suffix
 ```bash
 kova --name quickstart \
   build examples/simple \
-  --target host.docker.internal:5002/kova-examples/simple:dev \
+  --target kind-registry:5000/kova-examples/simple:dev \
   --format both
 ```
 
@@ -135,7 +135,7 @@ cd examples && zip -qr ../.work/source.zip simple && cd ..
 
 kova --name quickstart \
   build --format oci --concurrency 1 --timeout 600 --fail-fast --verbose \
-  --var KOVA_IMAGE_REGISTRY=host.docker.internal:5002 \
+  --var KOVA_IMAGE_REGISTRY=kind-registry:5000 \
   < .work/source.zip
 ```
 

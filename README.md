@@ -127,7 +127,7 @@ Use the [CLI workflow](docs/cli-workflow.md) for the normal sequence:
 `kova build` accepts a single build context directory for one-off builds:
 
 ```bash
-kova build ./image-1 --target host.docker.internal:5002/kova-examples/simple:dev
+kova build ./image-1 --target registry.example.com/team/simple:dev
 ```
 
 For batch builds, `kova build` also reads a zip stream from stdin. The zip root

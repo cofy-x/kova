@@ -39,7 +39,7 @@ REGISTRY_NAME ?= kind-registry
 REGISTRY_IMAGE ?= registry:2@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373
 REGISTRY_HOST ?= localhost:5002
 REGISTRY_PORT ?= 5002
-CLUSTER_REGISTRY ?= host.docker.internal:5002
+CLUSTER_REGISTRY ?= kind-registry:5000
 
 RELEASE_NAME ?= kova
 NAMESPACE ?= kova

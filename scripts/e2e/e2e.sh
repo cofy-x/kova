@@ -9,14 +9,21 @@ RUNNER_IMAGE=${RUNNER_IMAGE:-localhost:5002/kova:runner-dev}
 BUILDKIT_ADDR=${BUILDKIT_ADDR:-tcp://kova.kova.svc:9094}
 KIND_KUBECONFIG=${KIND_KUBECONFIG:-.kind/kova-local.kubeconfig}
 KOVA_RUNNER_NAME=${KOVA_RUNNER_NAME:-e2e}
+NAMESPACE=${NAMESPACE:-kova}
 WORK_DIR=${WORK_DIR:-.work}
 SOURCE_ZIP=${SOURCE_ZIP:-${WORK_DIR}/source.zip}
 RESULT_JSONL=${RESULT_JSONL:-${WORK_DIR}/result.jsonl}
-CLUSTER_REGISTRY=${CLUSTER_REGISTRY:-host.docker.internal:5002}
+CLUSTER_REGISTRY=${CLUSTER_REGISTRY:-kind-registry:5000}
 REGISTRY_HOST=${REGISTRY_HOST:-localhost:5002}
 SINGLE_DIR_TARGET=${SINGLE_DIR_TARGET:-${CLUSTER_REGISTRY}/kova-examples/simple-dir:dev}
 SINGLE_DIR_PULL_TARGET=${SINGLE_DIR_PULL_TARGET:-${REGISTRY_HOST}/kova-examples/simple-dir:dev}
 E2E_BUILD_IMAGE=${E2E_BUILD_IMAGE:-true}
+
+if [[ "${KIND_KUBECONFIG}" == /* ]]; then
+  kubeconfig=${KIND_KUBECONFIG}
+else
+  kubeconfig=${ROOT}/${KIND_KUBECONFIG}
+fi
 
 make -C "${ROOT}" kova
 if [[ "${E2E_BUILD_IMAGE}" == "true" ]]; then
@@ -24,11 +31,24 @@ if [[ "${E2E_BUILD_IMAGE}" == "true" ]]; then
 fi
 KOVA=("${ROOT}/bin/kova")
 
+dump_debug() {
+  echo "---- Kova pods ----" >&2
+  kubectl --kubeconfig "${kubeconfig}" get pods -n "${NAMESPACE}" -o wide >&2 || true
+  echo "---- Kova events ----" >&2
+  kubectl --kubeconfig "${kubeconfig}" get events -n "${NAMESPACE}" \
+    --sort-by=.lastTimestamp >&2 || true
+  echo "---- runner logs ----" >&2
+  "${KOVA[@]}" --kubeconfig "${kubeconfig}" --name "${KOVA_RUNNER_NAME}" \
+    logs --tail=200 >&2 || true
+}
+
+trap 'dump_debug' ERR
+
 "${ROOT}/scripts/kind/deploy-kind.sh"
 "${ROOT}/scripts/package/package-example.sh"
 
 KOVA_IMAGE_PULL_SECRET='' "${KOVA[@]}" \
-  --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" \
+  --kubeconfig "${kubeconfig}" \
   --name "${KOVA_RUNNER_NAME}" \
   destroy || true
 
@@ -39,7 +59,7 @@ KOVA_DAEMON_OTEL_EXPORTER_OTLP_ENDPOINT=${KOVA_DAEMON_OTEL_EXPORTER_OTLP_ENDPOIN
 KOVA_DAEMON_OTEL_EXPORTER_OTLP_INSECURE=${KOVA_DAEMON_OTEL_EXPORTER_OTLP_INSECURE:-true} \
 KOVA_DAEMON_OTEL_RESOURCE_ATTRIBUTES=${KOVA_DAEMON_OTEL_RESOURCE_ATTRIBUTES:-deployment.environment=kind} \
 "${KOVA[@]}" \
-  --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" \
+  --kubeconfig "${kubeconfig}" \
   --buildkit-addr "${BUILDKIT_ADDR}" \
   --name "${KOVA_RUNNER_NAME}" \
   prepare \
@@ -48,7 +68,7 @@ KOVA_DAEMON_OTEL_RESOURCE_ATTRIBUTES=${KOVA_DAEMON_OTEL_RESOURCE_ATTRIBUTES:-dep
   --image-pull-secret ""
 
 "${KOVA[@]}" \
-  --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" \
+  --kubeconfig "${kubeconfig}" \
   --buildkit-addr "${BUILDKIT_ADDR}" \
   --name "${KOVA_RUNNER_NAME}" \
   build --format oci --concurrency 1 --timeout 600 --fail-fast --verbose \
@@ -56,19 +76,19 @@ KOVA_DAEMON_OTEL_RESOURCE_ATTRIBUTES=${KOVA_DAEMON_OTEL_RESOURCE_ATTRIBUTES:-dep
   < "${ROOT}/${SOURCE_ZIP}"
 
 "${KOVA[@]}" \
-  --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" \
+  --kubeconfig "${kubeconfig}" \
   --name "${KOVA_RUNNER_NAME}" \
   wait --timeout 600
 
 "${KOVA[@]}" \
-  --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" \
+  --kubeconfig "${kubeconfig}" \
   --name "${KOVA_RUNNER_NAME}" \
   export --result "${ROOT}/${RESULT_JSONL}" --oci
 
 docker pull "${REGISTRY_HOST}/kova-examples/simple:dev"
 
 "${KOVA[@]}" \
-  --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" \
+  --kubeconfig "${kubeconfig}" \
   --buildkit-addr "${BUILDKIT_ADDR}" \
   --name "${KOVA_RUNNER_NAME}" \
   build "${ROOT}/examples/simple" \
@@ -76,7 +96,7 @@ docker pull "${REGISTRY_HOST}/kova-examples/simple:dev"
   --format oci --concurrency 1 --timeout 600 --fail-fast --verbose
 
 "${KOVA[@]}" \
-  --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" \
+  --kubeconfig "${kubeconfig}" \
   --name "${KOVA_RUNNER_NAME}" \
   wait --timeout 600
 
