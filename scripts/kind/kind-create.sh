@@ -12,12 +12,18 @@ KIND_KUBECONFIG=${KIND_KUBECONFIG:-.kind/${KIND_CLUSTER}.kubeconfig}
 KIND_WORKERS=${KIND_WORKERS:-3}
 REGISTRY_NAME=${REGISTRY_NAME:-kind-registry}
 
+if [[ "${KIND_KUBECONFIG}" == /* ]]; then
+  kubeconfig=${KIND_KUBECONFIG}
+else
+  kubeconfig=${ROOT}/${KIND_KUBECONFIG}
+fi
+
 require_cmd docker
 require_kind
 
 "${ROOT}/scripts/kind/kind-registry.sh"
 
-mkdir -p "${ROOT}/$(dirname "${KIND_KUBECONFIG}")"
+mkdir -p "$(dirname "${kubeconfig}")"
 
 if ! kind get clusters | grep -qx "${KIND_CLUSTER}"; then
   proxy_url=${HTTP_PROXY:-${http_proxy:-}}
@@ -35,7 +41,7 @@ if ! kind get clusters | grep -qx "${KIND_CLUSTER}"; then
     export no_proxy="${no_proxy:-${NO_PROXY}}"
     echo "Using kind node proxy: ${proxy_url}" >&2
   fi
-  KUBECONFIG="${ROOT}/${KIND_KUBECONFIG}" kind create cluster \
+  KUBECONFIG="${kubeconfig}" kind create cluster \
     --name "${KIND_CLUSTER}" \
     --image "${KIND_NODE_IMAGE}" \
     --config "${ROOT}/${KIND_CONFIG}"
@@ -50,4 +56,4 @@ fi
 
 docker network connect kind "${REGISTRY_NAME}" >/dev/null 2>&1 || true
 
-kind get kubeconfig --name "${KIND_CLUSTER}" > "${ROOT}/${KIND_KUBECONFIG}"
+kind get kubeconfig --name "${KIND_CLUSTER}" > "${kubeconfig}"
