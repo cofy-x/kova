@@ -36,10 +36,9 @@ selects the role:
 - worker Pods start `buildkitd --config /etc/buildkit/buildkitd.toml --addr
   tcp://0.0.0.0:9094`
 
-The runtime image contains the Kova binary and the external tools the daemon
-invokes:
+The runtime image contains `kovad` and the external tools used by the runtime
+roles:
 
-- `kova`: Kova's workstation/CI client CLI
 - `kovad`: Kova runtime daemon and service entrypoint
 - `buildctl`: the upstream BuildKit client used by the runner daemon
 - `buildkitd`: the upstream BuildKit daemon used by worker Pods
