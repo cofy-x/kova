@@ -30,7 +30,9 @@ targets=(
   windows/arm64
 )
 
+pids=()
 for target in "${targets[@]}"; do
+  (
   goos=${target%/*}
   goarch=${target#*/}
   archive_version=${VERSION#v}
@@ -52,4 +54,12 @@ for target in "${targets[@]}"; do
   else
     tar -C "${workdir}" -czf "${DIST}/kova_${archive_version}_${goos}_${goarch}.tar.gz" "${binary}" LICENSE
   fi
+  ) &
+  pids+=("$!")
 done
+
+failed=0
+for pid in "${pids[@]}"; do
+  wait "${pid}" || failed=1
+done
+exit "${failed}"

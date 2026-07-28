@@ -4,7 +4,8 @@ The local kind flow is the self-contained development deployment.
 
 For remote Kubernetes environments:
 
-- Publish the Kova runtime image to a registry reachable by the target cluster.
+- Publish the controller, runner, and worker images to a registry reachable by
+  the target cluster.
 - Override image, resources, replicas, registry auth, and scheduling through
   values files.
 - Keep Dragonfly/Nydus as cluster infrastructure.

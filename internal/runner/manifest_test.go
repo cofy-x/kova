@@ -51,7 +51,7 @@ func TestRenderPrepareManifestWithSecretAndPprof(t *testing.T) {
 
 	mustContain(t, manifest, "imagePullSecrets:")
 	mustContain(t, manifest, "- name: registry-secret")
-	mustContain(t, manifest, "mountPath: /root/.docker")
+	mustContain(t, manifest, "mountPath: /home/kova/.docker")
 	mustContain(t, manifest, "secretName: registry-secret")
 	mustContain(t, manifest, "KOVA_PPROF_SERVER")
 	if len(pod.Spec.Containers[0].Env) != 1 || pod.Spec.Containers[0].Env[0].Value != "0.0.0.0:5241" {

@@ -21,7 +21,7 @@ standard `HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY` variables and accepts these
 optional source overrides:
 
 - `UBUNTU_IMAGE`
-- `BUILDKIT_DOWNLOAD_BASE_URL`
+- `BUILDKIT_ROOTLESS_IMAGE`
 - `GRPCURL_DOWNLOAD_BASE_URL`
 - `NYDUS_DOWNLOAD_BASE_URL`
 - `GO_DOWNLOAD_BASE_URL`
@@ -35,7 +35,7 @@ and environment policy in the consuming workspace rather than this repository.
 | Target | Coverage | Main Artifacts |
 | --- | --- | --- |
 | `make e2e` | Zip-stream OCI build plus single-directory OCI build, push, export, and host pull. | `examples/simple`, `.work/result.jsonl` |
-| `make e2e-service` | Service daemon HTTP build, KovaBuild CRD status, PVC source store, logs, export, TTL cleanup, and host pull. | `examples/simple`, `.work/result-service.jsonl` |
+| `make e2e-service` | Authenticated service build, immutable KovaBuild status, filesystem artifact storage, logs, export, TTL cleanup, and host pull. | `examples/simple`, `.work/result-service.jsonl` |
 | `make e2e-concurrent` | Multi-image OCI build with worker distribution checks. | generated concurrent examples, `.work/result-concurrent.jsonl` |
 | `make e2e-dragonfly-nydus` | Nydus conversion, export, Dragonfly preheat, and Pod startup. | `examples/nydus-smoke`, `.work/result-nydus.jsonl` |
 | `make e2e-runtime-preflight` | Local tool and registry readiness checks for runtime validation. | Docker, kind, Helm, kubectl, local registry |
@@ -50,7 +50,7 @@ Tune the concurrent check with `EXAMPLE_COUNT`, `BUILD_CONCURRENCY`, and
 `make e2e-runtime` is the strongest local validation target. It:
 
 - verifies local tools and starts the local registry when needed
-- builds and publishes `localhost:5002/kova:dev`
+- builds and publishes the local controller, runner, and worker tags
 - builds and publishes `localhost:5002/kova-examples/python-smoke-base:dev`
 - deploys Kova workers
 - installs Dragonfly and Nydus

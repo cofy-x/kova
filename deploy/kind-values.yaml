@@ -1,7 +1,16 @@
-image:
-  repository: localhost:5002/kova
-  tag: dev
-  pullPolicy: IfNotPresent
+images:
+  controller:
+    repository: localhost:5002/kova
+    tag: controller-dev
+    pullPolicy: IfNotPresent
+  runner:
+    repository: localhost:5002/kova
+    tag: runner-dev
+    pullPolicy: IfNotPresent
+  worker:
+    repository: localhost:5002/kova
+    tag: worker-dev
+    pullPolicy: IfNotPresent
 
 imagePullSecrets:
   create: false
@@ -11,7 +20,8 @@ imageRegistries: []
 
 observability:
   enabled: true
-  serviceName: kova-worker
+  controllerServiceName: kova-controller
+  runnerServiceName: kova-runner
   endpoint: host.docker.internal:14317
   insecure: true
   resourceAttributes:
@@ -34,13 +44,25 @@ deployment:
       maxSurge: 0
       maxUnavailable: 1
 
-resources:
-  limits:
-    ephemeral-storage: 8Gi
-  requests:
-    ephemeral-storage: 1Gi
-
-podSecurityContext: {}
+worker:
+  resources:
+    limits:
+      ephemeral-storage: 8Gi
+    requests:
+      ephemeral-storage: 1Gi
+  volumes:
+    - name: run-buildkit
+      emptyDir: {}
+    - name: lib-buildkit
+      emptyDir:
+        sizeLimit: 8Gi
+  volumeMounts:
+    - name: run-buildkit
+      mountPath: /run/user/1000
+    - name: lib-buildkit
+      mountPath: /home/user/.local/share/buildkit
+    - name: buildkit-config
+      mountPath: /etc/buildkit
 
 affinity:
   nodeAffinity: null
@@ -52,13 +74,6 @@ scheduling:
     maxSkew: 1
     topologyKey: kubernetes.io/hostname
     whenUnsatisfiable: ScheduleAnyway
-
-volumes:
-  - name: run-buildkit
-    emptyDir: {}
-  - name: lib-buildkit
-    emptyDir:
-      sizeLimit: 8Gi
 
 buildkitdConfig: |
   debug = false

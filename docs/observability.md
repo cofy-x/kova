@@ -57,14 +57,18 @@ keeps local commands from trying to dial cluster DNS names.
 
 ## Helm
 
-The Kova worker chart exposes an `observability` values block but does not own
-the telemetry backend. Local Kind values point runners at the host Compose
-stack; the production Kubernetes baseline keeps telemetry disabled unless a
-collector endpoint is configured explicitly.
+The Kova chart exposes an `observability` values block for controller and
+runner processes but does not own the telemetry backend. Local Kind values
+point those processes at the host Compose stack; the production Kubernetes
+baseline keeps telemetry disabled unless a collector endpoint is configured
+explicitly. Rootless BuildKit workers are upstream processes and are not
+configured with Kova telemetry variables.
 
 ## Signals
 
 Kova emits operation spans and metrics for runner actions, daemon HTTP requests,
 batch build/export/preheat operations, per-target build/preheat attempts, and
-selected Kubernetes client calls. Logs keep the existing stderr format and are
-also exported as OTel log records when telemetry is enabled.
+selected Kubernetes client calls. Service metrics also cover queue latency,
+capacity waits, terminal outcomes, artifact writes, authentication denials,
+and cancellations. Logs keep the existing stderr format and are also exported
+as OTel log records when telemetry is enabled.

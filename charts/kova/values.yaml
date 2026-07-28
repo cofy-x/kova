@@ -1,12 +1,18 @@
 namespaceOverride: ""
 
-image:
-  repository: localhost:5002/kova
-  tag: dev
-  pullPolicy: IfNotPresent
-# Optional full image reference for scripts or one-off deployments.
-imageOverride: ""
-imagePullPolicy: IfNotPresent
+images:
+  controller:
+    repository: localhost:5002/kova
+    tag: controller-dev
+    pullPolicy: IfNotPresent
+  runner:
+    repository: localhost:5002/kova
+    tag: runner-dev
+    pullPolicy: IfNotPresent
+  worker:
+    repository: localhost:5002/kova
+    tag: worker-dev
+    pullPolicy: IfNotPresent
 
 nameOverride: ""
 fullnameOverride: ""
@@ -19,7 +25,8 @@ imageRegistries: []
 
 observability:
   enabled: false
-  serviceName: kova-worker
+  controllerServiceName: kova-controller
+  runnerServiceName: kova-runner
   endpoint: ""
   insecure: true
   resourceAttributes: {}
@@ -50,16 +57,26 @@ service:
   ipFamilyPolicy: SingleStack
   sessionAffinity: None
 
-sourceStore:
-  mountPath: /var/lib/kova/sources
-  pvc:
-    create: false
-    existingClaim: ""
-    name: ""
-    accessModes:
-      - ReadWriteMany
-    storageClassName: ""
-    size: 10Gi
+artifactStore:
+  driver: filesystem
+  # Secret keys use the KOVA_S3_* environment variable names. The same Secret
+  # is exposed to the controller and S3 source-fetch init containers.
+  secretName: ""
+  filesystem:
+    mountPath: /var/lib/kova/artifacts
+    pvc:
+      create: false
+      existingClaim: ""
+      name: ""
+      accessModes:
+        - ReadWriteOnce
+      storageClassName: ""
+      size: 10Gi
+  s3:
+    endpoint: ""
+    bucket: ""
+    region: ""
+    secure: true
 
 serviceDaemon:
   enabled: false
@@ -69,19 +86,22 @@ serviceDaemon:
   service:
     type: ClusterIP
     port: 8080
-  authTokenSecret:
-    name: ""
-    key: token
+  authentication:
+    mode: tokenreview
+    staticTokenSecret:
+      name: ""
+      key: token
   jobTTL: 2h
+  maxUploadBytes: 1073741824
   wait: 3m
   pollInterval: 5s
+  maxActiveJobs: 20
+  workerSlots: 20
   leaderElect: true
   runnerNamespace: ""
-  runnerImage: ""
-  runnerImagePullPolicy: ""
   runnerImagePullSecret: ""
-  # Pins runner Pods when the source PVC is ReadWriteOnce. Production should
-  # prefer ReadWriteMany storage and leave this empty.
+  # A filesystem store backed by ReadWriteOnce storage may require pinning the
+  # controller and runner Pods to the same node. S3 storage needs no pinning.
   runnerNodeSelector: {}
   buildkitAddr: ""
   serviceAccount:
@@ -95,22 +115,41 @@ serviceDaemon:
   nodeSelector: {}
   tolerations: []
   affinity: {}
-  securityContext: {}
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    fsGroup: 65532
+  securityContext:
+    allowPrivilegeEscalation: false
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    capabilities:
+      drop:
+        - ALL
+    seccompProfile:
+      type: RuntimeDefault
 
-container:
+worker:
   name: buildkitd
-  command:
-    - buildkitd
+  args:
     - --config
     - /etc/buildkit/buildkitd.toml
     - --addr
     - tcp://0.0.0.0:9094
+    - --oci-worker-no-process-sandbox
   portName: tcp
   port: 9094
   protocol: TCP
   securityContext:
-    privileged: true
-    allowPrivilegeEscalation: true
+    runAsNonRoot: true
+    runAsUser: 1000
+    runAsGroup: 1000
+    seccompProfile:
+      type: Unconfined
+    appArmorProfile:
+      type: Unconfined
   livenessProbe:
     enabled: true
     failureThreshold: 3
@@ -126,16 +165,33 @@ container:
     successThreshold: 1
     timeoutSeconds: 3
 
-resources:
-  limits:
-    ephemeral-storage: 80Gi
-    # cpu: 16
-    # memory: 32Gi
-  requests:
-    ephemeral-storage: 40Gi
-    # cpu: 16
-    # memory: 32Gi
-podSecurityContext: {}
+  resources:
+    limits:
+      ephemeral-storage: 80Gi
+      # cpu: 16
+      # memory: 32Gi
+    requests:
+      ephemeral-storage: 40Gi
+      # cpu: 16
+      # memory: 32Gi
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    runAsGroup: 1000
+    fsGroup: 1000
+  volumes:
+    - name: run-buildkit
+      emptyDir: {}
+    - name: lib-buildkit
+      emptyDir:
+        sizeLimit: 80Gi
+  volumeMounts:
+    - name: run-buildkit
+      mountPath: /run/user/1000
+    - name: lib-buildkit
+      mountPath: /home/user/.local/share/buildkit
+    - name: buildkit-config
+      mountPath: /etc/buildkit
 
 nodeSelector: {}
 tolerations: []
@@ -167,21 +223,6 @@ autoscaling:
   targetMemoryUtilizationPercentage: null
   behavior: {}
   metrics: []
-
-volumes:
-  - name: run-buildkit
-    emptyDir: {}
-  - name: lib-buildkit
-    emptyDir:
-      sizeLimit: 80Gi
-
-volumeMounts:
-  - name: run-buildkit
-    mountPath: /run/buildkit
-  - name: lib-buildkit
-    mountPath: /var/lib/buildkit
-  - name: buildkit-config
-    mountPath: /etc/buildkit
 
 extraVolumes: []
 extraVolumeMounts: []

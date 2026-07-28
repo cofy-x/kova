@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cofy-x/kova/internal/daemonclient"
 	"github.com/cofy-x/kova/internal/source"
 )
 
@@ -75,9 +76,7 @@ func (c *Client) Build(args []string) (err error) {
 	var stdout, stderr bytes.Buffer
 	err = kube.Exec(ctx, c.Config.Namespace, c.Config.PodName, kubeExecOptions(
 		input, &stdout, &stderr,
-		"curl", "-sS", "-X", "POST", "-T", "-",
-		"--unix-socket", daemonSocket,
-		"http://localhost/api/v1/build?"+values,
+		daemonclient.TransportCommand("POST", daemonclient.BuildPath, values, "")...,
 	))
 	if stdout.Len() > 0 {
 		fmt.Fprintln(c.Stderr, string(bytes.TrimSpace(stdout.Bytes())))

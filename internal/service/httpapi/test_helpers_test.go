@@ -14,7 +14,9 @@ import (
 	"time"
 
 	kovav1 "github.com/cofy-x/kova/internal/apis/kova/v1alpha1"
+	"github.com/cofy-x/kova/internal/artifactstore"
 	"github.com/cofy-x/kova/internal/kube"
+	serviceauth "github.com/cofy-x/kova/internal/service/auth"
 	"github.com/cofy-x/kova/internal/service/config"
 
 	corev1 "k8s.io/api/core/v1"
@@ -104,7 +106,15 @@ func newTestServerWithRoot(t *testing.T, kube *fakeKube, root string) *Server {
 		t.Fatal(err)
 	}
 	client := crfake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&kovav1.KovaBuild{}).Build()
-	return NewServer(testConfig(root), kube, client, client)
+	store, err := artifactstore.NewFilesystem(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	authenticator, err := serviceauth.New(serviceauth.ModeStatic, "token", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return NewServer(testConfig(root), kube, client, client, store, authenticator)
 }
 
 func testConfig(root string) config.Config {
@@ -114,10 +124,11 @@ func testConfig(root string) config.Config {
 		RunnerImagePullPolicy: "IfNotPresent",
 		BuildkitAddr:          "tcp://kova.kova.svc:9094",
 		SourcePVCClaim:        "kova-sources",
-		SourceRoot:            root,
-		SourceMountPath:       root,
+		ArtifactDriver:        artifactstore.DriverFilesystem,
+		ArtifactRoot:          root,
 		JobTTL:                time.Hour,
 		AuthToken:             "token",
+		AuthMode:              serviceauth.ModeStatic,
 		WaitTimeout:           time.Second,
 		PollInterval:          time.Millisecond,
 	}

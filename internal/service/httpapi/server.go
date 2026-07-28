@@ -5,25 +5,32 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
+	"fmt"
+	"io"
+	"mime/multipart"
 	"net/http"
-	"path/filepath"
+	"os"
 	"reflect"
 	"strconv"
 	"strings"
 	"time"
 
 	kovav1 "github.com/cofy-x/kova/internal/apis/kova/v1alpha1"
+	"github.com/cofy-x/kova/internal/artifactstore"
 	"github.com/cofy-x/kova/internal/kube"
 	"github.com/cofy-x/kova/internal/logging"
+	"github.com/cofy-x/kova/internal/observability"
+	serviceauth "github.com/cofy-x/kova/internal/service/auth"
 	"github.com/cofy-x/kova/internal/service/config"
 	"github.com/cofy-x/kova/internal/service/runnerexec"
-	"github.com/cofy-x/kova/internal/service/sourcestore"
 	"github.com/cofy-x/kova/internal/source"
 
 	"github.com/labstack/echo/v4"
+	"go.opentelemetry.io/otel/attribute"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	apiMeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -36,20 +43,32 @@ type Server struct {
 	kube   kubeAPI
 	client client.Client
 	reader client.Reader
+	store  artifactstore.Store
+	auth   serviceauth.Authenticator
 }
 
-func NewServer(cfg config.Config, kube kubeAPI, crClient client.Client, crReader client.Reader) *Server {
+var (
+	authDenied      = observability.Int64Counter("kova.service.auth.denied", "Rejected service API authentication attempts")
+	artifactWrites  = observability.Int64Counter("kova.service.artifact.writes", "Artifact write attempts")
+	artifactLatency = observability.DurationHistogram("kova.service.artifact.write.duration", "Artifact write latency")
+	buildCancels    = observability.Int64Counter("kova.service.job.cancellations", "Accepted job cancellations")
+)
+
+func NewServer(cfg config.Config, kube kubeAPI, crClient client.Client, crReader client.Reader, store artifactstore.Store, authenticator serviceauth.Authenticator) *Server {
 	if cfg.Listen == "" {
 		cfg.Listen = ":8080"
 	}
-	if cfg.SourceRoot == "" {
-		cfg.SourceRoot = sourcestore.DefaultRoot
+	if cfg.ArtifactRoot == "" {
+		cfg.ArtifactRoot = artifactstore.DefaultRoot
 	}
-	if cfg.SourceMountPath == "" {
-		cfg.SourceMountPath = cfg.SourceRoot
+	if cfg.ArtifactDriver == "" {
+		cfg.ArtifactDriver = artifactstore.DriverFilesystem
 	}
 	if cfg.JobTTL == 0 {
 		cfg.JobTTL = 2 * time.Hour
+	}
+	if cfg.MaxUploadBytes == 0 {
+		cfg.MaxUploadBytes = 1 << 30
 	}
 	if cfg.WaitTimeout == 0 {
 		cfg.WaitTimeout = 3 * time.Minute
@@ -60,7 +79,10 @@ func NewServer(cfg config.Config, kube kubeAPI, crClient client.Client, crReader
 	if crReader == nil {
 		crReader = crClient
 	}
-	return &Server{cfg: cfg, kube: kube, client: crClient, reader: crReader}
+	if store == nil {
+		store, _ = artifactstore.NewFilesystem(cfg.ArtifactRoot)
+	}
+	return &Server{cfg: cfg, kube: kube, client: crClient, reader: crReader, store: store, auth: authenticator}
 }
 
 func (s *Server) Start(ctx context.Context) error {
@@ -86,6 +108,13 @@ func (s *Server) routes() *echo.Echo {
 	e.GET("/healthz", func(c echo.Context) error {
 		return c.JSON(http.StatusOK, map[string]string{"status": "ok"})
 	})
+	e.GET("/readyz", func(c echo.Context) error {
+		var builds kovav1.KovaBuildList
+		if err := s.reader.List(c.Request().Context(), &builds, client.InNamespace(s.cfg.Namespace), client.Limit(1)); err != nil {
+			return c.JSON(http.StatusServiceUnavailable, map[string]string{"status": "unavailable"})
+		}
+		return c.JSON(http.StatusOK, map[string]string{"status": "ready"})
+	})
 	v1 := e.Group("/v1", s.authMiddleware)
 	v1.POST("/builds", s.handleCreateBuild)
 	v1.GET("/builds", s.handleListBuilds)
@@ -101,11 +130,13 @@ func (s *Server) routes() *echo.Echo {
 
 func (s *Server) authMiddleware(next echo.HandlerFunc) echo.HandlerFunc {
 	return func(c echo.Context) error {
-		if strings.TrimSpace(s.cfg.AuthToken) == "" {
-			return next(c)
+		token, err := serviceauth.Bearer(c.Request().Header.Get("Authorization"))
+		if err != nil && s.cfg.AuthMode != serviceauth.ModeUnsafeNone {
+			authDenied.Add(c.Request().Context(), 1)
+			return c.JSON(http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 		}
-		want := "Bearer " + s.cfg.AuthToken
-		if c.Request().Header.Get("Authorization") != want {
+		if s.auth == nil || s.auth.Authenticate(c.Request().Context(), token) != nil {
+			authDenied.Add(c.Request().Context(), 1)
 			return c.JSON(http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 		}
 		return next(c)
@@ -116,11 +147,15 @@ func (s *Server) handleCreateBuild(c echo.Context) error {
 	if strings.TrimSpace(s.cfg.RunnerImage) == "" {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "runner image is required"})
 	}
-	if strings.TrimSpace(s.cfg.SourcePVCClaim) == "" {
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "source PVC claim is required"})
+	if s.cfg.MaxUploadBytes > 0 {
+		c.Request().Body = http.MaxBytesReader(c.Response().Writer, c.Request().Body, s.cfg.MaxUploadBytes)
 	}
 	file, err := c.FormFile("file")
 	if err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			return c.JSON(http.StatusRequestEntityTooLarge, map[string]string{"error": "build request exceeds the configured upload limit"})
+		}
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "multipart field file is required"})
 	}
 	request, err := buildRequestFromMultipart(c)
@@ -134,6 +169,45 @@ func (s *Server) handleCreateBuild(c echo.Context) error {
 			return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		}
 	}
+	tmpPath, actualDigest, size, err := stageUpload(file)
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+	}
+	defer os.Remove(tmpPath)
+	if request.SourceDigest != "" && !strings.EqualFold(request.SourceDigest, actualDigest) {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("source digest mismatch: expected %s, got %s", request.SourceDigest, actualDigest)})
+	}
+	request.SourceDigest = actualDigest
+	if request.Options.Target != "" {
+		err = source.ValidateSingleBuildArchiveTarget(tmpPath, request.Options.Target)
+	} else {
+		_, err = source.ValidateBuildArchive(tmpPath)
+	}
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
+	}
+	staged, err := os.Open(tmpPath)
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+	}
+	key := "builds/" + id + "/" + strings.TrimPrefix(actualDigest, "sha256:") + ".zip"
+	writeStarted := time.Now()
+	artifactURI, putErr := s.store.Put(c.Request().Context(), key, staged, size, "application/zip")
+	result := observability.ResultOK
+	if putErr != nil {
+		result = observability.ResultError
+	}
+	storeAttrs := []attribute.KeyValue{attribute.String(observability.AttrResult, result), attribute.String("kova.store.driver", s.cfg.ArtifactDriver)}
+	artifactWrites.Add(c.Request().Context(), 1, storeAttrs...)
+	artifactLatency.RecordDuration(c.Request().Context(), time.Since(writeStarted), storeAttrs...)
+	closeErr := staged.Close()
+	if putErr != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": putErr.Error()})
+	}
+	if closeErr != nil {
+		_ = s.store.Delete(c.Request().Context(), artifactURI)
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": closeErr.Error()})
+	}
 	build := kovav1.KovaBuild{
 		TypeMeta: metav1.TypeMeta{APIVersion: kovav1.Group + "/" + kovav1.Version, Kind: "KovaBuild"},
 		ObjectMeta: metav1.ObjectMeta{
@@ -142,13 +216,8 @@ func (s *Server) handleCreateBuild(c echo.Context) error {
 			Labels:    map[string]string{"app.kubernetes.io/name": "kova-build"},
 		},
 		Spec: kovav1.KovaBuildSpec{
-			Source: kovav1.KovaBuildSourceSpec{Ready: false, PVC: kovav1.KovaBuildPVCSource{
-				ClaimName: s.cfg.SourcePVCClaim,
-				Path:      sourcestore.Path(id),
-				MountPath: s.cfg.SourceMountPath,
-			}},
+			Source:         kovav1.KovaBuildSourceSpec{URI: artifactURI, Digest: actualDigest},
 			Build:          request.Options,
-			SourceDigest:   request.SourceDigest,
 			IdempotencyKey: request.IdempotencyKey,
 		},
 	}
@@ -158,51 +227,48 @@ func (s *Server) handleCreateBuild(c echo.Context) error {
 			if getErr := s.reader.Get(c.Request().Context(), client.ObjectKey{Namespace: s.cfg.Namespace, Name: id}, &existing); getErr != nil {
 				return c.JSON(http.StatusInternalServerError, map[string]string{"error": getErr.Error()})
 			}
+			if existing.Spec.Source.URI != artifactURI {
+				_ = s.store.Delete(c.Request().Context(), artifactURI)
+			}
 			if !sameBuildRequest(&existing, request) {
 				return c.JSON(http.StatusConflict, map[string]string{"error": "idempotency key is already used with different build parameters"})
 			}
 			return c.JSON(http.StatusOK, buildJobFromCR(&existing, s.cfg))
 		}
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
-	}
-	relPath, err := sourcestore.SaveUpload(s.cfg.SourceRoot, id, file)
-	if err != nil {
-		_ = s.client.Delete(c.Request().Context(), &build)
-		_ = sourcestore.Remove(s.cfg.SourceRoot, id)
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
-	}
-	archivePath := filepath.Join(s.cfg.SourceRoot, filepath.FromSlash(relPath))
-	if request.Options.Target != "" {
-		err = source.ValidateSingleBuildArchiveTarget(archivePath, request.Options.Target)
-	} else {
-		_, err = source.ValidateBuildArchive(archivePath)
-	}
-	if err != nil {
-		_ = s.client.Delete(c.Request().Context(), &build)
-		_ = sourcestore.Remove(s.cfg.SourceRoot, id)
-		return c.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
-	}
-	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		var current kovav1.KovaBuild
-		if err := s.client.Get(c.Request().Context(), client.ObjectKeyFromObject(&build), &current); err != nil {
-			return err
-		}
-		current.Spec.Source.Ready = true
-		if err := s.client.Update(c.Request().Context(), &current); err != nil {
-			return err
-		}
-		build = current
-		return nil
-	}); err != nil {
-		_ = s.client.Delete(c.Request().Context(), &build)
+		_ = s.store.Delete(c.Request().Context(), artifactURI)
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
 	}
 	return c.JSON(http.StatusAccepted, buildJobFromCR(&build, s.cfg))
 }
 
 func sameBuildRequest(build *kovav1.KovaBuild, request createBuildRequest) bool {
-	return build.Spec.SourceDigest == request.SourceDigest &&
+	return build.Spec.Source.Digest == request.SourceDigest &&
 		reflect.DeepEqual(build.Spec.Build, request.Options)
+}
+
+func stageUpload(file *multipart.FileHeader) (string, string, int64, error) {
+	src, err := file.Open()
+	if err != nil {
+		return "", "", 0, err
+	}
+	defer src.Close()
+	tmp, err := os.CreateTemp("", "kova-source-*.zip")
+	if err != nil {
+		return "", "", 0, err
+	}
+	path := tmp.Name()
+	hash := sha256.New()
+	size, copyErr := io.Copy(io.MultiWriter(tmp, hash), src)
+	closeErr := tmp.Close()
+	if copyErr != nil {
+		_ = os.Remove(path)
+		return "", "", 0, copyErr
+	}
+	if closeErr != nil {
+		_ = os.Remove(path)
+		return "", "", 0, closeErr
+	}
+	return path, "sha256:" + hex.EncodeToString(hash.Sum(nil)), size, nil
 }
 
 func idempotentJobID(key string) string {
@@ -274,13 +340,17 @@ func (s *Server) handleCancelBuild(c echo.Context) error {
 	}
 	now := metav1.Now()
 	build.Status.Phase = kovav1.PhaseCancelled
-	build.Status.SourceDigest = build.Spec.SourceDigest
-	build.Status.IdempotencyKey = build.Spec.IdempotencyKey
+	build.Status.ObservedGeneration = build.Generation
 	build.Status.FinishedAt = &now
 	build.Status.Message = ""
+	apiMeta.SetStatusCondition(&build.Status.Conditions, metav1.Condition{
+		Type: "Ready", Status: metav1.ConditionFalse, Reason: "Cancelled",
+		Message: "build was cancelled", ObservedGeneration: build.Generation,
+	})
 	if err := s.client.Status().Update(c.Request().Context(), build); err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
 	}
+	buildCancels.Add(c.Request().Context(), 1)
 	return c.JSON(http.StatusAccepted, buildJobFromCR(build, s.cfg))
 }
 

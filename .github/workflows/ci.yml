@@ -63,11 +63,19 @@ jobs:
             exit 1
           fi
       - name: Verify cross-platform CLI builds
+        shell: bash
         run: |
+          pids=()
           for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 windows/arm64; do
             GOOS="${target%/*}" GOARCH="${target#*/}" CGO_ENABLED=0 \
-              go build -trimpath -o /tmp/kova ./cmd/kova
+              go build -trimpath -o "/tmp/kova-${target//\//-}" ./cmd/kova &
+            pids+=("$!")
           done
+          failed=0
+          for pid in "${pids[@]}"; do
+            wait "${pid}" || failed=1
+          done
+          exit "${failed}"
 
   manifests:
     name: Scripts and charts
@@ -100,9 +108,12 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Build binary image stage
-        if: github.event_name == 'pull_request'
-        run: docker build --platform linux/amd64 --target runtime-artifact --file docker/Dockerfile .
-      - name: Build complete image
-        if: github.event_name == 'push'
-        run: docker build --platform linux/amd64 --tag kova:ci --file docker/Dockerfile .
+      - name: Build and verify role images
+        shell: bash
+        run: |
+          for role in controller runner worker; do
+            docker build --platform linux/amd64 --target "${role}" --tag "kova:${role}-ci" --file docker/Dockerfile .
+          done
+          docker run --rm --entrypoint sh kova:controller-ci -c 'test "$(id -u)" = 65532; command -v kova-controller; ! command -v kovad; ! command -v buildkitd'
+          docker run --rm --entrypoint sh kova:runner-ci -c 'test "$(id -u)" = 65532; command -v kovad; command -v buildctl; ! command -v buildkitd'
+          docker run --rm --entrypoint sh kova:worker-ci -c 'test "$(id -u)" = 1000; command -v buildkitd; command -v rootlesskit; ! command -v kovad'

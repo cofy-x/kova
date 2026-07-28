@@ -1,29 +1,9 @@
 # syntax=docker/dockerfile:1@sha256:87999aa3d42bdc6bea60565083ee17e86d1f3339802f543c0d03998580f9cb89
 
 ARG UBUNTU_IMAGE=ubuntu:24.04@sha256:4fbb8e6a8395de5a7550b33509421a2bafbc0aab6c06ba2cef9ebffbc7092d90
+ARG BUILDKIT_ROOTLESS_IMAGE=moby/buildkit:v0.31.2-rootless@sha256:0eeb84626c0cd01aecae7848c5ed8f095aec279dd936d0cdb5a64110f42ca65b
 
-FROM ${UBUNTU_IMAGE} AS buildkit-downloader
-ARG BUILDKIT_VERSION=v0.31.2
-ARG BUILDKIT_SHA256_AMD64=fbabdb72433a35f5bb646e4cd424bf8567e5d055710cf55840f7af2020640791
-ARG BUILDKIT_SHA256_ARM64=41fba1eed480376934fa4c8177ddd7021036b5168a0eb8e7ab5eccdf75d47a05
-ARG TARGETOS=linux
-ARG TARGETARCH
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates curl tar \
-    && rm -rf /var/lib/apt/lists/*
-ARG BUILDKIT_DOWNLOAD_BASE_URL=https://github.com/moby/buildkit/releases/download
-RUN set -eux; \
-    case "${TARGETARCH}" in \
-      amd64) buildkit_arch="amd64"; buildkit_sha256="${BUILDKIT_SHA256_AMD64}" ;; \
-      arm64) buildkit_arch="arm64"; buildkit_sha256="${BUILDKIT_SHA256_ARM64}" ;; \
-      *) echo "unsupported TARGETARCH=${TARGETARCH}" >&2; exit 1 ;; \
-    esac; \
-    curl -fL --retry 5 --retry-all-errors --connect-timeout 20 --max-time 600 \
-      "${BUILDKIT_DOWNLOAD_BASE_URL}/${BUILDKIT_VERSION}/buildkit-${BUILDKIT_VERSION}.${TARGETOS}-${buildkit_arch}.tar.gz" \
-      -o /tmp/buildkit.tgz; \
-    echo "${buildkit_sha256}  /tmp/buildkit.tgz" | sha256sum -c -; \
-    mkdir -p /out; \
-    tar -xzf /tmp/buildkit.tgz -C /out
+FROM ${BUILDKIT_ROOTLESS_IMAGE} AS buildkit-rootless
 
 FROM ${UBUNTU_IMAGE} AS grpcurl-downloader
 ARG GRPCURL_VERSION=v1.9.3
@@ -111,26 +91,63 @@ RUN --mount=type=cache,target=/go/pkg/mod \
         -X github.com/cofy-x/kova/internal/version.Version=${VERSION} \
         -X github.com/cofy-x/kova/internal/version.Commit=${COMMIT} \
         -X github.com/cofy-x/kova/internal/version.BuildDate=${BUILD_DATE}" \
-      -o /out/kovad ./cmd/kovad
+      -o /out/kovad ./cmd/kovad && \
+    GOPROXY="${GOPROXY}" CGO_ENABLED=1 GOOS=${TARGETOS} GOARCH=${TARGETARCH} /usr/local/go/bin/go build \
+      -trimpath \
+      -tags 'netgo,osusergo' \
+      -ldflags "-s -w -linkmode external -extldflags '-static' \
+        -X github.com/cofy-x/kova/internal/version.Version=${VERSION} \
+        -X github.com/cofy-x/kova/internal/version.Commit=${COMMIT} \
+        -X github.com/cofy-x/kova/internal/version.BuildDate=${BUILD_DATE}" \
+      -o /out/kova-controller ./cmd/kova-controller
 
 FROM scratch AS runtime-artifact
 COPY --from=runtime-builder /out/kovad /kovad
 
-FROM ${UBUNTU_IMAGE}
+FROM ${UBUNTU_IMAGE} AS controller
 ARG VERSION=dev
 ARG COMMIT=unknown
 LABEL org.opencontainers.image.source="https://github.com/cofy-x/kova" \
       org.opencontainers.image.licenses="Apache-2.0" \
+      org.opencontainers.image.title="Kova controller" \
       org.opencontainers.image.version="${VERSION}" \
       org.opencontainers.image.revision="${COMMIT}"
-RUN export DEBIAN_FRONTEND=noninteractive TZ=Etc/UTC \
-    && apt-get update \
-    && apt-get install -y --no-install-recommends bash ca-certificates curl iptables liblmdb0 \
-    && rm -rf /var/lib/apt/lists/*
-COPY --from=buildkit-downloader /out/bin/ /usr/bin/
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --gid 65532 kova \
+    && useradd --uid 65532 --gid 65532 --create-home kova
+COPY --from=runtime-builder /out/kova-controller /usr/bin/kova-controller
+USER 65532:65532
+ENTRYPOINT ["kova-controller", "service"]
+
+FROM ${UBUNTU_IMAGE} AS runner
+ARG VERSION=dev
+ARG COMMIT=unknown
+LABEL org.opencontainers.image.source="https://github.com/cofy-x/kova" \
+      org.opencontainers.image.licenses="Apache-2.0" \
+      org.opencontainers.image.title="Kova runner" \
+      org.opencontainers.image.version="${VERSION}" \
+      org.opencontainers.image.revision="${COMMIT}"
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --gid 65532 kova \
+    && useradd --uid 65532 --gid 65532 --create-home kova
+COPY --from=buildkit-rootless /usr/bin/buildctl /usr/bin/buildctl
 COPY --from=grpcurl-downloader /out/grpcurl /usr/bin/grpcurl
 COPY --from=nydus-downloader /out/nydusify /usr/bin/nydusify
 COPY --from=nydus-downloader /out/nydus-image /usr/bin/nydus-image
 COPY --from=runtime-builder /out/kovad /usr/bin/kovad
-ENTRYPOINT []
-CMD ["buildkitd", "--addr", "tcp://0.0.0.0:9094"]
+ENV HOME=/home/kova
+USER 65532:65532
+ENTRYPOINT ["kovad", "daemon"]
+
+FROM buildkit-rootless AS worker
+ARG VERSION=dev
+ARG COMMIT=unknown
+LABEL org.opencontainers.image.source="https://github.com/cofy-x/kova" \
+      org.opencontainers.image.licenses="Apache-2.0" \
+      org.opencontainers.image.title="Kova worker" \
+      org.opencontainers.image.version="${VERSION}" \
+      org.opencontainers.image.revision="${COMMIT}"

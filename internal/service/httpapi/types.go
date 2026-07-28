@@ -37,10 +37,11 @@ type BuildResult struct {
 }
 
 type buildResultsResponse struct {
-	ID             string        `json:"id"`
-	SourceDigest   string        `json:"source_digest,omitempty"`
-	IdempotencyKey string        `json:"idempotency_key,omitempty"`
-	Results        []BuildResult `json:"results"`
+	ID                string        `json:"id"`
+	SourceDigest      string        `json:"source_digest,omitempty"`
+	IdempotencyKey    string        `json:"idempotency_key,omitempty"`
+	ResultArtifactURI string        `json:"result_artifact_uri,omitempty"`
+	Results           []BuildResult `json:"results"`
 }
 
 type jobListResponse struct {

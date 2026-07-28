@@ -50,26 +50,16 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- include "kova.registryConfigJson" . | b64enc -}}
 {{- end -}}
 
-{{- define "kova.image" -}}
-{{- if .Values.imageOverride -}}
-{{- .Values.imageOverride -}}
-{{- else -}}
-{{- if kindIs "string" .Values.image -}}
-{{- required "Values.image is required" .Values.image -}}
-{{- else -}}
-{{- $imageRepository := required "Values.image.repository is required" .Values.image.repository -}}
-{{- $imageTag := required "Values.image.tag is required" .Values.image.tag -}}
-{{- printf "%s:%s" $imageRepository $imageTag -}}
-{{- end -}}
-{{- end -}}
+{{- define "kova.roleImage" -}}
+{{- $image := required (printf "Values.images.%s is required" .role) (index .root.Values.images .role) -}}
+{{- $repository := required (printf "Values.images.%s.repository is required" .role) $image.repository -}}
+{{- $tag := required (printf "Values.images.%s.tag is required" .role) $image.tag -}}
+{{- printf "%s:%s" $repository $tag -}}
 {{- end -}}
 
-{{- define "kova.imagePullPolicy" -}}
-{{- if kindIs "string" .Values.image -}}
-{{- default "IfNotPresent" .Values.imagePullPolicy -}}
-{{- else -}}
-{{- default "IfNotPresent" .Values.image.pullPolicy -}}
-{{- end -}}
+{{- define "kova.roleImagePullPolicy" -}}
+{{- $image := required (printf "Values.images.%s is required" .role) (index .root.Values.images .role) -}}
+{{- default "IfNotPresent" $image.pullPolicy -}}
 {{- end -}}
 
 {{- define "kova.imagePullSecretName" -}}
@@ -107,10 +97,10 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- end -}}
 
 {{- define "kova.sourcePVCName" -}}
-{{- if .Values.sourceStore.pvc.existingClaim -}}
-{{- .Values.sourceStore.pvc.existingClaim -}}
-{{- else if .Values.sourceStore.pvc.name -}}
-{{- .Values.sourceStore.pvc.name -}}
+{{- if .Values.artifactStore.filesystem.pvc.existingClaim -}}
+{{- .Values.artifactStore.filesystem.pvc.existingClaim -}}
+{{- else if .Values.artifactStore.filesystem.pvc.name -}}
+{{- .Values.artifactStore.filesystem.pvc.name -}}
 {{- else -}}
 {{- printf "%s-sources" (include "kova.fullname" .) | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
@@ -128,7 +118,9 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 - name: KOVA_OTEL_METRIC_INTERVAL
   value: {{ .Values.observability.metricInterval | quote }}
 - name: OTEL_SERVICE_NAME
-  value: {{ .Values.observability.serviceName | quote }}
+  value: {{ .Values.observability.controllerServiceName | quote }}
+- name: KOVA_RUNNER_OTEL_SERVICE_NAME
+  value: {{ .Values.observability.runnerServiceName | quote }}
 - name: OTEL_EXPORTER_OTLP_ENDPOINT
   value: {{ .Values.observability.endpoint | quote }}
 - name: OTEL_EXPORTER_OTLP_INSECURE

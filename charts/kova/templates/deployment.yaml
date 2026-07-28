@@ -67,47 +67,43 @@ spec:
         {{- end }}
       {{- end }}
       containers:
-        - name: {{ .Values.container.name }}
-          command:
-            {{- toYaml .Values.container.command | nindent 12 }}
-          image: {{ include "kova.image" . }}
-          imagePullPolicy: {{ include "kova.imagePullPolicy" . }}
-          {{- if .Values.observability.enabled }}
-          env:
-            {{- include "kova.observabilityEnv" . | nindent 12 }}
-          {{- end }}
-          {{- if .Values.container.livenessProbe.enabled }}
+        - name: {{ .Values.worker.name }}
+          args:
+            {{- toYaml .Values.worker.args | nindent 12 }}
+          image: {{ include "kova.roleImage" (dict "root" . "role" "worker") }}
+          imagePullPolicy: {{ include "kova.roleImagePullPolicy" (dict "root" . "role" "worker") }}
+          {{- if .Values.worker.livenessProbe.enabled }}
           livenessProbe:
-            failureThreshold: {{ .Values.container.livenessProbe.failureThreshold }}
-            initialDelaySeconds: {{ .Values.container.livenessProbe.initialDelaySeconds }}
-            periodSeconds: {{ .Values.container.livenessProbe.periodSeconds }}
-            successThreshold: {{ .Values.container.livenessProbe.successThreshold }}
+            failureThreshold: {{ .Values.worker.livenessProbe.failureThreshold }}
+            initialDelaySeconds: {{ .Values.worker.livenessProbe.initialDelaySeconds }}
+            periodSeconds: {{ .Values.worker.livenessProbe.periodSeconds }}
+            successThreshold: {{ .Values.worker.livenessProbe.successThreshold }}
             tcpSocket:
-              port: {{ .Values.container.portName }}
-            timeoutSeconds: {{ .Values.container.livenessProbe.timeoutSeconds }}
+              port: {{ .Values.worker.portName }}
+            timeoutSeconds: {{ .Values.worker.livenessProbe.timeoutSeconds }}
           {{- end }}
           ports:
-            - containerPort: {{ .Values.container.port }}
-              name: {{ .Values.container.portName }}
-              protocol: {{ .Values.container.protocol }}
-          {{- if .Values.container.readinessProbe.enabled }}
+            - containerPort: {{ .Values.worker.port }}
+              name: {{ .Values.worker.portName }}
+              protocol: {{ .Values.worker.protocol }}
+          {{- if .Values.worker.readinessProbe.enabled }}
           readinessProbe:
-            failureThreshold: {{ .Values.container.readinessProbe.failureThreshold }}
-            initialDelaySeconds: {{ .Values.container.readinessProbe.initialDelaySeconds }}
-            periodSeconds: {{ .Values.container.readinessProbe.periodSeconds }}
-            successThreshold: {{ .Values.container.readinessProbe.successThreshold }}
+            failureThreshold: {{ .Values.worker.readinessProbe.failureThreshold }}
+            initialDelaySeconds: {{ .Values.worker.readinessProbe.initialDelaySeconds }}
+            periodSeconds: {{ .Values.worker.readinessProbe.periodSeconds }}
+            successThreshold: {{ .Values.worker.readinessProbe.successThreshold }}
             tcpSocket:
-              port: {{ .Values.container.portName }}
-            timeoutSeconds: {{ .Values.container.readinessProbe.timeoutSeconds }}
+              port: {{ .Values.worker.portName }}
+            timeoutSeconds: {{ .Values.worker.readinessProbe.timeoutSeconds }}
           {{- end }}
           resources:
-            {{- toYaml .Values.resources | nindent 12 }}
+            {{- toYaml .Values.worker.resources | nindent 12 }}
           securityContext:
-            {{- toYaml .Values.container.securityContext | nindent 12 }}
+            {{- toYaml .Values.worker.securityContext | nindent 12 }}
           terminationMessagePath: {{ .Values.terminationMessagePath }}
           terminationMessagePolicy: {{ .Values.terminationMessagePolicy }}
           volumeMounts:
-            {{- toYaml .Values.volumeMounts | nindent 12 }}
+            {{- toYaml .Values.worker.volumeMounts | nindent 12 }}
             {{- with .Values.extraVolumeMounts }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -130,7 +126,7 @@ spec:
       {{- end }}
       schedulerName: {{ .Values.schedulerName }}
       securityContext:
-        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+        {{- toYaml .Values.worker.podSecurityContext | nindent 8 }}
       serviceAccountName: {{ include "kova.serviceAccountName" . }}
       terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
       {{- with .Values.tolerations }}
@@ -156,7 +152,7 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       volumes:
-        {{- toYaml .Values.volumes | nindent 8 }}
+        {{- toYaml .Values.worker.volumes | nindent 8 }}
         - name: buildkit-config
           configMap:
             name: {{ include "kova.fullname" . }}-config

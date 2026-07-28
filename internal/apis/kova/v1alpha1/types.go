@@ -26,6 +26,7 @@ var SchemeGroupVersion = schema.GroupVersion{Group: Group, Version: Version}
 // +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.phase`
 // +kubebuilder:printcolumn:name="Runner",type=string,JSONPath=`.status.runnerPodName`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
+// +kubebuilder:validation:XValidation:rule="self.spec == oldSelf.spec",message="spec is immutable"
 type KovaBuild struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
@@ -38,34 +39,27 @@ type KovaBuild struct {
 
 type KovaBuildSpec struct {
 	// +kubebuilder:validation:Required
-	Source         KovaBuildSourceSpec `json:"source,omitempty"`
-	Build          KovaBuildOptions    `json:"build,omitempty"`
-	SourceDigest   string              `json:"sourceDigest,omitempty"`
-	IdempotencyKey string              `json:"idempotencyKey,omitempty"`
+	Source KovaBuildSourceSpec `json:"source,omitempty"`
+	Build  KovaBuildOptions    `json:"build,omitempty"`
+	// +kubebuilder:validation:MaxLength=256
+	IdempotencyKey string `json:"idempotencyKey,omitempty"`
 }
 
 type KovaBuildSourceSpec struct {
 	// +kubebuilder:validation:Required
-	PVC KovaBuildPVCSource `json:"pvc,omitempty"`
-	// Ready is set only after the immutable source archive has been committed.
-	// +kubebuilder:validation:Required
-	Ready bool `json:"ready"`
-}
-
-type KovaBuildPVCSource struct {
-	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinLength=1
-	ClaimName string `json:"claimName,omitempty"`
+	// +kubebuilder:validation:Pattern=`^(file|s3)://.+$`
+	URI string `json:"uri"`
 	// +kubebuilder:validation:Required
-	// +kubebuilder:validation:Pattern=`^builds/[A-Za-z0-9._-]+/source\.zip$`
-	Path string `json:"path,omitempty"`
-	// +kubebuilder:validation:MinLength=1
-	MountPath string `json:"mountPath,omitempty"`
+	// +kubebuilder:validation:Pattern=`^sha256:[a-f0-9]{64}$`
+	Digest string `json:"digest"`
 }
 
 type KovaBuildOptions struct {
 	// +kubebuilder:validation:Enum=oci;nydus;both
 	Format string `json:"format,omitempty"`
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
 	Target string `json:"target,omitempty"`
 	// +kubebuilder:validation:Minimum=1
 	Concurrency int `json:"concurrency,omitempty"`
@@ -82,15 +76,26 @@ type KovaBuildOptions struct {
 
 type KovaBuildStatus struct {
 	// +kubebuilder:validation:Enum=Queued;Starting;Running;Succeeded;Failed;Cancelled
-	Phase          string        `json:"phase,omitempty"`
-	RunnerPodName  string        `json:"runnerPodName,omitempty"`
-	Message        string        `json:"message,omitempty"`
-	StartedAt      *metav1.Time  `json:"startedAt,omitempty"`
-	FinishedAt     *metav1.Time  `json:"finishedAt,omitempty"`
-	ResultSummary  string        `json:"resultSummary,omitempty"`
-	SourceDigest   string        `json:"sourceDigest,omitempty"`
-	IdempotencyKey string        `json:"idempotencyKey,omitempty"`
-	Results        []BuildResult `json:"results,omitempty"`
+	Phase                string             `json:"phase,omitempty"`
+	ObservedGeneration   int64              `json:"observedGeneration,omitempty"`
+	AllocatedConcurrency int32              `json:"allocatedConcurrency,omitempty"`
+	RunnerPodName        string             `json:"runnerPodName,omitempty"`
+	Message              string             `json:"message,omitempty"`
+	StartedAt            *metav1.Time       `json:"startedAt,omitempty"`
+	FinishedAt           *metav1.Time       `json:"finishedAt,omitempty"`
+	ResultSummary        BuildResultSummary `json:"resultSummary,omitempty"`
+	ResultArtifactURI    string             `json:"resultArtifactURI,omitempty"`
+	// +kubebuilder:validation:MaxItems=100
+	Results []BuildResult `json:"results,omitempty"`
+	// +listType=map
+	// +listMapKey=type
+	Conditions []metav1.Condition `json:"conditions,omitempty" patchStrategy:"merge" patchMergeKey:"type"`
+}
+
+type BuildResultSummary struct {
+	Total     int32 `json:"total,omitempty"`
+	Succeeded int32 `json:"succeeded,omitempty"`
+	Failed    int32 `json:"failed,omitempty"`
 }
 
 type BuildResult struct {

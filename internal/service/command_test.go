@@ -34,3 +34,13 @@ func TestParseNodeSelectorAllowsEmptyLabelValue(t *testing.T) {
 		t.Fatalf("selectors = %#v", got)
 	}
 }
+
+func TestRunnerObservabilityEnvUsesRunnerServiceName(t *testing.T) {
+	t.Setenv("KOVA_OTEL_ENABLED", "true")
+	t.Setenv("OTEL_SERVICE_NAME", "kova-controller")
+	t.Setenv("KOVA_RUNNER_OTEL_SERVICE_NAME", "kova-runner")
+	env := runnerObservabilityEnv()
+	if env["KOVA_OTEL_ENABLED"] != "true" || env["OTEL_SERVICE_NAME"] != "kova-runner" {
+		t.Fatalf("runner env = %#v", env)
+	}
+}

@@ -2,7 +2,9 @@ package runner
 
 import (
 	"maps"
+	"net/url"
 	"sort"
+	"strconv"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -24,7 +26,17 @@ type ManifestOptions struct {
 	SourcePVCClaim  string
 	SourceMountPath string
 	SourceReadOnly  bool
+	SourceURI       string
+	SourceDigest    string
+	ArtifactRoot    string
+	ArtifactSecret  string
+	S3Endpoint      string
+	S3Bucket        string
+	S3Region        string
+	S3Secure        bool
 }
+
+const MaterializedSourcePath = "/var/lib/kova/source/source.zip"
 
 func RenderPrepareManifest(opts ManifestOptions) (string, error) {
 	pod := PreparePod(opts)
@@ -50,6 +62,12 @@ func PreparePod(opts ManifestOptions) corev1.Pod {
 		},
 		Spec: corev1.PodSpec{
 			RestartPolicy: corev1.RestartPolicyNever,
+			SecurityContext: &corev1.PodSecurityContext{
+				RunAsNonRoot: boolPointer(true),
+				RunAsUser:    int64Pointer(65532),
+				RunAsGroup:   int64Pointer(65532),
+				FSGroup:      int64Pointer(65532),
+			},
 			Containers: []corev1.Container{
 				{
 					Name:            "runner",
@@ -60,6 +78,16 @@ func PreparePod(opts ManifestOptions) corev1.Pod {
 						"daemon",
 						"--addrs",
 						opts.BuildkitAddr,
+					},
+					SecurityContext: &corev1.SecurityContext{
+						AllowPrivilegeEscalation: boolPointer(false),
+						RunAsNonRoot:             boolPointer(true),
+						RunAsUser:                int64Pointer(65532),
+						RunAsGroup:               int64Pointer(65532),
+						Capabilities: &corev1.Capabilities{
+							Drop: []corev1.Capability{"ALL"},
+						},
+						SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
 					},
 				},
 			},
@@ -98,10 +126,51 @@ func PreparePod(opts ManifestOptions) corev1.Pod {
 			},
 		})
 	}
+	if source, err := url.Parse(opts.SourceURI); err == nil && source.Scheme == "s3" {
+		mount := corev1.VolumeMount{Name: "kova-source", MountPath: "/var/lib/kova/source"}
+		pod.Spec.Containers[0].VolumeMounts = append(pod.Spec.Containers[0].VolumeMounts, mount)
+		pod.Spec.Volumes = append(pod.Spec.Volumes, corev1.Volume{
+			Name:         "kova-source",
+			VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
+		})
+		fetch := corev1.Container{
+			Name:            "source-fetch",
+			Image:           opts.Image,
+			ImagePullPolicy: corev1.PullPolicy(opts.ImagePullPolicy),
+			Command: []string{
+				"kovad", "artifact", "fetch",
+				"--uri", opts.SourceURI,
+				"--digest", opts.SourceDigest,
+				"--output", MaterializedSourcePath,
+				"--s3-endpoint", opts.S3Endpoint,
+				"--s3-bucket", opts.S3Bucket,
+				"--s3-region", opts.S3Region,
+				"--s3-secure=" + strconv.FormatBool(opts.S3Secure),
+			},
+			VolumeMounts: []corev1.VolumeMount{mount},
+			SecurityContext: &corev1.SecurityContext{
+				AllowPrivilegeEscalation: boolPointer(false),
+				RunAsNonRoot:             boolPointer(true),
+				RunAsUser:                int64Pointer(65532),
+				RunAsGroup:               int64Pointer(65532),
+				Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
+				SeccompProfile:           &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
+			},
+		}
+		if opts.ArtifactRoot != "" {
+			fetch.Env = append(fetch.Env, corev1.EnvVar{Name: "KOVA_ARTIFACT_ROOT", Value: opts.ArtifactRoot})
+		}
+		if opts.ArtifactSecret != "" {
+			fetch.EnvFrom = []corev1.EnvFromSource{{SecretRef: &corev1.SecretEnvSource{
+				LocalObjectReference: corev1.LocalObjectReference{Name: opts.ArtifactSecret},
+			}}}
+		}
+		pod.Spec.InitContainers = append(pod.Spec.InitContainers, fetch)
+	}
 	if opts.ImagePullSecret != "" {
 		pod.Spec.ImagePullSecrets = []corev1.LocalObjectReference{{Name: opts.ImagePullSecret}}
 		pod.Spec.Containers[0].VolumeMounts = append(pod.Spec.Containers[0].VolumeMounts,
-			corev1.VolumeMount{Name: "docker-config", MountPath: "/root/.docker", ReadOnly: true},
+			corev1.VolumeMount{Name: "docker-config", MountPath: "/home/kova/.docker", ReadOnly: true},
 		)
 		pod.Spec.Volumes = append(pod.Spec.Volumes,
 			corev1.Volume{
@@ -118,6 +187,14 @@ func PreparePod(opts ManifestOptions) corev1.Pod {
 		)
 	}
 	return pod
+}
+
+func boolPointer(value bool) *bool {
+	return &value
+}
+
+func int64Pointer(value int64) *int64 {
+	return &value
 }
 
 func sortedEnvNames(values map[string]string) []string {

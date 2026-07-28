@@ -9,6 +9,8 @@ Start with the [CLI quickstart guide](quickstart.md) for the daily flow and the
   cleanup.
 - [Runtime design](architecture.md): roles, topology, build/export,
   preheat, and scaling flows.
+- [Design contract](design.md): runtime, API, storage, security, scheduling,
+  observability, and release boundaries.
 - [Service Daemon](service.md): optional HTTP gateway that creates runner Pods
   for service-style usage.
 - [Validation matrix](testing.md): static checks, E2E targets, and runtime smoke

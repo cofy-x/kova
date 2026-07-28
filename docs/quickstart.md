@@ -12,7 +12,7 @@ already be pullable from the target cluster.
 
 ## Local kind Setup
 
-Create the local cluster, build the runtime image, and deploy the shared
+Create the local cluster, build the role images, and deploy the shared
 BuildKit workers:
 
 ```bash
@@ -25,7 +25,7 @@ make install
 The local runner image is usually:
 
 ```text
-localhost:5002/kova:dev
+localhost:5002/kova:runner-dev
 ```
 
 `make install` installs the local CLI as `kova` into your Go bin directory. Use
@@ -47,7 +47,7 @@ kova ctx set \
   --kubeconfig .kind/kova-local.kubeconfig \
   --namespace default \
   --buildkit-addr tcp://kova.kova.svc:9094 \
-  --image localhost:5002/kova:dev \
+  --image localhost:5002/kova:runner-dev \
   --image-pull-policy IfNotPresent \
   --image-pull-secret "" \
   --use \
@@ -61,7 +61,7 @@ kova ctx set \
   --kubeconfig /path/to/remote.kubeconfig \
   --namespace default \
   --buildkit-addr tcp://kova.kova.svc:9094 \
-  --image <registry>/<repo>/kova:<tag> \
+  --image <registry>/<repo>/kova:runner-<tag> \
   --image-pull-policy IfNotPresent \
   --image-pull-secret kova-registry \
   remote
@@ -91,7 +91,7 @@ and uses the kubeconfig to create the Pod in the target cluster:
 kova --name quickstart prepare
 ```
 
-The runner Pod starts `kovad daemon` from the runtime image.
+The runner Pod starts `kovad daemon` from the runner image.
 
 ## Start Builds
 

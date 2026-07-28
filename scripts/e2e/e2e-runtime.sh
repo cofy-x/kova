@@ -5,7 +5,8 @@ set -euo pipefail
 source "$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/../common.sh"
 
 ROOT=$(repo_root)
-IMAGE=${IMAGE:-localhost:5002/kova:dev}
+RUNNER_IMAGE=${RUNNER_IMAGE:-localhost:5002/kova:runner-dev}
+CURL_IMAGE=${CURL_IMAGE:-docker.io/curlimages/curl:8.16.0@sha256:463eaf6072688fe96ac64fa623fe73e1dbe25d8ad6c34404a669ad3ce1f104b6}
 BUILDKIT_ADDR=${BUILDKIT_ADDR:-tcp://kova.kova.svc:9094}
 KIND_CLUSTER=${KIND_CLUSTER:-kova-local}
 KIND_KUBECONFIG=${KIND_KUBECONFIG:-.kind/${KIND_CLUSTER}.kubeconfig}
@@ -67,7 +68,7 @@ KOVA_DAEMON_OTEL_RESOURCE_ATTRIBUTES=${KOVA_DAEMON_OTEL_RESOURCE_ATTRIBUTES:-dep
   --buildkit-addr "${BUILDKIT_ADDR}" \
   --name "${RUNNER_NAME}" \
   prepare \
-  --image "${IMAGE}" \
+  --image "${RUNNER_IMAGE}" \
   --image-pull-policy IfNotPresent \
   --image-pull-secret ""
 
@@ -179,14 +180,14 @@ spec:
       restartPolicy: Never
       containers:
         - name: probe
-          image: ${IMAGE}
+          image: ${CURL_IMAGE}
           imagePullPolicy: IfNotPresent
           command:
-            - /bin/bash
-            - -lc
+            - /bin/sh
+            - -ec
             - |
-              set -euo pipefail
-              for i in \$(seq 1 60); do
+              i=0
+              while [ "\$i" -lt 60 ]; do
                 if curl -fsS http://${name}.${RUNTIME_NAMESPACE}.svc:8080/healthz >/tmp/response 2>/tmp/error; then
                   cat /tmp/response
                   grep -q '"service":"kova-runtime-smoke"' /tmp/response
@@ -196,6 +197,7 @@ spec:
                 fi
                 cat /tmp/error || true
                 sleep 2
+                i=\$((i + 1))
               done
               exit 1
 EOF

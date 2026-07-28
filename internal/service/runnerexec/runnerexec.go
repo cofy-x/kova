@@ -5,29 +5,26 @@ import (
 	"context"
 	"fmt"
 	"net/url"
-	"path/filepath"
 	"strconv"
 	"strings"
 
 	kovav1 "github.com/cofy-x/kova/internal/apis/kova/v1alpha1"
+	"github.com/cofy-x/kova/internal/daemonclient"
 	"github.com/cofy-x/kova/internal/kube"
 	"github.com/cofy-x/kova/internal/runner"
 )
-
-const DaemonSocket = "/tmp/kova.sock"
 
 type Client struct {
 	Kube         kube.API
 	BuildkitAddr string
 }
 
-func (c Client) SubmitBuild(ctx context.Context, build *kovav1.KovaBuild, sourceMountPath string) error {
-	zipPath := filepath.Join(sourceMountPath, build.Spec.Source.PVC.Path)
+func (c Client) SubmitBuild(ctx context.Context, build *kovav1.KovaBuild, sourcePath string) error {
 	var stdout, stderr bytes.Buffer
 	err := c.Kube.Exec(ctx, build.Namespace, build.Status.RunnerPodName, kube.ExecOptions{
 		Stdout:  &stdout,
 		Stderr:  &stderr,
-		Command: []string{"curl", "-sS", "-X", "POST", "-T", zipPath, "--unix-socket", DaemonSocket, "http://localhost/api/v1/build?" + BuildQuery(build, c.BuildkitAddr)},
+		Command: daemonclient.TransportCommand("POST", daemonclient.BuildPath, BuildQuery(build, c.BuildkitAddr), sourcePath),
 	})
 	if err != nil {
 		return ExecError("submit build", stderr.Bytes(), err)
@@ -47,7 +44,7 @@ func (c Client) BuildStatus(ctx context.Context, build *kovav1.KovaBuild) (runne
 	err := c.Kube.Exec(ctx, build.Namespace, build.Status.RunnerPodName, kube.ExecOptions{
 		Stdout:  &stdout,
 		Stderr:  &stderr,
-		Command: []string{"curl", "-sS", "--unix-socket", DaemonSocket, "http://localhost/api/v1/build/status"},
+		Command: daemonclient.TransportCommand("GET", daemonclient.StatusPath, "", ""),
 	})
 	if err != nil {
 		return runner.BuildState{}, ExecError("build status", stderr.Bytes(), err)
@@ -63,7 +60,7 @@ func (c Client) CancelBuild(ctx context.Context, build *kovav1.KovaBuild) error 
 	var stderr bytes.Buffer
 	err := c.Kube.Exec(ctx, build.Namespace, build.Status.RunnerPodName, kube.ExecOptions{
 		Stderr:  &stderr,
-		Command: []string{"curl", "-sS", "-X", "POST", "--unix-socket", DaemonSocket, "http://localhost/api/v1/build/cancel"},
+		Command: daemonclient.TransportCommand("POST", daemonclient.CancelPath, "", ""),
 	})
 	if err != nil {
 		return ExecError("cancel build", stderr.Bytes(), err)
@@ -72,26 +69,11 @@ func (c Client) CancelBuild(ctx context.Context, build *kovav1.KovaBuild) error 
 }
 
 func (c Client) Post(ctx context.Context, build *kovav1.KovaBuild, path string, query string) ([]byte, error) {
-	script := `set -eu
-socket=$1
-url=$2
-body=$(mktemp)
-cleanup() { rm -f "$body"; }
-trap cleanup EXIT
-code=$(curl -sS -o "$body" -w "%{http_code}" -X POST --unix-socket "$socket" "$url")
-if [ "$code" -lt 200 ] || [ "$code" -ge 300 ]; then
-  cat "$body" >&2
-  exit 1
-fi
-cat "$body"`
 	var out, stderr bytes.Buffer
 	err := c.Kube.Exec(ctx, build.Namespace, build.Status.RunnerPodName, kube.ExecOptions{
-		Stdout: &out,
-		Stderr: &stderr,
-		Command: []string{
-			"sh", "-lc", script, "sh",
-			DaemonSocket, "http://localhost/api/v1/" + path + "?" + query,
-		},
+		Stdout:  &out,
+		Stderr:  &stderr,
+		Command: daemonclient.TransportCommand("POST", "/api/v1/"+path, query, ""),
 	})
 	if err != nil {
 		return nil, ExecError(path, stderr.Bytes(), err)
@@ -108,8 +90,12 @@ func BuildQuery(build *kovav1.KovaBuild, buildkitAddr string) string {
 	setString(values, "format", opts.Format)
 	setString(values, "target", opts.Target)
 	setString(values, "oom-cooldown", opts.OOMCooldown)
-	if opts.Concurrency > 0 {
-		values.Set("concurrency", strconv.Itoa(opts.Concurrency))
+	concurrency := opts.Concurrency
+	if build.Status.AllocatedConcurrency > 0 {
+		concurrency = int(build.Status.AllocatedConcurrency)
+	}
+	if concurrency > 0 {
+		values.Set("concurrency", strconv.Itoa(concurrency))
 	}
 	if opts.Timeout > 0 {
 		values.Set("timeout", strconv.Itoa(opts.Timeout))

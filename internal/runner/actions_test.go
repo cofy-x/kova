@@ -1,16 +1,6 @@
 package runner
 
-import (
-	"slices"
-	"testing"
-)
-
-func TestPreheatCurlCommandFailsOnHTTPErrorAndKeepsBody(t *testing.T) {
-	command := preheatCurlCommand("target=image")
-	if !slices.Contains(command, "--fail-with-body") {
-		t.Fatalf("command must propagate daemon HTTP failures: %#v", command)
-	}
-}
+import "testing"
 
 func TestParseListArgs(t *testing.T) {
 	wide, err := parseListArgs([]string{"-o", "wide"})

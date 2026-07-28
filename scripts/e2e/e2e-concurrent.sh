@@ -5,7 +5,7 @@ set -euo pipefail
 source "$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/../common.sh"
 
 ROOT=$(repo_root)
-IMAGE=${IMAGE:-localhost:5002/kova:dev}
+RUNNER_IMAGE=${RUNNER_IMAGE:-localhost:5002/kova:runner-dev}
 BUILDKIT_ADDR=${BUILDKIT_ADDR:-tcp://kova.kova.svc:9094}
 KIND_KUBECONFIG=${KIND_KUBECONFIG:-.kind/kova-local.kubeconfig}
 NAMESPACE=${NAMESPACE:-kova}
@@ -69,7 +69,7 @@ KOVA_DAEMON_OTEL_RESOURCE_ATTRIBUTES=${KOVA_DAEMON_OTEL_RESOURCE_ATTRIBUTES:-dep
   --buildkit-addr "${BUILDKIT_ADDR}" \
   --name "${RUNNER_NAME}" \
   prepare \
-  --image "${IMAGE}" \
+  --image "${RUNNER_IMAGE}" \
   --image-pull-policy IfNotPresent \
   --image-pull-secret ""
 

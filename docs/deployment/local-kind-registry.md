@@ -28,7 +28,7 @@ flowchart LR
   hostPort -->|"port maps to :5000"| registry
 
   kindNode -->|"containerd mirror<br/>localhost:5002 -> kind-registry:5000"| registry
-  kubelet -->|"image: localhost:5002/kova:dev"| kindNode
+  kubelet -->|"controller/runner/worker role tags"| kindNode
 
   runner -->|"tcp://kova...:9094"| buildkitSvc
   buildkitSvc --> buildkit
@@ -45,7 +45,7 @@ flowchart LR
 ```
 
 This is only for image pulls performed by kind nodes. When Kubernetes sees an
-image such as `localhost:5002/kova:dev`, containerd inside the kind
+image such as `localhost:5002/kova:runner-dev`, containerd inside the kind
 node uses the mirror endpoint and pulls from the Docker container named
 `kind-registry`.
 
@@ -70,8 +70,8 @@ local development.
 - `make kind-registry`: starts or reuses the `kind-registry` Docker container.
 - `make kind-create`: creates the kind cluster and connects `kind-registry` to
   the kind Docker network.
-- `make kind-load`: pushes `localhost:5002/kova:dev` to the local
-  registry and loads it into kind nodes.
+- `make kind-load`: pushes the local controller, runner, and worker tags to the
+  registry and loads them into kind nodes.
 - `make e2e`: deploys BuildKit workers, creates a runner, builds the example
   image, pushes it, exports results, and verifies host-side pull.
 - `make e2e-concurrent`: generates multiple tiny image contexts, builds them

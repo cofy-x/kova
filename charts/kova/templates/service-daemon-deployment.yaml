@@ -1,4 +1,13 @@
 {{- if .Values.serviceDaemon.enabled }}
+{{- if not (has .Values.artifactStore.driver (list "filesystem" "s3")) }}
+{{- fail "artifactStore.driver must be filesystem or s3" }}
+{{- end }}
+{{- if not (has .Values.serviceDaemon.authentication.mode (list "tokenreview" "static" "unsafe-none")) }}
+{{- fail "serviceDaemon.authentication.mode must be tokenreview, static, or unsafe-none" }}
+{{- end }}
+{{- if and (eq .Values.artifactStore.driver "filesystem") (not .Values.artifactStore.filesystem.pvc.create) (not .Values.artifactStore.filesystem.pvc.existingClaim) }}
+{{- fail "artifactStore.filesystem.pvc.existingClaim is required when the chart does not create the filesystem PVC" }}
+{{- end }}
 {{- $name := printf "%s-service" (include "kova.fullname" .) | trunc 63 | trimSuffix "-" }}
 {{- $selectorName := printf "%s-service" (include "kova.name" .) | trunc 63 | trimSuffix "-" }}
 {{- $saName := default "default" .Values.serviceDaemon.serviceAccount.name }}
@@ -37,50 +46,67 @@ spec:
     spec:
       automountServiceAccountToken: {{ .Values.serviceDaemon.serviceAccount.automountServiceAccountToken }}
       serviceAccountName: {{ $saName }}
+      securityContext:
+        {{- toYaml .Values.serviceDaemon.podSecurityContext | nindent 8 }}
       containers:
         - name: kova-service
-          image: {{ include "kova.image" . }}
-          imagePullPolicy: {{ include "kova.imagePullPolicy" . }}
-          command:
-            - kovad
-            - service
+          image: {{ include "kova.roleImage" (dict "root" . "role" "controller") }}
+          imagePullPolicy: {{ include "kova.roleImagePullPolicy" (dict "root" . "role" "controller") }}
+          args:
             - --listen={{ .Values.serviceDaemon.listen }}
             - --namespace={{ default (include "kova.namespace" .) .Values.serviceDaemon.runnerNamespace }}
-            - --runner-image={{ default (include "kova.image" .) .Values.serviceDaemon.runnerImage }}
-            - --runner-image-pull-policy={{ default (include "kova.imagePullPolicy" .) .Values.serviceDaemon.runnerImagePullPolicy }}
+            - --runner-image={{ include "kova.roleImage" (dict "root" . "role" "runner") }}
+            - --runner-image-pull-policy={{ include "kova.roleImagePullPolicy" (dict "root" . "role" "runner") }}
             - --runner-image-pull-secret={{ default (include "kova.imagePullSecretName" .) .Values.serviceDaemon.runnerImagePullSecret }}
             {{- range $key, $value := .Values.serviceDaemon.runnerNodeSelector }}
             - {{ printf "--runner-node-selector=%s=%s" $key ($value | toString) | quote }}
             {{- end }}
             - --buildkit-addr={{ default (printf "tcp://%s.%s.svc:%v" (include "kova.fullname" .) (include "kova.namespace" .) .Values.service.port) .Values.serviceDaemon.buildkitAddr }}
+            - --artifact-driver={{ .Values.artifactStore.driver }}
+            - --artifact-root={{ .Values.artifactStore.filesystem.mountPath }}
+            - --artifact-secret={{ .Values.artifactStore.secretName }}
+            {{- if eq .Values.artifactStore.driver "filesystem" }}
             - --source-pvc-claim={{ include "kova.sourcePVCName" . }}
-            - --source-root={{ .Values.sourceStore.mountPath }}
+            {{- else if eq .Values.artifactStore.driver "s3" }}
+            - --s3-endpoint={{ required "artifactStore.s3.endpoint is required for the s3 driver" .Values.artifactStore.s3.endpoint }}
+            - --s3-bucket={{ required "artifactStore.s3.bucket is required for the s3 driver" .Values.artifactStore.s3.bucket }}
+            - --s3-region={{ .Values.artifactStore.s3.region }}
+            - --s3-secure={{ .Values.artifactStore.s3.secure }}
+            {{- end }}
+            - --auth-mode={{ .Values.serviceDaemon.authentication.mode }}
             - --job-ttl={{ .Values.serviceDaemon.jobTTL }}
+            - --max-upload-bytes={{ .Values.serviceDaemon.maxUploadBytes | int64 }}
             - --wait={{ .Values.serviceDaemon.wait }}
             - --poll-interval={{ .Values.serviceDaemon.pollInterval }}
+            - --max-active-jobs={{ .Values.serviceDaemon.maxActiveJobs }}
+            - --worker-slots={{ .Values.serviceDaemon.workerSlots }}
             - --leader-elect={{ .Values.serviceDaemon.leaderElect }}
             - --leader-election-namespace={{ include "kova.namespace" . }}
           ports:
             - name: http
               containerPort: {{ .Values.serviceDaemon.port }}
               protocol: TCP
-          {{- if or $registrySecret .Values.serviceDaemon.authTokenSecret.name }}
+          {{- if or .Values.observability.enabled (eq .Values.serviceDaemon.authentication.mode "static") }}
           env:
-            {{- if .Values.serviceDaemon.authTokenSecret.name }}
+            {{- if .Values.observability.enabled }}
+            {{- include "kova.observabilityEnv" . | nindent 12 }}
+            {{- end }}
+            {{- if eq .Values.serviceDaemon.authentication.mode "static" }}
             - name: KOVA_SERVICE_AUTH_TOKEN
               valueFrom:
                 secretKeyRef:
-                  name: {{ .Values.serviceDaemon.authTokenSecret.name }}
-                  key: {{ .Values.serviceDaemon.authTokenSecret.key }}
+                  name: {{ required "serviceDaemon.authentication.staticTokenSecret.name is required for static authentication" .Values.serviceDaemon.authentication.staticTokenSecret.name }}
+                  key: {{ .Values.serviceDaemon.authentication.staticTokenSecret.key }}
             {{- end }}
-            {{- if $registrySecret }}
-            - name: DOCKER_CONFIG
-              value: /var/run/kova-registry-auth
-            {{- end }}
+          {{- end }}
+          {{- if .Values.artifactStore.secretName }}
+          envFrom:
+            - secretRef:
+                name: {{ .Values.artifactStore.secretName }}
           {{- end }}
           readinessProbe:
             httpGet:
-              path: /healthz
+              path: /readyz
               port: http
           livenessProbe:
             httpGet:
@@ -90,14 +116,11 @@ spec:
             {{- toYaml .Values.serviceDaemon.resources | nindent 12 }}
           securityContext:
             {{- toYaml .Values.serviceDaemon.securityContext | nindent 12 }}
+          {{- if eq .Values.artifactStore.driver "filesystem" }}
           volumeMounts:
             - name: kova-source-store
-              mountPath: {{ .Values.sourceStore.mountPath }}
-            {{- if $registrySecret }}
-            - name: registry-auth
-              mountPath: /var/run/kova-registry-auth
-              readOnly: true
-            {{- end }}
+              mountPath: {{ .Values.artifactStore.filesystem.mountPath }}
+          {{- end }}
       {{- $imagePullSecrets := include "kova.renderImagePullSecrets" . }}
       {{- if $imagePullSecrets }}
       imagePullSecrets:
@@ -115,16 +138,10 @@ spec:
       tolerations:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      {{- if eq .Values.artifactStore.driver "filesystem" }}
       volumes:
         - name: kova-source-store
           persistentVolumeClaim:
             claimName: {{ include "kova.sourcePVCName" . }}
-        {{- if $registrySecret }}
-        - name: registry-auth
-          secret:
-            secretName: {{ $registrySecret }}
-            items:
-              - key: .dockerconfigjson
-                path: config.json
-        {{- end }}
+      {{- end }}
 {{- end }}

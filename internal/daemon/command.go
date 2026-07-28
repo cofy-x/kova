@@ -53,7 +53,7 @@ func CLICommand() *cli.Command {
 		Flags: []cli.Flag{
 			&cli.StringFlag{Name: "socket", Value: defaultDaemonSocket, Usage: "unix socket path"},
 			&cli.StringFlag{Name: "addrs", Usage: "default comma-separated buildkitd addresses"},
-			&cli.StringFlag{Name: "auth", Usage: "base64-encoded registry auth JSON; written to /root/.docker/config.json"},
+			&cli.StringFlag{Name: "auth", Usage: "base64-encoded registry auth JSON; written under the runtime user's home directory"},
 		},
 		Action: func(c *cli.Context) error {
 			if auth := c.String("auth"); auth != "" {
@@ -71,7 +71,11 @@ func writeDockerAuth(b64 string) error {
 	if err != nil {
 		return fmt.Errorf("decode --auth: %w", err)
 	}
-	dir := "/root/.docker"
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return err
+	}
+	dir := filepath.Join(home, ".docker")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}

@@ -5,7 +5,9 @@ set -euo pipefail
 source "$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/../common.sh"
 
 ROOT=$(repo_root)
-IMAGE=${IMAGE:-localhost:5002/kova:dev}
+CONTROLLER_IMAGE=${CONTROLLER_IMAGE:-localhost:5002/kova:controller-dev}
+RUNNER_IMAGE=${RUNNER_IMAGE:-localhost:5002/kova:runner-dev}
+WORKER_IMAGE=${WORKER_IMAGE:-localhost:5002/kova:worker-dev}
 BUILDKIT_ADDR=${BUILDKIT_ADDR:-tcp://kova.kova.svc:9094}
 KIND_KUBECONFIG=${KIND_KUBECONFIG:-.kind/kova-local.kubeconfig}
 RELEASE_NAME=${RELEASE_NAME:-kova}
@@ -111,14 +113,20 @@ helm upgrade --install "${RELEASE_NAME}" "${ROOT}/charts/kova" \
   --wait \
   --timeout 180s \
   -f "${ROOT}/deploy/kind-values.yaml" \
-  --set "imageOverride=${IMAGE}" \
+  --set-string "images.controller.repository=${CONTROLLER_IMAGE%:*}" \
+  --set-string "images.controller.tag=${CONTROLLER_IMAGE##*:}" \
+  --set-string "images.runner.repository=${RUNNER_IMAGE%:*}" \
+  --set-string "images.runner.tag=${RUNNER_IMAGE##*:}" \
+  --set-string "images.worker.repository=${WORKER_IMAGE%:*}" \
+  --set-string "images.worker.tag=${WORKER_IMAGE##*:}" \
   --set "serviceDaemon.enabled=true" \
-  --set-string "serviceDaemon.authTokenSecret.name=${SERVICE_AUTH_SECRET}" \
-  --set-string "serviceDaemon.authTokenSecret.key=token" \
+  --set-string "serviceDaemon.authentication.mode=static" \
+  --set-string "serviceDaemon.authentication.staticTokenSecret.name=${SERVICE_AUTH_SECRET}" \
+  --set-string "serviceDaemon.authentication.staticTokenSecret.key=token" \
   --set "serviceDaemon.jobTTL=${SERVICE_JOB_TTL}" \
   --set "serviceDaemon.runnerImagePullSecret=" \
-  --set "sourceStore.pvc.create=true" \
-  --set "sourceStore.pvc.accessModes[0]=ReadWriteOnce"
+  --set "artifactStore.filesystem.pvc.create=true" \
+  --set "artifactStore.filesystem.pvc.accessModes[0]=ReadWriteOnce"
 
 kubectl --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" \
   -n "${NAMESPACE}" rollout status deploy/"${RELEASE_NAME}-service" --timeout=180s

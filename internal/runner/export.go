@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/cofy-x/kova/internal/daemonclient"
 )
 
 func (c *Client) Export(args []string) (err error) {
@@ -37,26 +39,13 @@ func (c *Client) Export(args []string) (err error) {
 	_ = tmp.Close()
 	defer os.Remove(tmpPath)
 
-	script := `set -eu
-socket=$1
-url=$2
-body=$(mktemp)
-cleanup() { rm -f "$body"; }
-trap cleanup EXIT
-code=$(curl -sS -o "$body" -w "%{http_code}" -X POST --unix-socket "$socket" "$url")
-if [ "$code" -lt 200 ] || [ "$code" -ge 300 ]; then
-  cat "$body" >&2
-  exit 1
-fi
-cat "$body"`
 	out, err := os.Create(tmpPath)
 	if err != nil {
 		return err
 	}
 	cmdErr := kube.Exec(ctx, c.Config.Namespace, c.Config.PodName, kubeExecOptions(
 		nil, out, c.Stderr,
-		"sh", "-lc", script, "sh",
-		daemonSocket, "http://localhost/api/v1/export?"+query,
+		daemonclient.TransportCommand("POST", daemonclient.ExportPath, query, "")...,
 	))
 	closeErr := out.Close()
 	if cmdErr != nil {

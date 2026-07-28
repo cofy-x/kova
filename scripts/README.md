@@ -11,7 +11,7 @@ the categorized paths below.
 
 ## Build
 
-- `build/build-image.sh`: build the Kova runtime image.
+- `build/build-image.sh`: build the controller, runner, and worker images.
 - `build/build-python-smoke-base.sh`: build the local Python smoke base image.
 
 ## Release

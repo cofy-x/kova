@@ -5,7 +5,9 @@ set -euo pipefail
 source "$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/../common.sh"
 
 ROOT=$(repo_root)
-IMAGE=${IMAGE:-localhost:5002/kova:dev}
+CONTROLLER_IMAGE=${CONTROLLER_IMAGE:-localhost:5002/kova:controller-dev}
+RUNNER_IMAGE=${RUNNER_IMAGE:-localhost:5002/kova:runner-dev}
+WORKER_IMAGE=${WORKER_IMAGE:-localhost:5002/kova:worker-dev}
 IMAGE_PLATFORM=${IMAGE_PLATFORM:-linux/$(docker_arch)}
 VERSION=${VERSION:-dev}
 COMMIT=${COMMIT:-$(git -C "${ROOT}" rev-parse --short=12 HEAD 2>/dev/null || printf unknown)}
@@ -21,13 +23,12 @@ build_args=(
   --build-arg "VERSION=${VERSION}"
   --build-arg "COMMIT=${COMMIT}"
   --build-arg "BUILD_DATE=${BUILD_DATE}"
-  -t "${IMAGE}"
   -f "${ROOT}/docker/Dockerfile"
 )
 
 optional_build_args=(
   UBUNTU_IMAGE
-  BUILDKIT_DOWNLOAD_BASE_URL
+  BUILDKIT_ROOTLESS_IMAGE
   GRPCURL_DOWNLOAD_BASE_URL
   NYDUS_DOWNLOAD_BASE_URL
   GO_DOWNLOAD_BASE_URL
@@ -67,4 +68,11 @@ if [[ -n "${https_proxy_url}" ]]; then
   )
 fi
 
-docker build "${build_args[@]}" "${ROOT}"
+for role in controller runner worker; do
+  case "${role}" in
+    controller) image=${CONTROLLER_IMAGE} ;;
+    runner) image=${RUNNER_IMAGE} ;;
+    worker) image=${WORKER_IMAGE} ;;
+  esac
+  docker build "${build_args[@]}" --target "${role}" --tag "${image}" "${ROOT}"
+done

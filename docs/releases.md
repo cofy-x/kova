@@ -1,49 +1,49 @@
 # Releases
 
-Kova publishes the cross-platform `kova` client and the Linux `kovad` runtime
-from the same version tag. The client is a CGO-free workstation binary; the
-runtime is delivered only in the container image.
+Every semantic-version tag publishes the cross-platform `kova` client and all
+three Linux runtime roles from the same commit.
 
 ## Versioning
 
-Release tags use semantic versions such as `v0.1.0`. A suffix such as
-`v0.1.0-rc.1` creates a prerelease and does not update the `latest` container
-tag. Kova is pre-1.0, so minor versions may include intentional CLI or API
-changes documented in the release notes.
+Tags use semantic versions such as `v0.1.0`. A suffix such as
+`v0.1.0-rc.1` creates a prerelease and does not update stable image tags.
+Kova is pre-1.0, so release notes may document intentional API changes.
 
 ## Published Artifacts
 
 Each tag publishes:
 
 - `kova` archives for Linux, macOS, and Windows on `amd64` and `arm64`
-- a `checksums.txt` file covering every downloadable artifact
-- a CycloneDX JSON SBOM for the CLI
-- GitHub build-provenance attestations for the CLI artifacts
-- `ghcr.io/cofy-x/kova:<version>` for Linux `amd64` and `arm64`
-- OCI provenance and SBOM attestations attached to the runtime image
+- `checksums.txt`, a CycloneDX CLI SBOM, and build-provenance attestations
+- `ghcr.io/cofy-x/kova:controller-<version>`
+- `ghcr.io/cofy-x/kova:runner-<version>`
+- `ghcr.io/cofy-x/kova:worker-<version>`
+- multi-platform OCI provenance and SBOM attestations for every image role
 
-Stable tags also update `ghcr.io/cofy-x/kova:latest`.
+Stable releases also update `controller-latest`, `runner-latest`, and
+`worker-latest`.
 
-Once a version tag exists, Go users can install that exact client version:
+Install an exact CLI version with Go:
 
 ```bash
 go install github.com/cofy-x/kova/cmd/kova@v0.1.0
 ```
 
-Replace `v0.1.0` with the required release or prerelease tag. `@latest` tracks
-the latest version selected by the Go module toolchain; use an explicit tag in
-automation and other reproducible environments.
+Use an explicit version in automation. `@latest` is convenient for interactive
+use but follows the version selected by the Go module proxy.
 
-## Release Flow
+## Release Gates
 
-The release workflow runs only for version tags. It builds and attests the CLI
-archives, publishes the multi-platform runtime image, verifies artifact
-checksums, and then creates the GitHub release. Create a release tag only from
-a commit whose required CI and CodeQL checks have passed.
+The tag workflow:
 
-GitHub Container Registry creates a new package as private on its first push.
-For the first release, let the image job publish the package, change the
-package visibility to public in the GitHub organization settings, and rerun
-the failed release job. The release job verifies an anonymous image pull
-before it creates the GitHub release, so later releases fail closed if package
-visibility regresses.
+1. validates the semantic version;
+2. builds the six CLI archives in parallel and generates checksums and SBOM;
+3. builds and attests controller, runner, and worker images for Linux `amd64`
+   and `arm64`;
+4. verifies archive contents, the native CLI version, image role boundaries,
+   runtime users, and anonymous pulls;
+5. creates the GitHub release only after every smoke check succeeds.
+
+Create a tag only from a commit whose required CI and CodeQL checks have
+passed. The GHCR package must be public before the first tag workflow can pass
+its anonymous-pull gate.

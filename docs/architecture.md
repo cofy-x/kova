@@ -1,270 +1,116 @@
 # Architecture
 
-`kova` is a distributed image build service. It turns batches of
-Dockerfile contexts into OCI or Nydus images, pushes them to a target registry,
-and can preheat built images into a Dragonfly P2P cluster.
+Kova is a cloud-provider-neutral Kubernetes image build service. It turns
+Dockerfile contexts into OCI or Nydus images, pushes them to OCI registries,
+and can preheat successful results through Dragonfly.
 
 ## Runtime Roles
 
-- **kova CLI**: the `kova` binary running on a developer workstation or CI job.
-  It uses the Kubernetes API to create runner Pods and send build, export,
-  wait, log, exec, scale, and preheat requests.
-- **runner**: a short-lived Pod for one build batch. It runs
-  `kovad daemon`, owns the batch state, unpacks the source zip, records
-  results, and dispatches work to BuildKit workers.
-- **worker**: a `buildkitd` Pod deployed by the Helm chart. Workers execute
-  BuildKit builds and push OCI image outputs to the configured registry. For
-  Nydus targets, the runner converts the OCI output with `nydusify` and pushes
-  the Nydus image.
-- **store**: per-runner result storage. The runner writes build outcomes to
-  `result.lmdb`, writes failure logs to `logs.jsonl`, and exports selected
-  records to `.work/result.jsonl` in local E2E flows.
-- **service daemon**: optional long-running HTTP gateway deployed in the
-  cluster. It accepts `/v1/builds` requests, creates one runner Pod per job, and
-  proxies status, logs, export, preheat, and cancel operations to that runner.
+Kova publishes three Linux image roles from the same version:
 
-Each build batch should usually use an independent runner. Build throughput is
-scaled mainly by increasing worker replicas and build concurrency. A single
-runner distributes its batch across available worker addresses.
+- **controller** runs `kova-controller service`, the authenticated HTTP API,
+  and the `KovaBuild` controller. It does not contain BuildKit or Nydus tools.
+- **runner** runs one isolated `kovad daemon` per job. It contains `buildctl`,
+  `nydusify`, `nydus-image`, and diagnostic tools, but not `buildkitd`.
+- **worker** runs upstream rootless BuildKit. It contains no Kova binary and
+  provides shared execution and cache capacity.
 
-## Runtime Image And Processes
+The cross-platform `kova` CLI is distributed separately. It can operate a
+runner directly for development or call a service deployment for platform
+integration.
 
-Kova uses one runtime image for both runner and worker Pods. The Pod command
-selects the role:
+## Job And Storage Model
 
-- runner Pods start `kovad daemon --addrs <buildkit-addresses>`
-- worker Pods start `buildkitd --config /etc/buildkit/buildkitd.toml --addr
-  tcp://0.0.0.0:9094`
+`KovaBuild` is the canonical service job. Its spec is immutable and contains
+an artifact URI, SHA-256 digest, build options, and an optional idempotency
+key. Status contains `observedGeneration`, a `Ready` Condition, timestamps,
+the assigned runner, allocated concurrency, a typed result summary, and at
+most 100 inline results.
 
-The runtime image contains `kovad` and the external tools used by the runtime
-roles:
+The artifact store has two drivers:
 
-- `kovad`: Kova runtime daemon and service entrypoint
-- `buildctl`: the upstream BuildKit client used by the runner daemon
-- `buildkitd`: the upstream BuildKit daemon used by worker Pods
-- `nydusify` and `nydus-image`: Nydus conversion tools
-- `grpcurl`: diagnostics and runtime checks
+- `filesystem` stores artifacts below a configured root. Kubernetes service
+  deployments mount that root from a PVC.
+- `s3` stores artifacts in an S3-compatible bucket. A runner init container
+  downloads and verifies the source into a job-local `emptyDir`.
 
-The local `kova` CLI is a Kubernetes client. During `prepare`, it uses the
-configured kubeconfig to create the runner Pod. The runner Pod then starts
-`kovad daemon` and listens on `/tmp/kova.sock`. Later local commands use
-Kubernetes exec to call the daemon through that Unix socket.
+The full result set is persisted as JSON in the same store. Credentials are
+read from Kubernetes Secrets and never copied into `KovaBuild` resources.
 
-For service-style deployments, `kovad service` runs as a separate long-lived
-Deployment. It uses in-cluster Kubernetes credentials to create runner Pods and
-then uses the same Unix-socket daemon API inside each runner. This keeps the
-batch isolation boundary intact while allowing CI systems and platform services
-to call Kova through HTTP.
+## Internal Protocol
 
-`prepare` is the boundary between the local CLI and the target Kubernetes
-cluster. The CLI can point at a local kind cluster or any other Kubernetes
-cluster that accepts the kubeconfig. The runner image passed with
-`prepare --image` must already be pullable by that cluster. Kova then creates a
-runner Pod from that image and waits for the daemon inside the Pod to become
-ready.
+The daemon listens on `/tmp/kova.sock`. Both the local CLI and the service
+controller use a typed Go client and invoke the hidden `kovad transport`
+command through Kubernetes exec. The transport streams request files and
+responses over the Unix socket without constructing shell or `curl` commands.
 
-Build requests run inside the runner Pod. The daemon unpacks source input,
-selects BuildKit worker addresses, and starts `buildctl` subprocesses. Those
-`buildctl` subprocesses connect to remote worker `buildkitd` Pods; they are not
-the component doing the heavy BuildKit execution themselves.
+## Worker Discovery And Scheduling
 
-## Worker Address Discovery
+The Helm chart creates a headless Service for worker Pods. Runners resolve its
+DNS name into independent BuildKit endpoints, keep the address pool refreshed,
+apply consistent target placement, enforce per-worker concurrency, and cool
+down workers after OOM-style failures.
 
-Worker Pods are created by the Helm-managed Kova Deployment. Their count comes
-from `deployment.replicas` unless chart autoscaling is enabled. A headless
-Service named `kova` selects those worker Pods and exposes port `9094`.
-
-The default runner BuildKit address is:
-
-```text
-tcp://kova.kova.svc:9094
-```
-
-Inside the runner Pod, Kubernetes DNS resolves the headless Service name to the
-ready worker Pod IPs. The scheduler parses the address, resolves the hostname
-with DNS, and turns every returned IP into an independent BuildKit endpoint:
-
-```text
-tcp://10.244.1.3:9094
-tcp://10.244.2.2:9094
-tcp://10.244.3.3:9094
-```
-
-Kova does not list worker Pods through the Kubernetes API for scheduling. It
-relies on headless Service DNS records, then uses its scheduler package to keep
-an address pool, assign targets consistently, enforce per-address concurrency,
-and temporarily cool down workers after OOM-style connection failures.
+The service controller adds a FIFO admission layer across jobs. It limits
+active jobs with `maxActiveJobs` and divides `workerSlots` across admitted
+jobs. Direct CLI runners remain an explicit development path and do not take
+part in service-level admission.
 
 ## Topology
 
 ```mermaid
 flowchart LR
-  client["kova CLI<br/>workstation"]
+  client["CLI or API client"]
+  controller["controller image<br/>kova-controller"]
   api["Kubernetes API"]
-  runnerPod["runner Pod<br/>runtime image"]
-  daemon["kovad daemon<br/>/tmp/kova.sock"]
-  buildctl["buildctl subprocesses"]
-  socket["Unix socket<br/>/tmp/kova.sock"]
-  dns["Kubernetes DNS<br/>kova.kova.svc"]
-  service["Headless Service<br/>kova:9094"]
-  workerA["worker Pod<br/>runtime image<br/>buildkitd"]
-  workerB["worker Pod<br/>runtime image<br/>buildkitd"]
-  workerC["worker Pod<br/>runtime image<br/>buildkitd"]
-  registry["target registry"]
-  dragonfly["Dragonfly P2P cluster"]
+  store["filesystem or S3 artifacts"]
+  runner["runner image<br/>kovad daemon"]
+  transport["typed Unix-socket transport"]
+  workers["worker images<br/>rootless buildkitd"]
+  registry["OCI registry"]
+  dragonfly["Dragonfly"]
 
-  client -->|"create/delete/list/logs/exec/scale"| api
-  api --> runnerPod
-  client -->|"remote exec curl"| socket
-  runnerPod --> daemon
-  socket --> daemon
-  daemon -->|"spawn"| buildctl
-  buildctl -->|"resolve"| dns
-  dns --> service
-  buildctl -->|"buildctl --addr tcp://pod-ip:9094"| service
-  service --> workerA
-  service --> workerB
-  service --> workerC
-  workerA -->|"push image"| registry
-  workerB -->|"push image"| registry
-  workerC -->|"push image"| registry
-  daemon -->|"convert and push Nydus targets"| registry
-  daemon -->|"preheat selected images"| dragonfly
+  client --> controller
+  controller --> store
+  controller --> api
+  api --> runner
+  runner --> transport
+  transport --> workers
+  workers --> registry
+  runner --> registry
+  runner --> dragonfly
 ```
 
-## Service Gateway Topology
+## Service Build Flow
 
-```mermaid
-flowchart LR
-  client["CI / platform / curl"]
-  gateway["kovad service<br/>HTTP :8080"]
-  api["Kubernetes API"]
-  runnerPod["runner Pod per job<br/>kovad daemon"]
-  socket["/tmp/kova.sock"]
-  worker["BuildKit workers"]
-  registry["target registry"]
+1. The service authenticates the caller with Kubernetes TokenReview or an
+   explicitly configured static token.
+2. It stages the upload, validates the archive, computes its SHA-256 digest,
+   and writes an immutable source artifact.
+3. It creates an immutable `KovaBuild`. Reusing an idempotency key with
+   different inputs returns a conflict.
+4. FIFO capacity admission assigns runner concurrency and creates a runner
+   Pod. S3 sources are materialized and verified by an init container.
+5. The controller streams the source path to the daemon transport. The runner
+   dispatches targets across healthy BuildKit workers.
+6. The controller resolves registry descriptors, persists the full result
+   artifact, updates typed status, and removes the job after its TTL.
 
-  client -->|"POST /v1/builds"| gateway
-  gateway -->|"create/delete/exec/logs"| api
-  api --> runnerPod
-  gateway -->|"exec curl --unix-socket"| socket
-  runnerPod --> socket
-  runnerPod --> worker
-  worker --> registry
-```
+## Security Boundaries
 
-## Build Batch Flow
+- Controller and runner containers run as UID/GID 65532 with all capabilities
+  dropped and the runtime-default seccomp profile.
+- Worker containers run upstream rootless BuildKit as UID/GID 1000. Rootless
+  BuildKit requires unconfined seccomp and AppArmor plus
+  `--oci-worker-no-process-sandbox`; it is not a privileged container.
+- TokenReview is the default service authentication mode. `unsafe-none` must
+  be selected explicitly and is intended only for isolated development.
+- Registry, artifact, and API credentials are external Secret inputs.
 
-```mermaid
-sequenceDiagram
-  autonumber
-  participant Client as kova CLI
-  participant API as Kubernetes API
-  participant Runner as runner Pod
-  participant Daemon as kovad daemon
-  participant Worker as buildkitd workers
-  participant Registry as target registry
+## Observability
 
-  Client->>API: prepare using kubeconfig
-  Client->>API: create runner Pod with --image
-  API->>Runner: start container: kovad daemon --addrs ...
-  Runner->>Daemon: listen on /tmp/kova.sock
-  API-->>Client: runner Pod Ready
-  Client->>Runner: health check through Kubernetes exec
-  Runner->>Daemon: GET /api/v1/health
-  Daemon-->>Runner: ok
-  Runner-->>Client: ready
-
-  Client->>Runner: POST /api/v1/build with .work/source.zip
-  Runner->>Daemon: stream zip over Unix socket
-  Daemon->>Daemon: unpack source, parse metadata, apply variables
-  Daemon->>Daemon: resolve headless Service DNS into worker IPs
-  loop For each image target
-    Daemon->>Daemon: select worker address from scheduler pool
-    Daemon->>Worker: spawn buildctl --addr tcp://worker-ip:9094 build
-    Worker->>Registry: push OCI image
-    opt Nydus target
-      Daemon->>Registry: nydusify convert and push Nydus image
-    end
-    Worker-->>Daemon: build result
-    Daemon->>Daemon: persist result and failure logs
-  end
-  Daemon-->>Runner: build accepted/status
-  Runner-->>Client: build response
-```
-
-## Export Flow
-
-```mermaid
-sequenceDiagram
-  autonumber
-  participant Client as kova CLI
-  participant Runner as runner Pod
-  participant Daemon as kovad daemon
-  participant Store as result store
-
-  Client->>Runner: POST /api/v1/export
-  Runner->>Daemon: request export over Unix socket
-  Daemon->>Store: read result.lmdb
-  Store-->>Daemon: stored build entries
-  Daemon->>Daemon: filter OCI / include failures
-  Daemon-->>Runner: result JSONL stream
-  Runner-->>Client: write .work/result.jsonl
-```
-
-## Preheat Flow
-
-```mermaid
-sequenceDiagram
-  autonumber
-  participant Client as kova CLI
-  participant Runner as runner Pod
-  participant Daemon as kovad daemon
-  participant Store as result store
-  participant Dragonfly as Dragonfly scheduler
-
-  Client->>Runner: POST /api/v1/preheat
-  Runner->>Daemon: request preheat over Unix socket
-  Daemon->>Store: read successful build entries
-  loop For each selected image
-    Daemon->>Dragonfly: submit preheat request
-    Dragonfly-->>Daemon: preheat accepted or failed
-    Daemon->>Store: update preheat outcome
-  end
-  Daemon-->>Runner: preheat summary
-  Runner-->>Client: preheat response
-```
-
-## Scaling Model
-
-```mermaid
-flowchart TB
-  batch["one build batch"]
-  runner["one runner Pod"]
-  concurrency["build concurrency"]
-  pool["BuildKit address pool"]
-  workers["worker replicas"]
-
-  batch --> runner
-  runner --> concurrency
-  concurrency --> pool
-  pool --> workers
-
-  note1["Increase worker replicas for more BuildKit capacity"]
-  note2["Increase build concurrency to use more available workers"]
-  note3["Use separate runners to isolate separate batches"]
-
-  workers --- note1
-  concurrency --- note2
-  runner --- note3
-```
-
-## Operational Boundaries
-
-- The runner is the batch isolation boundary. It owns one batch's daemon state,
-  result database, failure logs, and exported results.
-- Workers are shared build capacity. They do not own batch state.
-- Registry credentials and target registry addresses are supplied through Helm
-  values, runner options, image pull secrets, and build variables.
-- Every Kubernetes deployment uses the same runtime flow: client, runner Pod,
-  `kova` headless Service, and BuildKit worker Pods.
+Stable OpenTelemetry metrics cover queue delay, job duration and outcomes,
+capacity waits, artifact write latency and outcomes, authentication denials,
+and cancellations. Labels are limited to bounded values such as phase, result,
+and storage driver. `/healthz` remains an unauthenticated process liveness
+endpoint.

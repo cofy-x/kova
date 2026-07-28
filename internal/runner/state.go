@@ -7,6 +7,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/cofy-x/kova/internal/daemonclient"
 )
 
 func (c *Client) Destroy() (err error) {
@@ -95,8 +97,7 @@ func (c *Client) buildStatusJSON() ([]byte, error) {
 	var stdout, stderr bytes.Buffer
 	err = kube.Exec(context.Background(), c.Config.Namespace, c.Config.PodName, kubeExecOptions(
 		nil, &stdout, &stderr,
-		"curl", "-sS", "--unix-socket", daemonSocket,
-		"http://localhost/api/v1/build/status",
+		daemonclient.TransportCommand("GET", daemonclient.StatusPath, "", "")...,
 	))
 	if err != nil {
 		return nil, execError("build status", stderr.Bytes(), err)
@@ -112,8 +113,7 @@ func (c *Client) cancelBuildJSON() ([]byte, error) {
 	var stdout, stderr bytes.Buffer
 	err = kube.Exec(context.Background(), c.Config.Namespace, c.Config.PodName, kubeExecOptions(
 		nil, &stdout, &stderr,
-		"curl", "-sS", "-X", "POST", "--unix-socket", daemonSocket,
-		"http://localhost/api/v1/build/cancel",
+		daemonclient.TransportCommand("POST", daemonclient.CancelPath, "", "")...,
 	))
 	if err != nil {
 		return nil, execError("cancel build", stderr.Bytes(), err)

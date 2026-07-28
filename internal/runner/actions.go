@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/cofy-x/kova/internal/daemonclient"
 	kubeapi "github.com/cofy-x/kova/internal/kube"
 )
 
@@ -29,7 +30,8 @@ func (c *Client) Preheat(args []string) (err error) {
 	}
 	var stdout, stderr bytes.Buffer
 	err = kube.Exec(ctx, c.Config.Namespace, c.Config.PodName, kubeExecOptions(
-		nil, &stdout, &stderr, preheatCurlCommand(query)...,
+		nil, &stdout, &stderr,
+		daemonclient.TransportCommand("POST", daemonclient.PreheatPath, query, "")...,
 	))
 	if stdout.Len() > 0 {
 		fmt.Fprintln(c.Stdout, string(bytes.TrimSpace(stdout.Bytes())))
@@ -41,14 +43,6 @@ func (c *Client) Preheat(args []string) (err error) {
 		return execError("preheat request", stderr.Bytes(), err)
 	}
 	return nil
-}
-
-func preheatCurlCommand(query string) []string {
-	return []string{
-		"curl", "-sS", "--fail-with-body", "-X", "POST",
-		"--unix-socket", daemonSocket,
-		"http://localhost/api/v1/preheat?" + query,
-	}
 }
 
 func (c *Client) List(args []string) error {

@@ -6,12 +6,14 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
 	kovav1 "github.com/cofy-x/kova/internal/apis/kova/v1alpha1"
+	"github.com/cofy-x/kova/internal/artifactstore"
+	serviceauth "github.com/cofy-x/kova/internal/service/auth"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -70,16 +72,14 @@ func TestCreateBuildWritesSourceAndCreatesCR(t *testing.T) {
 	if err := srv.client.Get(context.Background(), kubeObjectKey("jobs", job.ID), &build); err != nil {
 		t.Fatal(err)
 	}
-	if build.Spec.Source.PVC.ClaimName != "kova-sources" {
-		t.Fatalf("claim = %q", build.Spec.Source.PVC.ClaimName)
-	}
-	if !build.Spec.Source.Ready {
-		t.Fatal("source was not marked ready after upload commit")
-	}
 	if build.Spec.Build.Format != "oci" || build.Spec.Build.Concurrency != 2 {
 		t.Fatalf("build options = %#v", build.Spec.Build)
 	}
-	if _, err := os.Stat(filepath.Join(root, build.Spec.Source.PVC.Path)); err != nil {
+	uri, err := url.Parse(build.Spec.Source.URI)
+	if err != nil || uri.Scheme != "file" || build.Spec.Source.Digest == "" {
+		t.Fatalf("source = %#v err=%v", build.Spec.Source, err)
+	}
+	if _, err := os.Stat(uri.Path); err != nil {
 		t.Fatalf("source zip not written: %v", err)
 	}
 }
@@ -94,6 +94,20 @@ func TestCreateBuildRequiresTarget(t *testing.T) {
 
 	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "target is required") {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestCreateBuildRejectsOversizedRequest(t *testing.T) {
+	srv := newTestServer(t, &fakeKube{})
+	srv.cfg.MaxUploadBytes = 32
+	req := multipartBuildRequest(t, map[string]string{"format": "oci", "target": "registry.local/example:dev"})
+	req.Header.Set("Authorization", "Bearer token")
+	rec := httptest.NewRecorder()
+
+	srv.routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
 	}
 }
 
@@ -151,7 +165,6 @@ func TestCreateBuildIsIdempotentAndRejectsConflicts(t *testing.T) {
 	fields := map[string]string{
 		"formats":         "oci,nydus",
 		"target":          "registry.local/tasksets/demo:payload",
-		"source_digest":   "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 		"idempotency_key": "taskset-demo-aaaaaaaa",
 	}
 	create := func(fields map[string]string) *httptest.ResponseRecorder {
@@ -176,7 +189,7 @@ func TestCreateBuildIsIdempotentAndRejectsConflicts(t *testing.T) {
 	if err := json.Unmarshal(second.Body.Bytes(), &b); err != nil {
 		t.Fatal(err)
 	}
-	if a.ID != b.ID || a.SourceDigest != fields["source_digest"] {
+	if a.ID != b.ID || a.SourceDigest == "" || a.SourceDigest != b.SourceDigest {
 		t.Fatalf("jobs = %#v %#v", a, b)
 	}
 
@@ -189,6 +202,17 @@ func TestCreateBuildIsIdempotentAndRejectsConflicts(t *testing.T) {
 	if conflict.Code != http.StatusConflict {
 		t.Fatalf("conflict status=%d body=%s", conflict.Code, conflict.Body.String())
 	}
+	var original kovav1.KovaBuild
+	if err := srv.client.Get(context.Background(), kubeObjectKey("jobs", a.ID), &original); err != nil {
+		t.Fatal(err)
+	}
+	uri, err := url.Parse(original.Spec.Source.URI)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(uri.Path); err != nil {
+		t.Fatalf("conflicting request removed the committed source: %v", err)
+	}
 }
 
 func TestCreateBuildIdempotencyUsesStrongReaderAfterAlreadyExists(t *testing.T) {
@@ -199,11 +223,18 @@ func TestCreateBuildIdempotencyUsesStrongReaderAfterAlreadyExists(t *testing.T) 
 	}
 	strong := crfake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&kovav1.KovaBuild{}).Build()
 	cached := &staleCachedReaderClient{Client: strong}
-	srv := NewServer(testConfig(root), &fakeKube{}, cached, strong)
+	store, err := artifactstore.NewFilesystem(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	authenticator, err := serviceauth.New(serviceauth.ModeStatic, "token", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := NewServer(testConfig(root), &fakeKube{}, cached, strong, store, authenticator)
 	fields := map[string]string{
 		"formats":         "oci,nydus",
 		"target":          "registry.local/tasksets/demo:payload",
-		"source_digest":   "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 		"idempotency_key": "taskset-demo-strong-read",
 	}
 	create := func() *httptest.ResponseRecorder {
@@ -226,7 +257,7 @@ func TestBuildResultsReturnsTypedStoredResults(t *testing.T) {
 	srv := newTestServer(t, &fakeKube{})
 	build := &kovav1.KovaBuild{
 		ObjectMeta: metav1.ObjectMeta{Name: "typed", Namespace: "jobs"},
-		Spec:       kovav1.KovaBuildSpec{SourceDigest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", IdempotencyKey: "key", Build: kovav1.KovaBuildOptions{Format: "both", Target: "registry.local/demo:payload"}},
+		Spec:       kovav1.KovaBuildSpec{Source: kovav1.KovaBuildSourceSpec{URI: "file:///tmp/source.zip", Digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}, IdempotencyKey: "key", Build: kovav1.KovaBuildOptions{Format: "both", Target: "registry.local/demo:payload"}},
 		Status:     kovav1.KovaBuildStatus{Phase: kovav1.PhaseSucceeded, Results: []kovav1.BuildResult{{Format: "oci", Status: "succeeded", Repository: "registry.local/demo:payload", ManifestDigest: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", MediaType: "application/vnd.oci.image.manifest.v1+json", Size: 123}}},
 	}
 	if err := srv.client.Create(context.Background(), build); err != nil {

@@ -7,6 +7,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/cofy-x/kova/internal/daemonclient"
 )
 
 func (c *Client) Prepare(image string, imagePullPolicy string, imagePullSecret string) (err error) {
@@ -84,9 +86,7 @@ func (c *Client) waitDaemonReady() error {
 		var stdout, stderr bytes.Buffer
 		if err := kube.Exec(context.Background(), c.Config.Namespace, c.Config.PodName, kubeExecOptions(
 			nil, &stdout, &stderr,
-			"curl", "-sS", "--max-time", "2",
-			"--unix-socket", daemonSocket,
-			"http://localhost/api/v1/health",
+			daemonclient.TransportCommand("GET", daemonclient.HealthPath, "", "")...,
 		)); err == nil {
 			return nil
 		} else {

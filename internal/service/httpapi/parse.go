@@ -68,9 +68,6 @@ func buildRequestFromMultipart(c echo.Context) (createBuildRequest, error) {
 		return createBuildRequest{}, fmt.Errorf("form field target is required")
 	}
 	if request.IdempotencyKey != "" {
-		if request.SourceDigest == "" {
-			return createBuildRequest{}, fmt.Errorf("idempotency_key requires source_digest")
-		}
 		if len(request.IdempotencyKey) > 256 {
 			return createBuildRequest{}, fmt.Errorf("form field idempotency_key is too long")
 		}

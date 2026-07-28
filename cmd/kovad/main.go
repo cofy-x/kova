@@ -9,10 +9,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cofy-x/kova/internal/artifactcmd"
 	"github.com/cofy-x/kova/internal/daemon"
 	"github.com/cofy-x/kova/internal/logging"
 	"github.com/cofy-x/kova/internal/observability"
-	"github.com/cofy-x/kova/internal/service"
 	"github.com/cofy-x/kova/internal/version"
 
 	cli "github.com/urfave/cli/v2"
@@ -25,7 +25,7 @@ func main() {
 	exitCode := 0
 	otelHandle, err := observability.Init(context.Background(), observability.ConfigFromEnv(
 		observability.WithServiceName("kovad"),
-		observability.WithComponent("runtime"),
+		observability.WithComponent("runner"),
 	))
 	if err != nil {
 		logging.Errorf("initialize observability: %v", err)
@@ -71,8 +71,9 @@ func main() {
 					return err
 				},
 			},
+			artifactcmd.CLICommand(),
+			daemon.TransportCLICommand(),
 			daemon.CLICommand(),
-			service.CLICommand(),
 		},
 	}
 	if err := app.Run(os.Args); err != nil {

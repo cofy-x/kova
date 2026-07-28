@@ -14,7 +14,7 @@ func buildJobFromCR(build *kovav1.KovaBuild, cfg config.Config) BuildJob {
 		Error:          build.Status.Message,
 		CreatedAt:      build.CreationTimestamp.Time,
 		BuildkitAddr:   cfg.BuildkitAddr,
-		SourceDigest:   build.Spec.SourceDigest,
+		SourceDigest:   build.Spec.Source.Digest,
 		IdempotencyKey: build.Spec.IdempotencyKey,
 	}
 	if job.PodName == "" {

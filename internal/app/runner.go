@@ -190,7 +190,7 @@ func valueFromFlagEnvCtx(c *cli.Context, flagName string, envName string, curren
 }
 
 func prepareImageOptionsFromContext(c *cli.Context, ctx ctxconfig.Context, hasCtx bool) (string, string, string) {
-	image := valueFromFlagEnvCtx(c, "image", "KOVA_IMAGE", runner.DefaultConfig().RunnerImage, ctx.RunnerImage, hasCtx)
+	image := valueFromFlagEnvCtx(c, "image", "KOVA_RUNNER_IMAGE", runner.DefaultConfig().RunnerImage, ctx.RunnerImage, hasCtx)
 	imagePullPolicy := valueFromFlagEnvCtx(c, "image-pull-policy", "KOVA_IMAGE_PULL_POLICY", runner.DefaultConfig().RunnerImagePullPolicy, ctx.RunnerImagePullPolicy, hasCtx)
 	imagePullSecret := valueFromPrepareSecret(c, ctx, hasCtx)
 	return image, imagePullPolicy, imagePullSecret

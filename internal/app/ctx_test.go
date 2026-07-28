@@ -179,7 +179,7 @@ func TestPrepareImageOptionsUseCtxEmptyPullSecret(t *testing.T) {
 }
 
 func TestPrepareImageOptionsKeepDefaultsWhenCtxImageFieldsEmpty(t *testing.T) {
-	t.Setenv("KOVA_IMAGE", "localhost:5001/kova:env")
+	t.Setenv("KOVA_RUNNER_IMAGE", "localhost:5001/kova:env")
 	t.Setenv("KOVA_IMAGE_PULL_POLICY", "IfNotPresent")
 	path := filepath.Join(t.TempDir(), "config.json")
 	err := ctxconfig.Save(path, ctxconfig.Config{

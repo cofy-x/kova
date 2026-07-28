@@ -11,7 +11,6 @@ const (
 	defaultBuildkitServiceAddr = "tcp://kova.kova.svc:9094"
 	kovaWorkerNamespace        = "kova"
 	kovaWorkerDeployment       = "kova"
-	daemonSocket               = "/tmp/kova.sock"
 )
 
 type Config struct {
@@ -41,7 +40,7 @@ func DefaultConfig() Config {
 		WaitTimeout:               envDefault("KOVA_WAIT_TIMEOUT", "180s"),
 		StateFile:                 filepath.Join(wd, ".kova.state"),
 		BuildkitAddr:              envDefault("KOVA_BUILDKIT_ADDR", defaultBuildkitServiceAddr),
-		RunnerImage:               strings.TrimSpace(os.Getenv("KOVA_IMAGE")),
+		RunnerImage:               strings.TrimSpace(os.Getenv("KOVA_RUNNER_IMAGE")),
 		RunnerImagePullPolicy:     envDefault("KOVA_IMAGE_PULL_POLICY", "Always"),
 		ImagePullSecret:           envDefault("KOVA_IMAGE_PULL_SECRET", "kova-registry"),
 		DaemonReadyTimeoutSeconds: envIntDefault("KOVA_DAEMON_READY_TIMEOUT", 60),

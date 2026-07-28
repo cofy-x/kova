@@ -14,9 +14,9 @@ spec:
     {{- toYaml .Values.service.ipFamilies | nindent 4 }}
   ipFamilyPolicy: {{ .Values.service.ipFamilyPolicy }}
   ports:
-    - name: {{ .Values.container.portName }}
+    - name: {{ .Values.worker.portName }}
       port: {{ .Values.service.port }}
-      protocol: {{ .Values.container.protocol }}
+      protocol: {{ .Values.worker.protocol }}
       targetPort: {{ .Values.service.targetPort }}
   selector:
     {{- include "kova.selectorLabels" . | nindent 4 }}

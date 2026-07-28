@@ -2,10 +2,19 @@
 # credentials, resources, scheduling, and registry configuration for the target
 # environment.
 
-image:
-  repository: registry.example.com/kova
-  tag: dev
-  pullPolicy: IfNotPresent
+images:
+  controller:
+    repository: registry.example.com/kova
+    tag: controller-dev
+    pullPolicy: IfNotPresent
+  runner:
+    repository: registry.example.com/kova
+    tag: runner-dev
+    pullPolicy: IfNotPresent
+  worker:
+    repository: registry.example.com/kova
+    tag: worker-dev
+    pullPolicy: IfNotPresent
 
 imagePullSecrets:
   # Set name to an existing pull secret, or set create=true with
@@ -17,7 +26,8 @@ imageRegistries: []
 
 observability:
   enabled: false
-  serviceName: kova-worker
+  controllerServiceName: kova-controller
+  runnerServiceName: kova-runner
   endpoint: ""
   insecure: true
   resourceAttributes: {}
@@ -44,15 +54,16 @@ deployment:
       maxSurge: 1
       maxUnavailable: 0
 
-resources:
-  limits:
-    ephemeral-storage: 80Gi
-    # cpu: 16
-    # memory: 32Gi
-  requests:
-    ephemeral-storage: 40Gi
-    # cpu: 8
-    # memory: 16Gi
+worker:
+  resources:
+    limits:
+      ephemeral-storage: 80Gi
+      # cpu: 16
+      # memory: 32Gi
+    requests:
+      ephemeral-storage: 40Gi
+      # cpu: 8
+      # memory: 16Gi
 
 podDisruptionBudget:
   enabled: true

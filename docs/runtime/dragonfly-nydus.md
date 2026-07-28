@@ -60,7 +60,7 @@ make e2e-dragonfly-nydus
 
 The target performs these steps:
 
-- builds and publishes `localhost:5002/kova:dev`
+- builds and publishes the local controller, runner, and worker tags
 - deploys Kova workers
 - installs Dragonfly and Nydus into `dragonfly-system`
 - patches worker node containerd to use the `nydus` snapshotter

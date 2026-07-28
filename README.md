@@ -31,8 +31,8 @@ make install
 kova version
 ```
 
-The client is CGO-free and runs on the workstation. Build execution and LMDB
-state stay in the Linux `kovad` runtime image.
+The client is CGO-free and runs on the workstation. Linux runtime images are
+split into controller, runner, and rootless BuildKit worker roles.
 
 ## Documentation
 
@@ -63,7 +63,7 @@ state stay in the Linux `kovad` runtime image.
 
 ## Quick Start
 
-Build the service image, create a dedicated kind cluster, deploy the Helm chart,
+Build the role images, create a dedicated kind cluster, deploy the Helm chart,
 run a sample build, and verify the pushed image:
 
 ```bash
@@ -155,8 +155,8 @@ Build a host-platform binary for local debugging:
 make kova
 ```
 
-`kovad` is a Linux runtime component and is distributed in the Kova container
-image rather than as a workstation binary.
+`kova-controller` and `kovad` are Linux runtime components distributed in the
+controller and runner images rather than as workstation binaries.
 
 The local `kova` CLI defaults to `tcp://kova.kova.svc:9094`. Override it with
 `--buildkit-addr` or `KOVA_BUILDKIT_ADDR` for another release, namespace, or
