@@ -24,6 +24,16 @@ Each tag publishes:
 
 Stable tags also update `ghcr.io/cofy-x/kova:latest`.
 
+Once a version tag exists, Go users can install that exact client version:
+
+```bash
+go install github.com/cofy-x/kova/cmd/kova@v0.1.0
+```
+
+Replace `v0.1.0` with the required release or prerelease tag. `@latest` tracks
+the latest version selected by the Go module toolchain; use an explicit tag in
+automation and other reproducible environments.
+
 ## Release Flow
 
 The release workflow runs only for version tags. It builds and attests the CLI

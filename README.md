@@ -16,7 +16,15 @@ published `checksums.txt`, and place `kova` on `PATH`. Linux and macOS builds
 are available for `amd64` and `arm64`; Windows builds are available as `.zip`
 archives for both architectures.
 
-You can also build and install the client from source:
+Go users can install the latest tagged client directly:
+
+```bash
+go install github.com/cofy-x/kova/cmd/kova@latest
+kova version
+```
+
+Use an explicit release tag instead of `@latest` when the installed version
+must be reproducible. Contributors can install the current checkout with:
 
 ```bash
 make install
