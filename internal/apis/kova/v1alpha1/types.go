@@ -69,8 +69,6 @@ type KovaBuildSourceSpec struct {
 type KovaBuildOptions struct {
 	// +kubebuilder:validation:Enum=oci;nydus;both
 	Format string `json:"format,omitempty"`
-	// +kubebuilder:validation:Required
-	// +kubebuilder:validation:MinLength=1
 	Target string `json:"target,omitempty"`
 	// +kubebuilder:validation:Minimum=1
 	Concurrency int `json:"concurrency,omitempty"`

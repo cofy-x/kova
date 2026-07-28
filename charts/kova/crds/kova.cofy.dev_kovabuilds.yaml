@@ -70,7 +70,6 @@ spec:
                   skipFail:
                     type: boolean
                   target:
-                    minLength: 1
                     type: string
                   timeout:
                     minimum: 0
@@ -81,8 +80,6 @@ spec:
                     type: array
                   verbose:
                     type: boolean
-                required:
-                - target
                 type: object
               idempotencyKey:
                 maxLength: 256
