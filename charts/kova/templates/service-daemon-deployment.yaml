@@ -14,7 +14,8 @@
 {{- if .Values.serviceDaemon.serviceAccount.create }}
 {{- $saName = default $name .Values.serviceDaemon.serviceAccount.name }}
 {{- end }}
-{{- $registrySecret := default (include "kova.imagePullSecretName" .) .Values.serviceDaemon.runnerImagePullSecret }}
+{{- $runnerRegistrySecret := default (include "kova.imagePullSecretName" .) .Values.serviceDaemon.runnerImagePullSecret }}
+{{- $outputRegistrySecret := default $runnerRegistrySecret .Values.serviceDaemon.registrySecret }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -57,9 +58,12 @@ spec:
             - --namespace={{ default (include "kova.namespace" .) .Values.serviceDaemon.runnerNamespace }}
             - --runner-image={{ include "kova.roleImage" (dict "root" . "role" "runner") }}
             - --runner-image-pull-policy={{ include "kova.roleImagePullPolicy" (dict "root" . "role" "runner") }}
-            - --runner-image-pull-secret={{ default (include "kova.imagePullSecretName" .) .Values.serviceDaemon.runnerImagePullSecret }}
+            - --runner-image-pull-secret={{ $runnerRegistrySecret }}
             {{- range $key, $value := .Values.serviceDaemon.runnerNodeSelector }}
             - {{ printf "--runner-node-selector=%s=%s" $key ($value | toString) | quote }}
+            {{- end }}
+            {{- range .Values.serviceDaemon.registryPlainHTTP }}
+            - {{ printf "--registry-plain-http=%s" . | quote }}
             {{- end }}
             - --buildkit-addr={{ default (printf "tcp://%s.%s.svc:%v" (include "kova.fullname" .) (include "kova.namespace" .) .Values.service.port) .Values.serviceDaemon.buildkitAddr }}
             - --artifact-driver={{ .Values.artifactStore.driver }}
@@ -74,6 +78,7 @@ spec:
             - --s3-secure={{ .Values.artifactStore.s3.secure }}
             {{- end }}
             - --auth-mode={{ .Values.serviceDaemon.authentication.mode }}
+            - --auth-static-principal={{ .Values.serviceDaemon.authentication.staticPrincipal }}
             - --job-ttl={{ .Values.serviceDaemon.jobTTL }}
             - --max-upload-bytes={{ .Values.serviceDaemon.maxUploadBytes | int64 }}
             - --wait={{ .Values.serviceDaemon.wait }}
@@ -86,7 +91,7 @@ spec:
             - name: http
               containerPort: {{ .Values.serviceDaemon.port }}
               protocol: TCP
-          {{- if or .Values.observability.enabled (eq .Values.serviceDaemon.authentication.mode "static") }}
+          {{- if or .Values.observability.enabled (eq .Values.serviceDaemon.authentication.mode "static") $outputRegistrySecret }}
           env:
             {{- if .Values.observability.enabled }}
             {{- include "kova.observabilityEnv" . | nindent 12 }}
@@ -97,6 +102,10 @@ spec:
                 secretKeyRef:
                   name: {{ required "serviceDaemon.authentication.staticTokenSecret.name is required for static authentication" .Values.serviceDaemon.authentication.staticTokenSecret.name }}
                   key: {{ .Values.serviceDaemon.authentication.staticTokenSecret.key }}
+            {{- end }}
+            {{- if $outputRegistrySecret }}
+            - name: DOCKER_CONFIG
+              value: /home/kova/.docker
             {{- end }}
           {{- end }}
           {{- if .Values.artifactStore.secretName }}
@@ -116,10 +125,17 @@ spec:
             {{- toYaml .Values.serviceDaemon.resources | nindent 12 }}
           securityContext:
             {{- toYaml .Values.serviceDaemon.securityContext | nindent 12 }}
-          {{- if eq .Values.artifactStore.driver "filesystem" }}
+          {{- if or (eq .Values.artifactStore.driver "filesystem") $outputRegistrySecret }}
           volumeMounts:
+            {{- if eq .Values.artifactStore.driver "filesystem" }}
             - name: kova-source-store
               mountPath: {{ .Values.artifactStore.filesystem.mountPath }}
+            {{- end }}
+            {{- if $outputRegistrySecret }}
+            - name: registry-credentials
+              mountPath: /home/kova/.docker
+              readOnly: true
+            {{- end }}
           {{- end }}
       {{- $imagePullSecrets := include "kova.renderImagePullSecrets" . }}
       {{- if $imagePullSecrets }}
@@ -138,10 +154,20 @@ spec:
       tolerations:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- if eq .Values.artifactStore.driver "filesystem" }}
+      {{- if or (eq .Values.artifactStore.driver "filesystem") $outputRegistrySecret }}
       volumes:
+        {{- if eq .Values.artifactStore.driver "filesystem" }}
         - name: kova-source-store
           persistentVolumeClaim:
             claimName: {{ include "kova.sourcePVCName" . }}
+        {{- end }}
+        {{- if $outputRegistrySecret }}
+        - name: registry-credentials
+          secret:
+            secretName: {{ $outputRegistrySecret }}
+            items:
+              - key: .dockerconfigjson
+                path: config.json
+        {{- end }}
       {{- end }}
 {{- end }}

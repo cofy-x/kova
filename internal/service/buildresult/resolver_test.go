@@ -10,11 +10,11 @@ import (
 )
 
 func TestReferenceOptionsUsePlainHTTPOnlyForLocalRegistries(t *testing.T) {
-	local, err := name.ParseReference("host.docker.internal:5002/demo:dev", referenceOptions("host.docker.internal:5002/demo:dev")...)
+	local, err := name.ParseReference("host.docker.internal:5002/demo:dev", referenceOptions("host.docker.internal:5002/demo:dev", nil)...)
 	if err != nil {
 		t.Fatal(err)
 	}
-	remote, err := name.ParseReference("registry.example/demo:dev", referenceOptions("registry.example/demo:dev")...)
+	remote, err := name.ParseReference("registry.example/demo:dev", referenceOptions("registry.example/demo:dev", nil)...)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -23,6 +23,19 @@ func TestReferenceOptionsUsePlainHTTPOnlyForLocalRegistries(t *testing.T) {
 	}
 	if remote.Context().Registry.Scheme() != "https" {
 		t.Fatalf("remote registry scheme = %q", remote.Context().Registry.Scheme())
+	}
+}
+
+func TestReferenceOptionsUseConfiguredPlainHTTPRegistry(t *testing.T) {
+	ref, err := name.ParseReference(
+		"kind-registry:5000/demo:dev",
+		referenceOptions("kind-registry:5000/demo:dev", []string{"kind-registry:5000"})...,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ref.Context().Registry.Scheme() != "http" {
+		t.Fatalf("configured registry scheme = %q", ref.Context().Registry.Scheme())
 	}
 }
 
@@ -42,7 +55,7 @@ func TestResolvePreservesTypedPartialFailures(t *testing.T) {
 		queries = append(queries, query)
 		return []byte(`{"target":"registry.example/demo:payload","success":false,"reason":"oci failed"}` + "\n" +
 			`{"target":"registry.example/demo:payload_nydus_v3","success":false,"reason":"nydus failed"}` + "\n"), nil
-	}), build)
+	}), build, nil)
 	if len(results) != 2 || results[0].Status != "failed" || results[1].Status != "failed" || AllSucceeded(results) {
 		t.Fatalf("results = %#v", results)
 	}
@@ -58,7 +71,7 @@ func TestResolvePreservesSuccessfulVariantWhenOtherExportFails(t *testing.T) {
 			return nil, context.DeadlineExceeded
 		}
 		return []byte(`{"target":"registry.example/demo:payload_nydus_v3","success":false,"reason":"nydus failed"}` + "\n"), nil
-	}), build)
+	}), build, nil)
 	if len(results) != 2 || results[0].Error != "nydus failed" || results[1].Error != context.DeadlineExceeded.Error() {
 		t.Fatalf("results = %#v", results)
 	}
@@ -70,7 +83,7 @@ func TestCancelledResultsDoNotCallExporter(t *testing.T) {
 	results := Resolve(context.Background(), exporterFunc(func(context.Context, *kovav1.KovaBuild, string, string) ([]byte, error) {
 		called = true
 		return nil, nil
-	}), build)
+	}), build, nil)
 	if called || len(results) != 1 || results[0].Status != "cancelled" {
 		t.Fatalf("called=%v results=%#v", called, results)
 	}

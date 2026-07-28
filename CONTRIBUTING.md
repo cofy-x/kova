@@ -22,6 +22,7 @@ Start with the fast checks:
 
 ```bash
 make test
+make docs-check
 make lint-scripts
 make helm-template
 ```

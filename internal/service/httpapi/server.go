@@ -45,16 +45,18 @@ type Server struct {
 	reader client.Reader
 	store  artifactstore.Store
 	auth   serviceauth.Authenticator
+	authz  serviceauth.Authorizer
 }
 
 var (
 	authDenied      = observability.Int64Counter("kova.service.auth.denied", "Rejected service API authentication attempts")
+	authzDenied     = observability.Int64Counter("kova.service.authorization.denied", "Rejected service API authorization attempts")
 	artifactWrites  = observability.Int64Counter("kova.service.artifact.writes", "Artifact write attempts")
 	artifactLatency = observability.DurationHistogram("kova.service.artifact.write.duration", "Artifact write latency")
 	buildCancels    = observability.Int64Counter("kova.service.job.cancellations", "Accepted job cancellations")
 )
 
-func NewServer(cfg config.Config, kube kubeAPI, crClient client.Client, crReader client.Reader, store artifactstore.Store, authenticator serviceauth.Authenticator) *Server {
+func NewServer(cfg config.Config, kube kubeAPI, crClient client.Client, crReader client.Reader, store artifactstore.Store, authenticator serviceauth.Authenticator, authorizer serviceauth.Authorizer) *Server {
 	if cfg.Listen == "" {
 		cfg.Listen = ":8080"
 	}
@@ -82,7 +84,7 @@ func NewServer(cfg config.Config, kube kubeAPI, crClient client.Client, crReader
 	if store == nil {
 		store, _ = artifactstore.NewFilesystem(cfg.ArtifactRoot)
 	}
-	return &Server{cfg: cfg, kube: kube, client: crClient, reader: crReader, store: store, auth: authenticator}
+	return &Server{cfg: cfg, kube: kube, client: crClient, reader: crReader, store: store, auth: authenticator, authz: authorizer}
 }
 
 func (s *Server) Start(ctx context.Context) error {
@@ -135,15 +137,25 @@ func (s *Server) authMiddleware(next echo.HandlerFunc) echo.HandlerFunc {
 			authDenied.Add(c.Request().Context(), 1)
 			return c.JSON(http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 		}
-		if s.auth == nil || s.auth.Authenticate(c.Request().Context(), token) != nil {
+		if s.auth == nil {
 			authDenied.Add(c.Request().Context(), 1)
 			return c.JSON(http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 		}
+		principal, err := s.auth.Authenticate(c.Request().Context(), token)
+		if err != nil {
+			authDenied.Add(c.Request().Context(), 1)
+			return c.JSON(http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		}
+		c.Set(principalContextKey, principal)
 		return next(c)
 	}
 }
 
 func (s *Server) handleCreateBuild(c echo.Context) error {
+	principal := principalFromContext(c)
+	if err := s.authorize(c.Request().Context(), principal, "create", ""); err != nil {
+		return forbidden(c)
+	}
 	if strings.TrimSpace(s.cfg.RunnerImage) == "" {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "runner image is required"})
 	}
@@ -162,7 +174,7 @@ func (s *Server) handleCreateBuild(c echo.Context) error {
 	if err != nil {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
 	}
-	id := idempotentJobID(request.IdempotencyKey)
+	id := idempotentJobID(principal.Username, request.IdempotencyKey)
 	if id == "" {
 		id, err = newJobID()
 		if err != nil {
@@ -213,9 +225,13 @@ func (s *Server) handleCreateBuild(c echo.Context) error {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      id,
 			Namespace: s.cfg.Namespace,
-			Labels:    map[string]string{"app.kubernetes.io/name": "kova-build"},
+			Labels: map[string]string{
+				"app.kubernetes.io/name": "kova-build",
+				requesterLabel:           requesterID(principal.Username),
+			},
 		},
 		Spec: kovav1.KovaBuildSpec{
+			Requester:      kovav1.KovaBuildRequester{Username: principal.Username, UID: principal.UID},
 			Source:         kovav1.KovaBuildSourceSpec{URI: artifactURI, Digest: actualDigest},
 			Build:          request.Options,
 			IdempotencyKey: request.IdempotencyKey,
@@ -271,17 +287,22 @@ func stageUpload(file *multipart.FileHeader) (string, string, int64, error) {
 	return path, "sha256:" + hex.EncodeToString(hash.Sum(nil)), size, nil
 }
 
-func idempotentJobID(key string) string {
+func idempotentJobID(username, key string) string {
 	if key == "" {
 		return ""
 	}
-	sum := sha256.Sum256([]byte(key))
+	sum := sha256.Sum256([]byte(username + "\x00" + key))
 	return "idem-" + hex.EncodeToString(sum[:10])
 }
 
 func (s *Server) handleListBuilds(c echo.Context) error {
+	principal := principalFromContext(c)
+	options := []client.ListOption{client.InNamespace(s.cfg.Namespace)}
+	if err := s.authorize(c.Request().Context(), principal, "list", ""); err != nil {
+		options = append(options, client.MatchingLabels{requesterLabel: requesterID(principal.Username)})
+	}
 	var builds kovav1.KovaBuildList
-	if err := s.reader.List(c.Request().Context(), &builds, client.InNamespace(s.cfg.Namespace)); err != nil {
+	if err := s.reader.List(c.Request().Context(), &builds, options...); err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
 	}
 	jobs := make([]BuildJob, 0, len(builds.Items))
@@ -299,6 +320,9 @@ func (s *Server) handleGetBuild(c echo.Context) error {
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
 	}
+	if err := s.authorizeBuild(c.Request().Context(), principalFromContext(c), "get", build); err != nil {
+		return forbidden(c)
+	}
 	return c.JSON(http.StatusOK, buildJobFromCR(build, s.cfg))
 }
 
@@ -309,6 +333,9 @@ func (s *Server) handleBuildLogs(c echo.Context) error {
 	}
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+	}
+	if err := s.authorizeBuild(c.Request().Context(), principalFromContext(c), "get", build); err != nil {
+		return forbidden(c)
 	}
 	tail, err := strconv.ParseInt(strings.TrimSpace(defaultString(c.QueryParam("tail_lines"), "100")), 10, 64)
 	if err != nil || tail < 0 {
@@ -328,6 +355,9 @@ func (s *Server) handleCancelBuild(c echo.Context) error {
 	}
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+	}
+	if err := s.authorizeBuild(c.Request().Context(), principalFromContext(c), "delete", build); err != nil {
+		return forbidden(c)
 	}
 	if isTerminalPhase(build.Status.Phase) {
 		return c.JSON(http.StatusOK, buildJobFromCR(build, s.cfg))
@@ -362,11 +392,53 @@ func (s *Server) handleExportBuild(c echo.Context) error {
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
 	}
+	if err := s.authorizeBuild(c.Request().Context(), principalFromContext(c), "update", build); err != nil {
+		return forbidden(c)
+	}
 	out, err := s.runner().Post(c.Request().Context(), build, "export", c.QueryString())
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
 	}
 	return c.Blob(http.StatusOK, "application/x-ndjson", out)
+}
+
+const (
+	principalContextKey = "kova.principal"
+	requesterLabel      = "kova.cofy.dev/requester-id"
+)
+
+func principalFromContext(c echo.Context) serviceauth.Principal {
+	principal, _ := c.Get(principalContextKey).(serviceauth.Principal)
+	return principal
+}
+
+func requesterID(username string) string {
+	sum := sha256.Sum256([]byte(username))
+	return hex.EncodeToString(sum[:16])
+}
+
+func (s *Server) authorize(ctx context.Context, principal serviceauth.Principal, verb, name string) error {
+	if s.authz == nil {
+		return fmt.Errorf("authorization is not configured")
+	}
+	return s.authz.Authorize(ctx, principal, serviceauth.Attributes{
+		Verb: verb, Namespace: s.cfg.Namespace, Resource: "kovabuilds", Name: name,
+	})
+}
+
+func (s *Server) authorizeBuild(ctx context.Context, principal serviceauth.Principal, verb string, build *kovav1.KovaBuild) error {
+	if err := s.authorize(ctx, principal, verb, build.Name); err == nil {
+		return nil
+	}
+	if principal.Username != "" && build.Spec.Requester.Username == principal.Username {
+		return nil
+	}
+	return fmt.Errorf("access denied")
+}
+
+func forbidden(c echo.Context) error {
+	authzDenied.Add(c.Request().Context(), 1)
+	return c.JSON(http.StatusForbidden, map[string]string{"error": "forbidden"})
 }
 
 func (s *Server) handlePreheatBuild(c echo.Context) error {
@@ -376,6 +448,9 @@ func (s *Server) handlePreheatBuild(c echo.Context) error {
 	}
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+	}
+	if err := s.authorizeBuild(c.Request().Context(), principalFromContext(c), "update", build); err != nil {
+		return forbidden(c)
 	}
 	out, err := s.runner().Post(c.Request().Context(), build, "preheat", c.QueryString())
 	if err != nil {

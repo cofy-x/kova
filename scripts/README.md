@@ -9,6 +9,10 @@ the categorized paths below.
 - `common.sh`: shared helpers for repository paths, command checks, Docker arch,
   kind worker discovery, and local proxy detection.
 
+## Documentation
+
+- `docs/check.sh`: validate relative links in public and contributor Markdown.
+
 ## Build
 
 - `build/build-image.sh`: build the controller, runner, and worker images.

@@ -12,6 +12,19 @@ func TestParseNodeSelector(t *testing.T) {
 	}
 }
 
+func TestParseRegistryHosts(t *testing.T) {
+	hosts, err := parseRegistryHosts([]string{" Registry.Example:5000 ", "registry.example:5000"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hosts) != 1 || hosts[0] != "registry.example:5000" {
+		t.Fatalf("hosts = %#v", hosts)
+	}
+	if _, err := parseRegistryHosts([]string{"http://registry.example:5000"}); err == nil {
+		t.Fatal("expected scheme to be rejected")
+	}
+}
+
 func TestParseNodeSelectorRejectsInvalidAndDuplicateValues(t *testing.T) {
 	for _, values := range [][]string{
 		{"missing-value"},

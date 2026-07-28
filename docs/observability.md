@@ -70,5 +70,5 @@ Kova emits operation spans and metrics for runner actions, daemon HTTP requests,
 batch build/export/preheat operations, per-target build/preheat attempts, and
 selected Kubernetes client calls. Service metrics also cover queue latency,
 capacity waits, terminal outcomes, artifact writes, authentication denials,
-and cancellations. Logs keep the existing stderr format and are also exported
-as OTel log records when telemetry is enabled.
+authorization denials, and cancellations. Logs keep the existing stderr format
+and are also exported as OTel log records when telemetry is enabled.

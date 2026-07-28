@@ -94,6 +94,7 @@ serviceDaemon:
     staticTokenSecret:
       name: ""
       key: token
+    staticPrincipal: kova:static
   jobTTL: 2h
   maxUploadBytes: 1073741824
   wait: 3m
@@ -103,6 +104,11 @@ serviceDaemon:
   leaderElect: true
   runnerNamespace: ""
   runnerImagePullSecret: ""
+  # Optional Docker config Secret used by the controller to verify pushed
+  # image descriptors. Defaults to runnerImagePullSecret, then imagePullSecrets.
+  registrySecret: ""
+  # Registry hosts that intentionally use plain HTTP. Development only.
+  registryPlainHTTP: []
   # A filesystem store backed by ReadWriteOnce storage may require pinning the
   # controller and runner Pods to the same node. S3 storage needs no pinning.
   runnerNodeSelector: {}
@@ -133,6 +139,14 @@ serviceDaemon:
         - ALL
     seccompProfile:
       type: RuntimeDefault
+
+networkPolicy:
+  enabled: false
+  # Empty peer lists deny ingress to the selected component. Supply standard
+  # Kubernetes NetworkPolicyPeer entries for the namespaces and Pods that may
+  # reach each endpoint.
+  workerIngressFrom: []
+  serviceIngressFrom: []
 
 worker:
   name: buildkitd

@@ -23,6 +23,7 @@ var undefinedFlagPattern = regexp.MustCompile(`flag provided but not defined: -+
 func NewCLIApp() *cli.App {
 	commands := withUsageErrorHint([]*cli.Command{
 		versionCLICommand(),
+		jobCLICommand(),
 		prepareCLICommand(),
 		listCLICommand(),
 		scaleCLICommand(),
@@ -52,6 +53,9 @@ func NewCLIApp() *cli.App {
 			&cli.StringFlag{Name: "name", Usage: "runner Pod name for local runner operations"},
 			&cli.StringFlag{Name: "wait", Value: runner.DefaultConfig().WaitTimeout, Usage: "timeout used by prepare when waiting for Pod readiness"},
 			&cli.StringFlag{Name: "buildkit-addr", Value: runner.DefaultConfig().BuildkitAddr, Usage: "BuildKit address passed to runner daemon and build requests"},
+			&cli.StringFlag{Name: "service-url", EnvVars: []string{"KOVA_SERVICE_URL"}, Usage: "Kova service base URL"},
+			&cli.StringFlag{Name: "service-ca-file", EnvVars: []string{"KOVA_SERVICE_CA_FILE"}, Usage: "CA bundle for the Kova service"},
+			&cli.BoolFlag{Name: "service-insecure", EnvVars: []string{"KOVA_SERVICE_INSECURE"}, Usage: "skip Kova service TLS verification"},
 		},
 		OnUsageError: usageErrorWithGlobalFlagHint,
 		Before: func(c *cli.Context) error {
@@ -115,7 +119,7 @@ func misplacedGlobalFlagName(message string) (string, bool) {
 	}
 	name := match[1]
 	switch name {
-	case "ctx", "ctx-config", "kubeconfig", "namespace", "name", "wait", "buildkit-addr":
+	case "ctx", "ctx-config", "kubeconfig", "namespace", "name", "wait", "buildkit-addr", "service-url", "service-ca-file", "service-insecure":
 		return name, true
 	default:
 		return "", false

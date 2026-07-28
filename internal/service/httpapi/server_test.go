@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -44,6 +45,59 @@ func TestCreateBuildRequiresAuth(t *testing.T) {
 
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusUnauthorized)
+	}
+}
+
+func TestOwnerAccessIsIsolatedWithoutAdministrativeRBAC(t *testing.T) {
+	srv := newTestServer(t, &fakeKube{})
+	srv.authz = authorizerFunc(func(context.Context, serviceauth.Principal, serviceauth.Attributes) error {
+		return fmt.Errorf("denied")
+	})
+	owned := &kovav1.KovaBuild{
+		ObjectMeta: metav1.ObjectMeta{Name: "owned", Namespace: "jobs", Labels: map[string]string{requesterLabel: requesterID("test-user")}},
+		Spec:       kovav1.KovaBuildSpec{Requester: kovav1.KovaBuildRequester{Username: "test-user"}},
+	}
+	other := &kovav1.KovaBuild{
+		ObjectMeta: metav1.ObjectMeta{Name: "other", Namespace: "jobs", Labels: map[string]string{requesterLabel: requesterID("other-user")}},
+		Spec:       kovav1.KovaBuildSpec{Requester: kovav1.KovaBuildRequester{Username: "other-user"}},
+	}
+	if err := srv.client.Create(context.Background(), owned); err != nil {
+		t.Fatal(err)
+	}
+	if err := srv.client.Create(context.Background(), other); err != nil {
+		t.Fatal(err)
+	}
+
+	request := func(endpoint string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, endpoint, nil)
+		req.Header.Set("Authorization", "Bearer token")
+		rec := httptest.NewRecorder()
+		srv.routes().ServeHTTP(rec, req)
+		return rec
+	}
+	if rec := request("/v1/builds/owned"); rec.Code != http.StatusOK {
+		t.Fatalf("owner get status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if rec := request("/v1/builds/other"); rec.Code != http.StatusForbidden {
+		t.Fatalf("other get status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	list := request("/v1/builds")
+	if list.Code != http.StatusOK || !strings.Contains(list.Body.String(), `"id":"owned"`) || strings.Contains(list.Body.String(), `"id":"other"`) {
+		t.Fatalf("filtered list status=%d body=%s", list.Code, list.Body.String())
+	}
+}
+
+func TestCreateBuildRequiresCreateAuthorization(t *testing.T) {
+	srv := newTestServer(t, &fakeKube{})
+	srv.authz = authorizerFunc(func(context.Context, serviceauth.Principal, serviceauth.Attributes) error {
+		return fmt.Errorf("denied")
+	})
+	req := multipartBuildRequest(t, map[string]string{"format": "oci", "target": "registry.local/example:dev"})
+	req.Header.Set("Authorization", "Bearer token")
+	rec := httptest.NewRecorder()
+	srv.routes().ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
 }
 
@@ -227,11 +281,11 @@ func TestCreateBuildIdempotencyUsesStrongReaderAfterAlreadyExists(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	authenticator, err := serviceauth.New(serviceauth.ModeStatic, "token", nil)
+	authenticator, err := serviceauth.New(serviceauth.ModeStatic, "token", "test-user", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := NewServer(testConfig(root), &fakeKube{}, cached, strong, store, authenticator)
+	srv := NewServer(testConfig(root), &fakeKube{}, cached, strong, store, authenticator, serviceauth.AllowAllAuthorizer{})
 	fields := map[string]string{
 		"formats":         "oci,nydus",
 		"target":          "registry.local/tasksets/demo:payload",

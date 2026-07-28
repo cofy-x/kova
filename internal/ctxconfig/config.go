@@ -13,6 +13,8 @@ import (
 const (
 	configDirName  = "kova"
 	configFileName = "config.json"
+	ModeDirect     = "direct"
+	ModeService    = "service"
 )
 
 type Config struct {
@@ -21,12 +23,37 @@ type Config struct {
 }
 
 type Context struct {
+	Mode                  string `json:"mode"`
 	Kubeconfig            string `json:"kubeconfig,omitempty"`
 	Namespace             string `json:"namespace,omitempty"`
 	BuildkitAddr          string `json:"buildkitAddr,omitempty"`
 	RunnerImage           string `json:"runnerImage,omitempty"`
 	RunnerImagePullPolicy string `json:"runnerImagePullPolicy,omitempty"`
 	ImagePullSecret       string `json:"imagePullSecret,omitempty"`
+	ServiceURL            string `json:"serviceURL,omitempty"`
+	ServiceCAFile         string `json:"serviceCAFile,omitempty"`
+	ServiceInsecure       bool   `json:"serviceInsecure,omitempty"`
+}
+
+func (c Context) EffectiveMode() string {
+	if strings.TrimSpace(c.Mode) == "" {
+		return ModeDirect
+	}
+	return strings.TrimSpace(c.Mode)
+}
+
+func (c Context) Validate() error {
+	switch c.EffectiveMode() {
+	case ModeDirect:
+		return nil
+	case ModeService:
+		if strings.TrimSpace(c.ServiceURL) == "" {
+			return fmt.Errorf("service context requires a service URL")
+		}
+		return nil
+	default:
+		return fmt.Errorf("unsupported context mode %q", c.Mode)
+	}
 }
 
 func DefaultPath() (string, error) {

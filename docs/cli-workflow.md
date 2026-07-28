@@ -1,14 +1,15 @@
-# CLI Workflow
+# Direct Runner Workflow
 
-This guide shows the complete operator flow for one Kova build batch:
+This development workflow creates a runner Pod directly from the workstation:
 
 ```text
 prepare -> build -> logs -> wait -> export -> destroy
 ```
 
-The same CLI flow works against a local kind cluster or any Kubernetes cluster
-accepted by the supplied kubeconfig. The runner image must
-already be pullable from the target cluster.
+Use the [authenticated Service workflow](service.md) for shared environments.
+The direct flow works against a local kind cluster or any Kubernetes cluster
+accepted by the supplied kubeconfig. The runner image must already be pullable
+from the target cluster.
 
 ## Local kind Setup
 
@@ -44,6 +45,7 @@ Create a local kind context:
 
 ```bash
 kova ctx set \
+  --mode direct \
   --kubeconfig .kind/kova-local.kubeconfig \
   --namespace default \
   --buildkit-addr tcp://kova.kova.svc:9094 \
@@ -58,6 +60,7 @@ Create another context for a remote Kubernetes cluster:
 
 ```bash
 kova ctx set \
+  --mode direct \
   --kubeconfig /path/to/remote.kubeconfig \
   --namespace default \
   --buildkit-addr tcp://kova.kova.svc:9094 \

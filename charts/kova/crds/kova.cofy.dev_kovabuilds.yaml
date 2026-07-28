@@ -87,6 +87,16 @@ spec:
               idempotencyKey:
                 maxLength: 256
                 type: string
+              requester:
+                properties:
+                  uid:
+                    type: string
+                  username:
+                    minLength: 1
+                    type: string
+                required:
+                - username
+                type: object
               source:
                 properties:
                   digest:
@@ -101,6 +111,7 @@ spec:
                 - uri
                 type: object
             required:
+            - requester
             - source
             type: object
           status:

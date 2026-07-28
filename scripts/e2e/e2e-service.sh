@@ -123,10 +123,19 @@ helm upgrade --install "${RELEASE_NAME}" "${ROOT}/charts/kova" \
   --set-string "serviceDaemon.authentication.mode=static" \
   --set-string "serviceDaemon.authentication.staticTokenSecret.name=${SERVICE_AUTH_SECRET}" \
   --set-string "serviceDaemon.authentication.staticTokenSecret.key=token" \
+  --set-string "serviceDaemon.authentication.staticPrincipal=kova:e2e" \
   --set "serviceDaemon.jobTTL=${SERVICE_JOB_TTL}" \
   --set "serviceDaemon.runnerImagePullSecret=" \
+  --set-string "serviceDaemon.registryPlainHTTP[0]=${CLUSTER_REGISTRY}" \
   --set "artifactStore.filesystem.pvc.create=true" \
   --set "artifactStore.filesystem.pvc.accessModes[0]=ReadWriteOnce"
+
+kubectl --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" \
+  -n "${NAMESPACE}" create rolebinding "${RELEASE_NAME}-e2e-submitter" \
+  --role="${RELEASE_NAME}-service-submitter" \
+  --user=kova:e2e \
+  --dry-run=client -o yaml | \
+  kubectl --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" apply -f - >/dev/null
 
 kubectl --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" \
   -n "${NAMESPACE}" rollout status deploy/"${RELEASE_NAME}-service" --timeout=180s

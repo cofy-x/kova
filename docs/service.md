@@ -15,8 +15,83 @@ Every `/v1/*` request requires an explicit authentication mode:
 - `unsafe-none` disables authentication explicitly and is suitable only for
   an isolated development cluster.
 
+Authentication returns a principal containing the caller's Kubernetes
+username, UID, and groups. TokenReview mode submits a SubjectAccessReview for
+the requested `KovaBuild` operation:
+
+- callers with `create` access can submit jobs
+- submitters can list, read, cancel, export, and preheat only their own jobs
+- callers with the corresponding namespace-wide RBAC verb can operate on all
+  jobs
+
+The chart creates unbound submitter and admin Roles. An environment grants
+access with a RoleBinding such as:
+
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: kova-builders
+  namespace: kova
+subjects:
+  - kind: Group
+    name: kova-builders
+    apiGroup: rbac.authorization.k8s.io
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: kova-service-submitter
+```
+
+Bind trusted platform operators to `kova-service-admin`. Static mode maps its
+single token to `serviceDaemon.authentication.staticPrincipal`; create a
+RoleBinding for that Kubernetes username. Kova contexts never store bearer
+tokens.
+
 `/healthz` is an unauthenticated process liveness endpoint. `/readyz` verifies
 that the controller can query `KovaBuild` resources before it accepts traffic.
+
+## CLI
+
+Create a Service context. A kubeconfig supplies TokenReview credentials through
+the same bearer token or exec credential plugin used by Kubernetes clients:
+
+```bash
+kubectl -n kova port-forward service/kova-service 8080:8080
+
+kova ctx set \
+  --mode service \
+  --service-url http://127.0.0.1:8080 \
+  --kubeconfig "${KUBECONFIG:-$HOME/.kube/config}" \
+  --use \
+  service
+```
+
+For static authentication, provide the token only through the process
+environment:
+
+```bash
+export KOVA_SERVICE_TOKEN=REPLACE_WITH_TOKEN
+```
+
+Submit and manage jobs without constructing HTTP requests:
+
+```bash
+kova job submit ./image \
+  --target registry.example.com/team/image:dev \
+  --format oci \
+  --idempotency-key build-123
+
+kova job list
+kova job get <job-id>
+kova job logs <job-id> --tail 100
+kova job wait <job-id> --timeout 10m
+kova job results <job-id>
+kova job cancel <job-id>
+```
+
+Use `--service-ca-file` for a private Service CA. The
+`--service-insecure` option is intended only for isolated TLS testing.
 
 ## Artifact Storage
 
@@ -57,7 +132,7 @@ optional `KOVA_S3_SESSION_TOKEN`. An S3 runner init container uses the same
 Secret to download and verify the job source. S3 mode does not require an RWX
 volume or controller/runner node affinity.
 
-## API
+## HTTP API
 
 Create a build:
 
@@ -76,8 +151,9 @@ curl -sS -X POST \
 from the uploaded bytes. Responses always contain the computed digest.
 
 The first request returns `202 Accepted`. Repeating an idempotency key with the
-same archive and build options returns the existing job with `200 OK`. Reusing
-it with different immutable inputs returns `409 Conflict`.
+same archive and build options returns the existing job with `200 OK`.
+Idempotency keys are scoped to the authenticated username. Reusing one with
+different immutable inputs returns `409 Conflict`.
 
 Supported form fields are:
 
@@ -137,16 +213,35 @@ artifactStore:
     secure: true
 ```
 
+The submitter and admin Roles are intentionally not bound by the chart. The
+consuming environment owns user and group membership.
+
 Static-token environments use an externally managed Secret:
 
 ```yaml
 serviceDaemon:
   authentication:
     mode: static
+    staticPrincipal: kova:ci
     staticTokenSecret:
       name: kova-service-auth
       key: token
 ```
+
+The controller verifies each pushed image descriptor before marking a job
+successful. It reuses `serviceDaemon.runnerImagePullSecret`, then
+`imagePullSecrets.name`, unless `serviceDaemon.registrySecret` names a distinct
+`kubernetes.io/dockerconfigjson` Secret in the release namespace. Registry
+transport is HTTPS by default. Isolated development registries that provide
+only HTTP must be listed explicitly:
+
+```yaml
+serviceDaemon:
+  registryPlainHTTP:
+    - registry.local:5000
+```
+
+Do not enable plain HTTP for production registries.
 
 Filesystem mode is useful for local clusters:
 

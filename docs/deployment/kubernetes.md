@@ -97,9 +97,14 @@ environments. A ReadWriteOnce PVC may require matching
 ## Authentication
 
 TokenReview is the default service mode. The chart creates only the RBAC needed
-to submit TokenReview requests. Static authentication is available when an
-external Secret is more appropriate. `unsafe-none` must be selected explicitly
-and should never be exposed outside an isolated development cluster.
+to submit TokenReview and SubjectAccessReview requests. It also creates
+unbound `kova-service-submitter` and `kova-service-admin` Roles. Bind users or
+groups to the submitter Role to create jobs and manage only their own jobs;
+bind platform operators to the admin Role for namespace-wide access. Static
+authentication is available when an external Secret is more appropriate and
+maps the token to `serviceDaemon.authentication.staticPrincipal`.
+`unsafe-none` must be selected explicitly and should never be exposed outside
+an isolated development cluster.
 
 See the [service API and storage guide](../service.md) for complete values.
 
@@ -114,8 +119,15 @@ imagePullSecrets:
 ```
 
 Place the Secret in both the release namespace and runner namespace when they
-differ. The chart can render credentials from `imageRegistries`, but production
-environments should keep secrets out of Helm values and release history.
+differ. Service mode uses the same Secret to verify output image descriptors;
+set `serviceDaemon.registrySecret` to use a different Docker config Secret in
+the release namespace. The chart can render credentials from
+`imageRegistries`, but production environments should keep secrets out of Helm
+values and release history.
+
+Registry transport is HTTPS by default. Only isolated development registries
+that do not support TLS should be listed under
+`serviceDaemon.registryPlainHTTP`.
 
 ## Capacity And Placement
 
@@ -135,6 +147,22 @@ IPs, avoid busy or cooling endpoints, and refresh DNS as replicas change.
 The chart exposes worker resources, topology spread, disruption budget, HPA,
 node selectors, tolerations, affinity, priority class, and runtime class.
 Environment overlays should set these according to cluster policy.
+
+Enable `networkPolicy` only with explicit ingress peers. An empty peer list
+denies ingress to the selected worker or Service endpoint:
+
+```yaml
+networkPolicy:
+  enabled: true
+  workerIngressFrom:
+    - podSelector:
+        matchLabels:
+          app.kubernetes.io/name: kova-runner
+  serviceIngressFrom:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: platform-clients
+```
 
 ## Direct Runner Lifecycle
 

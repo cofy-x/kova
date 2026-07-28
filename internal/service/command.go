@@ -27,6 +27,7 @@ import (
 	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
+	ctrlzap "sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 )
 
@@ -42,6 +43,7 @@ func CLICommand() *cli.Command {
 			&cli.StringFlag{Name: "runner-image-pull-policy", Value: defaults.RunnerImagePullPolicy, Usage: "runner image pull policy"},
 			&cli.StringFlag{Name: "runner-image-pull-secret", Value: defaults.ImagePullSecret, Usage: "runner image pull secret name"},
 			&cli.StringSliceFlag{Name: "runner-node-selector", Usage: "node selector for runner Pods; repeatable key=value"},
+			&cli.StringSliceFlag{Name: "registry-plain-http", EnvVars: []string{"KOVA_SERVICE_REGISTRY_PLAIN_HTTP"}, Usage: "output registry host that uses plain HTTP; repeatable and intended for development"},
 			&cli.StringFlag{Name: "buildkit-addr", Value: defaults.BuildkitAddr, Usage: "BuildKit address passed to runner daemon and build requests"},
 			&cli.StringFlag{Name: "source-pvc-claim", Usage: "PVC claim backing filesystem artifacts; not used by S3 storage"},
 			&cli.StringFlag{Name: "artifact-driver", Value: artifactstore.DriverFilesystem, EnvVars: []string{"KOVA_ARTIFACT_DRIVER"}, Usage: "artifact storage driver: filesystem or s3"},
@@ -58,6 +60,7 @@ func CLICommand() *cli.Command {
 			&cli.Int64Flag{Name: "max-upload-bytes", Value: 1 << 30, Usage: "maximum multipart build request size in bytes"},
 			&cli.StringFlag{Name: "auth-mode", Value: serviceauth.ModeTokenReview, EnvVars: []string{"KOVA_SERVICE_AUTH_MODE"}, Usage: "API authentication mode: tokenreview, static, or unsafe-none"},
 			&cli.StringFlag{Name: "auth-token", EnvVars: []string{"KOVA_SERVICE_AUTH_TOKEN"}, Usage: "bearer token required by static authentication"},
+			&cli.StringFlag{Name: "auth-static-principal", Value: "kova:static", EnvVars: []string{"KOVA_SERVICE_AUTH_STATIC_PRINCIPAL"}, Usage: "Kubernetes username represented by the static token"},
 			&cli.DurationFlag{Name: "wait", Value: 3 * time.Minute, Usage: "timeout for runner Pod readiness"},
 			&cli.DurationFlag{Name: "poll-interval", Value: 5 * time.Second, Usage: "build status polling interval"},
 			&cli.IntFlag{Name: "max-active-jobs", Value: 20, Usage: "maximum concurrently active service jobs"},
@@ -66,7 +69,12 @@ func CLICommand() *cli.Command {
 			&cli.StringFlag{Name: "leader-election-namespace", Usage: "namespace used for controller leader election leases; defaults to --namespace"},
 		},
 		Action: func(c *cli.Context) error {
+			ctrl.SetLogger(ctrlzap.New(ctrlzap.UseDevMode(false), ctrlzap.WriteTo(os.Stderr)))
 			runnerNodeSelector, err := parseNodeSelector(c.StringSlice("runner-node-selector"))
+			if err != nil {
+				return err
+			}
+			plainHTTPRegistries, err := parseRegistryHosts(c.StringSlice("registry-plain-http"))
 			if err != nil {
 				return err
 			}
@@ -95,6 +103,7 @@ func CLICommand() *cli.Command {
 				RunnerImagePullSecret: c.String("runner-image-pull-secret"),
 				RunnerNodeSelector:    runnerNodeSelector,
 				RunnerEnv:             runnerObservabilityEnv(),
+				RegistryPlainHTTP:     plainHTTPRegistries,
 				BuildkitAddr:          c.String("buildkit-addr"),
 				SourcePVCClaim:        strings.TrimSpace(c.String("source-pvc-claim")),
 				ArtifactDriver:        c.String("artifact-driver"),
@@ -110,7 +119,8 @@ func CLICommand() *cli.Command {
 				JobTTL:                c.Duration("job-ttl"),
 				MaxUploadBytes:        c.Int64("max-upload-bytes"),
 				AuthToken:             c.String("auth-token"),
-				AuthMode:              c.String("auth-mode"),
+				AuthMode:              strings.TrimSpace(c.String("auth-mode")),
+				AuthStaticPrincipal:   strings.TrimSpace(c.String("auth-static-principal")),
 				WaitTimeout:           c.Duration("wait"),
 				PollInterval:          c.Duration("poll-interval"),
 				MaxActiveJobs:         c.Int("max-active-jobs"),
@@ -125,9 +135,16 @@ func CLICommand() *cli.Command {
 			if err != nil {
 				return err
 			}
-			authenticator, err := serviceauth.New(cfg.AuthMode, cfg.AuthToken, clientset.AuthenticationV1().TokenReviews())
+			authenticator, err := serviceauth.New(cfg.AuthMode, cfg.AuthToken, cfg.AuthStaticPrincipal, clientset.AuthenticationV1().TokenReviews())
 			if err != nil {
 				return err
+			}
+			var authorizer serviceauth.Authorizer = serviceauth.AllowAllAuthorizer{}
+			if cfg.AuthMode != serviceauth.ModeUnsafeNone {
+				authorizer, err = serviceauth.NewSubjectAccessReviewAuthorizer(clientset.AuthorizationV1().SubjectAccessReviews())
+				if err != nil {
+					return err
+				}
 			}
 			mgr, err := ctrl.NewManager(restConfig, ctrl.Options{
 				Scheme:                  scheme,
@@ -150,7 +167,7 @@ func CLICommand() *cli.Command {
 				return err
 			}
 			go func() {
-				if err := httpapi.NewServer(cfg, kubeClient, mgr.GetClient(), mgr.GetAPIReader(), store, authenticator).Start(ctx); err != nil {
+				if err := httpapi.NewServer(cfg, kubeClient, mgr.GetClient(), mgr.GetAPIReader(), store, authenticator, authorizer).Start(ctx); err != nil {
 					stop()
 				}
 			}()
@@ -203,6 +220,23 @@ func parseNodeSelector(values []string) (map[string]string, error) {
 		selectors[key] = value
 	}
 	return selectors, nil
+}
+
+func parseRegistryHosts(values []string) ([]string, error) {
+	seen := make(map[string]struct{}, len(values))
+	hosts := make([]string, 0, len(values))
+	for _, value := range values {
+		host := strings.ToLower(strings.TrimSpace(value))
+		if host == "" || strings.Contains(host, "://") || strings.Contains(host, "/") {
+			return nil, fmt.Errorf("invalid plain HTTP registry %q: expected host or host:port", value)
+		}
+		if _, exists := seen[host]; exists {
+			continue
+		}
+		seen[host] = struct{}{}
+		hosts = append(hosts, host)
+	}
+	return hosts, nil
 }
 
 func leaderElectionNamespace(c *cli.Context, fallback string) string {

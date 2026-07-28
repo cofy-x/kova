@@ -150,6 +150,9 @@ func runnerConfigFromContext(c *cli.Context) (runner.Config, error) {
 	if err != nil {
 		return runner.Config{}, err
 	}
+	if hasCtx && ctx.EffectiveMode() != ctxconfig.ModeDirect {
+		return runner.Config{}, fmt.Errorf("ctx %q uses service mode; use kova job commands", c.String("ctx"))
+	}
 	cfg.Kubeconfig = valueFromFlagEnvCtx(c, "kubeconfig", "KOVA_KUBECONFIG", cfg.Kubeconfig, ctx.Kubeconfig, hasCtx)
 	cfg.Namespace = valueFromFlagEnvCtx(c, "namespace", "KOVA_NAMESPACE", cfg.Namespace, ctx.Namespace, hasCtx)
 	cfg.PodName = strings.TrimSpace(c.String("name"))

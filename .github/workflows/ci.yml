@@ -100,6 +100,8 @@ jobs:
           version: v4.1.3
       - name: Check shell scripts
         run: make lint-scripts
+      - name: Check documentation links
+        run: make docs-check
       - name: Lint Helm charts
         run: |
           helm lint charts/kova --values deploy/kind-values.yaml

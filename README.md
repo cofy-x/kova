@@ -52,13 +52,29 @@ helm upgrade --install kova oci://ghcr.io/cofy-x/charts/kova \
 The chart selects matching controller, runner, and worker images automatically.
 Continue with the [installation and first-build guide](docs/quickstart.md).
 
+For shared environments, enable the authenticated Service and use the native
+job workflow:
+
+```bash
+kova job submit ./image --target registry.example.com/team/image:dev
+kova job list
+kova job wait <job-id>
+kova job results <job-id>
+```
+
+The [Service security and CLI guide](docs/service.md) covers identity, RBAC,
+contexts, artifact storage, and job operations. Direct runner commands remain
+available for local development and low-level debugging.
+
 ## Documentation
 
 - [Documentation map](docs/README.md): choose the guide for a task.
 - [Installation and first build](docs/quickstart.md): install the public OCI
   Helm chart and matching CLI, then verify a build.
 - [CLI workflow](docs/cli-workflow.md): contexts, prepare,
-  build, logs, wait, export, and cleanup.
+  direct runner builds, logs, export, and cleanup.
+- [Service job workflow](docs/service.md): authenticated shared builds,
+  authorization, storage, and native CLI operations.
 - [Runtime design](docs/architecture.md): roles, topology, build/export,
   preheat, and scaling flows.
 - [Kubernetes deployment](docs/deployment/kubernetes.md): Helm installation,

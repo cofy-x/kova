@@ -8,6 +8,7 @@ container runtime behavior.
 
 ```bash
 go test ./...
+make docs-check
 make lint-scripts
 make helm-template
 git diff --check

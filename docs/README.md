@@ -8,12 +8,12 @@ with the [complete CLI workflow](cli-workflow.md) for build operations or the
 
 - [Installation and first build](quickstart.md): install the OCI Helm chart and
   matching CLI, then verify a build.
-- [CLI workflow](cli-workflow.md): prepare, build, logs, wait, export, and
-  cleanup.
+- [Direct runner workflow](cli-workflow.md): prepare, build, logs, wait,
+  export, and cleanup for development.
 - [Runtime design](architecture.md): roles, topology, build/export,
   preheat, and scaling flows.
-- [Service API](service.md): optional HTTP gateway that creates runner Pods
-  for service-style usage.
+- [Service job workflow](service.md): authenticated job CLI, HTTP API, RBAC,
+  and artifact storage for shared environments.
 - [Validation matrix](testing.md): static checks, E2E targets, and runtime smoke
   expectations.
 - [Release artifacts](releases.md): versioning, CLI archives, runtime images,

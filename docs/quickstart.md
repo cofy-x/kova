@@ -90,6 +90,7 @@ Create a CLI context for the installed worker Service:
 export KOVA_KUBECONFIG=${KUBECONFIG:-$HOME/.kube/config}
 
 kova ctx set \
+  --mode direct \
   --kubeconfig "${KOVA_KUBECONFIG}" \
   --namespace kova \
   --buildkit-addr tcp://kova.kova.svc:9094 \
@@ -126,8 +127,10 @@ Verify that `.work/kova-quickstart-result.jsonl` reports a successful build.
 Pull `${KOVA_TARGET}` as an additional registry-path check when the workstation
 can reach the target registry.
 
-The [complete CLI workflow](cli-workflow.md) covers contexts, logs, batch
-input, Nydus output, and result selection. The
+The [direct runner workflow](cli-workflow.md) covers contexts, logs, batch
+input, Nydus output, and result selection. Use the
+[authenticated Service workflow](service.md) for shared or platform-operated
+environments. The
 [Kubernetes deployment guide](deployment/kubernetes.md) covers private registry
 credentials, service mode, artifact storage, capacity, and production overlays.
 

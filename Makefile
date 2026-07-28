@@ -63,7 +63,7 @@ export REGISTRY_NAME REGISTRY_IMAGE REGISTRY_HOST REGISTRY_PORT CLUSTER_REGISTRY
 export RELEASE_NAME NAMESPACE WORK_DIR KOVA_RUNNER_NAME SOURCE_ZIP RESULT_JSONL
 export KOVA_CONCURRENT_RUNNER_NAME CONCURRENT_SOURCE_ZIP CONCURRENT_RESULT_JSONL NYDUS_RESULT_JSONL RUNTIME_OCI_SOURCE_ZIP RUNTIME_NYDUS_SOURCE_ZIP RUNTIME_OCI_RESULT_JSONL RUNTIME_NYDUS_RESULT_JSONL EXAMPLE_COUNT BUILD_CONCURRENCY
 
-.PHONY: all kova kovad install generate-crds image kind-registry kind-create kind-load deploy-kind diagnose-kind observability-up observability-down observability-status dragonfly-nydus-install e2e e2e-helm-quickstart e2e-service e2e-concurrent e2e-dragonfly-nydus e2e-runtime-preflight e2e-runtime e2e-observability clean clean-kind test lint-scripts helm-template package-example package-concurrent-example FORCE
+.PHONY: all kova kovad install generate-crds image kind-registry kind-create kind-load deploy-kind diagnose-kind observability-up observability-down observability-status dragonfly-nydus-install e2e e2e-helm-quickstart e2e-service e2e-concurrent e2e-dragonfly-nydus e2e-runtime-preflight e2e-runtime e2e-observability clean clean-kind test docs-check lint-scripts helm-template package-example package-concurrent-example FORCE
 
 all: kova
 
@@ -165,6 +165,9 @@ e2e-observability:
 test:
 	$(GO) test ./...
 
+docs-check:
+	./scripts/docs/check.sh
+
 lint-scripts:
 	find scripts -name '*.sh' -print0 | xargs -0 -n1 bash -n
 	@if command -v shellcheck >/dev/null 2>&1; then \
@@ -176,6 +179,19 @@ lint-scripts:
 helm-template:
 	helm template $(RELEASE_NAME) ./charts/kova -f deploy/kind-values.yaml >/dev/null
 	helm template $(RELEASE_NAME) ./charts/kova -f deploy/kubernetes-values.yaml >/dev/null
+	helm template $(RELEASE_NAME) ./charts/kova \
+		--set serviceDaemon.enabled=true \
+		--set artifactStore.filesystem.pvc.create=true >/dev/null
+	helm template $(RELEASE_NAME) ./charts/kova \
+		--set serviceDaemon.enabled=true \
+		--set artifactStore.filesystem.pvc.create=true \
+		--set serviceDaemon.authentication.mode=static \
+		--set serviceDaemon.authentication.staticTokenSecret.name=test-secret \
+		--set networkPolicy.enabled=true >/dev/null
+	helm template $(RELEASE_NAME) ./charts/kova \
+		--set serviceDaemon.enabled=true \
+		--set artifactStore.filesystem.pvc.create=true \
+		--set serviceDaemon.authentication.mode=unsafe-none >/dev/null
 	helm template kova-observability ./charts/kova-observability \
 		--namespace kova-observability \
 		--set grafana.admin.existingSecret=test-secret >/dev/null

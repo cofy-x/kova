@@ -209,7 +209,7 @@ func (r *KovaBuildReconciler) pollBuild(ctx context.Context, build *kovav1.KovaB
 	}
 	if success {
 		build.Status.Phase = kovav1.PhaseSucceeded
-		build.Status.Results = buildresult.Resolve(ctx, runnerexec.Client{Kube: r.Kube, BuildkitAddr: r.Cfg.BuildkitAddr}, build)
+		build.Status.Results = buildresult.Resolve(ctx, runnerexec.Client{Kube: r.Kube, BuildkitAddr: r.Cfg.BuildkitAddr}, build, r.Cfg.RegistryPlainHTTP)
 		if !buildresult.AllSucceeded(build.Status.Results) {
 			return ctrl.Result{}, r.finish(ctx, build, kovav1.PhaseFailed, "one or more build results could not be verified")
 		}
@@ -220,14 +220,14 @@ func (r *KovaBuildReconciler) pollBuild(ctx context.Context, build *kovav1.KovaB
 	}
 	if state.Status == "cancelled" {
 		build.Status.Phase = kovav1.PhaseCancelled
-		build.Status.Results = buildresult.Resolve(ctx, runnerexec.Client{Kube: r.Kube, BuildkitAddr: r.Cfg.BuildkitAddr}, build)
+		build.Status.Results = buildresult.Resolve(ctx, runnerexec.Client{Kube: r.Kube, BuildkitAddr: r.Cfg.BuildkitAddr}, build, r.Cfg.RegistryPlainHTTP)
 		if err := r.persistResults(ctx, build); err != nil {
 			return ctrl.Result{}, r.finish(ctx, build, kovav1.PhaseFailed, err.Error())
 		}
 		return ctrl.Result{}, r.finish(ctx, build, kovav1.PhaseCancelled, state.Error)
 	}
 	build.Status.Phase = kovav1.PhaseFailed
-	build.Status.Results = buildresult.Resolve(ctx, runnerexec.Client{Kube: r.Kube, BuildkitAddr: r.Cfg.BuildkitAddr}, build)
+	build.Status.Results = buildresult.Resolve(ctx, runnerexec.Client{Kube: r.Kube, BuildkitAddr: r.Cfg.BuildkitAddr}, build, r.Cfg.RegistryPlainHTTP)
 	if err := r.persistResults(ctx, build); err != nil {
 		return ctrl.Result{}, r.finish(ctx, build, kovav1.PhaseFailed, err.Error())
 	}

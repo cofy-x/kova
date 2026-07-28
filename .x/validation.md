@@ -6,6 +6,7 @@ For broad code changes, prefer:
 
 ```bash
 go test ./...
+make docs-check
 make lint-scripts
 make helm-template
 git diff --check

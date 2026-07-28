@@ -10,6 +10,7 @@ type Config struct {
 	RunnerImagePullSecret string
 	RunnerNodeSelector    map[string]string
 	RunnerEnv             map[string]string
+	RegistryPlainHTTP     []string
 	BuildkitAddr          string
 	SourcePVCClaim        string
 	ArtifactDriver        string
@@ -26,6 +27,7 @@ type Config struct {
 	MaxUploadBytes        int64
 	AuthToken             string
 	AuthMode              string
+	AuthStaticPrincipal   string
 	WaitTimeout           time.Duration
 	PollInterval          time.Duration
 	MaxActiveJobs         int

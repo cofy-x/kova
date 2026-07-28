@@ -33,6 +33,12 @@ type fakeKube struct {
 	deleteErr error
 }
 
+type authorizerFunc func(context.Context, serviceauth.Principal, serviceauth.Attributes) error
+
+func (fn authorizerFunc) Authorize(ctx context.Context, principal serviceauth.Principal, attrs serviceauth.Attributes) error {
+	return fn(ctx, principal, attrs)
+}
+
 func (f *fakeKube) GetSecretData(context.Context, string, string, string) (string, error) {
 	return "", nil
 }
@@ -110,11 +116,11 @@ func newTestServerWithRoot(t *testing.T, kube *fakeKube, root string) *Server {
 	if err != nil {
 		t.Fatal(err)
 	}
-	authenticator, err := serviceauth.New(serviceauth.ModeStatic, "token", nil)
+	authenticator, err := serviceauth.New(serviceauth.ModeStatic, "token", "test-user", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return NewServer(testConfig(root), kube, client, client, store, authenticator)
+	return NewServer(testConfig(root), kube, client, client, store, authenticator, serviceauth.AllowAllAuthorizer{})
 }
 
 func testConfig(root string) config.Config {
@@ -129,6 +135,7 @@ func testConfig(root string) config.Config {
 		JobTTL:                time.Hour,
 		AuthToken:             "token",
 		AuthMode:              serviceauth.ModeStatic,
+		AuthStaticPrincipal:   "test-user",
 		WaitTimeout:           time.Second,
 		PollInterval:          time.Millisecond,
 	}

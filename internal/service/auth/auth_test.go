@@ -15,43 +15,61 @@ func (fn reviewerFunc) Create(ctx context.Context, review *authenticationv1.Toke
 }
 
 func TestStaticAuthentication(t *testing.T) {
-	authenticator, err := New(ModeStatic, "secret", nil)
+	authenticator, err := New(ModeStatic, "secret", "kova:test", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := authenticator.Authenticate(context.Background(), "secret"); err != nil {
+	principal, err := authenticator.Authenticate(context.Background(), "secret")
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := authenticator.Authenticate(context.Background(), "wrong"); err == nil {
+	if principal.Username != "kova:test" {
+		t.Fatalf("principal = %#v", principal)
+	}
+	if _, err := authenticator.Authenticate(context.Background(), "wrong"); err == nil {
 		t.Fatal("expected invalid token to fail")
 	}
 }
 
 func TestTokenReviewAuthentication(t *testing.T) {
-	authenticator, err := New(ModeTokenReview, "", reviewerFunc(func(_ context.Context, review *authenticationv1.TokenReview, _ metav1.CreateOptions) (*authenticationv1.TokenReview, error) {
-		return &authenticationv1.TokenReview{Status: authenticationv1.TokenReviewStatus{Authenticated: review.Spec.Token == "valid"}}, nil
+	authenticator, err := New(ModeTokenReview, "", "", reviewerFunc(func(_ context.Context, review *authenticationv1.TokenReview, _ metav1.CreateOptions) (*authenticationv1.TokenReview, error) {
+		return &authenticationv1.TokenReview{Status: authenticationv1.TokenReviewStatus{
+			Authenticated: review.Spec.Token == "valid",
+			User:          authenticationv1.UserInfo{Username: "alice", UID: "uid-1", Groups: []string{"builders"}},
+		}}, nil
 	}))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := authenticator.Authenticate(context.Background(), "valid"); err != nil {
+	principal, err := authenticator.Authenticate(context.Background(), "valid")
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := authenticator.Authenticate(context.Background(), "invalid"); err == nil {
+	if principal.Username != "alice" || principal.UID != "uid-1" || len(principal.Groups) != 1 {
+		t.Fatalf("principal = %#v", principal)
+	}
+	if _, err := authenticator.Authenticate(context.Background(), "invalid"); err == nil {
 		t.Fatal("expected unauthenticated review to fail")
 	}
 }
 
 func TestAuthenticationModesAreExplicit(t *testing.T) {
-	if _, err := New(ModeStatic, "", nil); err == nil {
+	if _, err := New(ModeStatic, "", "principal", nil); err == nil {
 		t.Fatal("expected empty static token to fail")
 	}
-	if _, err := New(ModeTokenReview, "", nil); err == nil {
+	if _, err := New(ModeStatic, "token", "", nil); err == nil {
+		t.Fatal("expected empty static principal to fail")
+	}
+	if _, err := New(ModeTokenReview, "", "", nil); err == nil {
 		t.Fatal("expected missing token reviewer to fail")
 	}
-	unsafe, err := New(ModeUnsafeNone, "", nil)
-	if err != nil || unsafe.Authenticate(context.Background(), "") != nil {
-		t.Fatalf("unsafe mode: authenticator=%#v err=%v", unsafe, err)
+	unsafe, err := New(ModeUnsafeNone, "", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	principal, err := unsafe.Authenticate(context.Background(), "")
+	if err != nil || principal.Username != "system:anonymous" {
+		t.Fatalf("unsafe mode: principal=%#v err=%v", principal, err)
 	}
 }
 

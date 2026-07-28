@@ -21,6 +21,15 @@ The default installs one worker. Production environments should provide an
 environment-owned values file for capacity, storage, registry credentials,
 scheduling, and service configuration.
 
+`values.schema.json` rejects unknown or invalid chart values. Optional
+NetworkPolicies require explicit worker and Service ingress peers; empty peer
+lists deny ingress.
+
+Service deployments reuse the runner image pull Secret to authenticate output
+descriptor verification by default. Set `serviceDaemon.registrySecret` when
+those credentials differ. Plain HTTP registries must be listed explicitly in
+`serviceDaemon.registryPlainHTTP` and are intended only for development.
+
 See the [Quick Start](../../docs/quickstart.md) and
 [Kubernetes deployment guide](../../docs/deployment/kubernetes.md) for the
 supported workflows and configuration boundaries.

@@ -36,14 +36,18 @@ func ctxListCLICommand() *cli.Command {
 				return err
 			}
 			writer := tabwriter.NewWriter(c.App.Writer, 0, 0, 2, ' ', 0)
-			fmt.Fprintln(writer, "CURRENT\tNAME\tKUBECONFIG\tNAMESPACE\tIMAGE")
+			fmt.Fprintln(writer, "CURRENT\tNAME\tMODE\tENDPOINT")
 			for _, name := range cfg.Names() {
 				mark := ""
 				if name == cfg.Current {
 					mark = "*"
 				}
 				ctx := cfg.Contexts[name]
-				fmt.Fprintf(writer, "%s\t%s\t%s\t%s\t%s\n", mark, name, ctx.Kubeconfig, ctx.Namespace, ctx.RunnerImage)
+				endpoint := ctx.ServiceURL
+				if ctx.EffectiveMode() == ctxconfig.ModeDirect {
+					endpoint = ctx.BuildkitAddr
+				}
+				fmt.Fprintf(writer, "%s\t%s\t%s\t%s\n", mark, name, ctx.EffectiveMode(), endpoint)
 			}
 			return writer.Flush()
 		},
@@ -134,12 +138,16 @@ func ctxSetCLICommand() *cli.Command {
 		Usage:     "create or update a local Kova context",
 		ArgsUsage: "<name>",
 		Flags: []cli.Flag{
+			&cli.StringFlag{Name: "mode", Usage: "context mode: direct or service"},
 			&cli.StringFlag{Name: "kubeconfig", Usage: "path to kubeconfig"},
 			&cli.StringFlag{Name: "namespace", Usage: "runner namespace"},
 			&cli.StringFlag{Name: "buildkit-addr", Usage: "default BuildKit address"},
 			&cli.StringFlag{Name: "image", Usage: "default runner image"},
 			&cli.StringFlag{Name: "image-pull-policy", Usage: "default runner image pull policy"},
 			&cli.StringFlag{Name: "image-pull-secret", Usage: "default runner image pull secret name"},
+			&cli.StringFlag{Name: "service-url", Usage: "Kova service base URL"},
+			&cli.StringFlag{Name: "service-ca-file", Usage: "CA bundle for the Kova service"},
+			&cli.BoolFlag{Name: "service-insecure", Usage: "skip Kova service TLS verification"},
 			&cli.BoolFlag{Name: "use", Usage: "make this context current"},
 		},
 		Action: func(c *cli.Context) error {
@@ -155,6 +163,9 @@ func ctxSetCLICommand() *cli.Command {
 				cfg.Contexts = map[string]ctxconfig.Context{}
 			}
 			next := cfg.Contexts[name]
+			if c.IsSet("mode") {
+				next.Mode = strings.TrimSpace(c.String("mode"))
+			}
 			if c.IsSet("kubeconfig") {
 				next.Kubeconfig = strings.TrimSpace(c.String("kubeconfig"))
 			}
@@ -172,6 +183,21 @@ func ctxSetCLICommand() *cli.Command {
 			}
 			if c.IsSet("image-pull-secret") {
 				next.ImagePullSecret = strings.TrimSpace(c.String("image-pull-secret"))
+			}
+			if c.IsSet("service-url") {
+				next.ServiceURL = strings.TrimSpace(c.String("service-url"))
+			}
+			if c.IsSet("service-ca-file") {
+				next.ServiceCAFile = strings.TrimSpace(c.String("service-ca-file"))
+			}
+			if c.IsSet("service-insecure") {
+				next.ServiceInsecure = c.Bool("service-insecure")
+			}
+			if next.Mode == "" {
+				next.Mode = ctxconfig.ModeDirect
+			}
+			if err := next.Validate(); err != nil {
+				return err
 			}
 			cfg.Contexts[name] = next
 			if c.Bool("use") || cfg.Current == "" {

@@ -155,6 +155,10 @@ func assertBasePreparePod(t *testing.T, pod corev1.Pod) {
 	if got := pod.Spec.Containers[0].Command; len(got) != 4 || got[0] != wantCommand[0] || got[1] != wantCommand[1] || got[2] != wantCommand[2] {
 		t.Fatalf("unexpected command: %#v", got)
 	}
+	probe := pod.Spec.Containers[0].ReadinessProbe
+	if probe == nil || probe.Exec == nil || len(probe.Exec.Command) != 3 || probe.Exec.Command[2] != "/tmp/kova.sock" {
+		t.Fatalf("unexpected readiness probe: %#v", probe)
+	}
 }
 
 func mustNotContain(t *testing.T, value, unwanted string) {

@@ -1,0 +1,54 @@
+{{- if .Values.networkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "kova.fullname" . }}-worker
+  namespace: {{ include "kova.namespace" . }}
+  labels:
+    {{- include "kova.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "kova.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+  {{- if .Values.networkPolicy.workerIngressFrom }}
+  ingress:
+    - from:
+        {{- toYaml .Values.networkPolicy.workerIngressFrom | nindent 8 }}
+      ports:
+        - port: {{ .Values.worker.port }}
+          protocol: {{ .Values.worker.protocol }}
+  {{- else }}
+  ingress: []
+  {{- end }}
+{{- if .Values.serviceDaemon.enabled }}
+---
+{{- $selectorName := printf "%s-service" (include "kova.name" .) | trunc 63 | trimSuffix "-" }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "kova.fullname" . }}-service
+  namespace: {{ include "kova.namespace" . }}
+  labels:
+    {{- include "kova.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/name: {{ $selectorName }}
+      app.kubernetes.io/component: service
+  policyTypes:
+    - Ingress
+  {{- if .Values.networkPolicy.serviceIngressFrom }}
+  ingress:
+    - from:
+        {{- toYaml .Values.networkPolicy.serviceIngressFrom | nindent 8 }}
+      ports:
+        - port: {{ .Values.serviceDaemon.port }}
+          protocol: TCP
+  {{- else }}
+  ingress: []
+  {{- end }}
+{{- end }}
+{{- end }}

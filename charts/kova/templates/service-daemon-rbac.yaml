@@ -52,6 +52,30 @@ rules:
     verbs: ["update"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $name }}-submitter
+  namespace: {{ $runnerNamespace }}
+  labels:
+    {{- include "kova.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["kova.cofy.dev"]
+    resources: ["kovabuilds"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $name }}-admin
+  namespace: {{ $runnerNamespace }}
+  labels:
+    {{- include "kova.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["kova.cofy.dev"]
+    resources: ["kovabuilds"]
+    verbs: ["create", "delete", "get", "list", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   name: {{ $name }}
@@ -97,23 +121,28 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
   name: {{ $name }}-leader-election
-{{- if eq .Values.serviceDaemon.authentication.mode "tokenreview" }}
+{{- if ne .Values.serviceDaemon.authentication.mode "unsafe-none" }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: {{ $name }}-tokenreview
+  name: {{ $name }}-auth-review
   labels:
     {{- include "kova.labels" . | nindent 4 }}
 rules:
+  {{- if eq .Values.serviceDaemon.authentication.mode "tokenreview" }}
   - apiGroups: ["authentication.k8s.io"]
     resources: ["tokenreviews"]
+    verbs: ["create"]
+  {{- end }}
+  - apiGroups: ["authorization.k8s.io"]
+    resources: ["subjectaccessreviews"]
     verbs: ["create"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: {{ $name }}-tokenreview
+  name: {{ $name }}-auth-review
   labels:
     {{- include "kova.labels" . | nindent 4 }}
 subjects:
@@ -123,6 +152,6 @@ subjects:
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: {{ $name }}-tokenreview
+  name: {{ $name }}-auth-review
 {{- end }}
 {{- end }}

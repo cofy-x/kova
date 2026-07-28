@@ -79,6 +79,14 @@ func PreparePod(opts ManifestOptions) corev1.Pod {
 						"--addrs",
 						opts.BuildkitAddr,
 					},
+					ReadinessProbe: &corev1.Probe{
+						ProbeHandler: corev1.ProbeHandler{Exec: &corev1.ExecAction{
+							Command: []string{"/usr/bin/test", "-S", "/tmp/kova.sock"},
+						}},
+						PeriodSeconds:    1,
+						TimeoutSeconds:   1,
+						FailureThreshold: 3,
+					},
 					SecurityContext: &corev1.SecurityContext{
 						AllowPrivilegeEscalation: boolPointer(false),
 						RunAsNonRoot:             boolPointer(true),

@@ -16,6 +16,7 @@ func buildJobFromCR(build *kovav1.KovaBuild, cfg config.Config) BuildJob {
 		BuildkitAddr:   cfg.BuildkitAddr,
 		SourceDigest:   build.Spec.Source.Digest,
 		IdempotencyKey: build.Spec.IdempotencyKey,
+		Requester:      build.Spec.Requester.Username,
 	}
 	if job.PodName == "" {
 		job.PodName = buildPodName(build.Name)

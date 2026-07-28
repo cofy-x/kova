@@ -39,10 +39,19 @@ type KovaBuild struct {
 
 type KovaBuildSpec struct {
 	// +kubebuilder:validation:Required
+	Requester KovaBuildRequester `json:"requester"`
+	// +kubebuilder:validation:Required
 	Source KovaBuildSourceSpec `json:"source,omitempty"`
 	Build  KovaBuildOptions    `json:"build,omitempty"`
 	// +kubebuilder:validation:MaxLength=256
 	IdempotencyKey string `json:"idempotencyKey,omitempty"`
+}
+
+type KovaBuildRequester struct {
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	Username string `json:"username"`
+	UID      string `json:"uid,omitempty"`
 }
 
 type KovaBuildSourceSpec struct {

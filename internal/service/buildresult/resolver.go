@@ -21,7 +21,7 @@ type Exporter interface {
 	Post(context.Context, *kovav1.KovaBuild, string, string) ([]byte, error)
 }
 
-func Resolve(ctx context.Context, exporter Exporter, build *kovav1.KovaBuild) []kovav1.BuildResult {
+func Resolve(ctx context.Context, exporter Exporter, build *kovav1.KovaBuild, plainHTTPRegistries []string) []kovav1.BuildResult {
 	expected := Pending(build)
 	if build.Status.Phase == kovav1.PhaseCancelled {
 		return failAll(expected, "cancelled", "build cancelled")
@@ -50,7 +50,7 @@ func Resolve(ctx context.Context, exporter Exporter, build *kovav1.KovaBuild) []
 			expected[index].Status, expected[index].Error = "failed", entry.Reason
 			continue
 		}
-		ref, parseErr := name.ParseReference(entry.Target, referenceOptions(entry.Target)...)
+		ref, parseErr := name.ParseReference(entry.Target, referenceOptions(entry.Target, plainHTTPRegistries)...)
 		if parseErr != nil {
 			expected[index].Status, expected[index].Error = "failed", parseErr.Error()
 			continue
@@ -68,14 +68,19 @@ func Resolve(ctx context.Context, exporter Exporter, build *kovav1.KovaBuild) []
 	return expected
 }
 
-func referenceOptions(target string) []name.Option {
+func referenceOptions(target string, plainHTTPRegistries []string) []name.Option {
 	options := []name.Option{name.WeakValidation}
 	normalized := strings.TrimPrefix(strings.TrimPrefix(strings.TrimSpace(target), "docker://"), "oci://")
-	host, _, found := strings.Cut(normalized, "/")
+	registry, _, found := strings.Cut(normalized, "/")
 	if !found {
 		return options
 	}
-	host, _, _ = strings.Cut(host, ":")
+	for _, configured := range plainHTTPRegistries {
+		if strings.EqualFold(strings.TrimSpace(configured), registry) {
+			return append(options, name.Insecure)
+		}
+	}
+	host, _, _ := strings.Cut(registry, ":")
 	switch host {
 	case "localhost", "127.0.0.1", "host.docker.internal":
 		return append(options, name.Insecure)

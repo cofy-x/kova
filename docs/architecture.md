@@ -22,10 +22,10 @@ integration.
 ## Job and Storage Model
 
 `KovaBuild` is the canonical service job. Its spec is immutable and contains
-an artifact URI, SHA-256 digest, build options, and an optional idempotency
-key. Status contains `observedGeneration`, a `Ready` Condition, timestamps,
-the assigned runner, allocated concurrency, a typed result summary, and at
-most 100 inline results.
+the authenticated requester, an artifact URI, SHA-256 digest, build options,
+and an optional caller-scoped idempotency key. Status contains
+`observedGeneration`, a `Ready` Condition, timestamps, the assigned runner,
+allocated concurrency, a typed result summary, and at most 100 inline results.
 
 The artifact store has two drivers:
 
@@ -103,7 +103,9 @@ flowchart LR
 - Worker containers run upstream rootless BuildKit as UID/GID 1000. Rootless
   BuildKit requires unconfined seccomp and AppArmor plus
   `--oci-worker-no-process-sandbox`; it is not a privileged container.
-- TokenReview is the default service authentication mode. `unsafe-none` must
+- TokenReview is the default service authentication mode. SubjectAccessReview
+  enforces create and administrative access, while submitters may read and
+  control only jobs owned by their authenticated username. `unsafe-none` must
   be selected explicitly and is intended only for isolated development.
 - Registry, artifact, and API credentials are external Secret inputs.
 

@@ -21,6 +21,9 @@ func (s *Server) handleBuildResults(c echo.Context) error {
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
 	}
+	if err := s.authorizeBuild(c.Request().Context(), principalFromContext(c), "get", build); err != nil {
+		return forbidden(c)
+	}
 	storedResults := build.Status.Results
 	if build.Status.ResultArtifactURI != "" {
 		reader, openErr := s.store.Open(c.Request().Context(), build.Status.ResultArtifactURI)

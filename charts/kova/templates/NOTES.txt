@@ -9,4 +9,14 @@ The worker endpoint is:
 
   tcp://{{ include "kova.fullname" . }}.{{ include "kova.namespace" . }}.svc:{{ .Values.service.port }}
 
+{{- if .Values.serviceDaemon.enabled }}
+The authenticated Service endpoint is:
+
+  http://{{ include "kova.fullname" . }}-service.{{ include "kova.namespace" . }}.svc:{{ .Values.serviceDaemon.service.port }}
+
+Bind callers to the {{ include "kova.fullname" . }}-service-submitter Role, or
+bind trusted operators to {{ include "kova.fullname" . }}-service-admin. Then
+configure a service context and use `kova job` commands.
+{{- end }}
+
 Documentation: https://github.com/cofy-x/kova/blob/main/docs/quickstart.md
