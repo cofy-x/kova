@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/url"
 	"strings"
+	"time"
 )
 
 const (
@@ -18,6 +19,13 @@ type Store interface {
 	Put(context.Context, string, io.Reader, int64, string) (string, error)
 	Open(context.Context, string) (io.ReadCloser, error)
 	Delete(context.Context, string) error
+	List(context.Context, string) ([]Artifact, error)
+}
+
+type Artifact struct {
+	Key      string
+	URI      string
+	Modified time.Time
 }
 
 type Config struct {

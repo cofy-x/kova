@@ -61,8 +61,10 @@ func (s *Server) handleBuildResults(c echo.Context) error {
 	}
 	return c.JSON(http.StatusOK, buildResultsResponse{
 		ID: build.Name, SourceDigest: build.Spec.Source.Digest,
-		IdempotencyKey:    build.Spec.IdempotencyKey,
-		ResultArtifactURI: build.Status.ResultArtifactURI, Results: results,
+		IdempotencyKey:       build.Spec.IdempotencyKey,
+		ResultArtifactURI:    build.Status.ResultArtifactURI,
+		ResultArtifactDigest: build.Status.ResultArtifactDigest,
+		Results:              results,
 	})
 }
 

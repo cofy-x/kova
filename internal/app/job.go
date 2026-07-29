@@ -79,13 +79,17 @@ func jobListCLICommand() *cli.Command {
 	return &cli.Command{
 		Name:  "list",
 		Usage: "list visible service jobs",
-		Flags: []cli.Flag{&cli.StringFlag{Name: "output", Aliases: []string{"o"}, Value: "table", Usage: "output format: table or json"}},
+		Flags: []cli.Flag{
+			&cli.StringFlag{Name: "output", Aliases: []string{"o"}, Value: "table", Usage: "output format: table or json"},
+			&cli.IntFlag{Name: "limit", Value: 100, Usage: "maximum jobs to return, from 1 to 500"},
+			&cli.StringFlag{Name: "continue", Usage: "opaque continuation token from a previous response"},
+		},
 		Action: func(c *cli.Context) error {
 			client, err := serviceClientFromContext(c)
 			if err != nil {
 				return err
 			}
-			jobs, err := client.List(c.Context)
+			jobs, err := client.ListPage(c.Context, c.Int("limit"), c.String("continue"))
 			if err != nil {
 				return err
 			}
@@ -100,7 +104,13 @@ func jobListCLICommand() *cli.Command {
 			for _, job := range jobs.Jobs {
 				fmt.Fprintf(writer, "%s\t%s\t%s\t%s\n", job.ID, job.Status, job.Requester, job.CreatedAt.Format(time.RFC3339))
 			}
-			return writer.Flush()
+			if err := writer.Flush(); err != nil {
+				return err
+			}
+			if jobs.Continue != "" {
+				fmt.Fprintf(c.App.ErrWriter, "more jobs are available; continuation token: %s\n", jobs.Continue)
+			}
+			return nil
 		},
 	}
 }

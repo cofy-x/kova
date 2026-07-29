@@ -80,6 +80,38 @@ func (s *Filesystem) Delete(_ context.Context, rawURI string) error {
 	return nil
 }
 
+func (s *Filesystem) List(_ context.Context, prefix string) ([]Artifact, error) {
+	root, err := s.pathForKey(strings.TrimSuffix(prefix, "/"))
+	if err != nil {
+		return nil, err
+	}
+	artifacts := []Artifact{}
+	err = filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			if os.IsNotExist(walkErr) && path == root {
+				return filepath.SkipDir
+			}
+			return walkErr
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		key, err := filepath.Rel(s.root, path)
+		if err != nil {
+			return err
+		}
+		artifacts = append(artifacts, Artifact{
+			Key: filepath.ToSlash(key), URI: (&url.URL{Scheme: "file", Path: path}).String(), Modified: info.ModTime(),
+		})
+		return nil
+	})
+	return artifacts, err
+}
+
 func (s *Filesystem) pathForKey(key string) (string, error) {
 	if key == "" || filepath.IsAbs(key) {
 		return "", fmt.Errorf("artifact key must be a non-empty relative path")

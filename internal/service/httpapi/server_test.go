@@ -89,7 +89,10 @@ func TestOwnerAccessIsIsolatedWithoutAdministrativeRBAC(t *testing.T) {
 
 func TestCreateBuildRequiresCreateAuthorization(t *testing.T) {
 	srv := newTestServer(t, &fakeKube{})
-	srv.authz = authorizerFunc(func(context.Context, serviceauth.Principal, serviceauth.Attributes) error {
+	srv.authz = authorizerFunc(func(_ context.Context, _ serviceauth.Principal, attrs serviceauth.Attributes) error {
+		if attrs.Resource != serviceauth.ServiceBuildResource {
+			t.Fatalf("authorization resource = %q", attrs.Resource)
+		}
 		return fmt.Errorf("denied")
 	})
 	req := multipartBuildRequest(t, map[string]string{"format": "oci", "target": "registry.local/example:dev"})
@@ -98,6 +101,25 @@ func TestCreateBuildRequiresCreateAuthorization(t *testing.T) {
 	srv.routes().ServeHTTP(rec, req)
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestTailLogLines(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		raw   string
+		lines int64
+		want  string
+	}{
+		{name: "last two", raw: "one\ntwo\nthree\n", lines: 2, want: "two\nthree\n"},
+		{name: "all", raw: "one\ntwo\n", lines: 10, want: "one\ntwo\n"},
+		{name: "zero", raw: "one\n", lines: 0, want: ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := string(tailLogLines([]byte(tc.raw), tc.lines)); got != tc.want {
+				t.Fatalf("got %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 
@@ -138,6 +160,26 @@ func TestCreateBuildWritesSourceAndCreatesCR(t *testing.T) {
 	}
 	if _, err := os.Stat(uri.Path); err != nil {
 		t.Fatalf("source zip not written: %v", err)
+	}
+}
+
+func TestCreateBuildRejectsRequesterQueueOverflow(t *testing.T) {
+	srv := newTestServer(t, &fakeKube{})
+	srv.cfg.MaxQueuedJobsPerRequester = 1
+	existing := &kovav1.KovaBuild{
+		ObjectMeta: metav1.ObjectMeta{Name: "queued", Namespace: "jobs", Labels: map[string]string{requesterLabel: requesterID("test-user")}},
+		Spec:       kovav1.KovaBuildSpec{Requester: kovav1.KovaBuildRequester{Username: "test-user"}},
+		Status:     kovav1.KovaBuildStatus{Phase: kovav1.PhaseQueued},
+	}
+	if err := srv.client.Create(context.Background(), existing); err != nil {
+		t.Fatal(err)
+	}
+	req := multipartBuildRequest(t, map[string]string{"format": "oci", "target": "registry.local/example:dev"})
+	req.Header.Set("Authorization", "Bearer token")
+	rec := httptest.NewRecorder()
+	srv.routes().ServeHTTP(rec, req)
+	if rec.Code != http.StatusTooManyRequests || rec.Header().Get("Retry-After") == "" {
+		t.Fatalf("status=%d headers=%v body=%s", rec.Code, rec.Header(), rec.Body.String())
 	}
 }
 
@@ -421,12 +463,15 @@ func TestListGetLogsExportPreheatAndCancel(t *testing.T) {
 	if err := srv.client.Get(context.Background(), kubeObjectKey("jobs", "abc"), &cancelled); err != nil {
 		t.Fatal(err)
 	}
-	if cancelled.Status.Phase != kovav1.PhaseCancelled {
-		t.Fatalf("phase = %s", cancelled.Status.Phase)
+	if cancelled.Status.Phase != kovav1.PhaseRunning {
+		t.Fatalf("API handler wrote terminal status directly: %s", cancelled.Status.Phase)
+	}
+	if cancelled.Annotations[kovav1.CancellationRequestedAnnotation] == "" {
+		t.Fatalf("cancellation request was not persisted: %#v", cancelled.Annotations)
 	}
 }
 
-func TestCancelReturnsErrorWhenPodDeleteFails(t *testing.T) {
+func TestCancelDoesNotOperateRunnerDirectly(t *testing.T) {
 	kube := &fakeKube{deleteErr: errors.New("delete failed")}
 	srv := newTestServer(t, kube)
 	build := &kovav1.KovaBuild{
@@ -452,7 +497,10 @@ func TestCancelReturnsErrorWhenPodDeleteFails(t *testing.T) {
 	rec := httptest.NewRecorder()
 	srv.routes().ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusInternalServerError {
+	if rec.Code != http.StatusAccepted {
 		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if len(kube.deleted) != 0 {
+		t.Fatalf("API handler deleted runner Pods directly: %#v", kube.deleted)
 	}
 }

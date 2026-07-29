@@ -24,12 +24,13 @@ import (
 	serviceauth "github.com/cofy-x/kova/internal/service/auth"
 	"github.com/cofy-x/kova/internal/service/config"
 	"github.com/cofy-x/kova/internal/service/runnerexec"
+	"github.com/cofy-x/kova/internal/serviceapi"
 	"github.com/cofy-x/kova/internal/source"
+	"github.com/cofy-x/kova/internal/version"
 
 	"github.com/labstack/echo/v4"
 	"go.opentelemetry.io/otel/attribute"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	apiMeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -72,6 +73,9 @@ func NewServer(cfg config.Config, kube kubeAPI, crClient client.Client, crReader
 	if cfg.MaxUploadBytes == 0 {
 		cfg.MaxUploadBytes = 1 << 30
 	}
+	if cfg.MaxLogBytes == 0 {
+		cfg.MaxLogBytes = 16 << 20
+	}
 	if cfg.WaitTimeout == 0 {
 		cfg.WaitTimeout = 3 * time.Minute
 	}
@@ -109,6 +113,12 @@ func (s *Server) routes() *echo.Echo {
 	e.HidePort = true
 	e.GET("/healthz", func(c echo.Context) error {
 		return c.JSON(http.StatusOK, map[string]string{"status": "ok"})
+	})
+	e.GET("/version", func(c echo.Context) error {
+		return c.JSON(http.StatusOK, serviceapi.VersionInfo{
+			APIVersion: serviceapi.APIVersion, Version: version.Version,
+			Commit: version.Commit, BuildDate: version.BuildDate,
+		})
 	})
 	e.GET("/readyz", func(c echo.Context) error {
 		var builds kovav1.KovaBuildList
@@ -180,6 +190,10 @@ func (s *Server) handleCreateBuild(c echo.Context) error {
 		if err != nil {
 			return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		}
+	}
+	if err := s.ensureQueueCapacity(c.Request().Context(), principal, id, request.IdempotencyKey != ""); err != nil {
+		c.Response().Header().Set("Retry-After", "5")
+		return c.JSON(http.StatusTooManyRequests, map[string]string{"error": err.Error()})
 	}
 	tmpPath, actualDigest, size, err := stageUpload(file)
 	if err != nil {
@@ -302,7 +316,14 @@ func idempotentJobID(username, key string) string {
 
 func (s *Server) handleListBuilds(c echo.Context) error {
 	principal := principalFromContext(c)
-	options := []client.ListOption{client.InNamespace(s.cfg.Namespace)}
+	limit, err := strconv.ParseInt(strings.TrimSpace(defaultString(c.QueryParam("limit"), "100")), 10, 64)
+	if err != nil || limit < 1 || limit > 500 {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "limit must be between 1 and 500"})
+	}
+	options := []client.ListOption{client.InNamespace(s.cfg.Namespace), client.Limit(limit)}
+	if token := strings.TrimSpace(c.QueryParam("continue")); token != "" {
+		options = append(options, client.Continue(token))
+	}
 	if err := s.authorize(c.Request().Context(), principal, "list", ""); err != nil {
 		options = append(options, client.MatchingLabels{requesterLabel: requesterID(principal.Username)})
 	}
@@ -314,7 +335,35 @@ func (s *Server) handleListBuilds(c echo.Context) error {
 	for i := range builds.Items {
 		jobs = append(jobs, buildJobFromCR(&builds.Items[i], s.cfg))
 	}
-	return c.JSON(http.StatusOK, jobListResponse{Jobs: jobs})
+	return c.JSON(http.StatusOK, jobListResponse{Jobs: jobs, Continue: builds.Continue})
+}
+
+func (s *Server) ensureQueueCapacity(ctx context.Context, principal serviceauth.Principal, id string, idempotent bool) error {
+	if s.cfg.MaxQueuedJobsPerRequester <= 0 {
+		return nil
+	}
+	if idempotent {
+		var existing kovav1.KovaBuild
+		if err := s.reader.Get(ctx, client.ObjectKey{Namespace: s.cfg.Namespace, Name: id}, &existing); err == nil {
+			return nil
+		} else if !apierrors.IsNotFound(err) {
+			return fmt.Errorf("check idempotent job: %w", err)
+		}
+	}
+	var builds kovav1.KovaBuildList
+	if err := s.reader.List(ctx, &builds, client.InNamespace(s.cfg.Namespace), client.MatchingLabels{requesterLabel: requesterID(principal.Username)}); err != nil {
+		return fmt.Errorf("check requester queue capacity: %w", err)
+	}
+	queued := 0
+	for i := range builds.Items {
+		if builds.Items[i].Status.Phase == "" || builds.Items[i].Status.Phase == kovav1.PhaseQueued {
+			queued++
+		}
+	}
+	if queued >= s.cfg.MaxQueuedJobsPerRequester {
+		return fmt.Errorf("requester queue limit of %d jobs is reached", s.cfg.MaxQueuedJobsPerRequester)
+	}
+	return nil
 }
 
 func (s *Server) handleGetBuild(c echo.Context) error {
@@ -346,11 +395,57 @@ func (s *Server) handleBuildLogs(c echo.Context) error {
 	if err != nil || tail < 0 {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "tail_lines must be a non-negative integer"})
 	}
+	if build.Status.LogArtifactURI != "" {
+		reader, err := s.store.Open(c.Request().Context(), build.Status.LogArtifactURI)
+		if err != nil {
+			return c.JSON(http.StatusInternalServerError, map[string]string{"error": fmt.Sprintf("read persisted logs: %v", err)})
+		}
+		raw, readErr := io.ReadAll(io.LimitReader(reader, s.cfg.MaxLogBytes+1))
+		closeErr := reader.Close()
+		if readErr != nil {
+			return c.JSON(http.StatusInternalServerError, map[string]string{"error": fmt.Sprintf("read persisted logs: %v", readErr)})
+		}
+		if closeErr != nil {
+			return c.JSON(http.StatusInternalServerError, map[string]string{"error": fmt.Sprintf("close persisted logs: %v", closeErr)})
+		}
+		if int64(len(raw)) > s.cfg.MaxLogBytes {
+			return c.JSON(http.StatusInternalServerError, map[string]string{"error": "persisted logs exceed the configured limit"})
+		}
+		return c.Blob(http.StatusOK, "text/plain; charset=utf-8", tailLogLines(raw, tail))
+	}
 	var out bytes.Buffer
+	if build.Status.RunnerPodName == "" {
+		return c.JSON(http.StatusNotFound, map[string]string{"error": "job logs are not available"})
+	}
 	if err := s.kube.WritePodLogsTail(c.Request().Context(), build.Namespace, build.Status.RunnerPodName, tail, &out); err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
 	}
 	return c.Blob(http.StatusOK, "text/plain; charset=utf-8", out.Bytes())
+}
+
+func tailLogLines(raw []byte, lines int64) []byte {
+	if lines == 0 || len(raw) == 0 {
+		return nil
+	}
+	if lines < 0 {
+		return raw
+	}
+	end := len(raw)
+	if raw[end-1] == '\n' {
+		end--
+	}
+	start := end
+	for remaining := lines; remaining > 0 && start > 0; {
+		start--
+		if raw[start] == '\n' {
+			remaining--
+			if remaining == 0 {
+				start++
+				break
+			}
+		}
+	}
+	return raw[start:]
 }
 
 func (s *Server) handleCancelBuild(c echo.Context) error {
@@ -367,22 +462,14 @@ func (s *Server) handleCancelBuild(c echo.Context) error {
 	if isTerminalPhase(build.Status.Phase) {
 		return c.JSON(http.StatusOK, buildJobFromCR(build, s.cfg))
 	}
-	_ = s.runner().CancelBuild(c.Request().Context(), build)
-	if build.Status.RunnerPodName != "" {
-		if err := s.kube.DeletePod(c.Request().Context(), build.Namespace, build.Status.RunnerPodName); err != nil {
-			return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
-		}
+	base := build.DeepCopy()
+	if build.Annotations == nil {
+		build.Annotations = map[string]string{}
 	}
-	now := metav1.Now()
-	build.Status.Phase = kovav1.PhaseCancelled
-	build.Status.ObservedGeneration = build.Generation
-	build.Status.FinishedAt = &now
-	build.Status.Message = ""
-	apiMeta.SetStatusCondition(&build.Status.Conditions, metav1.Condition{
-		Type: "Ready", Status: metav1.ConditionFalse, Reason: "Cancelled",
-		Message: "build was cancelled", ObservedGeneration: build.Generation,
-	})
-	if err := s.client.Status().Update(c.Request().Context(), build); err != nil {
+	if build.Annotations[kovav1.CancellationRequestedAnnotation] == "" {
+		build.Annotations[kovav1.CancellationRequestedAnnotation] = time.Now().UTC().Format(time.RFC3339Nano)
+	}
+	if err := s.client.Patch(c.Request().Context(), build, client.MergeFrom(base)); err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
 	}
 	buildCancels.Add(c.Request().Context(), 1)
@@ -427,7 +514,7 @@ func (s *Server) authorize(ctx context.Context, principal serviceauth.Principal,
 		return fmt.Errorf("authorization is not configured")
 	}
 	return s.authz.Authorize(ctx, principal, serviceauth.Attributes{
-		Verb: verb, Namespace: s.cfg.Namespace, Resource: "kovabuilds", Name: name,
+		Verb: verb, Namespace: s.cfg.Namespace, Resource: serviceauth.ServiceBuildResource, Name: name,
 	})
 }
 

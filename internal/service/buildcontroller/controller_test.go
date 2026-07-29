@@ -21,6 +21,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	crfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
@@ -332,21 +333,64 @@ func TestAdmissionIsFIFOAndCapacityAware(t *testing.T) {
 	}
 	active := &kovav1.KovaBuild{
 		ObjectMeta: metav1.ObjectMeta{Name: "active", Namespace: "jobs"},
-		Status:     kovav1.KovaBuildStatus{Phase: kovav1.PhaseRunning},
+		Status:     kovav1.KovaBuildStatus{Phase: kovav1.PhaseRunning, AllocatedConcurrency: 3},
 	}
 	client := crfake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&kovav1.KovaBuild{}).WithObjects(older, newer, active).Build()
 	reconciler := KovaBuildReconciler{Client: client, Cfg: config.Config{MaxActiveJobs: 2, WorkerSlots: 8}}
 
-	admitted, activeCount, err := reconciler.admitted(context.Background(), older)
-	if err != nil || !admitted || activeCount != 1 {
-		t.Fatalf("older admitted=%t active=%d err=%v", admitted, activeCount, err)
+	decision, err := reconciler.admission(context.Background(), older)
+	if err != nil || !decision.Admitted || decision.Allocation != 5 {
+		t.Fatalf("older decision=%#v err=%v", decision, err)
 	}
-	admitted, _, err = reconciler.admitted(context.Background(), newer)
-	if err != nil || admitted {
-		t.Fatalf("newer admitted=%t err=%v", admitted, err)
+	decision, err = reconciler.admission(context.Background(), newer)
+	if err != nil || decision.Admitted {
+		t.Fatalf("newer decision=%#v err=%v", decision, err)
 	}
-	if got := reconciler.allocatedConcurrency(older, activeCount+1); got != 4 {
-		t.Fatalf("allocated concurrency=%d, want 4", got)
+}
+
+func TestAdmissionRoundRobinsRequesters(t *testing.T) {
+	scheme := testScheme(t)
+	builds := []*kovav1.KovaBuild{
+		{ObjectMeta: metav1.ObjectMeta{Name: "alice-1", Namespace: "jobs", CreationTimestamp: metav1.NewTime(time.Unix(1, 0))}, Spec: kovav1.KovaBuildSpec{Requester: kovav1.KovaBuildRequester{Username: "alice"}}},
+		{ObjectMeta: metav1.ObjectMeta{Name: "alice-2", Namespace: "jobs", CreationTimestamp: metav1.NewTime(time.Unix(2, 0))}, Spec: kovav1.KovaBuildSpec{Requester: kovav1.KovaBuildRequester{Username: "alice"}}},
+		{ObjectMeta: metav1.ObjectMeta{Name: "bob-1", Namespace: "jobs", CreationTimestamp: metav1.NewTime(time.Unix(3, 0))}, Spec: kovav1.KovaBuildSpec{Requester: kovav1.KovaBuildRequester{Username: "bob"}}},
+	}
+	objects := make([]client.Object, 0, len(builds))
+	for _, build := range builds {
+		objects = append(objects, build)
+	}
+	crClient := crfake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&kovav1.KovaBuild{}).WithObjects(objects...).Build()
+	reconciler := KovaBuildReconciler{Client: crClient, Cfg: config.Config{MaxActiveJobs: 2, WorkerSlots: 2}}
+
+	decision, err := reconciler.admission(context.Background(), builds[2])
+	if err != nil || !decision.Admitted {
+		t.Fatalf("bob decision=%#v err=%v", decision, err)
+	}
+	decision, err = reconciler.admission(context.Background(), builds[1])
+	if err != nil || decision.Admitted {
+		t.Fatalf("second alice decision=%#v err=%v", decision, err)
+	}
+}
+
+func TestReconcilerProcessesCancellationRequest(t *testing.T) {
+	scheme := testScheme(t)
+	build := &kovav1.KovaBuild{
+		ObjectMeta: metav1.ObjectMeta{Name: "cancel", Namespace: "jobs", Finalizers: []string{cleanupFinalizer}, Annotations: map[string]string{kovav1.CancellationRequestedAnnotation: time.Now().Format(time.RFC3339Nano)}},
+		Status:     kovav1.KovaBuildStatus{Phase: kovav1.PhaseRunning, RunnerPodName: "kova-job-cancel", AllocatedConcurrency: 2},
+	}
+	crClient := crfake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&kovav1.KovaBuild{}).WithObjects(build).Build()
+	kube := &fakeKube{}
+	reconciler := KovaBuildReconciler{Client: crClient, Scheme: scheme, Kube: kube}
+
+	if _, err := reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "jobs", Name: "cancel"}}); err != nil {
+		t.Fatal(err)
+	}
+	var updated kovav1.KovaBuild
+	if err := crClient.Get(context.Background(), types.NamespacedName{Namespace: "jobs", Name: "cancel"}, &updated); err != nil {
+		t.Fatal(err)
+	}
+	if updated.Status.Phase != kovav1.PhaseCancelled || len(kube.deleted) != 1 {
+		t.Fatalf("status=%#v deleted=%#v", updated.Status, kube.deleted)
 	}
 }
 
@@ -380,6 +424,39 @@ func TestPersistResultsStoresFullSetAndBoundsStatus(t *testing.T) {
 	if err != nil || bytes.Count(raw, []byte(`"status":"succeeded"`)) != 101 {
 		t.Fatalf("stored result count=%d err=%v", bytes.Count(raw, []byte(`"status":"succeeded"`)), err)
 	}
+}
+
+func TestPersistLogsKeepsBoundedTailAndDigest(t *testing.T) {
+	store, err := artifactstore.NewFilesystem(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	kube := &fakeKubeWithLogs{fakeKube: fakeKube{}, logs: "0123456789"}
+	build := &kovav1.KovaBuild{ObjectMeta: metav1.ObjectMeta{Name: "logs", Namespace: "jobs"}, Status: kovav1.KovaBuildStatus{RunnerPodName: "runner"}}
+	reconciler := KovaBuildReconciler{Store: store, Kube: kube, Cfg: config.Config{MaxLogBytes: 5}}
+	reconciler.persistLogs(context.Background(), build)
+	if build.Status.LogArtifactURI == "" || !strings.HasPrefix(build.Status.LogArtifactDigest, "sha256:") {
+		t.Fatalf("status = %#v", build.Status)
+	}
+	reader, err := store.Open(context.Background(), build.Status.LogArtifactURI)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := io.ReadAll(reader)
+	_ = reader.Close()
+	if err != nil || string(raw) != "56789" {
+		t.Fatalf("logs=%q err=%v", raw, err)
+	}
+}
+
+type fakeKubeWithLogs struct {
+	fakeKube
+	logs string
+}
+
+func (f *fakeKubeWithLogs) WritePodLogsTail(_ context.Context, _ string, _ string, _ int64, out io.Writer) error {
+	_, err := io.WriteString(out, f.logs)
+	return err
 }
 
 func testScheme(t *testing.T) *runtime.Scheme {

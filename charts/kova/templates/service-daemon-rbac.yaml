@@ -39,8 +39,8 @@ rules:
     resources: ["pods/exec"]
     verbs: ["create"]
   - apiGroups: [""]
-    resources: ["secrets"]
-    verbs: ["get"]
+    resources: ["events"]
+    verbs: ["create", "patch"]
   - apiGroups: ["kova.cofy.dev"]
     resources: ["kovabuilds"]
     verbs: ["create", "delete", "get", "list", "patch", "update", "watch"]
@@ -60,7 +60,7 @@ metadata:
     {{- include "kova.labels" . | nindent 4 }}
 rules:
   - apiGroups: ["kova.cofy.dev"]
-    resources: ["kovabuilds"]
+    resources: ["servicebuilds"]
     verbs: ["create"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -72,7 +72,7 @@ metadata:
     {{- include "kova.labels" . | nindent 4 }}
 rules:
   - apiGroups: ["kova.cofy.dev"]
-    resources: ["kovabuilds"]
+    resources: ["servicebuilds"]
     verbs: ["create", "delete", "get", "list", "update"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1

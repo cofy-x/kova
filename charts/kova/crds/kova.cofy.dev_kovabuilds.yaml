@@ -184,6 +184,10 @@ spec:
               finishedAt:
                 format: date-time
                 type: string
+              logArtifactDigest:
+                type: string
+              logArtifactURI:
+                type: string
               message:
                 type: string
               observedGeneration:
@@ -197,6 +201,10 @@ spec:
                 - Succeeded
                 - Failed
                 - Cancelled
+                type: string
+              reason:
+                type: string
+              resultArtifactDigest:
                 type: string
               resultArtifactURI:
                 type: string

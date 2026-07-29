@@ -2,6 +2,15 @@ package serviceapi
 
 import "time"
 
+const APIVersion = "v1"
+
+type VersionInfo struct {
+	APIVersion string `json:"api_version"`
+	Version    string `json:"version"`
+	Commit     string `json:"commit"`
+	BuildDate  string `json:"build_date"`
+}
+
 const (
 	JobStatusQueued    = "queued"
 	JobStatusStarting  = "starting"
@@ -12,19 +21,25 @@ const (
 )
 
 type BuildJob struct {
-	ID             string     `json:"id"`
-	Status         string     `json:"status"`
-	PodName        string     `json:"pod_name"`
-	Namespace      string     `json:"namespace"`
-	Error          string     `json:"error,omitempty"`
-	CreatedAt      time.Time  `json:"created_at"`
-	StartedAt      *time.Time `json:"started_at,omitempty"`
-	FinishedAt     *time.Time `json:"finished_at,omitempty"`
-	ExpiresAt      *time.Time `json:"expires_at,omitempty"`
-	BuildkitAddr   string     `json:"buildkit_addr,omitempty"`
-	SourceDigest   string     `json:"source_digest,omitempty"`
-	IdempotencyKey string     `json:"idempotency_key,omitempty"`
-	Requester      string     `json:"requester"`
+	ID                    string     `json:"id"`
+	Status                string     `json:"status"`
+	PodName               string     `json:"pod_name"`
+	Namespace             string     `json:"namespace"`
+	Error                 string     `json:"error,omitempty"`
+	Reason                string     `json:"reason,omitempty"`
+	CreatedAt             time.Time  `json:"created_at"`
+	StartedAt             *time.Time `json:"started_at,omitempty"`
+	FinishedAt            *time.Time `json:"finished_at,omitempty"`
+	ExpiresAt             *time.Time `json:"expires_at,omitempty"`
+	BuildkitAddr          string     `json:"buildkit_addr,omitempty"`
+	SourceDigest          string     `json:"source_digest,omitempty"`
+	IdempotencyKey        string     `json:"idempotency_key,omitempty"`
+	Requester             string     `json:"requester"`
+	CancellationRequested bool       `json:"cancellation_requested,omitempty"`
+	RequestedConcurrency  int        `json:"requested_concurrency,omitempty"`
+	AllocatedConcurrency  int32      `json:"allocated_concurrency,omitempty"`
+	LogArtifactURI        string     `json:"log_artifact_uri,omitempty"`
+	LogArtifactDigest     string     `json:"log_artifact_digest,omitempty"`
 }
 
 type BuildResult struct {
@@ -38,13 +53,15 @@ type BuildResult struct {
 }
 
 type BuildResults struct {
-	ID                string        `json:"id"`
-	SourceDigest      string        `json:"source_digest,omitempty"`
-	IdempotencyKey    string        `json:"idempotency_key,omitempty"`
-	ResultArtifactURI string        `json:"result_artifact_uri,omitempty"`
-	Results           []BuildResult `json:"results"`
+	ID                   string        `json:"id"`
+	SourceDigest         string        `json:"source_digest,omitempty"`
+	IdempotencyKey       string        `json:"idempotency_key,omitempty"`
+	ResultArtifactURI    string        `json:"result_artifact_uri,omitempty"`
+	ResultArtifactDigest string        `json:"result_artifact_digest,omitempty"`
+	Results              []BuildResult `json:"results"`
 }
 
 type JobList struct {
-	Jobs []BuildJob `json:"jobs"`
+	Jobs     []BuildJob `json:"jobs"`
+	Continue string     `json:"continue,omitempty"`
 }

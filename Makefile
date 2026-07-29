@@ -187,7 +187,7 @@ helm-template:
 		--set artifactStore.filesystem.pvc.create=true \
 		--set serviceDaemon.authentication.mode=static \
 		--set serviceDaemon.authentication.staticTokenSecret.name=test-secret \
-		--set networkPolicy.enabled=true >/dev/null
+		--set networkPolicy.service.enabled=true >/dev/null
 	helm template $(RELEASE_NAME) ./charts/kova \
 		--set serviceDaemon.enabled=true \
 		--set artifactStore.filesystem.pvc.create=true \

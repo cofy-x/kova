@@ -144,9 +144,14 @@
         },
         "jobTTL": { "type": "string" },
         "maxUploadBytes": { "type": "integer", "minimum": 1 },
+        "maxLogBytes": { "type": "integer", "minimum": 1 },
+        "artifactGCInterval": { "type": "string" },
+        "artifactOrphanTTL": { "type": "string" },
         "wait": { "type": "string" },
         "pollInterval": { "type": "string" },
         "maxActiveJobs": { "type": "integer", "minimum": 1 },
+        "maxActiveJobsPerRequester": { "type": "integer", "minimum": 1 },
+        "maxQueuedJobsPerRequester": { "type": "integer", "minimum": 1 },
         "workerSlots": { "type": "integer", "minimum": 1 },
         "leaderElect": { "type": "boolean" },
         "runnerNamespace": { "type": "string" },
@@ -174,9 +179,22 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "enabled": { "type": "boolean" },
-        "workerIngressFrom": { "type": "array", "items": { "type": "object" } },
-        "serviceIngressFrom": { "type": "array", "items": { "type": "object" } }
+        "worker": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "additionalIngressFrom": { "type": "array", "items": { "type": "object" } }
+          }
+        },
+        "service": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "ingressFrom": { "type": "array", "items": { "type": "object" } }
+          }
+        }
       }
     },
     "worker": {

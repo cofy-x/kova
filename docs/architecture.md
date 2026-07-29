@@ -26,7 +26,8 @@ the authenticated requester, immutable archive targets, an artifact URI,
 SHA-256 digest, build options, and an optional caller-scoped idempotency key.
 Status contains
 `observedGeneration`, a `Ready` Condition, timestamps, the assigned runner,
-allocated concurrency, a typed result summary, and at most 100 inline results.
+requested and allocated concurrency, stable failure reasons, persisted log and
+result digests, a typed result summary, and at most 100 inline results.
 
 The artifact store has two drivers:
 
@@ -35,8 +36,10 @@ The artifact store has two drivers:
 - `s3` stores artifacts in an S3-compatible bucket. A runner init container
   downloads and verifies the source into a job-local `emptyDir`.
 
-The full result set is persisted as JSON in the same store. Credentials are
-read from Kubernetes Secrets and never copied into `KovaBuild` resources.
+The full result set and bounded trailing runner logs are persisted in the same
+store. Credentials are read from Kubernetes Secrets and never copied into
+`KovaBuild` resources. A leader-elected collector removes aged artifact
+directories that no longer have a `KovaBuild` owner.
 
 ## Internal Protocol
 
@@ -52,10 +55,11 @@ DNS name into independent BuildKit endpoints, keep the address pool refreshed,
 apply consistent target placement, enforce per-worker concurrency, and cool
 down workers after OOM-style failures.
 
-The service controller adds a FIFO admission layer across jobs. It limits
-active jobs with `maxActiveJobs` and divides `workerSlots` across admitted
-jobs. Direct CLI runners remain an explicit development path and do not take
-part in service-level admission.
+The service controller reserves actual worker slots for admitted jobs. Queued
+jobs are interleaved by authenticated requester and then ordered by creation
+time. Admission is work-conserving, respects global and per-requester active
+limits, and records the fixed allocation used by each runner. Direct CLI
+runners remain a development path and do not participate in service admission.
 
 ## Topology
 
@@ -90,12 +94,13 @@ flowchart LR
    and writes an immutable source artifact.
 3. It creates an immutable `KovaBuild`. Reusing an idempotency key with
    different inputs returns a conflict.
-4. FIFO capacity admission assigns runner concurrency and creates a runner
-   Pod. S3 sources are materialized and verified by an init container.
+4. Fair, work-conserving capacity admission reserves runner concurrency and
+   creates a runner Pod. S3 sources are materialized and verified by an init
+   container.
 5. The controller streams the source path to the daemon transport. The runner
    dispatches targets across healthy BuildKit workers.
-6. The controller resolves registry descriptors, persists the full result
-   artifact, updates typed status, and removes the job after its TTL.
+6. The controller resolves registry descriptors, persists results and logs,
+   updates typed status, and removes the job and artifacts after its TTL.
 
 ## Security Boundaries
 
@@ -105,9 +110,12 @@ flowchart LR
   BuildKit requires unconfined seccomp and AppArmor plus
   `--oci-worker-no-process-sandbox`; it is not a privileged container.
 - TokenReview is the default service authentication mode. SubjectAccessReview
-  enforces create and administrative access, while submitters may read and
-  control only jobs owned by their authenticated username. `unsafe-none` must
-  be selected explicitly and is intended only for isolated development.
+  checks a virtual Service resource. Submitters have no direct write access to
+  `KovaBuild`, Pods, or Secrets and may control only jobs owned by their
+  authenticated username. `unsafe-none` must be selected explicitly and is
+  intended only for isolated development.
+- The chart restricts the unauthenticated BuildKit TCP endpoint to Kova runner
+  Pods by default when the cluster network plugin enforces NetworkPolicy.
 - Registry, artifact, and API credentials are external Secret inputs.
 
 ## Observability

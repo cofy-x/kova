@@ -37,10 +37,17 @@ split into controller, runner, and rootless BuildKit worker roles.
 ## Install Kova
 
 Choose a tag from [GitHub releases](https://github.com/cofy-x/kova/releases),
-then install that exact OCI Helm chart without cloning the repository:
+then install that exact OCI Helm chart without cloning the repository. The
+quick-start profile uses a generated static token and filesystem PVC; shared
+environments should use TokenReview and S3-compatible storage instead:
 
 ```bash
 export KOVA_VERSION=vX.Y.Z
+export KOVA_SERVICE_TOKEN=$(openssl rand -hex 32)
+
+kubectl create namespace kova --dry-run=client -o yaml | kubectl apply -f -
+kubectl -n kova create secret generic kova-service-auth \
+  --from-literal=token="${KOVA_SERVICE_TOKEN}"
 
 helm show crds oci://ghcr.io/cofy-x/charts/kova \
   --version "${KOVA_VERSION#v}" | kubectl apply -f -
@@ -48,19 +55,27 @@ helm upgrade --install kova oci://ghcr.io/cofy-x/charts/kova \
   --version "${KOVA_VERSION#v}" \
   --namespace kova \
   --create-namespace \
+  --set serviceDaemon.enabled=true \
+  --set serviceDaemon.authentication.mode=static \
+  --set serviceDaemon.authentication.staticPrincipal=kova:quickstart \
+  --set serviceDaemon.authentication.staticTokenSecret.name=kova-service-auth \
+  --set artifactStore.filesystem.pvc.create=true \
   --wait
+
+kubectl -n kova create rolebinding kova-quickstart \
+  --role=kova-service-submitter \
+  --user=kova:quickstart
 ```
 
 Applying the release CRD before every Helm upgrade is required because Helm
 does not upgrade files from a chart's `crds/` directory.
 
 The chart selects matching controller, runner, and worker images automatically.
-Continue with the [installation and first-build guide](docs/quickstart.md).
-
-For shared environments, enable the authenticated Service and use the native
-job workflow:
+Continue with the [installation and first-build guide](docs/quickstart.md),
+create a Service context, and verify it before the first job:
 
 ```bash
+kova doctor
 kova job submit ./image --target registry.example.com/team/image:dev
 kova job list
 kova job wait <job-id>

@@ -10,6 +10,8 @@ const (
 	Group   = "kova.cofy.dev"
 	Version = "v1alpha1"
 
+	CancellationRequestedAnnotation = "kova.cofy.dev/cancellation-requested-at"
+
 	PhaseQueued    = "Queued"
 	PhaseStarting  = "Starting"
 	PhaseRunning   = "Running"
@@ -89,11 +91,15 @@ type KovaBuildStatus struct {
 	ObservedGeneration   int64              `json:"observedGeneration,omitempty"`
 	AllocatedConcurrency int32              `json:"allocatedConcurrency,omitempty"`
 	RunnerPodName        string             `json:"runnerPodName,omitempty"`
+	Reason               string             `json:"reason,omitempty"`
 	Message              string             `json:"message,omitempty"`
 	StartedAt            *metav1.Time       `json:"startedAt,omitempty"`
 	FinishedAt           *metav1.Time       `json:"finishedAt,omitempty"`
 	ResultSummary        BuildResultSummary `json:"resultSummary,omitempty"`
 	ResultArtifactURI    string             `json:"resultArtifactURI,omitempty"`
+	ResultArtifactDigest string             `json:"resultArtifactDigest,omitempty"`
+	LogArtifactURI       string             `json:"logArtifactURI,omitempty"`
+	LogArtifactDigest    string             `json:"logArtifactDigest,omitempty"`
 	// +kubebuilder:validation:MaxItems=100
 	Results []BuildResult `json:"results,omitempty"`
 	// +listType=map

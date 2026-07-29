@@ -80,13 +80,12 @@ jobs:
           if-no-files-found: error
 
   chart:
-    name: Helm chart
+    name: Helm chart candidate
     needs: validate
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       contents: read
-      packages: write
       id-token: write
       attestations: write
     steps:
@@ -98,6 +97,193 @@ jobs:
           version: v4.1.3
       - name: Package Helm chart
         run: scripts/release/package-chart.sh "${GITHUB_REF_NAME}"
+      - name: Attest Helm chart
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        with:
+          subject-path: dist/kova-*.tgz
+      - name: Upload Helm chart candidate
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: chart-candidate
+          path: dist/*
+          if-no-files-found: error
+
+  image:
+    name: ${{ matrix.role }} image candidate
+    needs: validate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    strategy:
+      fail-fast: false
+      matrix:
+        role:
+          - controller
+          - runner
+          - worker
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Prepare image metadata
+        id: metadata
+        shell: bash
+        run: echo "build_date=$(git show -s --format=%cI HEAD)" >> "${GITHUB_OUTPUT}"
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@abd2ef45e78c5afb21d64d4ca52ee8550d9572c7 # v4.5.1
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+      - name: Build and publish candidate image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: docker/Dockerfile
+          target: ${{ matrix.role }}
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ghcr.io/${{ github.repository }}:${{ matrix.role }}-candidate-${{ github.sha }}
+          build-args: |
+            VERSION=${{ github.ref_name }}
+            COMMIT=${{ github.sha }}
+            BUILD_DATE=${{ steps.metadata.outputs.build_date }}
+          provenance: mode=max
+          sbom: true
+          cache-from: type=gha,scope=kova-${{ matrix.role }}
+          cache-to: type=gha,mode=max,scope=kova-${{ matrix.role }}
+
+  candidate-smoke:
+    name: Candidate Service and upgrade smoke
+    needs:
+      - cli
+      - chart
+      - image
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up Helm
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: v4.1.3
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Install kind
+        run: go install sigs.k8s.io/kind@v0.32.0
+      - name: Download CLI candidate
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: cli-assets
+          path: dist
+      - name: Download chart candidate
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: chart-candidate
+          path: dist
+      - name: Prepare candidate and baseline
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          mkdir -p dist/cli dist/baseline
+          tar -xzf "dist/kova_${GITHUB_REF_NAME#v}_linux_amd64.tar.gz" -C dist/cli kova LICENSE
+          dist/cli/kova version | grep -F "${GITHUB_REF_NAME}"
+          cp "dist/kova-${GITHUB_REF_NAME#v}.tgz" dist/kova-candidate.tgz
+          baseline_tag=$(gh release list --repo "${GITHUB_REPOSITORY}" \
+            --limit 1 --json tagName --jq '.[0].tagName // empty')
+          if [[ -n "${baseline_tag}" ]]; then
+            baseline_version="${baseline_tag#v}"
+            helm pull "oci://ghcr.io/${GITHUB_REPOSITORY_OWNER}/charts/kova" \
+              --version "${baseline_version}" \
+              --destination dist/baseline
+            cp "dist/baseline/kova-${baseline_version}.tgz" dist/baseline.tgz
+            printf 'BASELINE_CHART=%s/dist/baseline.tgz\n' "${GITHUB_WORKSPACE}" \
+              >> "${GITHUB_ENV}"
+          fi
+      - name: Run candidate Service lifecycle
+        env:
+          CONTROLLER_IMAGE: ghcr.io/${{ github.repository }}:controller-candidate-${{ github.sha }}
+          RUNNER_IMAGE: ghcr.io/${{ github.repository }}:runner-candidate-${{ github.sha }}
+          WORKER_IMAGE: ghcr.io/${{ github.repository }}:worker-candidate-${{ github.sha }}
+          KOVA_CHART: ${{ github.workspace }}/dist/kova-candidate.tgz
+          KOVA_CLI: ${{ github.workspace }}/dist/cli/kova
+          E2E_SERVICE_BUILD_CLI: "false"
+          E2E_SERVICE_BUILD_IMAGE: "false"
+          KIND_LOAD_IMAGES: "false"
+          START_OBSERVABILITY: "false"
+          KIND_CLUSTER: kova-release-smoke
+          KIND_CONFIG: deploy/quickstart-kind-cluster.yaml
+          KIND_KUBECONFIG: .kind/kova-release-smoke.kubeconfig
+          KIND_WORKERS: "1"
+          KIND_VALUES: deploy/quickstart-kind-values.yaml
+          KOVA_VALUES: ${{ github.workspace }}/deploy/quickstart-kind-values.yaml
+        run: scripts/e2e/e2e-service.sh
+
+  publish-image:
+    name: Publish ${{ matrix.role }} image
+    needs: candidate-smoke
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        role:
+          - controller
+          - runner
+          - worker
+    steps:
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@abd2ef45e78c5afb21d64d4ca52ee8550d9572c7 # v4.5.1
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Promote validated image digest
+        shell: bash
+        run: |
+          source="ghcr.io/${GITHUB_REPOSITORY}:${{ matrix.role }}-candidate-${GITHUB_SHA}"
+          args=(--tag "ghcr.io/${GITHUB_REPOSITORY}:${{ matrix.role }}-${GITHUB_REF_NAME}")
+          if [[ "${GITHUB_REF_NAME}" != *-* ]]; then
+            args+=(--tag "ghcr.io/${GITHUB_REPOSITORY}:${{ matrix.role }}-latest")
+          fi
+          docker buildx imagetools create "${args[@]}" "${source}"
+
+  publish-chart:
+    name: Publish Helm chart
+    needs: candidate-smoke
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Set up Helm
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: v4.1.3
+      - name: Download chart candidate
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: chart-candidate
+          path: dist
       - name: Log in to GitHub Container Registry
         env:
           HELM_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
@@ -106,13 +292,12 @@ jobs:
           printf '%s' "${HELM_PASSWORD}" | helm registry login ghcr.io \
             --username "${GITHUB_ACTOR}" \
             --password-stdin
-      - name: Publish Helm chart
+      - name: Publish validated chart
         shell: bash
         run: |
           version="${GITHUB_REF_NAME#v}"
-          chart="dist/kova-${version}.tgz"
-          destination="oci://ghcr.io/${GITHUB_REPOSITORY_OWNER}/charts"
-          output=$(helm push "${chart}" "${destination}" 2>&1)
+          output=$(helm push "dist/kova-${version}.tgz" \
+            "oci://ghcr.io/${GITHUB_REPOSITORY_OWNER}/charts" 2>&1)
           printf '%s\n' "${output}"
           digest=$(printf '%s\n' "${output}" | awk '/^Digest: sha256:/ {print $2}')
           if [[ ! "${digest}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
@@ -122,11 +307,7 @@ jobs:
           printf 'oci://ghcr.io/%s/charts/kova@%s\n' \
             "${GITHUB_REPOSITORY_OWNER}" "${digest}" \
             >"dist/kova_${version}.chart-digest.txt"
-      - name: Attest Helm chart
-        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
-        with:
-          subject-path: dist/kova-*.tgz
-      - name: Upload Helm chart assets
+      - name: Upload published chart assets
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: chart-assets
@@ -140,7 +321,7 @@ jobs:
     name: Release assets
     needs:
       - cli
-      - chart
+      - publish-chart
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -171,71 +352,11 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
-  image:
-    name: ${{ matrix.role }} image
-    needs: validate
-    runs-on: ubuntu-24.04
-    timeout-minutes: 45
-    permissions:
-      contents: read
-      packages: write
-      id-token: write
-      attestations: write
-    strategy:
-      fail-fast: false
-      matrix:
-        role:
-          - controller
-          - runner
-          - worker
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Prepare image metadata
-        id: metadata
-        shell: bash
-        run: |
-          tags="ghcr.io/${GITHUB_REPOSITORY}:${{ matrix.role }}-${GITHUB_REF_NAME}"
-          if [[ "${GITHUB_REF_NAME}" != *-* ]]; then
-            tags="${tags}"$'\n'"ghcr.io/${GITHUB_REPOSITORY}:${{ matrix.role }}-latest"
-          fi
-          {
-            echo 'tags<<EOF'
-            echo "${tags}"
-            echo EOF
-            echo "build_date=$(git show -s --format=%cI HEAD)"
-          } >> "${GITHUB_OUTPUT}"
-      - name: Log in to GitHub Container Registry
-        uses: docker/login-action@abd2ef45e78c5afb21d64d4ca52ee8550d9572c7 # v4.5.1
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
-      - name: Build and publish role image
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
-        with:
-          context: .
-          file: docker/Dockerfile
-          target: ${{ matrix.role }}
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.metadata.outputs.tags }}
-          build-args: |
-            VERSION=${{ github.ref_name }}
-            COMMIT=${{ github.sha }}
-            BUILD_DATE=${{ steps.metadata.outputs.build_date }}
-          provenance: mode=max
-          sbom: true
-          cache-from: type=gha,scope=kova-${{ matrix.role }}
-          cache-to: type=gha,mode=max,scope=kova-${{ matrix.role }}
-
-  smoke:
-    name: Release smoke
+  published-smoke:
+    name: Published artifact smoke
     needs:
       - assets
-      - image
+      - publish-image
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
@@ -266,38 +387,38 @@ jobs:
           version="${GITHUB_REF_NAME#v}"
           mkdir pulled
           helm registry logout ghcr.io >/dev/null 2>&1 || true
-          helm pull "oci://ghcr.io/${GITHUB_REPOSITORY_OWNER}/charts/kova" \
-            --version "${version}" \
-            --destination pulled
+          pulled_chart=false
+          for _ in {1..6}; do
+            if helm pull "oci://ghcr.io/${GITHUB_REPOSITORY_OWNER}/charts/kova" \
+              --version "${version}" --destination pulled; then
+              pulled_chart=true
+              break
+            fi
+            sleep 5
+          done
+          if [[ "${pulled_chart}" != true ]]; then
+            echo "published Helm chart is not anonymously pullable" >&2
+            exit 1
+          fi
           cmp "dist/kova-${version}.tgz" "pulled/kova-${version}.tgz"
           helm show chart "pulled/kova-${version}.tgz" \
             | grep -Fx "version: ${version}" >/dev/null
           helm show chart "pulled/kova-${version}.tgz" \
             | grep -Fx "appVersion: ${GITHUB_REF_NAME}" >/dev/null
-          helm template kova "pulled/kova-${version}.tgz" \
-            --namespace kova \
-            --set serviceDaemon.enabled=true \
-            --set artifactStore.filesystem.pvc.create=true >rendered.yaml
-          grep -F "image: \"ghcr.io/${GITHUB_REPOSITORY}:controller-${GITHUB_REF_NAME}\"" \
-            rendered.yaml >/dev/null
-          grep -F "image: \"ghcr.io/${GITHUB_REPOSITORY}:worker-${GITHUB_REF_NAME}\"" \
-            rendered.yaml >/dev/null
-          grep -F -- "--runner-image=ghcr.io/${GITHUB_REPOSITORY}:runner-${GITHUB_REF_NAME}" \
-            rendered.yaml >/dev/null
       - name: Verify public role images and boundaries
         shell: bash
         run: |
           for role in controller runner worker; do
             image="ghcr.io/${GITHUB_REPOSITORY}:${role}-${GITHUB_REF_NAME}"
-            pulled=false
-            for _ in {1..5}; do
+            pulled_image=false
+            for _ in {1..6}; do
               if docker pull "${image}"; then
-                pulled=true
+                pulled_image=true
                 break
               fi
               sleep 5
             done
-            if [[ "${pulled}" != true ]]; then
+            if [[ "${pulled_image}" != true ]]; then
               echo "${image} is not anonymously pullable" >&2
               exit 1
             fi
@@ -313,8 +434,7 @@ jobs:
     name: GitHub release
     needs:
       - assets
-      - image
-      - smoke
+      - published-smoke
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:

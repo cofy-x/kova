@@ -23,6 +23,7 @@ var undefinedFlagPattern = regexp.MustCompile(`flag provided but not defined: -+
 func NewCLIApp() *cli.App {
 	commands := withUsageErrorHint([]*cli.Command{
 		versionCLICommand(),
+		doctorCLICommand(),
 		jobCLICommand(),
 		prepareCLICommand(),
 		listCLICommand(),

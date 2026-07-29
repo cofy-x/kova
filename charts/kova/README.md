@@ -26,9 +26,10 @@ The default installs one worker. Production environments should provide an
 environment-owned values file for capacity, storage, registry credentials,
 scheduling, and service configuration.
 
-`values.schema.json` rejects unknown or invalid chart values. Optional
-NetworkPolicies require explicit worker and Service ingress peers; empty peer
-lists deny ingress.
+`values.schema.json` rejects unknown or invalid chart values. The worker
+NetworkPolicy allows Kova runner Pods from the configured runner namespace by
+default. Service ingress policy is opt-in; an empty peer list denies ingress
+when it is enabled.
 
 Service deployments reuse the runner image pull Secret to authenticate output
 descriptor verification by default. Set `serviceDaemon.registrySecret` when

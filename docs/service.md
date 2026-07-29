@@ -17,12 +17,17 @@ Every `/v1/*` request requires an explicit authentication mode:
 
 Authentication returns a principal containing the caller's Kubernetes
 username, UID, and groups. TokenReview mode submits a SubjectAccessReview for
-the requested `KovaBuild` operation:
+the virtual `servicebuilds.kova.cofy.dev` authorization resource:
 
 - callers with `create` access can submit jobs
 - submitters can list, read, cancel, export, and preheat only their own jobs
 - callers with the corresponding namespace-wide RBAC verb can operate on all
   jobs
+
+The virtual resource is an authorization contract, not a Kubernetes API
+resource. Only the controller ServiceAccount can create or mutate the actual
+`KovaBuild` CRD, so callers cannot bypass source validation, ownership, or
+idempotency by writing CRs directly.
 
 The chart creates unbound submitter and admin Roles. An environment grants
 access with a RoleBinding such as:
@@ -50,6 +55,8 @@ tokens.
 
 `/healthz` is an unauthenticated process liveness endpoint. `/readyz` verifies
 that the controller can query `KovaBuild` resources before it accepts traffic.
+`/version` exposes build provenance and the Service API compatibility version;
+it contains no environment credentials.
 
 ## CLI
 
@@ -72,6 +79,13 @@ environment:
 
 ```bash
 export KOVA_SERVICE_TOKEN=REPLACE_WITH_TOKEN
+```
+
+Verify API compatibility, readiness, authentication, and authorization before
+submitting a build:
+
+```bash
+kova doctor
 ```
 
 Submit and manage jobs without constructing HTTP requests:
@@ -110,7 +124,7 @@ The service validates each source archive and computes its SHA-256 digest
 before creating a job. The resulting `KovaBuild.spec` is immutable.
 Multipart build requests are limited to 1 GiB by default. Set
 `serviceDaemon.maxUploadBytes` or `--max-upload-bytes` to change the hard
-limit.
+limit. At most 100 queued jobs per requester are accepted by default.
 
 Filesystem mode uses a PVC-mounted root:
 
@@ -142,6 +156,12 @@ The referenced Secret exposes `KOVA_S3_ACCESS_KEY`, `KOVA_S3_SECRET_KEY`, and
 optional `KOVA_S3_SESSION_TOKEN`. An S3 runner init container uses the same
 Secret to download and verify the job source. S3 mode does not require an RWX
 volume or controller/runner node affinity.
+
+Terminal runner logs and the complete typed result set are persisted beside
+the source. Their URIs and SHA-256 digests are recorded in status. The
+controller retains only the configured trailing log bytes, deletes all known
+artifacts with the job, and periodically removes aged artifact directories
+that no longer have a `KovaBuild` owner.
 
 ## HTTP API
 
@@ -182,17 +202,23 @@ Supported form fields are:
 Query and control jobs:
 
 ```bash
-curl -sS -H "Authorization: Bearer $TOKEN" "$BASE/v1/builds"
+curl -sS -H "Authorization: Bearer $TOKEN" "$BASE/v1/builds?limit=100"
 curl -sS -H "Authorization: Bearer $TOKEN" "$BASE/v1/builds/<id>"
 curl -sS -H "Authorization: Bearer $TOKEN" "$BASE/v1/builds/<id>/results"
 curl -sS -H "Authorization: Bearer $TOKEN" "$BASE/v1/builds/<id>/logs?tail_lines=100"
 curl -sS -X POST -H "Authorization: Bearer $TOKEN" "$BASE/v1/builds/<id>/cancel"
 ```
 
-Status includes Kubernetes Conditions, the observed generation, allocated
-concurrency, a typed result summary, and at most 100 inline results. The full
-result set is persisted as a JSON artifact and referenced by
-`status.resultArtifactURI`.
+List requests accept `limit` from 1 through 500 and an opaque `continue` token.
+Status includes a stable failure reason, Kubernetes Conditions, requested and
+allocated concurrency, a typed result summary, persisted log metadata, and at
+most 100 inline results. The complete result set is persisted as a JSON
+artifact.
+
+Cancellation is declarative. The API records a cancellation request and the
+controller performs runner termination and the terminal status update. This
+keeps the controller as the only job status writer and makes cancellation
+recoverable across controller restarts.
 
 Export and preheat operate through the typed runner daemon transport:
 
@@ -213,6 +239,8 @@ serviceDaemon:
   authentication:
     mode: tokenreview
   maxActiveJobs: 20
+  maxActiveJobsPerRequester: 4
+  maxQueuedJobsPerRequester: 100
   workerSlots: 40
 
 artifactStore:

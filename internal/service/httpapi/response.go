@@ -7,16 +7,22 @@ import (
 
 func buildJobFromCR(build *kovav1.KovaBuild, cfg config.Config) BuildJob {
 	job := BuildJob{
-		ID:             build.Name,
-		Status:         httpStatus(build.Status.Phase),
-		PodName:        build.Status.RunnerPodName,
-		Namespace:      build.Namespace,
-		Error:          build.Status.Message,
-		CreatedAt:      build.CreationTimestamp.Time,
-		BuildkitAddr:   cfg.BuildkitAddr,
-		SourceDigest:   build.Spec.Source.Digest,
-		IdempotencyKey: build.Spec.IdempotencyKey,
-		Requester:      build.Spec.Requester.Username,
+		ID:                    build.Name,
+		Status:                httpStatus(build.Status.Phase),
+		PodName:               build.Status.RunnerPodName,
+		Namespace:             build.Namespace,
+		Error:                 build.Status.Message,
+		Reason:                build.Status.Reason,
+		CreatedAt:             build.CreationTimestamp.Time,
+		BuildkitAddr:          cfg.BuildkitAddr,
+		SourceDigest:          build.Spec.Source.Digest,
+		IdempotencyKey:        build.Spec.IdempotencyKey,
+		Requester:             build.Spec.Requester.Username,
+		CancellationRequested: build.Annotations[kovav1.CancellationRequestedAnnotation] != "",
+		RequestedConcurrency:  requestedConcurrency(build),
+		AllocatedConcurrency:  build.Status.AllocatedConcurrency,
+		LogArtifactURI:        build.Status.LogArtifactURI,
+		LogArtifactDigest:     build.Status.LogArtifactDigest,
 	}
 	if job.PodName == "" {
 		job.PodName = buildPodName(build.Name)
@@ -32,6 +38,13 @@ func buildJobFromCR(build *kovav1.KovaBuild, cfg config.Config) BuildJob {
 		job.ExpiresAt = &expires
 	}
 	return job
+}
+
+func requestedConcurrency(build *kovav1.KovaBuild) int {
+	if build.Spec.Build.Concurrency > 0 {
+		return build.Spec.Build.Concurrency
+	}
+	return 1
 }
 
 func buildPodName(name string) string {

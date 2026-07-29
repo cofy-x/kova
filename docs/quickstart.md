@@ -1,14 +1,15 @@
 # Quick Start
 
-This guide installs a released Kova Helm chart and verifies its rootless
-BuildKit worker. The chart is cloud-provider-neutral and uses public images from
-GitHub Container Registry by default.
+This guide installs a released Kova Service and completes an authenticated OCI
+build. The chart is cloud-provider-neutral and uses public images from GitHub
+Container Registry by default.
 
 ## Prerequisites
 
 - a Kubernetes cluster that permits Kova's rootless BuildKit security profile
 - Helm with OCI registry support
 - `kubectl` access that can create namespaced workloads
+- `openssl` for generating the development Service token
 
 Choose a tag from the
 [GitHub release page](https://github.com/cofy-x/kova/releases), then set it once
@@ -22,8 +23,18 @@ export KOVA_CHART_VERSION=${KOVA_VERSION#v}
 
 ## Install Kova
 
-Apply the selected release CRD, then install or upgrade the public OCI chart
-without cloning the repository:
+Create the namespace and a development authentication token. Keep the token out
+of shared shell history in real environments:
+
+```bash
+kubectl create namespace kova --dry-run=client -o yaml | kubectl apply -f -
+export KOVA_SERVICE_TOKEN=$(openssl rand -hex 32)
+kubectl -n kova create secret generic kova-service-auth \
+  --from-literal=token="${KOVA_SERVICE_TOKEN}"
+```
+
+Apply the selected release CRD, then install the public OCI chart with the
+Service and a filesystem artifact PVC enabled:
 
 ```bash
 helm show crds oci://ghcr.io/cofy-x/charts/kova \
@@ -32,19 +43,34 @@ helm upgrade --install kova oci://ghcr.io/cofy-x/charts/kova \
   --version "${KOVA_CHART_VERSION}" \
   --namespace kova \
   --create-namespace \
+  --set serviceDaemon.enabled=true \
+  --set serviceDaemon.authentication.mode=static \
+  --set serviceDaemon.authentication.staticPrincipal=kova:quickstart \
+  --set serviceDaemon.authentication.staticTokenSecret.name=kova-service-auth \
+  --set artifactStore.filesystem.pvc.create=true \
   --wait
 ```
 
 The explicit CRD apply is required on upgrades because Helm does not update
 files in a chart's `crds/` directory.
 
-The default installation creates one rootless BuildKit worker and its headless
-discovery Service. Published charts bind the controller, runner, and worker
-image tags to the same Kova release automatically.
+Grant the quick-start principal permission to submit through the Service. This
+Role does not grant direct access to `KovaBuild`, Pods, or Secrets:
+
+```bash
+kubectl -n kova create rolebinding kova-quickstart \
+  --role=kova-service-submitter \
+  --user=kova:quickstart
+```
+
+The installation creates the Service controller, one rootless BuildKit worker,
+and the artifact PVC. Published charts bind controller, runner, and worker image
+tags to the same Kova release automatically.
 
 Verify the installation:
 
 ```bash
+kubectl -n kova rollout status deployment/kova-service
 kubectl -n kova rollout status deployment/kova
 kubectl -n kova get pods,service
 ```
@@ -90,62 +116,77 @@ Replace the uppercase registry placeholders before running these commands. For
 an anonymous registry, omit the Secret creation and set
 `KOVA_REGISTRY_SECRET` to an empty value.
 
-Create a CLI context for the installed worker Service:
+When the Secret is non-empty, attach it to new runners and controller-side
+result verification:
 
 ```bash
-export KOVA_KUBECONFIG=${KUBECONFIG:-$HOME/.kube/config}
-
-kova ctx set \
-  --mode direct \
-  --kubeconfig "${KOVA_KUBECONFIG}" \
-  --namespace kova \
-  --buildkit-addr tcp://kova.kova.svc:9094 \
-  --image "ghcr.io/cofy-x/kova:runner-${KOVA_VERSION}" \
-  --image-pull-policy IfNotPresent \
-  --image-pull-secret "${KOVA_REGISTRY_SECRET}" \
-  --use \
-  quickstart
+if [ -n "${KOVA_REGISTRY_SECRET}" ]; then
+  helm upgrade kova oci://ghcr.io/cofy-x/charts/kova \
+    --version "${KOVA_CHART_VERSION}" \
+    --namespace kova \
+    --reuse-values \
+    --set serviceDaemon.runnerImagePullSecret="${KOVA_REGISTRY_SECRET}" \
+    --set serviceDaemon.registrySecret="${KOVA_REGISTRY_SECRET}" \
+    --wait
+fi
 ```
 
-Prepare a runner, create a minimal build context, and build it:
+Forward the cluster-internal Service, create a Service context, and verify the
+API version, readiness, authentication, and authorization:
 
 ```bash
-kova --name quickstart prepare
+kubectl -n kova port-forward service/kova-service 8080:8080
 
+kova ctx set \
+  --mode service \
+  --service-url http://127.0.0.1:8080 \
+  --use \
+  quickstart
+
+kova doctor
+```
+
+Create a minimal build context and submit it:
+
+```bash
 mkdir -p .work/kova-quickstart
 printf 'FROM scratch\nCOPY hello.txt /\n' \
   > .work/kova-quickstart/Dockerfile
 printf 'hello from kova\n' > .work/kova-quickstart/hello.txt
 
-kova --name quickstart build .work/kova-quickstart \
+kova job submit .work/kova-quickstart \
   --target "${KOVA_TARGET}" \
   --format oci \
   --concurrency 1 \
   --fail-fast
-kova --name quickstart wait --timeout 600
-kova --name quickstart export \
-  --result .work/kova-quickstart-result.jsonl \
-  --target "${KOVA_TARGET}" \
-  --oci
 ```
 
-Verify that `.work/kova-quickstart-result.jsonl` reports a successful build.
-Pull `${KOVA_TARGET}` as an additional registry-path check when the workstation
-can reach the target registry.
+Copy the returned job ID, then inspect the complete lifecycle:
 
-The [direct runner workflow](cli-workflow.md) covers contexts, logs, batch
-input, Nydus output, and result selection. Use the
-[authenticated Service workflow](service.md) for shared or platform-operated
-environments. The
+```bash
+kova job wait <job-id> --timeout 10m
+kova job get <job-id>
+kova job results <job-id>
+kova job logs <job-id>
+```
+
+Pull `${KOVA_TARGET}` as an additional registry-path check when the workstation
+can reach the target registry. Logs and typed results remain available from the
+artifact store after the short-lived runner Pod disappears.
+
+The [authenticated Service workflow](service.md) covers TokenReview, batch
+archives, cancellation, Nydus output, and production artifact storage. The
+[direct runner workflow](cli-workflow.md) is reserved for development and
+low-level debugging. The
 [Kubernetes deployment guide](deployment/kubernetes.md) covers private registry
 credentials, service mode, artifact storage, capacity, and production overlays.
 
 ## Uninstall
 
 ```bash
-kova --name quickstart destroy
 helm uninstall kova --namespace kova
-rm -rf .work/kova-quickstart .work/kova-quickstart-result.jsonl
+kubectl delete namespace kova
+rm -rf .work/kova-quickstart
 ```
 
 The chart does not create clusters, cloud accounts, output registries, or

@@ -18,6 +18,12 @@ imagePullSecrets:
 
 imageRegistries: []
 
+# kindnet's NetworkPolicy implementation can drop UDP DNS replies to selected
+# rootless worker Pods. Production overlays keep the chart's secure default.
+networkPolicy:
+  worker:
+    enabled: false
+
 observability:
   enabled: true
   controllerServiceName: kova-controller

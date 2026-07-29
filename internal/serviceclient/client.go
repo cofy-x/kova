@@ -99,6 +99,9 @@ func authenticatedHTTPClient(cfg Config, baseURL *url.URL) (*http.Client, error)
 }
 
 func (c *Client) CreateBuild(ctx context.Context, opts CreateBuildOptions) (serviceapi.BuildJob, error) {
+	if err := c.CheckCompatible(ctx); err != nil {
+		return serviceapi.BuildJob{}, err
+	}
 	archive, err := os.Open(opts.ArchivePath)
 	if err != nil {
 		return serviceapi.BuildJob{}, err
@@ -128,6 +131,36 @@ func (c *Client) CreateBuild(ctx context.Context, opts CreateBuildOptions) (serv
 		err = formErr
 	}
 	return job, err
+}
+
+func (c *Client) Version(ctx context.Context) (serviceapi.VersionInfo, error) {
+	var info serviceapi.VersionInfo
+	err := c.getJSON(ctx, "/version", &info)
+	return info, err
+}
+
+func (c *Client) CheckCompatible(ctx context.Context) error {
+	info, err := c.Version(ctx)
+	if err != nil {
+		return fmt.Errorf("query Kova service version: %w", err)
+	}
+	if info.APIVersion != serviceapi.APIVersion {
+		return fmt.Errorf("incompatible Kova service API %q; client requires %q", info.APIVersion, serviceapi.APIVersion)
+	}
+	return nil
+}
+
+func (c *Client) Ready(ctx context.Context) error {
+	var status struct {
+		Status string `json:"status"`
+	}
+	if err := c.getJSON(ctx, "/readyz", &status); err != nil {
+		return err
+	}
+	if status.Status != "ready" {
+		return fmt.Errorf("service readiness status is %q", status.Status)
+	}
+	return nil
 }
 
 func writeCreateBuildForm(writer *multipart.Writer, archive io.Reader, opts CreateBuildOptions) error {
@@ -161,8 +194,17 @@ func writeCreateBuildForm(writer *multipart.Writer, archive io.Reader, opts Crea
 }
 
 func (c *Client) List(ctx context.Context) (serviceapi.JobList, error) {
+	return c.ListPage(ctx, 100, "")
+}
+
+func (c *Client) ListPage(ctx context.Context, limit int, continueToken string) (serviceapi.JobList, error) {
 	var jobs serviceapi.JobList
-	err := c.getJSON(ctx, "/v1/builds", &jobs)
+	values := url.Values{}
+	values.Set("limit", strconv.Itoa(limit))
+	if continueToken != "" {
+		values.Set("continue", continueToken)
+	}
+	err := c.getJSON(ctx, "/v1/builds?"+values.Encode(), &jobs)
 	return jobs, err
 }
 

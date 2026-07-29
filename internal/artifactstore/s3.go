@@ -67,6 +67,23 @@ func (s *S3) Delete(ctx context.Context, rawURI string) error {
 	return s.client.RemoveObject(ctx, s.bucket, key, minio.RemoveObjectOptions{})
 }
 
+func (s *S3) List(ctx context.Context, prefix string) ([]Artifact, error) {
+	prefix, err := cleanS3Key(strings.TrimSuffix(prefix, "/"))
+	if err != nil {
+		return nil, err
+	}
+	artifacts := []Artifact{}
+	for object := range s.client.ListObjects(ctx, s.bucket, minio.ListObjectsOptions{Prefix: prefix + "/", Recursive: true}) {
+		if object.Err != nil {
+			return nil, fmt.Errorf("list S3 artifacts: %w", object.Err)
+		}
+		artifacts = append(artifacts, Artifact{
+			Key: object.Key, URI: (&url.URL{Scheme: "s3", Host: s.bucket, Path: "/" + object.Key}).String(), Modified: object.LastModified,
+		})
+	}
+	return artifacts, nil
+}
+
 func (s *S3) keyForURI(rawURI string) (string, error) {
 	u, err := ParseURI(rawURI)
 	if err != nil {

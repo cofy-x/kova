@@ -158,7 +158,11 @@ func (k *Client) DeletePod(ctx context.Context, namespace string, name string) (
 func (k *Client) WritePodLogsTail(ctx context.Context, namespace string, name string, tailLines int64, out io.Writer) (err error) {
 	ctx, op := kubeOperation(ctx, "pod_logs", namespace, name)
 	defer func() { op.End(err) }()
-	stream, err := k.clientset.CoreV1().Pods(namespace).GetLogs(name, &corev1.PodLogOptions{TailLines: &tailLines}).Stream(ctx)
+	options := &corev1.PodLogOptions{}
+	if tailLines >= 0 {
+		options.TailLines = &tailLines
+	}
+	stream, err := k.clientset.CoreV1().Pods(namespace).GetLogs(name, options).Stream(ctx)
 	if err != nil {
 		return err
 	}

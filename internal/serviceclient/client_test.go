@@ -62,6 +62,10 @@ func TestClientAppliesTLSOptionsWithBearerToken(t *testing.T) {
 
 func TestCreateBuildStreamsMultipartArchive(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/version" {
+			_ = json.NewEncoder(w).Encode(serviceapi.VersionInfo{APIVersion: serviceapi.APIVersion})
+			return
+		}
 		if err := r.ParseMultipartForm(1 << 20); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return

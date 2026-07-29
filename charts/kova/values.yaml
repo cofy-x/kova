@@ -97,9 +97,14 @@ serviceDaemon:
     staticPrincipal: kova:static
   jobTTL: 2h
   maxUploadBytes: 1073741824
+  maxLogBytes: 16777216
+  artifactGCInterval: 10m
+  artifactOrphanTTL: 1h
   wait: 3m
   pollInterval: 5s
   maxActiveJobs: 20
+  maxActiveJobsPerRequester: 4
+  maxQueuedJobsPerRequester: 100
   workerSlots: 20
   leaderElect: true
   runnerNamespace: ""
@@ -141,12 +146,16 @@ serviceDaemon:
       type: RuntimeDefault
 
 networkPolicy:
-  enabled: false
-  # Empty peer lists deny ingress to the selected component. Supply standard
-  # Kubernetes NetworkPolicyPeer entries for the namespaces and Pods that may
-  # reach each endpoint.
-  workerIngressFrom: []
-  serviceIngressFrom: []
+  worker:
+    # Rootless BuildKit has no application-layer authentication. Restrict its
+    # TCP endpoint to Kova runner Pods by default.
+    enabled: true
+    additionalIngressFrom: []
+  service:
+    # Service ingress varies by cluster gateway and is opt-in. An empty peer
+    # list intentionally denies all ingress when enabled.
+    enabled: false
+    ingressFrom: []
 
 worker:
   name: buildkitd

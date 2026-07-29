@@ -103,11 +103,12 @@ environments. A ReadWriteOnce PVC may require matching
 
 TokenReview is the default service mode. The chart creates only the RBAC needed
 to submit TokenReview and SubjectAccessReview requests. It also creates
-unbound `kova-service-submitter` and `kova-service-admin` Roles. Bind users or
-groups to the submitter Role to create jobs and manage only their own jobs;
-bind platform operators to the admin Role for namespace-wide access. Static
-authentication is available when an external Secret is more appropriate and
-maps the token to `serviceDaemon.authentication.staticPrincipal`.
+unbound `kova-service-submitter` and `kova-service-admin` Roles. These Roles
+authorize the virtual Service API resource and do not grant direct CRD access.
+Bind users or groups to the submitter Role to create jobs and manage only their
+own jobs; bind platform operators to the admin Role for namespace-wide access.
+Static authentication is available when an external Secret is more appropriate
+and maps the token to `serviceDaemon.authentication.staticPrincipal`.
 `unsafe-none` must be selected explicitly and should never be exposed outside
 an isolated development cluster.
 
@@ -137,36 +138,41 @@ that do not support TLS should be listed under
 ## Capacity And Placement
 
 Worker replicas are shared BuildKit capacity. Direct CLI jobs set their own
-`build --concurrency`. Service jobs additionally use FIFO admission:
+`build --concurrency`. Service jobs reserve slots through fair admission:
 
 ```yaml
 serviceDaemon:
   maxActiveJobs: 20
+  maxActiveJobsPerRequester: 4
+  maxQueuedJobsPerRequester: 100
   workerSlots: 40
 ```
 
-The controller divides worker slots across admitted jobs and records the
-allocation in job status. Runners resolve the headless Service into worker Pod
-IPs, avoid busy or cooling endpoints, and refresh DNS as replicas change.
+The controller interleaves queued jobs by requester, allocates available worker
+slots without leaving usable capacity idle, and records each fixed allocation
+in job status. Runners resolve the headless Service into worker Pod IPs, avoid
+busy or cooling endpoints, and refresh DNS as replicas change.
 
 The chart exposes worker resources, topology spread, disruption budget, HPA,
 node selectors, tolerations, affinity, priority class, and runtime class.
 Environment overlays should set these according to cluster policy.
 
-Enable `networkPolicy` only with explicit ingress peers. An empty peer list
-denies ingress to the selected worker or Service endpoint:
+Worker ingress is restricted to Kova runner Pods by default. Add trusted peers
+only when another component intentionally calls BuildKit. Service ingress is
+opt-in because gateway topology differs by environment; enabling it with an
+empty peer list denies all ingress:
 
 ```yaml
 networkPolicy:
-  enabled: true
-  workerIngressFrom:
-    - podSelector:
-        matchLabels:
-          app.kubernetes.io/name: kova-runner
-  serviceIngressFrom:
-    - namespaceSelector:
-        matchLabels:
-          kubernetes.io/metadata.name: platform-clients
+  worker:
+    enabled: true
+    additionalIngressFrom: []
+  service:
+    enabled: true
+    ingressFrom:
+      - namespaceSelector:
+          matchLabels:
+            kubernetes.io/metadata.name: platform-clients
 ```
 
 ## Direct Runner Lifecycle

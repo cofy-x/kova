@@ -9,6 +9,12 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+// ServiceBuildResource is the virtual Kubernetes authorization resource used
+// by the HTTP service. It intentionally does not name the KovaBuild CRD: users
+// may be authorized to call the service without receiving direct write access
+// to controller-owned build state.
+const ServiceBuildResource = "servicebuilds"
+
 type Attributes struct {
 	Verb      string
 	Namespace string

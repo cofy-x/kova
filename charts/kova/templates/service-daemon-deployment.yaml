@@ -81,9 +81,14 @@ spec:
             - --auth-static-principal={{ .Values.serviceDaemon.authentication.staticPrincipal }}
             - --job-ttl={{ .Values.serviceDaemon.jobTTL }}
             - --max-upload-bytes={{ .Values.serviceDaemon.maxUploadBytes | int64 }}
+            - --max-log-bytes={{ .Values.serviceDaemon.maxLogBytes | int64 }}
+            - --artifact-gc-interval={{ .Values.serviceDaemon.artifactGCInterval }}
+            - --artifact-orphan-ttl={{ .Values.serviceDaemon.artifactOrphanTTL }}
             - --wait={{ .Values.serviceDaemon.wait }}
             - --poll-interval={{ .Values.serviceDaemon.pollInterval }}
             - --max-active-jobs={{ .Values.serviceDaemon.maxActiveJobs }}
+            - --max-active-jobs-per-requester={{ .Values.serviceDaemon.maxActiveJobsPerRequester }}
+            - --max-queued-jobs-per-requester={{ .Values.serviceDaemon.maxQueuedJobsPerRequester }}
             - --worker-slots={{ .Values.serviceDaemon.workerSlots }}
             - --leader-elect={{ .Values.serviceDaemon.leaderElect }}
             - --leader-election-namespace={{ include "kova.namespace" . }}
