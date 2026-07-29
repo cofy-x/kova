@@ -22,6 +22,7 @@ standard `HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY` variables and accepts these
 optional source overrides:
 
 - `UBUNTU_IMAGE`
+- `APT_MIRROR`
 - `BUILDKIT_ROOTLESS_IMAGE`
 - `GRPCURL_DOWNLOAD_BASE_URL`
 - `NYDUS_DOWNLOAD_BASE_URL`
