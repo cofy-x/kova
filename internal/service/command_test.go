@@ -3,11 +3,11 @@ package service
 import "testing"
 
 func TestParseNodeSelector(t *testing.T) {
-	got, err := parseNodeSelector([]string{"kova.cofy.io/source-node=true", "topology.kubernetes.io/zone=cn-hongkong-b"})
+	got, err := parseNodeSelector([]string{"kova.cofy.io/source-node=true", "topology.kubernetes.io/zone=zone-b"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got["kova.cofy.io/source-node"] != "true" || got["topology.kubernetes.io/zone"] != "cn-hongkong-b" {
+	if got["kova.cofy.io/source-node"] != "true" || got["topology.kubernetes.io/zone"] != "zone-b" {
 		t.Fatalf("selectors = %#v", got)
 	}
 }
