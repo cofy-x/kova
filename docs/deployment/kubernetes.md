@@ -72,7 +72,7 @@ images:
 ```
 
 The default chart mode installs one worker only. Use the
-[provider-neutral production baseline](../../deploy/kubernetes-values.yaml) as
+[provider-neutral production baseline](../../deploy/production-values.yaml) as
 a starting point for capacity and availability settings. Enable
 `serviceDaemon` for an authenticated HTTP API and managed `KovaBuild` jobs.
 
@@ -84,6 +84,9 @@ Production service deployments should use an S3-compatible artifact store:
 artifactStore:
   driver: s3
   secretName: kova-artifact-credentials
+  credentials:
+    provider: file
+    mountPath: /var/run/secrets/kova/s3
   s3:
     endpoint: objects.example.com
     bucket: kova-builds
@@ -92,8 +95,13 @@ artifactStore:
 ```
 
 The external Secret uses `KOVA_S3_ACCESS_KEY`, `KOVA_S3_SECRET_KEY`, and an
-optional `KOVA_S3_SESSION_TOKEN`. The controller and source-fetch init
-containers receive the Secret through environment references.
+optional `KOVA_S3_SESSION_TOKEN`. With the recommended `file` provider, the
+controller and source-fetch init containers mount the Secret and reread it as
+credentials expire. Kubernetes Secret projection can therefore rotate
+credentials without embedding provider-specific identity logic in Kova.
+If `serviceDaemon.runnerNamespace` differs from the release namespace, create
+the same external Secret in both namespaces because source-fetch init
+containers run beside the runner.
 
 Filesystem storage remains available for local or deliberately shared-volume
 environments. A ReadWriteOnce PVC may require matching

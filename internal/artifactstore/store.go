@@ -10,9 +10,13 @@ import (
 )
 
 const (
-	DriverFilesystem = "filesystem"
-	DriverS3         = "s3"
-	DefaultRoot      = "/var/lib/kova/artifacts"
+	DriverFilesystem              = "filesystem"
+	DriverS3                      = "s3"
+	S3CredentialProviderStatic    = "static"
+	S3CredentialProviderFile      = "file"
+	S3CredentialProviderAnonymous = "anonymous"
+	DefaultRoot                   = "/var/lib/kova/artifacts"
+	DefaultS3CredentialDir        = "/var/run/secrets/kova/s3"
 )
 
 type Store interface {
@@ -29,15 +33,17 @@ type Artifact struct {
 }
 
 type Config struct {
-	Driver       string
-	Root         string
-	S3Endpoint   string
-	S3Bucket     string
-	S3Region     string
-	S3AccessKey  string
-	S3SecretKey  string
-	S3SessionKey string
-	S3Secure     bool
+	Driver               string
+	Root                 string
+	S3Endpoint           string
+	S3Bucket             string
+	S3Region             string
+	S3CredentialProvider string
+	S3CredentialDir      string
+	S3AccessKey          string
+	S3SecretKey          string
+	S3SessionKey         string
+	S3Secure             bool
 }
 
 func New(cfg Config) (Store, error) {

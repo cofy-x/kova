@@ -62,9 +62,13 @@ service:
 
 artifactStore:
   driver: filesystem
-  # Secret keys use the KOVA_S3_* environment variable names. The same Secret
-  # is exposed to the controller and S3 source-fetch init containers.
+  # Secret keys use the KOVA_S3_* names. The file provider mounts the Secret
+  # and rereads credentials so projected Secret rotation does not require a
+  # restart. The static provider exposes the keys as environment values.
   secretName: ""
+  credentials:
+    provider: static
+    mountPath: /var/run/secrets/kova/s3
   filesystem:
     mountPath: /var/lib/kova/artifacts
     pvc:

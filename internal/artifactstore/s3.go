@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"io"
 	"net/url"
+	"os"
 	"path"
+	"path/filepath"
 	"strings"
 
 	"github.com/minio/minio-go/v7"
@@ -21,8 +23,12 @@ func NewS3(cfg Config) (*S3, error) {
 	if strings.TrimSpace(cfg.S3Endpoint) == "" || strings.TrimSpace(cfg.S3Bucket) == "" {
 		return nil, fmt.Errorf("S3 endpoint and bucket are required")
 	}
+	creds, err := s3Credentials(cfg)
+	if err != nil {
+		return nil, err
+	}
 	client, err := minio.New(cfg.S3Endpoint, &minio.Options{
-		Creds:  credentials.NewStaticV4(cfg.S3AccessKey, cfg.S3SecretKey, cfg.S3SessionKey),
+		Creds:  creds,
 		Secure: cfg.S3Secure,
 		Region: cfg.S3Region,
 	})
@@ -30,6 +36,80 @@ func NewS3(cfg Config) (*S3, error) {
 		return nil, fmt.Errorf("create S3 client: %w", err)
 	}
 	return &S3{client: client, bucket: cfg.S3Bucket}, nil
+}
+
+func s3Credentials(cfg Config) (*credentials.Credentials, error) {
+	provider := strings.TrimSpace(cfg.S3CredentialProvider)
+	if provider == "" {
+		provider = S3CredentialProviderStatic
+	}
+	switch provider {
+	case S3CredentialProviderStatic:
+		if strings.TrimSpace(cfg.S3AccessKey) == "" || strings.TrimSpace(cfg.S3SecretKey) == "" {
+			return nil, fmt.Errorf("static S3 credentials require access and secret keys")
+		}
+		return credentials.NewStaticV4(cfg.S3AccessKey, cfg.S3SecretKey, cfg.S3SessionKey), nil
+	case S3CredentialProviderFile:
+		dir := strings.TrimSpace(cfg.S3CredentialDir)
+		if dir == "" {
+			dir = DefaultS3CredentialDir
+		}
+		provider := fileCredentialProvider{dir: dir}
+		if _, err := provider.Retrieve(); err != nil {
+			return nil, err
+		}
+		return credentials.New(provider), nil
+	case S3CredentialProviderAnonymous:
+		return credentials.NewStaticV4("", "", ""), nil
+	default:
+		return nil, fmt.Errorf("unsupported S3 credential provider %q", provider)
+	}
+}
+
+type fileCredentialProvider struct {
+	dir string
+}
+
+func (p fileCredentialProvider) Retrieve() (credentials.Value, error) {
+	accessKey, err := readCredentialFile(p.dir, "KOVA_S3_ACCESS_KEY", true)
+	if err != nil {
+		return credentials.Value{}, err
+	}
+	secretKey, err := readCredentialFile(p.dir, "KOVA_S3_SECRET_KEY", true)
+	if err != nil {
+		return credentials.Value{}, err
+	}
+	sessionToken, err := readCredentialFile(p.dir, "KOVA_S3_SESSION_TOKEN", false)
+	if err != nil {
+		return credentials.Value{}, err
+	}
+	return credentials.Value{
+		AccessKeyID:     accessKey,
+		SecretAccessKey: secretKey,
+		SessionToken:    sessionToken,
+		SignerType:      credentials.SignatureV4,
+	}, nil
+}
+
+func (p fileCredentialProvider) RetrieveWithCredContext(*credentials.CredContext) (credentials.Value, error) {
+	return p.Retrieve()
+}
+
+func (fileCredentialProvider) IsExpired() bool { return true }
+
+func readCredentialFile(dir, name string, required bool) (string, error) {
+	raw, err := os.ReadFile(filepath.Join(dir, name))
+	if err != nil {
+		if !required && os.IsNotExist(err) {
+			return "", nil
+		}
+		return "", fmt.Errorf("read S3 credential %s: %w", name, err)
+	}
+	value := strings.TrimRight(string(raw), "\r\n")
+	if required && value == "" {
+		return "", fmt.Errorf("S3 credential %s is empty", name)
+	}
+	return value, nil
 }
 
 func (s *S3) Put(ctx context.Context, key string, src io.Reader, size int64, contentType string) (string, error) {

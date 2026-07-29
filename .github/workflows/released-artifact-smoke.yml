@@ -1,0 +1,79 @@
+name: Released artifact smoke
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Exact Kova release tag; defaults to the newest release
+        required: false
+        type: string
+  workflow_run:
+    workflows:
+      - Release
+    types:
+      - completed
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  resolve:
+    name: Resolve release
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    outputs:
+      version: ${{ steps.release.outputs.version }}
+    steps:
+      - name: Resolve exact release tag
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED_VERSION: ${{ inputs.version }}
+          RELEASE_COMMIT: ${{ github.event.workflow_run.head_sha }}
+        shell: bash
+        run: |
+          version="${REQUESTED_VERSION}"
+          if [[ -z "${version}" && -n "${RELEASE_COMMIT}" ]]; then
+            while IFS= read -r tag; do
+              commit=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${tag}" \
+                --jq .sha)
+              if [[ "${commit}" == "${RELEASE_COMMIT}" ]]; then
+                version="${tag}"
+                break
+              fi
+            done < <(gh release list --repo "${GITHUB_REPOSITORY}" \
+              --limit 20 --json tagName --jq '.[].tagName')
+          fi
+          if [[ -z "${version}" ]]; then
+            version=$(gh release list --repo "${GITHUB_REPOSITORY}" \
+              --limit 1 --json tagName --jq '.[0].tagName')
+          fi
+          if [[ ! "${version}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "invalid release tag: ${version}" >&2
+            exit 1
+          fi
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+
+  smoke:
+    name: Public CLI, chart, images, and Service lifecycle
+    needs: resolve
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - name: Check out the validation harness
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up Helm
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: v4.1.3
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Install kind
+        run: go install sigs.k8s.io/kind@v0.32.0
+      - name: Validate the public release
+        run: scripts/e2e/e2e-release.sh "${{ needs.resolve.outputs.version }}"

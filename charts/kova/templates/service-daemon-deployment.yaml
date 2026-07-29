@@ -5,6 +5,12 @@
 {{- if not (has .Values.serviceDaemon.authentication.mode (list "tokenreview" "static" "unsafe-none")) }}
 {{- fail "serviceDaemon.authentication.mode must be tokenreview, static, or unsafe-none" }}
 {{- end }}
+{{- if not (has .Values.artifactStore.credentials.provider (list "static" "file" "anonymous")) }}
+{{- fail "artifactStore.credentials.provider must be static, file, or anonymous" }}
+{{- end }}
+{{- if and (eq .Values.artifactStore.driver "s3") (ne .Values.artifactStore.credentials.provider "anonymous") (not .Values.artifactStore.secretName) }}
+{{- fail "artifactStore.secretName is required for static and file S3 credentials" }}
+{{- end }}
 {{- if and (eq .Values.artifactStore.driver "filesystem") (not .Values.artifactStore.filesystem.pvc.create) (not .Values.artifactStore.filesystem.pvc.existingClaim) }}
 {{- fail "artifactStore.filesystem.pvc.existingClaim is required when the chart does not create the filesystem PVC" }}
 {{- end }}
@@ -75,6 +81,8 @@ spec:
             - --s3-endpoint={{ required "artifactStore.s3.endpoint is required for the s3 driver" .Values.artifactStore.s3.endpoint }}
             - --s3-bucket={{ required "artifactStore.s3.bucket is required for the s3 driver" .Values.artifactStore.s3.bucket }}
             - --s3-region={{ .Values.artifactStore.s3.region }}
+            - --s3-credential-provider={{ .Values.artifactStore.credentials.provider }}
+            - --s3-credential-dir={{ .Values.artifactStore.credentials.mountPath }}
             - --s3-secure={{ .Values.artifactStore.s3.secure }}
             {{- end }}
             - --auth-mode={{ .Values.serviceDaemon.authentication.mode }}
@@ -113,7 +121,7 @@ spec:
               value: /home/kova/.docker
             {{- end }}
           {{- end }}
-          {{- if .Values.artifactStore.secretName }}
+          {{- if and .Values.artifactStore.secretName (eq .Values.artifactStore.credentials.provider "static") }}
           envFrom:
             - secretRef:
                 name: {{ .Values.artifactStore.secretName }}
@@ -130,11 +138,16 @@ spec:
             {{- toYaml .Values.serviceDaemon.resources | nindent 12 }}
           securityContext:
             {{- toYaml .Values.serviceDaemon.securityContext | nindent 12 }}
-          {{- if or (eq .Values.artifactStore.driver "filesystem") $outputRegistrySecret }}
+          {{- if or (eq .Values.artifactStore.driver "filesystem") (and .Values.artifactStore.secretName (eq .Values.artifactStore.credentials.provider "file")) $outputRegistrySecret }}
           volumeMounts:
             {{- if eq .Values.artifactStore.driver "filesystem" }}
             - name: kova-source-store
               mountPath: {{ .Values.artifactStore.filesystem.mountPath }}
+            {{- end }}
+            {{- if and .Values.artifactStore.secretName (eq .Values.artifactStore.credentials.provider "file") }}
+            - name: s3-credentials
+              mountPath: {{ .Values.artifactStore.credentials.mountPath }}
+              readOnly: true
             {{- end }}
             {{- if $outputRegistrySecret }}
             - name: registry-credentials
@@ -159,12 +172,17 @@ spec:
       tolerations:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- if or (eq .Values.artifactStore.driver "filesystem") $outputRegistrySecret }}
+      {{- if or (eq .Values.artifactStore.driver "filesystem") (and .Values.artifactStore.secretName (eq .Values.artifactStore.credentials.provider "file")) $outputRegistrySecret }}
       volumes:
         {{- if eq .Values.artifactStore.driver "filesystem" }}
         - name: kova-source-store
           persistentVolumeClaim:
             claimName: {{ include "kova.sourcePVCName" . }}
+        {{- end }}
+        {{- if and .Values.artifactStore.secretName (eq .Values.artifactStore.credentials.provider "file") }}
+        - name: s3-credentials
+          secret:
+            secretName: {{ .Values.artifactStore.secretName }}
         {{- end }}
         {{- if $outputRegistrySecret }}
         - name: registry-credentials

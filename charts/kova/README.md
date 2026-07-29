@@ -26,6 +26,11 @@ The default installs one worker. Production environments should provide an
 environment-owned values file for capacity, storage, registry credentials,
 scheduling, and service configuration.
 
+For S3-compatible storage, prefer
+`artifactStore.credentials.provider=file`. The chart mounts an external Secret
+whose keys are named `KOVA_S3_ACCESS_KEY`, `KOVA_S3_SECRET_KEY`, and optionally
+`KOVA_S3_SESSION_TOKEN`; Kova rereads projected credentials after rotation.
+
 `values.schema.json` rejects unknown or invalid chart values. The worker
 NetworkPolicy allows Kova runner Pods from the configured runner namespace by
 default. Service ingress policy is opt-in; an empty peer list denies ingress

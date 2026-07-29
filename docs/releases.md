@@ -45,12 +45,21 @@ The tag workflow:
 
 1. validates the semantic version;
 2. builds the six CLI archives in parallel and generates the CLI SBOM;
-3. packages, publishes, and attests the OCI Helm chart;
-4. assembles checksums while building and attesting controller, runner, and
-   worker images for Linux `amd64` and `arm64`;
-5. verifies archive contents, the native CLI version, the anonymously pullable
-   Helm chart, image role boundaries, runtime users, and anonymous image pulls;
-6. creates the GitHub release only after every smoke check succeeds.
+3. packages and attests a candidate Helm chart while building and attesting
+   controller, runner, and worker images for Linux `amd64` and `arm64`;
+4. upgrades a kind cluster from the previous public release to the candidate,
+   runs the authenticated Service lifecycle, and rolls back to the baseline;
+5. promotes the validated role image digests and publishes the OCI chart;
+6. assembles checksums and verifies the CLI, anonymously pullable chart, role
+   image boundaries, runtime users, and anonymous image pulls;
+7. creates the GitHub release with installation guidance and generated change
+   notes only after every blocking gate succeeds.
+
+After a successful release, the released-artifact smoke downloads the public
+CLI and checksum file, pulls the exact public chart and role images, and runs
+the S3-backed Service lifecycle in a fresh kind cluster. It can also be started
+manually for an exact tag. This catches registry availability and packaging
+regressions that cannot be observed until artifacts are public.
 
 Create a tag only from a commit whose required CI and CodeQL checks have
 passed. The GHCR package must be public before the first tag workflow can pass

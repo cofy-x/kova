@@ -19,6 +19,8 @@ type Config struct {
 	S3Endpoint                string
 	S3Bucket                  string
 	S3Region                  string
+	S3CredentialProvider      string
+	S3CredentialDir           string
 	S3AccessKey               string
 	S3SecretKey               string
 	S3SessionToken            string

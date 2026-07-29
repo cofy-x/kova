@@ -124,6 +124,12 @@ Run the released-chart installation path locally with:
 make e2e-helm-quickstart
 ```
 
+Validate an already published release with:
+
+```bash
+make e2e-release KOVA_VERSION=vX.Y.Z
+```
+
 Use the [validation guide](docs/testing.md) to choose broader E2E coverage.
 Contributions are welcome; the [contribution workflow](CONTRIBUTING.md) covers
 the full setup and pull request process. Report vulnerabilities through the

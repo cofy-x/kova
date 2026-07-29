@@ -79,6 +79,14 @@
       "properties": {
         "driver": { "type": "string", "enum": ["filesystem", "s3"] },
         "secretName": { "type": "string" },
+        "credentials": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "provider": { "type": "string", "enum": ["static", "file", "anonymous"] },
+            "mountPath": { "type": "string", "minLength": 1 }
+          }
+        },
         "filesystem": {
           "type": "object",
           "additionalProperties": false,

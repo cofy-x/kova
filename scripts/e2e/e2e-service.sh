@@ -187,6 +187,7 @@ case "${ARTIFACT_DRIVER}" in
     helm_args+=(
       --set-string "artifactStore.driver=s3"
       --set-string "artifactStore.secretName=${ARTIFACT_SECRET}"
+      --set-string "artifactStore.credentials.provider=file"
       --set-string "artifactStore.s3.endpoint=${S3_ENDPOINT}"
       --set-string "artifactStore.s3.bucket=${S3_BUCKET}"
       --set-string "artifactStore.s3.region=${S3_REGION}"

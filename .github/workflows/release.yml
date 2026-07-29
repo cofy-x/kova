@@ -460,10 +460,28 @@ jobs:
           GH_REPO: ${{ github.repository }}
         shell: bash
         run: |
+          read -r -d '' introduction <<EOF || true
+          Kova ${GITHUB_REF_NAME} publishes one matched release set:
+
+          - CLI archives
+          - OCI chart: oci://ghcr.io/${GITHUB_REPOSITORY_OWNER}/charts/kova
+          - controller, runner, and worker images
+
+          Install the exact chart version:
+
+              export KOVA_VERSION=${GITHUB_REF_NAME}
+              helm show crds oci://ghcr.io/${GITHUB_REPOSITORY_OWNER}/charts/kova --version "\${KOVA_VERSION#v}" | kubectl apply -f -
+              helm upgrade --install kova oci://ghcr.io/${GITHUB_REPOSITORY_OWNER}/charts/kova --version "\${KOVA_VERSION#v}" --namespace kova --create-namespace --wait
+
+          Verify downloaded assets with checksums.txt. Apply the selected
+          release CRDs before every Helm upgrade because Helm does not upgrade CRDs
+          from a chart's crds/ directory.
+          EOF
           args=(
             release create "${GITHUB_REF_NAME}"
             --verify-tag
             --generate-notes
+            --notes "${introduction}"
             --title "${GITHUB_REF_NAME}"
           )
           if [[ "${GITHUB_REF_NAME}" == *-* ]]; then

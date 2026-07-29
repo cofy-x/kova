@@ -147,15 +147,21 @@ kova-controller service \
   --buildkit-addr=tcp://kova.kova.svc:9094 \
   --artifact-driver=s3 \
   --artifact-secret=kova-artifact-credentials \
+  --s3-credential-provider=file \
+  --s3-credential-dir=/var/run/secrets/kova/s3 \
   --s3-endpoint=objects.example.com \
   --s3-bucket=kova-builds \
   --s3-region=us-east-1
 ```
 
 The referenced Secret exposes `KOVA_S3_ACCESS_KEY`, `KOVA_S3_SECRET_KEY`, and
-optional `KOVA_S3_SESSION_TOKEN`. An S3 runner init container uses the same
-Secret to download and verify the job source. S3 mode does not require an RWX
-volume or controller/runner node affinity.
+optional `KOVA_S3_SESSION_TOKEN`. The recommended `file` provider mounts and
+rereads those keys in the controller and S3 runner init container. `static`
+uses environment variables and `anonymous` is available only for stores that
+permit unsigned requests. S3 mode does not require an RWX volume or
+controller/runner node affinity.
+When runners use another namespace, provision the external artifact Secret in
+both the controller and runner namespaces.
 
 Terminal runner logs and the complete typed result set are persisted beside
 the source. Their URIs and SHA-256 digests are recorded in status. The
@@ -246,6 +252,9 @@ serviceDaemon:
 artifactStore:
   driver: s3
   secretName: kova-artifact-credentials
+  credentials:
+    provider: file
+    mountPath: /var/run/secrets/kova/s3
   s3:
     endpoint: objects.example.com
     bucket: kova-builds

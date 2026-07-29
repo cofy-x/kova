@@ -53,6 +53,8 @@ func CLICommand() *cli.Command {
 			&cli.StringFlag{Name: "s3-endpoint", EnvVars: []string{"KOVA_S3_ENDPOINT"}},
 			&cli.StringFlag{Name: "s3-bucket", EnvVars: []string{"KOVA_S3_BUCKET"}},
 			&cli.StringFlag{Name: "s3-region", EnvVars: []string{"KOVA_S3_REGION"}},
+			&cli.StringFlag{Name: "s3-credential-provider", Value: artifactstore.S3CredentialProviderStatic, EnvVars: []string{"KOVA_S3_CREDENTIAL_PROVIDER"}},
+			&cli.StringFlag{Name: "s3-credential-dir", Value: artifactstore.DefaultS3CredentialDir, EnvVars: []string{"KOVA_S3_CREDENTIAL_DIR"}},
 			&cli.StringFlag{Name: "s3-access-key", EnvVars: []string{"KOVA_S3_ACCESS_KEY"}},
 			&cli.StringFlag{Name: "s3-secret-key", EnvVars: []string{"KOVA_S3_SECRET_KEY"}},
 			&cli.StringFlag{Name: "s3-session-token", EnvVars: []string{"KOVA_S3_SESSION_TOKEN"}},
@@ -118,6 +120,8 @@ func CLICommand() *cli.Command {
 				S3Endpoint:                c.String("s3-endpoint"),
 				S3Bucket:                  c.String("s3-bucket"),
 				S3Region:                  c.String("s3-region"),
+				S3CredentialProvider:      c.String("s3-credential-provider"),
+				S3CredentialDir:           c.String("s3-credential-dir"),
 				S3AccessKey:               c.String("s3-access-key"),
 				S3SecretKey:               c.String("s3-secret-key"),
 				S3SessionToken:            c.String("s3-session-token"),
@@ -140,6 +144,7 @@ func CLICommand() *cli.Command {
 			store, err := artifactstore.New(artifactstore.Config{
 				Driver: cfg.ArtifactDriver, Root: cfg.ArtifactRoot,
 				S3Endpoint: cfg.S3Endpoint, S3Bucket: cfg.S3Bucket, S3Region: cfg.S3Region,
+				S3CredentialProvider: cfg.S3CredentialProvider, S3CredentialDir: cfg.S3CredentialDir,
 				S3AccessKey: cfg.S3AccessKey, S3SecretKey: cfg.S3SecretKey,
 				S3SessionKey: cfg.S3SessionToken, S3Secure: cfg.S3Secure,
 			})

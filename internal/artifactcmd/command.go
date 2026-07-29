@@ -40,6 +40,8 @@ func storeFlags() []cli.Flag {
 		&cli.StringFlag{Name: "s3-endpoint", EnvVars: []string{"KOVA_S3_ENDPOINT"}},
 		&cli.StringFlag{Name: "s3-bucket", EnvVars: []string{"KOVA_S3_BUCKET"}},
 		&cli.StringFlag{Name: "s3-region", EnvVars: []string{"KOVA_S3_REGION"}},
+		&cli.StringFlag{Name: "s3-credential-provider", Value: artifactstore.S3CredentialProviderStatic, EnvVars: []string{"KOVA_S3_CREDENTIAL_PROVIDER"}},
+		&cli.StringFlag{Name: "s3-credential-dir", Value: artifactstore.DefaultS3CredentialDir, EnvVars: []string{"KOVA_S3_CREDENTIAL_DIR"}},
 		&cli.StringFlag{Name: "s3-access-key", EnvVars: []string{"KOVA_S3_ACCESS_KEY"}},
 		&cli.StringFlag{Name: "s3-secret-key", EnvVars: []string{"KOVA_S3_SECRET_KEY"}},
 		&cli.StringFlag{Name: "s3-session-token", EnvVars: []string{"KOVA_S3_SESSION_TOKEN"}},
@@ -53,15 +55,17 @@ func fetch(c *cli.Context) error {
 		return err
 	}
 	cfg := artifactstore.Config{
-		Driver:       map[string]string{"file": artifactstore.DriverFilesystem, "s3": artifactstore.DriverS3}[u.Scheme],
-		Root:         c.String("artifact-root"),
-		S3Endpoint:   c.String("s3-endpoint"),
-		S3Bucket:     c.String("s3-bucket"),
-		S3Region:     c.String("s3-region"),
-		S3AccessKey:  c.String("s3-access-key"),
-		S3SecretKey:  c.String("s3-secret-key"),
-		S3SessionKey: c.String("s3-session-token"),
-		S3Secure:     c.Bool("s3-secure"),
+		Driver:               map[string]string{"file": artifactstore.DriverFilesystem, "s3": artifactstore.DriverS3}[u.Scheme],
+		Root:                 c.String("artifact-root"),
+		S3Endpoint:           c.String("s3-endpoint"),
+		S3Bucket:             c.String("s3-bucket"),
+		S3Region:             c.String("s3-region"),
+		S3CredentialProvider: c.String("s3-credential-provider"),
+		S3CredentialDir:      c.String("s3-credential-dir"),
+		S3AccessKey:          c.String("s3-access-key"),
+		S3SecretKey:          c.String("s3-secret-key"),
+		S3SessionKey:         c.String("s3-session-token"),
+		S3Secure:             c.Bool("s3-secure"),
 	}
 	store, err := artifactstore.New(cfg)
 	if err != nil {

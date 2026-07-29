@@ -12,28 +12,30 @@ import (
 )
 
 type ManifestOptions struct {
-	PodName         string
-	Namespace       string
-	Image           string
-	ImagePullPolicy string
-	ImagePullSecret string
-	BuildkitAddr    string
-	PprofServer     string
-	Env             map[string]string
-	Labels          map[string]string
-	Annotations     map[string]string
-	NodeSelector    map[string]string
-	SourcePVCClaim  string
-	SourceMountPath string
-	SourceReadOnly  bool
-	SourceURI       string
-	SourceDigest    string
-	ArtifactRoot    string
-	ArtifactSecret  string
-	S3Endpoint      string
-	S3Bucket        string
-	S3Region        string
-	S3Secure        bool
+	PodName              string
+	Namespace            string
+	Image                string
+	ImagePullPolicy      string
+	ImagePullSecret      string
+	BuildkitAddr         string
+	PprofServer          string
+	Env                  map[string]string
+	Labels               map[string]string
+	Annotations          map[string]string
+	NodeSelector         map[string]string
+	SourcePVCClaim       string
+	SourceMountPath      string
+	SourceReadOnly       bool
+	SourceURI            string
+	SourceDigest         string
+	ArtifactRoot         string
+	ArtifactSecret       string
+	S3Endpoint           string
+	S3Bucket             string
+	S3Region             string
+	S3CredentialProvider string
+	S3CredentialDir      string
+	S3Secure             bool
 }
 
 const MaterializedSourcePath = "/var/lib/kova/source/source.zip"
@@ -135,6 +137,14 @@ func PreparePod(opts ManifestOptions) corev1.Pod {
 		})
 	}
 	if source, err := url.Parse(opts.SourceURI); err == nil && source.Scheme == "s3" {
+		credentialProvider := opts.S3CredentialProvider
+		if credentialProvider == "" {
+			credentialProvider = "static"
+		}
+		credentialDir := opts.S3CredentialDir
+		if credentialDir == "" {
+			credentialDir = "/var/run/secrets/kova/s3"
+		}
 		mount := corev1.VolumeMount{Name: "kova-source", MountPath: "/var/lib/kova/source"}
 		pod.Spec.Containers[0].VolumeMounts = append(pod.Spec.Containers[0].VolumeMounts, mount)
 		pod.Spec.Volumes = append(pod.Spec.Volumes, corev1.Volume{
@@ -153,6 +163,8 @@ func PreparePod(opts ManifestOptions) corev1.Pod {
 				"--s3-endpoint", opts.S3Endpoint,
 				"--s3-bucket", opts.S3Bucket,
 				"--s3-region", opts.S3Region,
+				"--s3-credential-provider", credentialProvider,
+				"--s3-credential-dir", credentialDir,
 				"--s3-secure=" + strconv.FormatBool(opts.S3Secure),
 			},
 			VolumeMounts: []corev1.VolumeMount{mount},
@@ -168,10 +180,20 @@ func PreparePod(opts ManifestOptions) corev1.Pod {
 		if opts.ArtifactRoot != "" {
 			fetch.Env = append(fetch.Env, corev1.EnvVar{Name: "KOVA_ARTIFACT_ROOT", Value: opts.ArtifactRoot})
 		}
-		if opts.ArtifactSecret != "" {
+		if opts.ArtifactSecret != "" && credentialProvider == "static" {
 			fetch.EnvFrom = []corev1.EnvFromSource{{SecretRef: &corev1.SecretEnvSource{
 				LocalObjectReference: corev1.LocalObjectReference{Name: opts.ArtifactSecret},
 			}}}
+		} else if opts.ArtifactSecret != "" && credentialProvider == "file" {
+			fetch.VolumeMounts = append(fetch.VolumeMounts, corev1.VolumeMount{
+				Name: "s3-credentials", MountPath: credentialDir, ReadOnly: true,
+			})
+			pod.Spec.Volumes = append(pod.Spec.Volumes, corev1.Volume{
+				Name: "s3-credentials",
+				VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{
+					SecretName: opts.ArtifactSecret,
+				}},
+			})
 		}
 		pod.Spec.InitContainers = append(pod.Spec.InitContainers, fetch)
 	}
