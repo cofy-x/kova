@@ -31,14 +31,21 @@ if ! kind get clusters | grep -qx "${KIND_CLUSTER}"; then
     proxy_url=$(detect_host_http_proxy || true)
   fi
   if [[ -n "${proxy_url}" ]]; then
+    proxy_exclusions=${NO_PROXY:-${no_proxy:-}}
+    for exclusion in localhost 127.0.0.1 kind-registry kind-registry:5000 .svc .svc.cluster.local .cluster.local; do
+      case ",${proxy_exclusions}," in
+        *,"${exclusion}",*) ;;
+        *) proxy_exclusions=${proxy_exclusions:+${proxy_exclusions},}${exclusion} ;;
+      esac
+    done
     proxy_url=${proxy_url/127.0.0.1/host.docker.internal}
     proxy_url=${proxy_url/localhost/host.docker.internal}
     export HTTP_PROXY="${proxy_url}"
     export HTTPS_PROXY="${proxy_url}"
     export http_proxy="${proxy_url}"
     export https_proxy="${proxy_url}"
-    export NO_PROXY="${NO_PROXY:-localhost,127.0.0.1,kind-registry,kind-registry:5000,*.svc,*.cluster.local}"
-    export no_proxy="${no_proxy:-${NO_PROXY}}"
+    export NO_PROXY="${proxy_exclusions}"
+    export no_proxy="${proxy_exclusions}"
     echo "Using kind node proxy: ${proxy_url}" >&2
   fi
   KUBECONFIG="${kubeconfig}" kind create cluster \

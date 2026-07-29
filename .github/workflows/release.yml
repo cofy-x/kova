@@ -212,6 +212,11 @@ jobs:
             cp "dist/baseline/kova-${baseline_version}.tgz" dist/baseline.tgz
             printf 'BASELINE_CHART=%s/dist/baseline.tgz\n' "${GITHUB_WORKSPACE}" \
               >> "${GITHUB_ENV}"
+            {
+              printf 'BASELINE_CONTROLLER_IMAGE=ghcr.io/%s:controller-%s\n' "${GITHUB_REPOSITORY}" "${baseline_tag}"
+              printf 'BASELINE_RUNNER_IMAGE=ghcr.io/%s:runner-%s\n' "${GITHUB_REPOSITORY}" "${baseline_tag}"
+              printf 'BASELINE_WORKER_IMAGE=ghcr.io/%s:worker-%s\n' "${GITHUB_REPOSITORY}" "${baseline_tag}"
+            } >> "${GITHUB_ENV}"
           fi
       - name: Run candidate Service lifecycle
         env:

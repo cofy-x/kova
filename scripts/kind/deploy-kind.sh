@@ -33,6 +33,8 @@ if [[ "${START_OBSERVABILITY}" == "true" ]]; then
 fi
 if [[ "${KIND_LOAD_IMAGES}" == "true" ]]; then
   "${ROOT}/scripts/kind/kind-load.sh"
+else
+  "${ROOT}/scripts/kind/kind-create.sh"
 fi
 
 helm upgrade --install "${RELEASE_NAME}" "${KOVA_CHART}" \

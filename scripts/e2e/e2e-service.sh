@@ -31,6 +31,23 @@ SOURCE_PVC=${SOURCE_PVC:-kova-sources}
 KOVA_CHART=${KOVA_CHART:-${ROOT}/charts/kova}
 KOVA_VALUES=${KOVA_VALUES:-${ROOT}/deploy/kind-values.yaml}
 BASELINE_CHART=${BASELINE_CHART:-}
+BASELINE_CONTROLLER_IMAGE=${BASELINE_CONTROLLER_IMAGE:-}
+BASELINE_RUNNER_IMAGE=${BASELINE_RUNNER_IMAGE:-}
+BASELINE_WORKER_IMAGE=${BASELINE_WORKER_IMAGE:-}
+ARTIFACT_DRIVER=${ARTIFACT_DRIVER:-filesystem}
+ARTIFACT_SECRET=${ARTIFACT_SECRET:-kova-e2e-s3}
+S3_ENDPOINT=${S3_ENDPOINT:-kova-e2e-minio.kova.svc:9000}
+S3_BUCKET=${S3_BUCKET:-kova-builds}
+S3_REGION=${S3_REGION:-us-east-1}
+S3_SECURE=${S3_SECURE:-false}
+
+case "${ARTIFACT_DRIVER}" in
+  filesystem | s3) ;;
+  *)
+    echo "error: ARTIFACT_DRIVER must be filesystem or s3" >&2
+    exit 2
+    ;;
+esac
 
 require_cmd curl
 require_cmd docker
@@ -46,10 +63,26 @@ test -x "${KOVA_CLI}"
 if [[ "${E2E_SERVICE_BUILD_IMAGE}" == "true" ]]; then
   make -C "${ROOT}" image
 fi
+baseline_revision=""
 if [[ -n "${BASELINE_CHART}" ]]; then
-  KOVA_CHART=${BASELINE_CHART} "${ROOT}/scripts/kind/deploy-kind.sh"
+  if [[ -z "${BASELINE_CONTROLLER_IMAGE}" || -z "${BASELINE_RUNNER_IMAGE}" || -z "${BASELINE_WORKER_IMAGE}" ]]; then
+    echo "error: baseline chart validation requires all three BASELINE_*_IMAGE values" >&2
+    exit 2
+  fi
+  KOVA_CHART=${BASELINE_CHART} \
+    CONTROLLER_IMAGE=${BASELINE_CONTROLLER_IMAGE} \
+    RUNNER_IMAGE=${BASELINE_RUNNER_IMAGE} \
+    WORKER_IMAGE=${BASELINE_WORKER_IMAGE} \
+    "${ROOT}/scripts/kind/deploy-kind.sh"
+  baseline_revision=$(helm history "${RELEASE_NAME}" \
+    --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" \
+    --namespace "${NAMESPACE}" -o json | jq -r 'last.revision')
 else
   "${ROOT}/scripts/kind/deploy-kind.sh"
+fi
+
+if [[ "${ARTIFACT_DRIVER}" == "s3" ]]; then
+  "${ROOT}/scripts/e2e/minio-kind.sh" deploy
 fi
 
 helm show crds "${KOVA_CHART}" | \
@@ -118,29 +151,51 @@ sync_service_auth_secret() (
 
 sync_service_auth_secret
 
-helm upgrade --install "${RELEASE_NAME}" "${KOVA_CHART}" \
-  --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" \
-  --namespace "${NAMESPACE}" \
-  --create-namespace \
-  --wait \
-  --timeout 180s \
-  -f "${KOVA_VALUES}" \
-  --set-string "images.controller.repository=${CONTROLLER_IMAGE%:*}" \
-  --set-string "images.controller.tag=${CONTROLLER_IMAGE##*:}" \
-  --set-string "images.runner.repository=${RUNNER_IMAGE%:*}" \
-  --set-string "images.runner.tag=${RUNNER_IMAGE##*:}" \
-  --set-string "images.worker.repository=${WORKER_IMAGE%:*}" \
-  --set-string "images.worker.tag=${WORKER_IMAGE##*:}" \
-  --set "serviceDaemon.enabled=true" \
-  --set-string "serviceDaemon.authentication.mode=static" \
-  --set-string "serviceDaemon.authentication.staticTokenSecret.name=${SERVICE_AUTH_SECRET}" \
-  --set-string "serviceDaemon.authentication.staticTokenSecret.key=token" \
-  --set-string "serviceDaemon.authentication.staticPrincipal=kova:e2e" \
-  --set "serviceDaemon.jobTTL=${SERVICE_JOB_TTL}" \
-  --set "serviceDaemon.runnerImagePullSecret=" \
-  --set-string "serviceDaemon.registryPlainHTTP[0]=${CLUSTER_REGISTRY}" \
-  --set "artifactStore.filesystem.pvc.create=true" \
-  --set "artifactStore.filesystem.pvc.accessModes[0]=ReadWriteOnce"
+helm_args=(
+  upgrade --install "${RELEASE_NAME}" "${KOVA_CHART}"
+  --kubeconfig "${ROOT}/${KIND_KUBECONFIG}"
+  --namespace "${NAMESPACE}"
+  --create-namespace
+  --wait
+  --timeout 180s
+  -f "${KOVA_VALUES}"
+  --set-string "images.controller.repository=${CONTROLLER_IMAGE%:*}"
+  --set-string "images.controller.tag=${CONTROLLER_IMAGE##*:}"
+  --set-string "images.runner.repository=${RUNNER_IMAGE%:*}"
+  --set-string "images.runner.tag=${RUNNER_IMAGE##*:}"
+  --set-string "images.worker.repository=${WORKER_IMAGE%:*}"
+  --set-string "images.worker.tag=${WORKER_IMAGE##*:}"
+  --set "serviceDaemon.enabled=true"
+  --set-string "serviceDaemon.authentication.mode=static"
+  --set-string "serviceDaemon.authentication.staticTokenSecret.name=${SERVICE_AUTH_SECRET}"
+  --set-string "serviceDaemon.authentication.staticTokenSecret.key=token"
+  --set-string "serviceDaemon.authentication.staticPrincipal=kova:e2e"
+  --set "serviceDaemon.jobTTL=${SERVICE_JOB_TTL}"
+  --set "serviceDaemon.runnerImagePullSecret="
+  --set-string "serviceDaemon.registryPlainHTTP[0]=${CLUSTER_REGISTRY}"
+)
+
+case "${ARTIFACT_DRIVER}" in
+  filesystem)
+    helm_args+=(
+      --set-string "artifactStore.driver=filesystem"
+      --set "artifactStore.filesystem.pvc.create=true"
+      --set "artifactStore.filesystem.pvc.accessModes[0]=ReadWriteOnce"
+    )
+    ;;
+  s3)
+    helm_args+=(
+      --set-string "artifactStore.driver=s3"
+      --set-string "artifactStore.secretName=${ARTIFACT_SECRET}"
+      --set-string "artifactStore.s3.endpoint=${S3_ENDPOINT}"
+      --set-string "artifactStore.s3.bucket=${S3_BUCKET}"
+      --set-string "artifactStore.s3.region=${S3_REGION}"
+      --set "artifactStore.s3.secure=${S3_SECURE}"
+    )
+    ;;
+esac
+
+helm "${helm_args[@]}"
 
 kubectl --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" \
   -n "${NAMESPACE}" create rolebinding "${RELEASE_NAME}-e2e-submitter" \
@@ -342,13 +397,41 @@ for completed_job_id in "${job_id}" "${cancel_job_id}"; do
   fi
 done
 
-service_pod=$(kubectl --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" \
-  -n "${NAMESPACE}" get pod \
-  -l 'app.kubernetes.io/component=service' \
-  -o jsonpath='{.items[0].metadata.name}')
-kubectl --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" \
-  -n "${NAMESPACE}" exec "${service_pod}" -- \
-  test ! -e "${SOURCE_STORE_MOUNT}/builds/${job_id}"
-kubectl --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" \
-  -n "${NAMESPACE}" exec "${service_pod}" -- \
-  test ! -e "${SOURCE_STORE_MOUNT}/builds/${cancel_job_id}"
+if [[ "${ARTIFACT_DRIVER}" == "filesystem" ]]; then
+  service_pod=$(kubectl --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" \
+    -n "${NAMESPACE}" get pod \
+    -l 'app.kubernetes.io/component=service' \
+    -o jsonpath='{.items[0].metadata.name}')
+  kubectl --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" \
+    -n "${NAMESPACE}" exec "${service_pod}" -- \
+    test ! -e "${SOURCE_STORE_MOUNT}/builds/${job_id}"
+  kubectl --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" \
+    -n "${NAMESPACE}" exec "${service_pod}" -- \
+    test ! -e "${SOURCE_STORE_MOUNT}/builds/${cancel_job_id}"
+else
+  "${ROOT}/scripts/e2e/minio-kind.sh" assert-empty
+fi
+
+if [[ -n "${baseline_revision}" ]]; then
+  helm rollback "${RELEASE_NAME}" "${baseline_revision}" \
+    --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" \
+    --namespace "${NAMESPACE}" \
+    --wait \
+    --timeout 180s
+  kubectl --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" \
+    -n "${NAMESPACE}" rollout status "deployment/${RELEASE_NAME}" --timeout=180s
+  if kubectl --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" \
+      -n "${NAMESPACE}" get "deployment/${RELEASE_NAME}-service" >/dev/null 2>&1; then
+    echo "error: Service deployment remains after rolling back to the baseline release" >&2
+    exit 1
+  fi
+  rolled_back_values=$(helm get values "${RELEASE_NAME}" \
+    --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" \
+    --namespace "${NAMESPACE}" -o json)
+  for expected_image in \
+    "${BASELINE_CONTROLLER_IMAGE}" \
+    "${BASELINE_RUNNER_IMAGE}" \
+    "${BASELINE_WORKER_IMAGE}"; do
+    grep -F "${expected_image##*:}" <<<"${rolled_back_values}" >/dev/null
+  done
+fi

@@ -63,7 +63,7 @@ export REGISTRY_NAME REGISTRY_IMAGE REGISTRY_HOST REGISTRY_PORT CLUSTER_REGISTRY
 export RELEASE_NAME NAMESPACE WORK_DIR KOVA_RUNNER_NAME SOURCE_ZIP RESULT_JSONL
 export KOVA_CONCURRENT_RUNNER_NAME CONCURRENT_SOURCE_ZIP CONCURRENT_RESULT_JSONL NYDUS_RESULT_JSONL RUNTIME_OCI_SOURCE_ZIP RUNTIME_NYDUS_SOURCE_ZIP RUNTIME_OCI_RESULT_JSONL RUNTIME_NYDUS_RESULT_JSONL EXAMPLE_COUNT BUILD_CONCURRENCY
 
-.PHONY: all kova kovad install generate-crds image kind-registry kind-create kind-load deploy-kind diagnose-kind observability-up observability-down observability-status dragonfly-nydus-install e2e e2e-helm-quickstart e2e-service e2e-concurrent e2e-dragonfly-nydus e2e-runtime-preflight e2e-runtime e2e-observability clean clean-kind test docs-check lint-scripts helm-template package-example package-concurrent-example FORCE
+.PHONY: all kova kovad install generate-crds image kind-registry kind-create kind-load deploy-kind diagnose-kind observability-up observability-down observability-status dragonfly-nydus-install e2e e2e-helm-quickstart e2e-service e2e-service-s3 e2e-concurrent e2e-dragonfly-nydus e2e-runtime-preflight e2e-runtime e2e-observability clean clean-kind test docs-check lint-scripts helm-template package-example package-concurrent-example FORCE
 
 all: kova
 
@@ -147,6 +147,9 @@ e2e-helm-quickstart:
 e2e-service:
 	SOURCE_ZIP=$(WORK_DIR)/source-service.zip RESULT_JSONL=$(WORK_DIR)/result-service.jsonl ./scripts/e2e/e2e-service.sh
 
+e2e-service-s3:
+	ARTIFACT_DRIVER=s3 SOURCE_ZIP=$(WORK_DIR)/source-service-s3.zip RESULT_JSONL=$(WORK_DIR)/result-service-s3.jsonl ./scripts/e2e/e2e-service.sh
+
 e2e-concurrent:
 	KOVA_RUNNER_NAME=$(KOVA_CONCURRENT_RUNNER_NAME) SOURCE_ZIP=$(CONCURRENT_SOURCE_ZIP) RESULT_JSONL=$(CONCURRENT_RESULT_JSONL) ./scripts/e2e/e2e-concurrent.sh
 
@@ -192,6 +195,12 @@ helm-template:
 		--set serviceDaemon.enabled=true \
 		--set artifactStore.filesystem.pvc.create=true \
 		--set serviceDaemon.authentication.mode=unsafe-none >/dev/null
+	helm template $(RELEASE_NAME) ./charts/kova \
+		--set serviceDaemon.enabled=true \
+		--set artifactStore.driver=s3 \
+		--set artifactStore.secretName=test-s3 \
+		--set artifactStore.s3.endpoint=s3.example.com \
+		--set artifactStore.s3.bucket=kova-builds >/dev/null
 	helm template kova-observability ./charts/kova-observability \
 		--namespace kova-observability \
 		--set grafana.admin.existingSecret=test-secret >/dev/null

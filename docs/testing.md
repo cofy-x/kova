@@ -39,6 +39,7 @@ and environment policy in the consuming workspace rather than this repository.
 | `make e2e` | Zip-stream OCI build plus single-directory OCI build, push, export, and host pull. | `examples/simple`, `.work/result.jsonl` |
 | `make e2e-helm-quickstart` | Packages the chart, installs it into a minimal kind cluster, and runs the authenticated Service workflow against the packaged chart. | Helm archive, `examples/simple`, `.work/result-service.jsonl` |
 | `make e2e-service` | Virtual-resource RBAC isolation, doctor checks, authenticated build, persisted result and log digests, declarative cancellation, TTL cleanup, and host pull. | `examples/simple`, `.work/result-service.jsonl` |
+| `make e2e-service-s3` | The Service workflow against a pinned MinIO deployment, including source materialization, persisted results and logs, and object cleanup after TTL. | `examples/simple`, `.work/result-service-s3.jsonl` |
 | `make e2e-concurrent` | Multi-image OCI build with worker distribution checks. | generated concurrent examples, `.work/result-concurrent.jsonl` |
 | `make e2e-dragonfly-nydus` | Nydus conversion, export, Dragonfly preheat, and Pod startup. | `examples/nydus-smoke`, `.work/result-nydus.jsonl` |
 | `make e2e-runtime-preflight` | Local tool and registry readiness checks for runtime validation. | Docker, kind, Helm, kubectl, local registry |
