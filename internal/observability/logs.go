@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/log"
 	"go.opentelemetry.io/otel/log/global"
 )
@@ -21,7 +22,7 @@ func EmitLog(ctx context.Context, level string, message string) {
 	record.SetObservedTimestamp(now)
 	record.SetSeverity(severity(level))
 	record.SetSeverityText(level)
-	record.SetBody(log.StringValue(SanitizeLogBody(message)))
+	record.SetBody(attribute.StringValue(SanitizeLogBody(message)))
 	global.Logger(instrumentationName).Emit(ctx, record)
 }
 
