@@ -1,45 +1,34 @@
-# Kova
+<p align="center">
+  <img src="./assets/readme/hero.svg" width="100%" alt="Kova — a Kubernetes-native image build service: the CLI submits jobs to the controller's KovaBuild API, a per-job runner drives shared rootless BuildKit workers, and images are pushed to an OCI registry and preheated over Dragonfly P2P.">
+</p>
 
-[![CI](https://github.com/cofy-x/kova/actions/workflows/ci.yml/badge.svg)](https://github.com/cofy-x/kova/actions/workflows/ci.yml)
-[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+<p align="center">
+  <a href="https://github.com/cofy-x/kova/actions/workflows/ci.yml"><img src="https://github.com/cofy-x/kova/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue.svg" alt="License: Apache-2.0"></a>
+</p>
 
-Kova is a Kubernetes-native, cloud-provider-neutral image build service powered
-by BuildKit. It builds batches of Dockerfile contexts into OCI or Nydus images,
-pushes them to OCI registries, and can preheat successful results through a
-Dragonfly P2P cluster.
+<p align="center">
+  English | <a href="README.zh-CN.md">中文</a>
+</p>
 
-## Install the CLI
+Kova turns batches of Dockerfile contexts into OCI or Nydus images on your own Kubernetes cluster.
+Powered by BuildKit, it pushes results to any OCI registry and can preheat them across a Dragonfly P2P cluster — without tying you to a cloud provider.
 
-Download a provenance-attested archive for Linux, macOS, or Windows from the
-[GitHub releases](https://github.com/cofy-x/kova/releases), verify it with the
-published `checksums.txt`, and place `kova` on `PATH`. Linux and macOS builds
-are available for `amd64` and `arm64`; Windows builds are available as `.zip`
-archives for both architectures.
+## Quick start
 
-Go users can install the latest tagged client directly:
+You need a Kubernetes cluster, Helm with OCI support, and `kubectl`.
+Choose a tag from [GitHub releases](https://github.com/cofy-x/kova/releases) so the chart, CLI, and runtime images stay aligned.
+Provenance-attested CLI archives for Linux, macOS, and Windows are published there as well.
+
+Install the CLI:
 
 ```bash
 go install github.com/cofy-x/kova/cmd/kova@latest
 kova version
 ```
 
-Use an explicit release tag instead of `@latest` when the installed version
-must be reproducible. Contributors can install the current checkout with:
-
-```bash
-make install
-kova version
-```
-
-The client is CGO-free and runs on the workstation. Linux runtime images are
-split into controller, runner, and rootless BuildKit worker roles.
-
-## Install Kova
-
-Choose a tag from [GitHub releases](https://github.com/cofy-x/kova/releases),
-then install that exact OCI Helm chart without cloning the repository. The
-quick-start profile uses a generated static token and filesystem PVC; shared
-environments should use TokenReview and S3-compatible storage instead:
+Install the service.
+The quick-start profile uses a generated static token and a filesystem PVC; shared environments should use TokenReview and S3-compatible storage instead:
 
 ```bash
 export KOVA_VERSION=vX.Y.Z
@@ -67,72 +56,58 @@ kubectl -n kova create rolebinding kova-quickstart \
   --user=kova:quickstart
 ```
 
-Applying the release CRD before every Helm upgrade is required because Helm
-does not upgrade files from a chart's `crds/` directory.
+Applying the release CRD before every Helm upgrade is required because Helm does not upgrade files from a chart's `crds/` directory.
 
-The chart selects matching controller, runner, and worker images automatically.
-Continue with the [installation and first-build guide](docs/quickstart.md),
-create a Service context, and verify it before the first job:
+Run your first build:
 
 ```bash
+kubectl -n kova port-forward service/kova-service 8080:8080 &
+
+kova ctx set --mode service --service-url http://127.0.0.1:8080 --use quickstart
 kova doctor
 kova job submit ./image --target registry.example.com/team/image:dev
-kova job list
 kova job wait <job-id>
 kova job results <job-id>
 ```
 
-The [Service security and CLI guide](docs/service.md) covers identity, RBAC,
-contexts, artifact storage, and job operations. Direct runner commands remain
-available for local development and low-level debugging.
+Registry credentials, Nydus output, and batch archives are covered in the [installation and first-build guide](docs/quickstart.md).
+
+## Why Kova
+
+- **Batch in, images out** — one job builds many Dockerfile targets into OCI or Nydus images; typed per-target results and logs persist in the artifact store after the short-lived runner Pod is gone.
+- **A real job model** — the `KovaBuild` CRD has an immutable spec, SHA-256-pinned source artifacts, and caller-scoped idempotency keys.
+- **Fair, work-conserving scheduling** — queued jobs interleave by authenticated requester; admission reserves actual BuildKit worker slots.
+- **Isolated execution** — one runner Pod per job drives shared upstream rootless BuildKit workers; controller and runner run as non-root with all capabilities dropped.
+- **Kubernetes-native auth** — TokenReview and SubjectAccessReview by default; submitters never touch Pods, Secrets, or other users' jobs.
+- **Cloud-provider-neutral** — registry, artifact, and API credentials are external Secret inputs. The chart creates no clusters, cloud accounts, or registries.
+- **Observable** — stable OpenTelemetry metrics for queue delay, job duration, and capacity waits.
 
 ## Documentation
 
 - [Documentation map](docs/README.md): choose the guide for a task.
-- [Installation and first build](docs/quickstart.md): install the public OCI
-  Helm chart and matching CLI, then verify a build.
-- [CLI workflow](docs/cli-workflow.md): contexts, prepare,
-  direct runner builds, logs, export, and cleanup.
-- [Service job workflow](docs/service.md): authenticated shared builds,
-  authorization, storage, and native CLI operations.
-- [Runtime design](docs/architecture.md): roles, topology, build/export,
-  preheat, and scaling flows.
-- [Kubernetes deployment](docs/deployment/kubernetes.md): Helm installation,
-  registry credentials, worker sizing, and production configuration.
-- [Validation matrix](docs/testing.md): static checks, E2E targets, and runtime
-  smoke expectations.
-- [Release process](docs/releases.md): CLI archives, OCI Helm charts, runtime
-  images, SBOMs, provenance, and version tags.
-- [Examples](examples/README.md): build input examples and runtime smoke
-  service details.
+- [Installation and first build](docs/quickstart.md): OCI chart, matching CLI, and a verified build.
+- [Service job workflow](docs/service.md): identity, RBAC, contexts, artifact storage, and job operations.
+- [CLI workflow](docs/cli-workflow.md): direct runner builds for development and low-level debugging.
+- [Runtime design](docs/architecture.md): roles, topology, build/export, preheat, and scaling flows.
+- [Kubernetes deployment](docs/deployment/kubernetes.md): registry credentials, worker sizing, and production configuration.
+- [Release process](docs/releases.md): CLI archives, OCI charts, runtime images, SBOMs, and provenance.
+- [Examples](examples/README.md): build input examples and runtime smoke services.
 
-## Develop Kova
+## Develop
 
-The repository requires the Go version declared in `go.mod`, Docker, kind,
-Helm, kubectl, curl, zip, and LMDB development headers. Run the fast checks
-with:
+The repository requires the Go version declared in `go.mod`, Docker, kind, Helm, kubectl, curl, zip, and LMDB development headers.
 
 ```bash
 make test
 make lint-scripts
 make helm-template
+make e2e-helm-quickstart   # released-chart install path on kind
 ```
 
-Run the released-chart installation path locally with:
+Use the [validation matrix](docs/testing.md) to choose broader E2E coverage.
+Contributions are welcome; the [contribution workflow](CONTRIBUTING.md) covers the full setup and pull request process.
+Report vulnerabilities through the private process in the [security policy](SECURITY.md).
 
-```bash
-make e2e-helm-quickstart
-```
-
-Validate an already published release with:
-
-```bash
-make e2e-release KOVA_VERSION=vX.Y.Z
-```
-
-Use the [validation guide](docs/testing.md) to choose broader E2E coverage.
-Contributions are welcome; the [contribution workflow](CONTRIBUTING.md) covers
-the full setup and pull request process. Report vulnerabilities through the
-private process in the [security policy](SECURITY.md).
+## License
 
 Kova is licensed under the [Apache License 2.0](LICENSE).

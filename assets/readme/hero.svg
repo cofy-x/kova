@@ -1,0 +1,130 @@
+<svg xmlns="http://www.w3.org/2000/svg"
+     width="1200" height="430" viewBox="0 0 1200 430"
+     role="img" aria-labelledby="title desc">
+  <title id="title">Kova — Kubernetes-native image build service</title>
+  <desc id="desc">Kova builds batches of Dockerfile contexts into OCI or Nydus images. A five-stage strip shows one job's lifecycle: submit an archive with a SHA-256 digest, fair-queue admission, targets fanning out to rootless BuildKit workers, pushing the image to an OCI registry, and preheating over Dragonfly P2P.</desc>
+
+  <rect width="1200" height="430" rx="26" fill="#0C0F13"/>
+
+  <g id="title-block">
+    <text x="72" y="66"
+          font-family="ui-monospace, SFMono-Regular, Menlo, monospace"
+          font-size="18" letter-spacing="3" fill="#8B939D">KUBERNETES IMAGE BUILD SERVICE</text>
+
+    <text x="1128" y="66" text-anchor="end"
+          font-family="ui-monospace, SFMono-Regular, Menlo, monospace"
+          font-size="16" fill="#8B939D">Cloud-Provider-Neutral · Rootless BuildKit · KovaBuild CRD</text>
+
+    <text x="72" y="150"
+          font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', sans-serif"
+          font-size="84" font-weight="700" fill="#E7EAEE">Kova</text>
+
+    <text x="72" y="194"
+          font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', sans-serif"
+          font-size="21" fill="#C3CAD2">Batch Dockerfile contexts into OCI or Nydus images — pushed to any registry, preheated over Dragonfly P2P.</text>
+  </g>
+
+  <line x1="72" y1="214" x2="1128" y2="214" stroke="#1E252D" stroke-width="1.5"/>
+
+  <g id="job-lifecycle">
+    <!-- stage 1: submit -->
+    <g transform="translate(72 232)">
+      <rect width="192" height="158" rx="14" fill="#11161C" stroke="#262D36" stroke-width="1.5"/>
+      <text x="20" y="32" font-family="ui-monospace, SFMono-Regular, Menlo, monospace"
+            font-size="18" fill="#E18A2E">01</text>
+      <text x="20" y="62" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', sans-serif"
+            font-size="21" font-weight="600" fill="#E7EAEE">submit</text>
+      <rect x="20" y="76" width="48" height="40" rx="6" fill="#161C23" stroke="#2B333D" stroke-width="1.5"/>
+      <line x1="20" y1="84" x2="68" y2="84" stroke="#3A434E" stroke-width="2"/>
+      <line x1="28" y1="98" x2="60" y2="98" stroke="#3A434E" stroke-width="2"/>
+      <line x1="28" y1="106" x2="52" y2="106" stroke="#3A434E" stroke-width="2"/>
+      <circle cx="68" cy="76" r="4" fill="#E18A2E"/>
+      <text x="20" y="142" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', sans-serif"
+            font-size="17" fill="#8B939D">archive + sha256</text>
+    </g>
+
+    <!-- stage 2: admit -->
+    <g transform="translate(288 232)">
+      <rect width="192" height="158" rx="14" fill="#11161C" stroke="#262D36" stroke-width="1.5"/>
+      <text x="20" y="32" font-family="ui-monospace, SFMono-Regular, Menlo, monospace"
+            font-size="18" fill="#E18A2E">02</text>
+      <text x="20" y="62" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', sans-serif"
+            font-size="21" font-weight="600" fill="#E7EAEE">admit</text>
+      <rect x="20" y="78" width="64" height="9" rx="4.5" fill="#161C23" stroke="#2B333D" stroke-width="1.5"/>
+      <rect x="20" y="91" width="48" height="9" rx="4.5" fill="#161C23" stroke="#2B333D" stroke-width="1.5"/>
+      <rect x="20" y="104" width="32" height="9" rx="4.5" fill="#161C23" stroke="#2B333D" stroke-width="1.5"/>
+      <rect x="96" y="78" width="28" height="35" rx="6" fill="none" stroke="#E18A2E" stroke-width="1.5" stroke-dasharray="4 4"/>
+      <text x="20" y="142" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', sans-serif"
+            font-size="17" fill="#8B939D">fair queue · slots</text>
+    </g>
+
+    <!-- stage 3: build -->
+    <g transform="translate(504 232)">
+      <rect width="192" height="158" rx="14" fill="#11161C" stroke="#262D36" stroke-width="1.5"/>
+      <text x="20" y="32" font-family="ui-monospace, SFMono-Regular, Menlo, monospace"
+            font-size="18" fill="#E18A2E">03</text>
+      <text x="20" y="62" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', sans-serif"
+            font-size="21" font-weight="600" fill="#E7EAEE">build</text>
+      <circle cx="28" cy="97" r="6" fill="#161C23" stroke="#2B333D" stroke-width="1.5"/>
+      <line x1="35" y1="97" x2="54" y2="80" stroke="#3A434E" stroke-width="2"/>
+      <line x1="35" y1="97" x2="54" y2="96" stroke="#3A434E" stroke-width="2"/>
+      <line x1="35" y1="97" x2="54" y2="112" stroke="#3A434E" stroke-width="2"/>
+      <rect x="58" y="76" width="52" height="9" rx="4.5" fill="#161C23" stroke="#2B333D" stroke-width="1.5"/>
+      <rect x="90" y="76" width="20" height="9" rx="4.5" fill="#E18A2E"/>
+      <rect x="58" y="92" width="52" height="9" rx="4.5" fill="#161C23" stroke="#2B333D" stroke-width="1.5"/>
+      <rect x="82" y="92" width="28" height="9" rx="4.5" fill="#E18A2E"/>
+      <rect x="58" y="108" width="52" height="9" rx="4.5" fill="#161C23" stroke="#2B333D" stroke-width="1.5"/>
+      <rect x="96" y="108" width="14" height="9" rx="4.5" fill="#E18A2E"/>
+      <text x="20" y="142" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', sans-serif"
+            font-size="17" fill="#8B939D">Rootless BuildKit</text>
+    </g>
+
+    <!-- stage 4: push -->
+    <g transform="translate(720 232)">
+      <rect width="192" height="158" rx="14" fill="#11161C" stroke="#262D36" stroke-width="1.5"/>
+      <text x="20" y="32" font-family="ui-monospace, SFMono-Regular, Menlo, monospace"
+            font-size="18" fill="#E18A2E">04</text>
+      <text x="20" y="62" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', sans-serif"
+            font-size="21" font-weight="600" fill="#E7EAEE">push</text>
+      <rect x="20" y="78" width="58" height="9" rx="4.5" fill="#161C23" stroke="#2B333D" stroke-width="1.5"/>
+      <rect x="26" y="90" width="58" height="9" rx="4.5" fill="#161C23" stroke="#2B333D" stroke-width="1.5"/>
+      <rect x="32" y="102" width="58" height="9" rx="4.5" fill="#E18A2E"/>
+      <line x1="100" y1="97" x2="116" y2="97" stroke="#3A434E" stroke-width="2"/>
+      <path d="M114 93 L114 101 L121 97 Z" fill="#3A434E"/>
+      <rect x="124" y="85" width="48" height="24" rx="12" fill="#161C23" stroke="#2B333D" stroke-width="1.5"/>
+      <circle cx="136" cy="97" r="4" fill="#E18A2E"/>
+      <line x1="144" y1="97" x2="164" y2="97" stroke="#3A434E" stroke-width="2"/>
+      <text x="20" y="142" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', sans-serif"
+            font-size="17" fill="#8B939D">OCI or Nydus image</text>
+    </g>
+
+    <!-- stage 5: preheat -->
+    <g transform="translate(936 232)">
+      <rect width="192" height="158" rx="14" fill="#11161C" stroke="#262D36" stroke-width="1.5"/>
+      <text x="20" y="32" font-family="ui-monospace, SFMono-Regular, Menlo, monospace"
+            font-size="18" fill="#E18A2E">05</text>
+      <text x="20" y="62" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', sans-serif"
+            font-size="21" font-weight="600" fill="#E7EAEE">preheat</text>
+      <line x1="40" y1="88" x2="80" y2="88" stroke="#3A434E" stroke-width="2"/>
+      <line x1="40" y1="88" x2="60" y2="114" stroke="#3A434E" stroke-width="2"/>
+      <line x1="80" y1="88" x2="60" y2="114" stroke="#3A434E" stroke-width="2"/>
+      <circle cx="40" cy="88" r="8" fill="#161C23" stroke="#E18A2E" stroke-width="2"/>
+      <circle cx="80" cy="88" r="8" fill="#161C23" stroke="#E18A2E" stroke-width="2"/>
+      <circle cx="60" cy="114" r="8" fill="#161C23" stroke="#E18A2E" stroke-width="2"/>
+      <text x="20" y="142" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', sans-serif"
+            font-size="17" fill="#8B939D">Dragonfly P2P</text>
+    </g>
+
+    <!-- connecting arrows -->
+    <g stroke="#4A545F" stroke-width="2.5" fill="#4A545F">
+      <line x1="267" y1="311" x2="279" y2="311"/>
+      <path d="M278 306 L278 316 L287 311 Z" stroke="none"/>
+      <line x1="483" y1="311" x2="495" y2="311"/>
+      <path d="M494 306 L494 316 L503 311 Z" stroke="none"/>
+      <line x1="699" y1="311" x2="711" y2="311"/>
+      <path d="M710 306 L710 316 L719 311 Z" stroke="none"/>
+      <line x1="915" y1="311" x2="927" y2="311"/>
+      <path d="M926 306 L926 316 L935 311 Z" stroke="none"/>
+    </g>
+  </g>
+</svg>
