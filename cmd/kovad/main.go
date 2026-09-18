@@ -9,10 +9,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cofy-x/kova/internal/artifactcmd"
 	"github.com/cofy-x/kova/internal/daemon"
 	"github.com/cofy-x/kova/internal/logging"
 	"github.com/cofy-x/kova/internal/observability"
+	"github.com/cofy-x/kova/internal/sourcecmd"
 	"github.com/cofy-x/kova/internal/version"
 
 	cli "github.com/urfave/cli/v2"
@@ -80,7 +80,7 @@ func newCLIApp() *cli.App {
 					return err
 				},
 			},
-			artifactcmd.CLICommand(),
+			sourcecmd.CLICommand(),
 			daemon.TransportCLICommand(),
 			daemonCommand,
 		},

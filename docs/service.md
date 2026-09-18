@@ -1,101 +1,82 @@
 # Kova Service
 
-`kova-controller service` is the long-running HTTP gateway and `KovaBuild`
-controller. It authenticates callers, stores immutable source artifacts,
-admits jobs by capacity, and creates one short-lived runner Pod per build.
+`kova-controller service` is the authenticated HTTP gateway and `KovaBuild` controller.
+It validates immutable source contracts, admits builds by capacity, creates one short-lived runner Pod per build, and verifies pushed image manifest digests.
 
-## Authentication
+## Authentication and Authorization
 
 Every `/v1/*` request requires an explicit authentication mode:
 
-- `tokenreview` is the chart default. Bearer tokens are validated with the
-  Kubernetes TokenReview API.
-- `static` compares a bearer token from `KOVA_SERVICE_AUTH_TOKEN` in constant
-  time. Supply the value through a Secret.
-- `unsafe-none` disables authentication explicitly and is suitable only for
-  an isolated development cluster.
+- `tokenreview` validates bearer tokens with Kubernetes and is the chart default;
+- `static` compares a token from `KOVA_SERVICE_AUTH_TOKEN` and suits isolated automation or quick starts;
+- `unsafe-none` disables authentication and is restricted to isolated development clusters.
 
-Authentication returns a principal containing the caller's Kubernetes
-username, UID, and groups. TokenReview mode submits a SubjectAccessReview for
-the virtual `servicebuilds.kova.cofy.dev` authorization resource:
+TokenReview mode submits SubjectAccessReview requests for the virtual `servicebuilds.kova.cofy.dev` resource.
+Only the controller ServiceAccount writes actual `KovaBuild` resources, so callers cannot bypass ownership or idempotency through the public API.
+The chart creates unbound `kova-service-submitter` and `kova-service-admin` Roles; each environment owns their RoleBindings.
 
-- callers with `create` access can submit jobs
-- submitters can list, read, cancel, export, and preheat only their own jobs
-- callers with the corresponding namespace-wide RBAC verb can operate on all
-  jobs
+`/healthz` is unauthenticated liveness.
+`/readyz` verifies Kubernetes API access.
+`/version` reports Service API and build provenance without credentials.
 
-The virtual resource is an authorization contract, not a Kubernetes API
-resource. Only the controller ServiceAccount can create or mutate the actual
-`KovaBuild` CRD, so callers cannot bypass source validation, ownership, or
-idempotency by writing CRs directly.
+## Immutable Sources
 
-The chart creates unbound submitter and admin Roles. An environment grants
-access with a RoleBinding such as:
-
-```yaml
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata:
-  name: kova-builders
-  namespace: kova
-subjects:
-  - kind: Group
-    name: kova-builders
-    apiGroup: rbac.authorization.k8s.io
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: Role
-  name: kova-service-submitter
-```
-
-Bind trusted platform operators to `kova-service-admin`. Static mode maps its
-single token to `serviceDaemon.authentication.staticPrincipal`; create a
-RoleBinding for that Kubernetes username. Kova contexts never store bearer
-tokens.
-
-`/healthz` is an unauthenticated process liveness endpoint. `/readyz` verifies
-that the controller can query `KovaBuild` resources before it accepts traffic.
-`/version` exposes build provenance and the Service API compatibility version;
-it contains no environment credentials.
-
-## CLI
-
-Create a Service context. A kubeconfig supplies TokenReview credentials through
-the same bearer token or exec credential plugin used by Kubernetes clients:
+The preferred source is an OCI bundle published with `kova source push`.
+The command creates a deterministic zip, publishes one custom OCI layer, and returns both a manifest-pinned `oci://` URI and the SHA-256 digest of the zip bytes:
 
 ```bash
-kubectl -n kova port-forward service/kova-service 8080:8080
-
-kova ctx set \
-  --mode service \
-  --service-url http://127.0.0.1:8080 \
-  --kubeconfig "${KUBECONFIG:-$HOME/.kube/config}" \
-  --use \
-  service
+kova source push \
+  --target registry.example.com/team/image:dev \
+  --repository registry.example.com/team/kova-sources:request-123 \
+  ./image
 ```
 
-For static authentication, provide the token only through the process
-environment:
+Kova also accepts an immutable HTTPS archive URL when the caller supplies the expected SHA-256 content digest.
+OCI bundle retention and garbage collection belong to the registry or caller.
+
+Each request has 1–100 logical targets.
+Targets must be unique, explicitly tagged OCI push destinations; digest-only destinations are rejected.
+With `format=both`, status can contain at most 200 concrete outputs.
+Requested concurrency is between 1 and 100 and cannot exceed the logical target count.
+
+After a source is fetched and digest-verified, the controller inspects its metadata in the runner Pod.
+The normalized source target set must exactly match `spec.targets` before the build request is sent to BuildKit.
+Order is irrelevant, but missing, extra, invalid, and duplicate targets are deterministic failures with no image push.
+
+## CLI Workflow
+
+Create a Service context and keep bearer tokens in the process environment:
 
 ```bash
 export KOVA_SERVICE_TOKEN=REPLACE_WITH_TOKEN
-```
-
-Verify API compatibility, readiness, authentication, and authorization before
-submitting a build:
-
-```bash
+kubectl -n kova port-forward service/kova-service 8080:8080
+kova ctx set --mode service --service-url http://127.0.0.1:8080 --use service
 kova doctor
 ```
 
-Submit and manage jobs without constructing HTTP requests:
+Submit a local context through the public source contract by naming an OCI source repository:
 
 ```bash
-kova job submit ./image \
+kova job submit \
+  --source-repository registry.example.com/team/kova-sources:request-123 \
   --target registry.example.com/team/image:dev \
   --format oci \
-  --idempotency-key build-123
+  --idempotency-key request-123 \
+  ./image
+```
 
+Submit an already published source without uploading local bytes:
+
+```bash
+kova job submit \
+  --source-digest sha256:<content-digest> \
+  --target registry.example.com/team/image:dev \
+  oci://registry.example.com/team/kova-sources@sha256:<manifest-digest>
+```
+
+Manage the build with:
+
+```bash
 kova job list
 kova job get <job-id>
 kova job logs <job-id> --tail 100
@@ -104,140 +85,56 @@ kova job results <job-id>
 kova job cancel <job-id>
 ```
 
-For a batch archive whose top-level image directories already contain
-`Dockerfile` and `metadata.json`, omit `--target`. Kova records every immutable
-archive target in the job spec and verifies each pushed result:
-
-```bash
-kova job submit source.zip --format oci --concurrency 3
-```
-
-`--target` remains required when submitting a context directory and, when
-provided for a zip, requires exactly one matching archive target.
-
-Use `--service-ca-file` for a private Service CA. The
-`--service-insecure` option is intended only for isolated TLS testing.
-
-## Artifact Storage
-
-The service validates each source archive and computes its SHA-256 digest
-before creating a job. The resulting `KovaBuild.spec` is immutable.
-Multipart build requests are limited to 1 GiB by default. Set
-`serviceDaemon.maxUploadBytes` or `--max-upload-bytes` to change the hard
-limit. At most 100 queued jobs per requester are accepted by default.
-
-Filesystem mode uses a PVC-mounted root:
-
-```bash
-kova-controller service \
-  --namespace=kova \
-  --runner-image=registry.example/kova:runner-vX.Y.Z \
-  --buildkit-addr=tcp://kova.kova.svc:9094 \
-  --artifact-driver=filesystem \
-  --artifact-root=/var/lib/kova/artifacts \
-  --source-pvc-claim=kova-artifacts
-```
-
-S3 mode accepts any S3-compatible endpoint:
-
-```bash
-kova-controller service \
-  --namespace=kova \
-  --runner-image=registry.example/kova:runner-vX.Y.Z \
-  --buildkit-addr=tcp://kova.kova.svc:9094 \
-  --artifact-driver=s3 \
-  --artifact-secret=kova-artifact-credentials \
-  --s3-credential-provider=file \
-  --s3-credential-dir=/var/run/secrets/kova/s3 \
-  --s3-endpoint=objects.example.com \
-  --s3-bucket=kova-builds \
-  --s3-region=us-east-1
-```
-
-The referenced Secret exposes `KOVA_S3_ACCESS_KEY`, `KOVA_S3_SECRET_KEY`, and
-optional `KOVA_S3_SESSION_TOKEN`. The recommended `file` provider mounts and
-rereads those keys in the controller and S3 runner init container. `static`
-uses environment variables and `anonymous` is available only for stores that
-permit unsigned requests. S3 mode does not require an RWX volume or
-controller/runner node affinity.
-When runners use another namespace, provision the external artifact Secret in
-both the controller and runner namespaces.
-
-Terminal runner logs and the complete typed result set are persisted beside
-the source. Their URIs and SHA-256 digests are recorded in status. The
-controller retains only the configured trailing log bytes, deletes all known
-artifacts with the job, and periodically removes aged artifact directories
-that no longer have a `KovaBuild` owner.
+Logs are available only while the runner Pod is active.
+The results endpoint returns the source identity and verified image outputs; it does not return an object-store URI.
 
 ## HTTP API
 
-Create a build:
+Create requests use JSON:
 
 ```bash
-curl -sS -X POST \
+curl -sS -X POST "$BASE/v1/builds" \
   -H "Authorization: Bearer $TOKEN" \
-  -F file=@.work/source.zip \
-  -F formats=oci,nydus \
-  -F idempotency_key=<stable-request-key> \
-  -F target=registry.example.com/kova/demo \
-  -F concurrency=2 \
-  "$BASE/v1/builds"
+  -H "Content-Type: application/json" \
+  --data '{
+    "source_uri": "oci://registry.example.com/team/kova-sources@sha256:<manifest-digest>",
+    "source_digest": "sha256:<content-digest>",
+    "targets": ["registry.example.com/team/image:dev"],
+    "format": "oci",
+    "concurrency": 1,
+    "timeout": 600,
+    "idempotency_key": "request-123"
+  }'
 ```
 
-`source_digest` is optional. When supplied, it must match the digest computed
-from the uploaded bytes. Responses always contain the computed digest.
+The first request returns `202 Accepted`.
+Repeating the same caller-scoped idempotency key with identical inputs returns the existing build; changing any immutable input returns `409 Conflict`.
+Unknown fields and mutable source references are rejected.
 
-The first request returns `202 Accepted`. Repeating an idempotency key with the
-same archive and build options returns the existing job with `200 OK`.
-Idempotency keys are scoped to the authenticated username. Reusing one with
-different immutable inputs returns `409 Conflict`.
+Query and control endpoints are:
 
-Supported form fields are:
-
-- `file`: required source zip
-- `formats`: `oci,nydus` in either order
-- `format`: `oci`, `nydus`, or `both` when `formats` is omitted
-- `source_digest`: optional lowercase SHA-256 assertion
-- `idempotency_key`: optional stable request key, up to 256 characters
-- `target`: optional single-image override; when omitted, all archive metadata
-  targets are built
-- `concurrency`, `timeout`, `retry`, and `oom-cooldown`
-- `fail-fast`, `skip-fail`, and `verbose`
-- repeated `var` values in `NAME=value` form
-
-Query and control jobs:
-
-```bash
-curl -sS -H "Authorization: Bearer $TOKEN" "$BASE/v1/builds?limit=100"
-curl -sS -H "Authorization: Bearer $TOKEN" "$BASE/v1/builds/<id>"
-curl -sS -H "Authorization: Bearer $TOKEN" "$BASE/v1/builds/<id>/results"
-curl -sS -H "Authorization: Bearer $TOKEN" "$BASE/v1/builds/<id>/logs?tail_lines=100"
-curl -sS -X POST -H "Authorization: Bearer $TOKEN" "$BASE/v1/builds/<id>/cancel"
+```text
+GET  /v1/builds
+GET  /v1/builds/<id>
+GET  /v1/builds/<id>/results
+GET  /v1/builds/<id>/logs?tail_lines=100
+POST /v1/builds/<id>/cancel
+POST /v1/builds/<id>/export
+POST /v1/builds/<id>/preheat
 ```
 
-List requests accept `limit` from 1 through 500 and an opaque `continue` token.
-Status includes a stable failure reason, Kubernetes Conditions, requested and
-allocated concurrency, a typed result summary, persisted log metadata, and at
-most 100 inline results. The complete result set is persisted as a JSON
-artifact.
+Each successful output is the tuple `(format, image, manifest_digest)`.
+Registry descriptor checks use bounded parallelism.
+If one of several registries fails, the job is `Failed` while already verified output digests remain in status.
+Registry pushes are not transactional and Kova does not roll them back.
 
-Cancellation is declarative. The API records a cancellation request and the
-controller performs runner termination and the terminal status update. This
-keeps the controller as the only job status writer and makes cancellation
-recoverable across controller restarts.
+A caller can retry safely by creating a new request with the same immutable source URI, source digest, targets, and build options.
+Kova does not resume a failed build internally.
+Workloads above 100 logical targets must be split by the caller into several bounded builds.
 
-Export and preheat operate through the typed runner daemon transport:
+## Helm Configuration
 
-```bash
-curl -sS -X POST -H "Authorization: Bearer $TOKEN" \
-  "$BASE/v1/builds/<id>/export?oci=true"
-curl -sS -X POST -H "Authorization: Bearer $TOKEN" \
-  "$BASE/v1/builds/<id>/preheat?dragonfly-scheduler-addr=dragonfly:8002"
-```
-
-## Helm
-
-Enable the service with TokenReview and S3 storage:
+Enable the Service with TokenReview:
 
 ```yaml
 serviceDaemon:
@@ -248,66 +145,25 @@ serviceDaemon:
   maxActiveJobsPerRequester: 4
   maxQueuedJobsPerRequester: 100
   workerSlots: 40
-
-artifactStore:
-  driver: s3
-  secretName: kova-artifact-credentials
-  credentials:
-    provider: file
-    mountPath: /var/run/secrets/kova/s3
-  s3:
-    endpoint: objects.example.com
-    bucket: kova-builds
-    region: us-east-1
-    secure: true
+  controllerConcurrency: 4
 ```
 
-The submitter and admin Roles are intentionally not bound by the chart. The
-consuming environment owns user and group membership.
-
-Static-token environments use an externally managed Secret:
+Registry credentials are the only storage credentials needed by Kova.
+The same Docker config can authorize source pulls, output pushes, and controller-side manifest verification:
 
 ```yaml
+imagePullSecrets:
+  create: false
+  name: kova-registry
+
 serviceDaemon:
-  authentication:
-    mode: static
-    staticPrincipal: kova:ci
-    staticTokenSecret:
-      name: kova-service-auth
-      key: token
+  runnerImagePullSecret: kova-registry
+  registrySecret: kova-registry
 ```
 
-The controller verifies each pushed image descriptor before marking a job
-successful. It reuses `serviceDaemon.runnerImagePullSecret`, then
-`imagePullSecrets.name`, unless `serviceDaemon.registrySecret` names a distinct
-`kubernetes.io/dockerconfigjson` Secret in the release namespace. Registry
-transport is HTTPS by default. Isolated development registries that provide
-only HTTP must be listed explicitly:
+Different targets may name different registries if the supplied Docker config, network policy, and TLS configuration cover all of them.
+`serviceDaemon.registryPlainHTTP` explicitly lists development registries without TLS.
+Production registries should use HTTPS.
 
-```yaml
-serviceDaemon:
-  registryPlainHTTP:
-    - registry.local:5000
-```
-
-Do not enable plain HTTP for production registries.
-
-Filesystem mode is useful for local clusters:
-
-```yaml
-artifactStore:
-  driver: filesystem
-  filesystem:
-    pvc:
-      create: true
-      accessModes:
-        - ReadWriteOnce
-```
-
-A ReadWriteOnce filesystem may require identical controller and runner node
-selectors. Horizontally scalable deployments should use S3-compatible storage
-instead of introducing an RWX dependency.
-
-The chart creates the service ServiceAccount and RBAC. TokenReview mode also
-creates the narrow ClusterRole needed to create TokenReview resources.
-Registry, artifact, and static API credentials remain external Secret inputs.
+The Service needs no object store, shared filesystem, or RWX PVC.
+Each runner uses job-local `emptyDir` storage for the verified source bundle.

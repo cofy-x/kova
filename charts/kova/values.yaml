@@ -60,31 +60,6 @@ service:
   ipFamilyPolicy: SingleStack
   sessionAffinity: None
 
-artifactStore:
-  driver: filesystem
-  # Secret keys use the KOVA_S3_* names. The file provider mounts the Secret
-  # and rereads credentials so projected Secret rotation does not require a
-  # restart. The static provider exposes the keys as environment values.
-  secretName: ""
-  credentials:
-    provider: static
-    mountPath: /var/run/secrets/kova/s3
-  filesystem:
-    mountPath: /var/lib/kova/artifacts
-    pvc:
-      create: false
-      existingClaim: ""
-      name: ""
-      accessModes:
-        - ReadWriteOnce
-      storageClassName: ""
-      size: 10Gi
-  s3:
-    endpoint: ""
-    bucket: ""
-    region: ""
-    secure: true
-
 serviceDaemon:
   enabled: false
   replicas: 1
@@ -100,16 +75,13 @@ serviceDaemon:
       key: token
     staticPrincipal: kova:static
   jobTTL: 2h
-  maxUploadBytes: 1073741824
-  maxLogBytes: 16777216
-  artifactGCInterval: 10m
-  artifactOrphanTTL: 1h
   wait: 3m
   pollInterval: 5s
   maxActiveJobs: 20
   maxActiveJobsPerRequester: 4
   maxQueuedJobsPerRequester: 100
   workerSlots: 20
+  controllerConcurrency: 4
   leaderElect: true
   runnerNamespace: ""
   runnerImagePullSecret: ""
@@ -118,8 +90,6 @@ serviceDaemon:
   registrySecret: ""
   # Registry hosts that intentionally use plain HTTP. Development only.
   registryPlainHTTP: []
-  # A filesystem store backed by ReadWriteOnce storage may require pinning the
-  # controller and runner Pods to the same node. S3 storage needs no pinning.
   runnerNodeSelector: {}
   buildkitAddr: ""
   serviceAccount:

@@ -12,24 +12,7 @@ type Config struct {
 	RunnerEnv                 map[string]string
 	RegistryPlainHTTP         []string
 	BuildkitAddr              string
-	SourcePVCClaim            string
-	ArtifactDriver            string
-	ArtifactRoot              string
-	ArtifactSecret            string
-	S3Endpoint                string
-	S3Bucket                  string
-	S3Region                  string
-	S3CredentialProvider      string
-	S3CredentialDir           string
-	S3AccessKey               string
-	S3SecretKey               string
-	S3SessionToken            string
-	S3Secure                  bool
 	JobTTL                    time.Duration
-	MaxUploadBytes            int64
-	MaxLogBytes               int64
-	ArtifactGCInterval        time.Duration
-	ArtifactOrphanTTL         time.Duration
 	AuthToken                 string
 	AuthMode                  string
 	AuthStaticPrincipal       string
@@ -39,4 +22,5 @@ type Config struct {
 	MaxActiveJobsPerRequester int
 	MaxQueuedJobsPerRequester int
 	WorkerSlots               int
+	ControllerConcurrency     int
 }

@@ -52,11 +52,13 @@ spec:
               build:
                 properties:
                   concurrency:
+                    maximum: 100
                     minimum: 1
                     type: integer
                   failFast:
                     type: boolean
                   format:
+                    default: oci
                     enum:
                     - oci
                     - nydus
@@ -64,19 +66,14 @@ spec:
                     type: string
                   oomCooldown:
                     type: string
-                  retry:
-                    minimum: 0
-                    type: integer
-                  skipFail:
-                    type: boolean
-                  target:
-                    type: string
                   timeout:
                     minimum: 0
                     type: integer
                   vars:
                     items:
+                      maxLength: 2048
                       type: string
+                    maxItems: 100
                     type: array
                   verbose:
                     type: boolean
@@ -87,8 +84,10 @@ spec:
               requester:
                 properties:
                   uid:
+                    maxLength: 253
                     type: string
                   username:
+                    maxLength: 253
                     minLength: 1
                     type: string
                 required:
@@ -100,8 +99,9 @@ spec:
                     pattern: ^sha256:[a-f0-9]{64}$
                     type: string
                   uri:
+                    maxLength: 2048
                     minLength: 1
-                    pattern: ^(file|s3)://.+$
+                    pattern: ^(oci|https)://.+$
                     type: string
                 required:
                 - digest
@@ -109,7 +109,11 @@ spec:
                 type: object
               targets:
                 items:
+                  maxLength: 512
+                  minLength: 1
+                  pattern: ^[^[:space:]@]+:[^[:space:]@/]+$
                   type: string
+                maxItems: 100
                 minItems: 1
                 type: array
             required:
@@ -177,6 +181,7 @@ spec:
                   - status
                   - type
                   type: object
+                maxItems: 1
                 type: array
                 x-kubernetes-list-map-keys:
                 - type
@@ -184,15 +189,34 @@ spec:
               finishedAt:
                 format: date-time
                 type: string
-              logArtifactDigest:
-                type: string
-              logArtifactURI:
-                type: string
               message:
+                maxLength: 2048
                 type: string
               observedGeneration:
                 format: int64
                 type: integer
+              outputs:
+                items:
+                  properties:
+                    format:
+                      enum:
+                      - oci
+                      - nydus
+                      type: string
+                    image:
+                      maxLength: 512
+                      minLength: 1
+                      type: string
+                    manifestDigest:
+                      pattern: ^sha256:[a-f0-9]{64}$
+                      type: string
+                  required:
+                  - format
+                  - image
+                  - manifestDigest
+                  type: object
+                maxItems: 200
+                type: array
               phase:
                 enum:
                 - Queued
@@ -203,49 +227,10 @@ spec:
                 - Cancelled
                 type: string
               reason:
+                maxLength: 128
                 type: string
-              resultArtifactDigest:
-                type: string
-              resultArtifactURI:
-                type: string
-              resultSummary:
-                properties:
-                  failed:
-                    format: int32
-                    type: integer
-                  succeeded:
-                    format: int32
-                    type: integer
-                  total:
-                    format: int32
-                    type: integer
-                type: object
-              results:
-                items:
-                  properties:
-                    error:
-                      type: string
-                    format:
-                      type: string
-                    manifestDigest:
-                      type: string
-                    mediaType:
-                      type: string
-                    repository:
-                      type: string
-                    size:
-                      format: int64
-                      type: integer
-                    status:
-                      type: string
-                  required:
-                  - format
-                  - repository
-                  - status
-                  type: object
-                maxItems: 100
-                type: array
               runnerPodName:
+                maxLength: 253
                 type: string
               startedAt:
                 format: date-time
@@ -257,6 +242,12 @@ spec:
         x-kubernetes-validations:
         - message: spec is immutable
           rule: self.spec == oldSelf.spec
+        - message: concurrency must not exceed the logical target count
+          rule: self.spec.build.concurrency == 0 || self.spec.build.concurrency <=
+            size(self.spec.targets)
+        - message: targets must be unique
+          rule: self.spec.targets.all(target, self.spec.targets.filter(candidate,
+            candidate == target).size() == 1)
     served: true
     storage: true
     subresources:

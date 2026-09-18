@@ -11,7 +11,7 @@
   <a href="README.md">English</a> | 中文
 </p>
 
-Kova 在你自己的 Kubernetes 集群上，把成批的 Dockerfile context 构建成 OCI 或 Nydus 镜像。它由 BuildKit 驱动，将产物推送到任意 OCI registry，并可通过 Dragonfly P2P 集群预热，且不绑定任何云厂商。
+Kova 是 agentic infrastructure 中云中立的 seed image build execution plane。它验证不可变 source bundle，调度 BuildKit，推送 OCI 或 Nydus 镜像，并返回经过验证的 OCI manifest digest。
 
 ## 快速开始
 
@@ -24,7 +24,7 @@ go install github.com/cofy-x/kova/cmd/kova@latest
 kova version
 ```
 
-安装服务。快速开始配置使用生成的静态 token 和 filesystem PVC；共享环境应改用 TokenReview 和 S3 兼容存储：
+安装服务。快速开始配置使用生成的静态 token；共享环境应改用 TokenReview：
 
 ```bash
 export KOVA_VERSION=vX.Y.Z
@@ -44,7 +44,6 @@ helm upgrade --install kova oci://ghcr.io/cofy-x/charts/kova \
   --set serviceDaemon.authentication.mode=static \
   --set serviceDaemon.authentication.staticPrincipal=kova:quickstart \
   --set serviceDaemon.authentication.staticTokenSecret.name=kova-service-auth \
-  --set artifactStore.filesystem.pvc.create=true \
   --wait
 
 kubectl -n kova create rolebinding kova-quickstart \
@@ -61,7 +60,10 @@ kubectl -n kova port-forward service/kova-service 8080:8080 &
 
 kova ctx set --mode service --service-url http://127.0.0.1:8080 --use quickstart
 kova doctor
-kova job submit ./image --target registry.example.com/team/image:dev
+kova job submit \
+  --source-repository registry.example.com/team/kova-sources:quickstart \
+  --target registry.example.com/team/image:dev \
+  ./image
 kova job wait <job-id>
 kova job results <job-id>
 ```
@@ -70,19 +72,19 @@ registry 凭证、Nydus 输出和批量归档见[安装与首次构建指南](do
 
 ## 为什么选择 Kova
 
-- **批量输入，镜像产出** — 一个任务可构建多个 Dockerfile target，输出 OCI 或 Nydus 镜像；每个 target 的类型化结果和日志在 runner Pod 消失后仍保留在 artifact store 中。
-- **真实的任务模型** — `KovaBuild` CRD 拥有不可变 spec、以 SHA-256 钉住的源 artifact，以及按调用方隔离的幂等键。
+- **不可变 source 到可信镜像** — 每个构建消费经过 digest 验证的 OCI 或 HTTPS source，并返回已推送镜像的 manifest digest。
+- **有界执行模型** — 一个不可变 `KovaBuild` 最多接受 100 个 logical targets 并记录 200 个 concrete outputs；更大任务的分片和重试由调用方负责。
 - **公平且不浪费算力的调度** — 排队任务按认证身份交错；准入控制为任务预留真实的 BuildKit worker 槽位。
 - **隔离执行** — 每个任务一个 runner Pod，驱动共享的上游 rootless BuildKit worker；controller 和 runner 以非 root 运行并丢弃全部 capabilities。
 - **Kubernetes 原生认证** — 默认使用 TokenReview 和 SubjectAccessReview；提交者无法接触 Pod、Secret 或其他用户的任务。
-- **云厂商中立** — registry、artifact 和 API 凭证都是外部 Secret 输入；chart 不创建集群、云账号或 registry。
+- **云厂商中立** — registry 和 API 凭证都是外部 Secret 输入；chart 不创建集群、云账号、对象存储或 registry。
 - **可观测** — 稳定的 OpenTelemetry 指标覆盖排队延迟、任务时长和容量等待。
 
 ## 文档
 
 - [文档地图](docs/README.md)：按任务选择指南。
 - [安装与首次构建](docs/quickstart.md)：OCI chart、匹配版本的 CLI 和一次验证过的构建。
-- [Service 任务工作流](docs/service.md)：身份、RBAC、context、artifact 存储和任务操作。
+- [Service 任务工作流](docs/service.md)：不可变 source、身份、RBAC、有界结果和任务操作。
 - [CLI 工作流](docs/cli-workflow.md)：面向开发和底层调试的直连 runner 构建。
 - [运行时设计](docs/architecture.md)：角色、拓扑、构建/导出、预热和扩缩容流程。
 - [Kubernetes 部署](docs/deployment/kubernetes.md)：registry 凭证、worker 规格和生产配置。

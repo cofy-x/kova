@@ -59,5 +59,5 @@ Package one or more examples with `EXAMPLE_DIRS`:
 EXAMPLE_DIRS="simple service-oci" ./scripts/package/package-example.sh
 ```
 
-The generated archive is written to `source.zip` by default. Override
-`SOURCE_ZIP` when a test needs an isolated artifact name.
+The generated archive is written to `source.zip` by default.
+Override `SOURCE_ZIP` when a test needs an isolated archive name.

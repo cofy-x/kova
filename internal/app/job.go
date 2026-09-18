@@ -5,14 +5,15 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"text/tabwriter"
 	"time"
 
+	"github.com/cofy-x/kova/internal/buildcontract"
 	"github.com/cofy-x/kova/internal/ctxconfig"
 	"github.com/cofy-x/kova/internal/serviceclient"
 	"github.com/cofy-x/kova/internal/source"
+	"github.com/cofy-x/kova/internal/sourcebundle"
 
 	cli "github.com/urfave/cli/v2"
 )
@@ -32,39 +33,82 @@ func jobCLICommand() *cli.Command {
 func jobSubmitCLICommand() *cli.Command {
 	return &cli.Command{
 		Name:      "submit",
-		Usage:     "submit a directory or source zip to the Kova service",
-		ArgsUsage: "<context-directory|source.zip>",
+		Usage:     "submit an immutable source bundle to the Kova service",
+		ArgsUsage: "<oci-or-https-source|context-directory|source.zip>",
 		Flags: []cli.Flag{
-			&cli.StringFlag{Name: "target", Usage: "output image target; required for a directory and optional for a batch zip"},
+			&cli.StringSliceFlag{Name: "target", Usage: "output image reference; repeatable for a batch source"},
+			&cli.StringFlag{Name: "source-digest", Usage: "required SHA-256 content digest for a remote source"},
+			&cli.StringFlag{Name: "source-repository", Usage: "OCI repository tag used to publish a local directory or zip"},
+			&cli.StringSliceFlag{Name: "registry-plain-http", Usage: "registry host using plain HTTP; repeatable and intended for development"},
 			&cli.StringFlag{Name: "format", Value: "oci", Usage: "build output format: oci, nydus, or both"},
 			&cli.StringSliceFlag{Name: "var", Usage: "build variable in KEY=value form; repeatable"},
 			&cli.IntFlag{Name: "concurrency", Value: 1, Usage: "maximum concurrent targets"},
 			&cli.IntFlag{Name: "timeout", Value: 300, Usage: "per-target timeout in seconds; 0 disables timeout"},
-			&cli.IntFlag{Name: "retry", Value: 0, Usage: "retry count"},
 			&cli.DurationFlag{Name: "oom-cooldown", Value: defaultBuildkitOOMCooldown, Usage: "worker cooldown after an OOM-style failure"},
 			&cli.BoolFlag{Name: "fail-fast", Usage: "stop after the first failure"},
-			&cli.BoolFlag{Name: "skip-fail", Usage: "skip targets previously recorded as failed"},
 			&cli.BoolFlag{Name: "verbose", Usage: "enable verbose runner output"},
 			&cli.StringFlag{Name: "idempotency-key", Usage: "stable caller-scoped request key"},
 		},
 		Action: func(c *cli.Context) error {
 			if c.NArg() != 1 {
-				return fmt.Errorf("job submit requires exactly one context directory or source zip")
+				return fmt.Errorf("job submit requires exactly one immutable source reference or local source")
 			}
-			archivePath, cleanup, err := prepareServiceArchive(c.Args().First(), c.String("target"))
-			if err != nil {
+			input := strings.TrimSpace(c.Args().First())
+			sourceURI, sourceDigest := input, strings.TrimSpace(c.String("source-digest"))
+			targets := c.StringSlice("target")
+			if _, err := os.Stat(input); err == nil {
+				if strings.TrimSpace(c.String("source-repository")) == "" {
+					return fmt.Errorf("--source-repository is required for a local source")
+				}
+				info, _ := os.Stat(input)
+				if info.IsDir() && len(targets) != 1 {
+					return fmt.Errorf("a context directory requires exactly one --target")
+				}
+				if !info.IsDir() && len(targets) == 0 {
+					targets, err = source.BuildArchiveTargets(input)
+					if err != nil {
+						return err
+					}
+				}
+				targets, err = buildcontract.NormalizeTargets(targets)
+				if err != nil {
+					return err
+				}
+				archive, cleanup, err := sourceArchive(input, firstValue(targets))
+				if err != nil {
+					return err
+				}
+				defer cleanup()
+				ref, err := sourcebundle.Push(c.Context, archive, c.String("source-repository"), c.StringSlice("registry-plain-http"))
+				if err != nil {
+					return err
+				}
+				sourceURI, sourceDigest = ref.URI, ref.Digest
+			} else if !os.IsNotExist(err) {
 				return err
 			}
-			defer cleanup()
+			if !isLocalPath(input) {
+				var err error
+				targets, err = buildcontract.NormalizeTargets(targets)
+				if err != nil {
+					return err
+				}
+			}
+			if err := buildcontract.ValidateConcurrency(c.Int("concurrency"), len(targets)); err != nil {
+				return err
+			}
+			if err := sourcebundle.Validate(sourceURI, sourceDigest); err != nil {
+				return err
+			}
 			client, err := serviceClientFromContext(c)
 			if err != nil {
 				return err
 			}
 			job, err := client.CreateBuild(c.Context, serviceclient.CreateBuildOptions{
-				ArchivePath: archivePath, Target: c.String("target"), Format: c.String("format"),
-				Concurrency: c.Int("concurrency"), Timeout: c.Int("timeout"), Retry: c.Int("retry"),
+				SourceURI: sourceURI, SourceDigest: sourceDigest, Targets: targets, Format: c.String("format"),
+				Concurrency: c.Int("concurrency"), Timeout: c.Int("timeout"),
 				OOMCooldown: c.Duration("oom-cooldown"), FailFast: c.Bool("fail-fast"),
-				SkipFail: c.Bool("skip-fail"), Verbose: c.Bool("verbose"), Variables: c.StringSlice("var"),
+				Verbose: c.Bool("verbose"), Variables: c.StringSlice("var"),
 				IdempotencyKey: c.String("idempotency-key"),
 			})
 			if err != nil {
@@ -73,6 +117,11 @@ func jobSubmitCLICommand() *cli.Command {
 			return writeJSON(c, job)
 		},
 	}
+}
+
+func isLocalPath(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
 }
 
 func jobListCLICommand() *cli.Command {
@@ -235,39 +284,11 @@ func serviceClientFromContext(c *cli.Context) (*serviceclient.Client, error) {
 	})
 }
 
-func prepareServiceArchive(input, target string) (string, func(), error) {
-	info, err := os.Stat(input)
-	if err != nil {
-		return "", func() {}, err
+func firstValue(values []string) string {
+	if len(values) == 0 {
+		return ""
 	}
-	if !info.IsDir() {
-		if strings.TrimSpace(target) != "" {
-			if err := source.ValidateSingleBuildArchiveTarget(input, target); err != nil {
-				return "", func() {}, err
-			}
-		} else if _, err := source.BuildArchiveTargets(input); err != nil {
-			return "", func() {}, err
-		}
-		return input, func() {}, nil
-	}
-	if strings.TrimSpace(target) == "" {
-		return "", func() {}, fmt.Errorf("job submit requires --target for a context directory")
-	}
-	tmp, err := os.CreateTemp("", "kova-service-source-*.zip")
-	if err != nil {
-		return "", func() {}, err
-	}
-	path := tmp.Name()
-	if err := tmp.Close(); err != nil {
-		_ = os.Remove(path)
-		return "", func() {}, err
-	}
-	cleanup := func() { _ = os.Remove(path) }
-	if err := source.CreateSingleImageArchive(filepath.Clean(input), target, path); err != nil {
-		cleanup()
-		return "", func() {}, err
-	}
-	return path, cleanup, nil
+	return values[0]
 }
 
 func writeJSON(c *cli.Context, value any) error {

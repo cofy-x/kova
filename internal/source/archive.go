@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/cofy-x/kova/internal/buildcontract"
 )
 
 const (
@@ -118,22 +120,6 @@ func ValidateBuildArchive(zipPath string) (int, error) {
 	return validCount, nil
 }
 
-// ValidateSingleBuildArchiveTarget makes the service request target and the
-// target executed by the runner one immutable contract.
-func ValidateSingleBuildArchiveTarget(zipPath, target string) error {
-	targets, err := BuildArchiveTargets(zipPath)
-	if err != nil {
-		return err
-	}
-	if len(targets) != 1 {
-		return fmt.Errorf("service builds with an explicit target require exactly one image directory, got %d", len(targets))
-	}
-	if targets[0] != strings.TrimSpace(target) {
-		return fmt.Errorf("archive target %q does not match requested target %q", targets[0], target)
-	}
-	return nil
-}
-
 func BuildArchiveTargets(zipPath string) ([]string, error) {
 	count, err := ValidateBuildArchive(zipPath)
 	if err != nil {
@@ -174,9 +160,9 @@ func BuildArchiveTargets(zipPath string) ([]string, error) {
 		if err := json.Unmarshal(raw, &metadata); err != nil {
 			return nil, fmt.Errorf("invalid %s: %w", cleaned, err)
 		}
-		target := strings.TrimSpace(metadata.Target)
-		if target == "" {
-			return nil, fmt.Errorf("%s target is required", cleaned)
+		target, err := buildcontract.NormalizeTarget(metadata.Target)
+		if err != nil {
+			return nil, fmt.Errorf("invalid target in %s: %w", cleaned, err)
 		}
 		if previous, exists := directoriesByTarget[target]; exists {
 			return nil, fmt.Errorf("image directories %q and %q use duplicate target %q", previous, parts[0], target)
@@ -196,7 +182,7 @@ func BuildArchiveTargets(zipPath string) ([]string, error) {
 	for _, directory := range directories {
 		targets = append(targets, targetsByDirectory[directory])
 	}
-	return targets, nil
+	return buildcontract.NormalizeTargets(targets)
 }
 
 func ValidateBuildArchivePath(name string) (string, error) {

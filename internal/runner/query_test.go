@@ -9,11 +9,9 @@ func TestBuildQueryEncodesFlagsVarsAndTarget(t *testing.T) {
 	raw, err := BuildQuery([]string{
 		"--format", "oci",
 		"--fail-fast",
-		"--skip-fail",
 		"--verbose",
 		"--concurrency", "2",
 		"--timeout=600",
-		"--retry", "1",
 		"--oom-cooldown=45s",
 		"--var", "KOVA_IMAGE_REGISTRY=host.docker.internal:5001",
 		"--var=NAME=value with spaces",
@@ -29,11 +27,9 @@ func TestBuildQueryEncodesFlagsVarsAndTarget(t *testing.T) {
 
 	assertQueryValue(t, values, "format", "oci")
 	assertQueryValue(t, values, "fail-fast", "true")
-	assertQueryValue(t, values, "skip-fail", "true")
 	assertQueryValue(t, values, "verbose", "true")
 	assertQueryValue(t, values, "concurrency", "2")
 	assertQueryValue(t, values, "timeout", "600")
-	assertQueryValue(t, values, "retry", "1")
 	assertQueryValue(t, values, "oom-cooldown", "45s")
 	assertQueryValue(t, values, "target", "localhost:5001/example/simple:dev")
 	if got := values["var"]; len(got) != 2 || got[0] != "KOVA_IMAGE_REGISTRY=host.docker.internal:5001" || got[1] != "NAME=value with spaces" {

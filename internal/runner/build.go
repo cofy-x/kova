@@ -6,12 +6,10 @@ import (
 	"io"
 	"net/url"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/cofy-x/kova/internal/daemonclient"
-	"github.com/cofy-x/kova/internal/source"
 )
 
 func (c *Client) Build(args []string) (err error) {
@@ -26,18 +24,8 @@ func (c *Client) Build(args []string) (err error) {
 	if err := c.Config.requireBuildkitAddr(); err != nil {
 		return err
 	}
-	args, input, cleanup, err := prepareBuildInput(args)
-	if cleanup != nil {
-		defer cleanup()
-	}
-	if err != nil {
-		return err
-	}
-	if input == nil && stdinIsTerminal(c.Stdin) {
+	if stdinIsTerminal(c.Stdin) {
 		return fmt.Errorf("build requires a .zip stream on stdin")
-	}
-	if input == nil {
-		input = c.Stdin
 	}
 	kube, err := c.kubeClient()
 	if err != nil {
@@ -75,7 +63,7 @@ func (c *Client) Build(args []string) (err error) {
 	}
 	var stdout, stderr bytes.Buffer
 	err = kube.Exec(ctx, c.Config.Namespace, c.Config.PodName, kubeExecOptions(
-		input, &stdout, &stderr,
+		c.Stdin, &stdout, &stderr,
 		daemonclient.TransportCommand("POST", daemonclient.BuildPath, values, "")...,
 	))
 	if stdout.Len() > 0 {
@@ -89,80 +77,6 @@ func (c *Client) Build(args []string) (err error) {
 		return fmt.Errorf("build request failed: %s", strings.TrimSpace(stdout.String()))
 	}
 	return nil
-}
-
-func prepareBuildInput(args []string) ([]string, io.Reader, func(), error) {
-	positional := -1
-	for i := 0; i < len(args); i++ {
-		arg := args[i]
-		if strings.HasPrefix(arg, "--") {
-			if buildFlagTakesValue(arg) && !strings.Contains(arg, "=") {
-				i++
-			}
-			continue
-		}
-		if positional >= 0 {
-			return nil, nil, nil, fmt.Errorf("build accepts at most one positional argument")
-		}
-		positional = i
-	}
-	if positional < 0 || !isDir(args[positional]) {
-		return args, nil, nil, nil
-	}
-
-	target := buildTargetArg(args)
-	tmpZip, err := os.CreateTemp("", "kova-source-*.zip")
-	if err != nil {
-		return nil, nil, nil, err
-	}
-	tmpPath := tmpZip.Name()
-	if err := tmpZip.Close(); err != nil {
-		os.Remove(tmpPath)
-		return nil, nil, nil, err
-	}
-	if err := source.CreateSingleImageArchive(args[positional], target, tmpPath); err != nil {
-		os.Remove(tmpPath)
-		return nil, nil, nil, err
-	}
-	file, err := os.Open(tmpPath)
-	if err != nil {
-		os.Remove(tmpPath)
-		return nil, nil, nil, err
-	}
-	cleanup := func() {
-		file.Close()
-		os.Remove(tmpPath)
-	}
-	trimmed := append([]string{}, args[:positional]...)
-	trimmed = append(trimmed, args[positional+1:]...)
-	return trimmed, file, cleanup, nil
-}
-
-func buildFlagTakesValue(arg string) bool {
-	switch arg {
-	case "--var", "--target", "--format", "--concurrency", "--oom-cooldown", "--timeout", "--retry":
-		return true
-	default:
-		return false
-	}
-}
-
-func buildTargetArg(args []string) string {
-	for i := 0; i < len(args); i++ {
-		arg := args[i]
-		switch {
-		case arg == "--target" && i+1 < len(args):
-			return args[i+1]
-		case strings.HasPrefix(arg, "--target="):
-			return strings.TrimPrefix(arg, "--target=")
-		}
-	}
-	return ""
-}
-
-func isDir(path string) bool {
-	info, err := os.Stat(filepath.Clean(path))
-	return err == nil && info.IsDir()
 }
 
 func stdinIsTerminal(stdin io.Reader) bool {

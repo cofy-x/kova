@@ -15,8 +15,6 @@ SOURCE_ZIP=${SOURCE_ZIP:-${WORK_DIR}/source.zip}
 RESULT_JSONL=${RESULT_JSONL:-${WORK_DIR}/result.jsonl}
 CLUSTER_REGISTRY=${CLUSTER_REGISTRY:-kind-registry:5000}
 REGISTRY_HOST=${REGISTRY_HOST:-localhost:5002}
-SINGLE_DIR_TARGET=${SINGLE_DIR_TARGET:-${CLUSTER_REGISTRY}/kova-examples/simple-dir:dev}
-SINGLE_DIR_PULL_TARGET=${SINGLE_DIR_PULL_TARGET:-${REGISTRY_HOST}/kova-examples/simple-dir:dev}
 E2E_BUILD_IMAGE=${E2E_BUILD_IMAGE:-true}
 
 if [[ "${KIND_KUBECONFIG}" == /* ]]; then
@@ -45,7 +43,15 @@ dump_debug() {
 trap 'dump_debug' ERR
 
 "${ROOT}/scripts/kind/deploy-kind.sh"
-"${ROOT}/scripts/package/package-example.sh"
+if [[ "${SOURCE_ZIP}" == /* ]]; then
+  source_zip_path=${SOURCE_ZIP}
+else
+  source_zip_path=${ROOT}/${SOURCE_ZIP}
+fi
+"${KOVA[@]}" source pack \
+  --target "${CLUSTER_REGISTRY}/kova-examples/simple:dev" \
+  --output "${source_zip_path}" \
+  "${ROOT}/examples/simple"
 
 KOVA_IMAGE_PULL_SECRET='' "${KOVA[@]}" \
   --kubeconfig "${kubeconfig}" \
@@ -72,8 +78,7 @@ KOVA_DAEMON_OTEL_RESOURCE_ATTRIBUTES=${KOVA_DAEMON_OTEL_RESOURCE_ATTRIBUTES:-dep
   --buildkit-addr "${BUILDKIT_ADDR}" \
   --name "${KOVA_RUNNER_NAME}" \
   build --format oci --concurrency 1 --timeout 600 --fail-fast --verbose \
-  --var "KOVA_IMAGE_REGISTRY=${CLUSTER_REGISTRY}" \
-  < "${ROOT}/${SOURCE_ZIP}"
+  < "${source_zip_path}"
 
 "${KOVA[@]}" \
   --kubeconfig "${kubeconfig}" \
@@ -86,18 +91,3 @@ KOVA_DAEMON_OTEL_RESOURCE_ATTRIBUTES=${KOVA_DAEMON_OTEL_RESOURCE_ATTRIBUTES:-dep
   export --result "${ROOT}/${RESULT_JSONL}" --oci
 
 docker pull "${REGISTRY_HOST}/kova-examples/simple:dev"
-
-"${KOVA[@]}" \
-  --kubeconfig "${kubeconfig}" \
-  --buildkit-addr "${BUILDKIT_ADDR}" \
-  --name "${KOVA_RUNNER_NAME}" \
-  build "${ROOT}/examples/simple" \
-  --target "${SINGLE_DIR_TARGET}" \
-  --format oci --concurrency 1 --timeout 600 --fail-fast --verbose
-
-"${KOVA[@]}" \
-  --kubeconfig "${kubeconfig}" \
-  --name "${KOVA_RUNNER_NAME}" \
-  wait --timeout 600
-
-docker pull "${SINGLE_DIR_PULL_TARGET}"

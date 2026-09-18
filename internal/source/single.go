@@ -11,7 +11,12 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"time"
+
+	"github.com/cofy-x/kova/internal/buildcontract"
 )
+
+var deterministicArchiveTime = time.Date(1980, 1, 1, 0, 0, 0, 0, time.UTC)
 
 func PrepareSingleImageDir(imageDir, target string, buildVars map[string]string) (string, func(), error) {
 	if err := requireRegularFile(filepath.Join(imageDir, "Dockerfile")); err != nil {
@@ -60,6 +65,13 @@ func PrepareSingleImageDir(imageDir, target string, buildVars map[string]string)
 }
 
 func CreateSingleImageArchive(imageDir, target, zipPath string) error {
+	if strings.TrimSpace(target) != "" {
+		var err error
+		target, err = buildcontract.NormalizeTarget(target)
+		if err != nil {
+			return err
+		}
+	}
 	if err := requireRegularFile(filepath.Join(imageDir, "Dockerfile")); err != nil {
 		return fmt.Errorf("%s: %w", imageDir, err)
 	}
@@ -105,7 +117,9 @@ func CreateSingleImageArchive(imageDir, target, zipPath string) error {
 		}
 		name := path.Join(top, filepath.ToSlash(rel))
 		if d.IsDir() {
-			_, err := zw.CreateHeader(&zip.FileHeader{Name: name + "/", Method: zip.Deflate})
+			header := &zip.FileHeader{Name: name + "/", Method: zip.Store, Modified: deterministicArchiveTime}
+			header.SetMode(0o755 | fs.ModeDir)
+			_, err := zw.CreateHeader(header)
 			return err
 		}
 		if d.Type()&os.ModeSymlink != 0 {
@@ -123,7 +137,8 @@ func CreateSingleImageArchive(imageDir, target, zipPath string) error {
 			}
 			header.Name = name
 			header.Method = zip.Deflate
-			header.SetMode(info.Mode())
+			header.Modified = deterministicArchiveTime
+			header.SetMode(fs.ModeSymlink | 0o777)
 			w, err := zw.CreateHeader(header)
 			if err != nil {
 				return err
@@ -137,6 +152,8 @@ func CreateSingleImageArchive(imageDir, target, zipPath string) error {
 		}
 		header.Name = name
 		header.Method = zip.Deflate
+		header.Modified = deterministicArchiveTime
+		header.SetMode(info.Mode().Perm())
 		w, err := zw.CreateHeader(header)
 		if err != nil {
 			return err
@@ -161,7 +178,9 @@ func CreateSingleImageArchive(imageDir, target, zipPath string) error {
 		if err != nil {
 			return err
 		}
-		w, err := zw.Create(path.Join(top, "metadata.json"))
+		header := &zip.FileHeader{Name: path.Join(top, "metadata.json"), Method: zip.Deflate, Modified: deterministicArchiveTime}
+		header.SetMode(0o644)
+		w, err := zw.CreateHeader(header)
 		if err != nil {
 			return err
 		}

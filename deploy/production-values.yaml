@@ -1,6 +1,6 @@
 # Provider-neutral production starting point. The released chart selects its
 # matching controller, runner, and worker images automatically. Override only
-# environment-owned storage, registry, capacity, and scheduling inputs.
+# environment-owned registry, capacity, and scheduling inputs.
 
 imagePullSecrets:
   # Set name to an existing pull secret, or set create=true with
@@ -29,18 +29,6 @@ serviceAccount:
   create: false
   name: ""
   automountServiceAccountToken: false
-
-artifactStore:
-  driver: s3
-  secretName: kova-artifact-credentials
-  credentials:
-    provider: file
-    mountPath: /var/run/secrets/kova/s3
-  s3:
-    endpoint: objects.example.com
-    bucket: kova-builds
-    region: us-east-1
-    secure: true
 
 serviceDaemon:
   enabled: true

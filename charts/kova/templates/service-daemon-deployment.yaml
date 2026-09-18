@@ -1,18 +1,6 @@
 {{- if .Values.serviceDaemon.enabled }}
-{{- if not (has .Values.artifactStore.driver (list "filesystem" "s3")) }}
-{{- fail "artifactStore.driver must be filesystem or s3" }}
-{{- end }}
 {{- if not (has .Values.serviceDaemon.authentication.mode (list "tokenreview" "static" "unsafe-none")) }}
 {{- fail "serviceDaemon.authentication.mode must be tokenreview, static, or unsafe-none" }}
-{{- end }}
-{{- if not (has .Values.artifactStore.credentials.provider (list "static" "file" "anonymous")) }}
-{{- fail "artifactStore.credentials.provider must be static, file, or anonymous" }}
-{{- end }}
-{{- if and (eq .Values.artifactStore.driver "s3") (ne .Values.artifactStore.credentials.provider "anonymous") (not .Values.artifactStore.secretName) }}
-{{- fail "artifactStore.secretName is required for static and file S3 credentials" }}
-{{- end }}
-{{- if and (eq .Values.artifactStore.driver "filesystem") (not .Values.artifactStore.filesystem.pvc.create) (not .Values.artifactStore.filesystem.pvc.existingClaim) }}
-{{- fail "artifactStore.filesystem.pvc.existingClaim is required when the chart does not create the filesystem PVC" }}
 {{- end }}
 {{- $name := printf "%s-service" (include "kova.fullname" .) | trunc 63 | trimSuffix "-" }}
 {{- $selectorName := printf "%s-service" (include "kova.name" .) | trunc 63 | trimSuffix "-" }}
@@ -72,32 +60,16 @@ spec:
             - {{ printf "--registry-plain-http=%s" . | quote }}
             {{- end }}
             - --buildkit-addr={{ default (printf "tcp://%s.%s.svc:%v" (include "kova.fullname" .) (include "kova.namespace" .) .Values.service.port) .Values.serviceDaemon.buildkitAddr }}
-            - --artifact-driver={{ .Values.artifactStore.driver }}
-            - --artifact-root={{ .Values.artifactStore.filesystem.mountPath }}
-            - --artifact-secret={{ .Values.artifactStore.secretName }}
-            {{- if eq .Values.artifactStore.driver "filesystem" }}
-            - --source-pvc-claim={{ include "kova.sourcePVCName" . }}
-            {{- else if eq .Values.artifactStore.driver "s3" }}
-            - --s3-endpoint={{ required "artifactStore.s3.endpoint is required for the s3 driver" .Values.artifactStore.s3.endpoint }}
-            - --s3-bucket={{ required "artifactStore.s3.bucket is required for the s3 driver" .Values.artifactStore.s3.bucket }}
-            - --s3-region={{ .Values.artifactStore.s3.region }}
-            - --s3-credential-provider={{ .Values.artifactStore.credentials.provider }}
-            - --s3-credential-dir={{ .Values.artifactStore.credentials.mountPath }}
-            - --s3-secure={{ .Values.artifactStore.s3.secure }}
-            {{- end }}
             - --auth-mode={{ .Values.serviceDaemon.authentication.mode }}
             - --auth-static-principal={{ .Values.serviceDaemon.authentication.staticPrincipal }}
             - --job-ttl={{ .Values.serviceDaemon.jobTTL }}
-            - --max-upload-bytes={{ .Values.serviceDaemon.maxUploadBytes | int64 }}
-            - --max-log-bytes={{ .Values.serviceDaemon.maxLogBytes | int64 }}
-            - --artifact-gc-interval={{ .Values.serviceDaemon.artifactGCInterval }}
-            - --artifact-orphan-ttl={{ .Values.serviceDaemon.artifactOrphanTTL }}
             - --wait={{ .Values.serviceDaemon.wait }}
             - --poll-interval={{ .Values.serviceDaemon.pollInterval }}
             - --max-active-jobs={{ .Values.serviceDaemon.maxActiveJobs }}
             - --max-active-jobs-per-requester={{ .Values.serviceDaemon.maxActiveJobsPerRequester }}
             - --max-queued-jobs-per-requester={{ .Values.serviceDaemon.maxQueuedJobsPerRequester }}
             - --worker-slots={{ .Values.serviceDaemon.workerSlots }}
+            - --controller-concurrency={{ .Values.serviceDaemon.controllerConcurrency }}
             - --leader-elect={{ .Values.serviceDaemon.leaderElect }}
             - --leader-election-namespace={{ include "kova.namespace" . }}
           ports:
@@ -121,11 +93,6 @@ spec:
               value: /home/kova/.docker
             {{- end }}
           {{- end }}
-          {{- if and .Values.artifactStore.secretName (eq .Values.artifactStore.credentials.provider "static") }}
-          envFrom:
-            - secretRef:
-                name: {{ .Values.artifactStore.secretName }}
-          {{- end }}
           readinessProbe:
             httpGet:
               path: /readyz
@@ -138,22 +105,11 @@ spec:
             {{- toYaml .Values.serviceDaemon.resources | nindent 12 }}
           securityContext:
             {{- toYaml .Values.serviceDaemon.securityContext | nindent 12 }}
-          {{- if or (eq .Values.artifactStore.driver "filesystem") (and .Values.artifactStore.secretName (eq .Values.artifactStore.credentials.provider "file")) $outputRegistrySecret }}
+          {{- if $outputRegistrySecret }}
           volumeMounts:
-            {{- if eq .Values.artifactStore.driver "filesystem" }}
-            - name: kova-source-store
-              mountPath: {{ .Values.artifactStore.filesystem.mountPath }}
-            {{- end }}
-            {{- if and .Values.artifactStore.secretName (eq .Values.artifactStore.credentials.provider "file") }}
-            - name: s3-credentials
-              mountPath: {{ .Values.artifactStore.credentials.mountPath }}
-              readOnly: true
-            {{- end }}
-            {{- if $outputRegistrySecret }}
             - name: registry-credentials
               mountPath: /home/kova/.docker
               readOnly: true
-            {{- end }}
           {{- end }}
       {{- $imagePullSecrets := include "kova.renderImagePullSecrets" . }}
       {{- if $imagePullSecrets }}
@@ -172,25 +128,13 @@ spec:
       tolerations:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- if or (eq .Values.artifactStore.driver "filesystem") (and .Values.artifactStore.secretName (eq .Values.artifactStore.credentials.provider "file")) $outputRegistrySecret }}
+      {{- if $outputRegistrySecret }}
       volumes:
-        {{- if eq .Values.artifactStore.driver "filesystem" }}
-        - name: kova-source-store
-          persistentVolumeClaim:
-            claimName: {{ include "kova.sourcePVCName" . }}
-        {{- end }}
-        {{- if and .Values.artifactStore.secretName (eq .Values.artifactStore.credentials.provider "file") }}
-        - name: s3-credentials
-          secret:
-            secretName: {{ .Values.artifactStore.secretName }}
-        {{- end }}
-        {{- if $outputRegistrySecret }}
         - name: registry-credentials
           secret:
             secretName: {{ $outputRegistrySecret }}
             items:
               - key: .dockerconfigjson
                 path: config.json
-        {{- end }}
       {{- end }}
 {{- end }}

@@ -24,6 +24,7 @@ func NewCLIApp() *cli.App {
 	commands := withUsageErrorHint([]*cli.Command{
 		versionCLICommand(),
 		doctorCLICommand(),
+		sourceCLICommand(),
 		jobCLICommand(),
 		prepareCLICommand(),
 		listCLICommand(),

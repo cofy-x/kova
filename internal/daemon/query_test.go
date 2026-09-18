@@ -14,10 +14,8 @@ func TestBuildOptionsFromQuery(t *testing.T) {
 		"format":       []string{"both"},
 		"oom-cooldown": []string{"45s"},
 		"timeout":      []string{"600"},
-		"retry":        []string{"2"},
 		"verbose":      []string{"yes"},
-		"target":       []string{" localhost:5001/example:dev "},
-		"skip-fail":    []string{"true"},
+		"target":       []string{"localhost:5001/example:dev"},
 		"var":          []string{"KOVA_IMAGE_REGISTRY=localhost:5001", "KOVA_TAG=dev"},
 	}
 
@@ -26,10 +24,10 @@ func TestBuildOptionsFromQuery(t *testing.T) {
 		t.Fatalf("expected success, got %v", err)
 	}
 
-	if opts.Concurrency != 3 || opts.Timeout != 600 || opts.Retry != 2 {
+	if opts.Concurrency != 3 || opts.Timeout != 600 {
 		t.Fatalf("unexpected numeric options: %#v", opts)
 	}
-	if !opts.Failfast || !opts.Verbose || !opts.SkipFail {
+	if !opts.Failfast || !opts.Verbose {
 		t.Fatalf("unexpected bool options: %#v", opts)
 	}
 	if opts.BuildFormat != "both" {

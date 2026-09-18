@@ -99,30 +99,16 @@ func RunBuild(opts Options) error {
 	defer resultStore.Close()
 
 	totalTargets := len(jobs)
-	jobs, existingOutcomes, skippedSucceeded, skippedFailed, err := filterBuildJobs(jobs, resultStore, opts.SkipFail)
-	if err != nil {
-		runErr = err
-		return runErr
-	}
-
-	if skippedSucceeded > 0 || skippedFailed > 0 {
-		logging.Infof("Skipped %d previously successful target(s) and %d previously failed target(s)", skippedSucceeded, skippedFailed)
-	}
-	if len(jobs) == 0 {
-		logging.Infof("No targets to build")
-		op.SetResult(observability.ResultSkipped)
-		return nil
-	}
 
 	logging.ResetProgress(len(jobs))
 	defer logging.ClearProgress()
 
-	logging.Infof("Building %d target(s) across %d address(es), concurrency=%d, retry=%d",
-		len(jobs), len(opts.Addrs), opts.Concurrency, opts.Retry)
+	logging.Infof("Building %d target(s) across %d address(es), concurrency=%d",
+		len(jobs), len(opts.Addrs), opts.Concurrency)
 
 	addrPool := scheduler.NewPool(opts.Addrs, opts.Concurrency)
 	globalSem := make(chan struct{}, opts.Concurrency)
-	outcomeCounters := store.NewOutcomeCounters(totalTargets, existingOutcomes)
+	outcomeCounters := store.NewOutcomeCounters(totalTargets, nil)
 
 	ctx, cancel := context.WithCancel(opCtx)
 	defer cancel()
@@ -139,8 +125,7 @@ func RunBuild(opts Options) error {
 	}
 
 	type buildTask struct {
-		job     buildJob
-		attempt int
+		job buildJob
 	}
 
 	var (
@@ -162,9 +147,6 @@ func RunBuild(opts Options) error {
 		}
 		fatalMu.Unlock()
 	}
-
-	// retryQueue collects failed tasks that still have retry budget.
-	retryQueue := make(chan buildTask, len(jobs))
 
 	// scheduleTask picks a slot via consistent hash and launches the build goroutine.
 	scheduleTask := func(task buildTask) bool {
@@ -215,28 +197,9 @@ func RunBuild(opts Options) error {
 				Success:   true,
 			}
 
-			for idx, spec := range task.job.specs {
+			for _, spec := range task.job.specs {
 				entry := executeBuild(ctx, spec, slot.Addr, opts)
 				taskEntry.NodeIP = entry.NodeIP
-
-				if !entry.Success && task.attempt < opts.Retry {
-					// Log every failure to logs.jsonl, even if we will retry.
-					if entry.Logs != "" {
-						if err := resultStore.AppendFailure(entry.Target, entry.Logs); err != nil {
-							logging.Errorf("Failed to append failure log for %s: %v", entry.Target, err)
-						}
-					}
-					remainingSpecs := append([]source.Spec(nil), task.job.specs[idx:]...)
-					logging.Infof("[RETRY %d/%d] %s", task.attempt+1, opts.Retry, entry.Target)
-					retryQueue <- buildTask{
-						job: buildJob{
-							key:   task.job.key,
-							specs: remainingSpecs,
-						},
-						attempt: task.attempt + 1,
-					}
-					return
-				}
 
 				if err := resultStore.UpsertResult(entry); err != nil {
 					persistErr := fmt.Errorf("store result for %s: %w", entry.Target, err)
@@ -280,38 +243,12 @@ func RunBuild(opts Options) error {
 
 	// First pass: schedule all initial tasks.
 	for _, job := range jobs {
-		if !scheduleTask(buildTask{job: job, attempt: 0}) {
+		if !scheduleTask(buildTask{job: job}) {
 			break
 		}
 	}
 
-	// Drain retry queue: wait for in-flight builds to finish, then re-schedule retries.
-	for {
-		wg.Wait()
-		select {
-		case task := <-retryQueue:
-			// There may be more queued retries; drain them all before waiting again.
-			tasks := []buildTask{task}
-			for {
-				select {
-				case t := <-retryQueue:
-					tasks = append(tasks, t)
-				default:
-					goto schedule
-				}
-			}
-		schedule:
-			for _, t := range tasks {
-				if !scheduleTask(t) {
-					break
-				}
-			}
-		default:
-			// No retries pending, we're done.
-			goto done
-		}
-	}
-done:
+	wg.Wait()
 
 	printSummary(results)
 

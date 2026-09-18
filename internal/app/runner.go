@@ -230,9 +230,6 @@ func runnerBuildArgsFromContext(c *cli.Context) []string {
 	if format := source.NormalizeBuildFormatValue(c.String("format")); format != "nydus" {
 		args = append(args, "--format", format)
 	}
-	if c.Bool("skip-fail") {
-		args = append(args, "--skip-fail")
-	}
 	if c.Bool("verbose") {
 		args = append(args, "--verbose")
 	}
@@ -240,7 +237,6 @@ func runnerBuildArgsFromContext(c *cli.Context) []string {
 		"--concurrency", fmt.Sprint(c.Int("concurrency")),
 		"--oom-cooldown", c.Duration("oom-cooldown").String(),
 		"--timeout", fmt.Sprint(c.Int("timeout")),
-		"--retry", fmt.Sprint(c.Int("retry")),
 	)
 	args = append(args, c.Args().Slice()...)
 	return args

@@ -126,8 +126,8 @@ func (s *daemonServer) runBuildAsync(buildCtx context.Context, zipPath string, q
 		s.setBuildState(daemonState{Status: "failed", Error: err.Error()})
 		return
 	}
-	logging.Infof("Async build batch.Options resolved: addrs=%d concurrency=%d timeout=%ds retry=%d verbose=%t format=%q target=%q skip-fail=%t",
-		len(opts.Addrs), opts.Concurrency, opts.Timeout, opts.Retry, opts.Verbose, opts.BuildFormat, opts.Target, opts.SkipFail)
+	logging.Infof("Async build batch.Options resolved: addrs=%d concurrency=%d timeout=%ds verbose=%t format=%q target=%q",
+		len(opts.Addrs), opts.Concurrency, opts.Timeout, opts.Verbose, opts.BuildFormat, opts.Target)
 	opts.Ctx = buildCtx
 
 	_ = os.RemoveAll(daemonImageDir)

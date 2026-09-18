@@ -12,8 +12,7 @@ with the [complete CLI workflow](cli-workflow.md) for build operations or the
   export, and cleanup for development.
 - [Runtime design](architecture.md): roles, topology, build/export,
   preheat, and scaling flows.
-- [Service job workflow](service.md): authenticated job CLI, HTTP API, RBAC,
-  and artifact storage for shared environments.
+- [Service job workflow](service.md): immutable source contract, authenticated job CLI, HTTP API, RBAC, and bounded results.
 - [Validation matrix](testing.md): static checks, E2E targets, and runtime smoke
   expectations.
 - [Release artifacts](releases.md): versioning, CLI archives, runtime images,

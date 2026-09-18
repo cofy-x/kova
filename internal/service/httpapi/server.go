@@ -6,7 +6,6 @@ import (
 	"time"
 
 	kovav1 "github.com/cofy-x/kova/internal/apis/kova/v1alpha1"
-	"github.com/cofy-x/kova/internal/artifactstore"
 	"github.com/cofy-x/kova/internal/kube"
 	"github.com/cofy-x/kova/internal/logging"
 	"github.com/cofy-x/kova/internal/observability"
@@ -28,37 +27,22 @@ type Server struct {
 	kube   kubeAPI
 	client client.Client
 	reader client.Reader
-	store  artifactstore.Store
 	auth   serviceauth.Authenticator
 	authz  serviceauth.Authorizer
 }
 
 var (
-	authDenied      = observability.Int64Counter("kova.service.auth.denied", "Rejected service API authentication attempts")
-	authzDenied     = observability.Int64Counter("kova.service.authorization.denied", "Rejected service API authorization attempts")
-	artifactWrites  = observability.Int64Counter("kova.service.artifact.writes", "Artifact write attempts")
-	artifactLatency = observability.DurationHistogram("kova.service.artifact.write.duration", "Artifact write latency")
-	buildCancels    = observability.Int64Counter("kova.service.job.cancellations", "Accepted job cancellations")
+	authDenied   = observability.Int64Counter("kova.service.auth.denied", "Rejected service API authentication attempts")
+	authzDenied  = observability.Int64Counter("kova.service.authorization.denied", "Rejected service API authorization attempts")
+	buildCancels = observability.Int64Counter("kova.service.job.cancellations", "Accepted job cancellations")
 )
 
-func NewServer(cfg config.Config, kube kubeAPI, crClient client.Client, crReader client.Reader, store artifactstore.Store, authenticator serviceauth.Authenticator, authorizer serviceauth.Authorizer) *Server {
+func NewServer(cfg config.Config, kube kubeAPI, crClient client.Client, crReader client.Reader, authenticator serviceauth.Authenticator, authorizer serviceauth.Authorizer) *Server {
 	if cfg.Listen == "" {
 		cfg.Listen = ":8080"
 	}
-	if cfg.ArtifactRoot == "" {
-		cfg.ArtifactRoot = artifactstore.DefaultRoot
-	}
-	if cfg.ArtifactDriver == "" {
-		cfg.ArtifactDriver = artifactstore.DriverFilesystem
-	}
 	if cfg.JobTTL == 0 {
 		cfg.JobTTL = 2 * time.Hour
-	}
-	if cfg.MaxUploadBytes == 0 {
-		cfg.MaxUploadBytes = 1 << 30
-	}
-	if cfg.MaxLogBytes == 0 {
-		cfg.MaxLogBytes = 16 << 20
 	}
 	if cfg.WaitTimeout == 0 {
 		cfg.WaitTimeout = 3 * time.Minute
@@ -69,10 +53,7 @@ func NewServer(cfg config.Config, kube kubeAPI, crClient client.Client, crReader
 	if crReader == nil {
 		crReader = crClient
 	}
-	if store == nil {
-		store, _ = artifactstore.NewFilesystem(cfg.ArtifactRoot)
-	}
-	return &Server{cfg: cfg, kube: kube, client: crClient, reader: crReader, store: store, auth: authenticator, authz: authorizer}
+	return &Server{cfg: cfg, kube: kube, client: crClient, reader: crReader, auth: authenticator, authz: authorizer}
 }
 
 func (s *Server) Start(ctx context.Context) error {

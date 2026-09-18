@@ -7,11 +7,13 @@ how to work in Kova; public product and contributor documentation stays in
 ## Repository Map
 
 - `cmd/kova`: workstation and CI client entrypoint.
-- `cmd/kovad`: runner daemon and service-daemon entrypoint.
+- `cmd/kovad`: runner daemon and immutable source materialization entrypoint.
+- `cmd/kova-controller`: authenticated Service and `KovaBuild` controller entrypoint.
 - `internal/app`, `internal/runner`, `internal/kube`: client and Kubernetes
   control flow.
 - `internal/daemon`, `internal/batch`, `internal/source`, `internal/store`:
-  build execution and result state.
+  build execution and runner-local ephemeral state.
+- `internal/buildcontract`, `internal/sourcebundle`: bounded target validation and the public immutable source contract.
 - `internal/service`: long-lived HTTP service and `KovaBuild` controller.
 - `charts/`: provider-neutral Kova and observability Helm charts.
 - `deploy/`: local and non-local Kubernetes values baselines.

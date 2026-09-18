@@ -1,18 +1,14 @@
 package buildcontroller
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"io"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	kovav1 "github.com/cofy-x/kova/internal/apis/kova/v1alpha1"
-	"github.com/cofy-x/kova/internal/artifactstore"
 	"github.com/cofy-x/kova/internal/kube"
 	"github.com/cofy-x/kova/internal/service/config"
 
@@ -28,6 +24,8 @@ import (
 type fakeKube struct {
 	deleted   []string
 	deleteErr error
+	execFn    func(kube.ExecOptions) error
+	execCalls [][]string
 }
 
 func (f *fakeKube) GetSecretData(context.Context, string, string, string) (string, error) {
@@ -66,7 +64,11 @@ func (f *fakeKube) ListPodsWithOptions(context.Context, string, io.Writer, kube.
 	return nil
 }
 
-func (f *fakeKube) Exec(context.Context, string, string, kube.ExecOptions) error {
+func (f *fakeKube) Exec(_ context.Context, _, _ string, opts kube.ExecOptions) error {
+	f.execCalls = append(f.execCalls, append([]string(nil), opts.Command...))
+	if f.execFn != nil {
+		return f.execFn(opts)
+	}
 	return nil
 }
 
@@ -74,7 +76,7 @@ func (f *fakeKube) ScaleDeployment(context.Context, string, string, int32) error
 	return nil
 }
 
-func TestReconcilerCreatesRunnerWithPVCMount(t *testing.T) {
+func TestReconcilerCreatesRunnerWithImmutableSourceFetcher(t *testing.T) {
 	scheme := testScheme(t)
 	build := &kovav1.KovaBuild{
 		TypeMeta: metav1.TypeMeta{APIVersion: kovav1.Group + "/" + kovav1.Version, Kind: "KovaBuild"},
@@ -83,10 +85,12 @@ func TestReconcilerCreatesRunnerWithPVCMount(t *testing.T) {
 			Namespace: "jobs",
 		},
 		Spec: kovav1.KovaBuildSpec{
+			Targets: []string{"registry.local/example:dev"},
 			Source: kovav1.KovaBuildSourceSpec{
-				URI:    "file:///var/lib/kova/sources/builds/abc/source.zip",
+				URI:    "oci://registry.local/sources/abc@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
 				Digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 			},
+			Build: kovav1.KovaBuildOptions{Format: "oci", Concurrency: 1},
 		},
 	}
 	client := crfake.NewClientBuilder().
@@ -102,8 +106,7 @@ func TestReconcilerCreatesRunnerWithPVCMount(t *testing.T) {
 			RunnerImage:           "registry.local/kova:dev",
 			RunnerImagePullPolicy: "IfNotPresent",
 			BuildkitAddr:          "tcp://kova.kova.svc:9094",
-			SourcePVCClaim:        "kova-sources",
-			ArtifactRoot:          "/var/lib/kova/sources",
+			RegistryPlainHTTP:     []string{"registry.local"},
 			JobTTL:                time.Hour,
 			PollInterval:          time.Millisecond,
 			RunnerNodeSelector:    map[string]string{"kova.cofy.io/source-node": "true"},
@@ -134,11 +137,14 @@ func TestReconcilerCreatesRunnerWithPVCMount(t *testing.T) {
 	if got := pod.Spec.NodeSelector["kova.cofy.io/source-node"]; got != "true" {
 		t.Fatalf("runner node selector = %q", got)
 	}
-	if len(pod.Spec.Volumes) == 0 || pod.Spec.Volumes[0].PersistentVolumeClaim == nil || pod.Spec.Volumes[0].PersistentVolumeClaim.ClaimName != "kova-sources" {
+	if len(pod.Spec.Volumes) == 0 || pod.Spec.Volumes[0].EmptyDir == nil {
 		t.Fatalf("unexpected volumes: %#v", pod.Spec.Volumes)
 	}
-	if len(pod.Spec.Containers[0].VolumeMounts) == 0 || pod.Spec.Containers[0].VolumeMounts[0].MountPath != "/var/lib/kova/sources" || !pod.Spec.Containers[0].VolumeMounts[0].ReadOnly {
+	if len(pod.Spec.Containers[0].VolumeMounts) == 0 || pod.Spec.Containers[0].VolumeMounts[0].MountPath != "/var/lib/kova/source" {
 		t.Fatalf("unexpected mounts: %#v", pod.Spec.Containers[0].VolumeMounts)
+	}
+	if len(pod.Spec.InitContainers) != 1 || !strings.Contains(strings.Join(pod.Spec.InitContainers[0].Command, " "), "source fetch") {
+		t.Fatalf("source init container = %#v", pod.Spec.InitContainers)
 	}
 	var updated kovav1.KovaBuild
 	if err := client.Get(context.Background(), types.NamespacedName{Namespace: "jobs", Name: "abc"}, &updated); err != nil {
@@ -149,19 +155,20 @@ func TestReconcilerCreatesRunnerWithPVCMount(t *testing.T) {
 	}
 }
 
-func TestReconcilerMaterializesS3Source(t *testing.T) {
+func TestReconcilerMaterializesHTTPSSource(t *testing.T) {
 	scheme := testScheme(t)
 	build := &kovav1.KovaBuild{
 		ObjectMeta: metav1.ObjectMeta{Name: "pending", Namespace: "jobs", Finalizers: []string{cleanupFinalizer}},
-		Spec: kovav1.KovaBuildSpec{Source: kovav1.KovaBuildSourceSpec{
-			URI: "s3://builds/builds/pending/source.zip", Digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-		}},
+		Spec: kovav1.KovaBuildSpec{
+			Targets: []string{"registry.local/example:dev"},
+			Source: kovav1.KovaBuildSourceSpec{
+				URI: "https://sources.example.com/pending.zip", Digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			},
+			Build: kovav1.KovaBuildOptions{Format: "oci", Concurrency: 1},
+		},
 	}
 	client := crfake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&kovav1.KovaBuild{}).WithObjects(build).Build()
-	reconciler := KovaBuildReconciler{Client: client, Scheme: scheme, Kube: &fakeKube{}, Cfg: config.Config{
-		RunnerImage: "registry.local/kova:dev", ArtifactSecret: "s3-credentials",
-		S3Endpoint: "objects.example.com", S3Bucket: "builds", S3Region: "us-east-1", S3Secure: true,
-	}}
+	reconciler := KovaBuildReconciler{Client: client, Scheme: scheme, Kube: &fakeKube{}, Cfg: config.Config{RunnerImage: "registry.local/kova:dev"}}
 	_, err := reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "jobs", Name: "pending"}})
 	if err != nil {
 		t.Fatal(err)
@@ -173,10 +180,7 @@ func TestReconcilerMaterializesS3Source(t *testing.T) {
 	if len(pod.Spec.InitContainers) != 1 || pod.Spec.InitContainers[0].Name != "source-fetch" {
 		t.Fatalf("init containers = %#v", pod.Spec.InitContainers)
 	}
-	if len(pod.Spec.InitContainers[0].EnvFrom) != 1 || pod.Spec.InitContainers[0].EnvFrom[0].SecretRef.Name != "s3-credentials" {
-		t.Fatalf("fetch envFrom = %#v", pod.Spec.InitContainers[0].EnvFrom)
-	}
-	if command := strings.Join(pod.Spec.InitContainers[0].Command, " "); !strings.Contains(command, "--s3-endpoint objects.example.com") {
+	if command := strings.Join(pod.Spec.InitContainers[0].Command, " "); !strings.Contains(command, "https://sources.example.com/pending.zip") {
 		t.Fatalf("fetch command = %q", command)
 	}
 }
@@ -232,30 +236,120 @@ func TestSubmitWhenReadyFailsWhenRunnerDisappears(t *testing.T) {
 	}
 }
 
-func TestReconcilerDeleteCleansPodSourceAndFinalizer(t *testing.T) {
+func TestSubmitWhenReadyReportsSourceFetchFailureAsInvalidSource(t *testing.T) {
+	scheme := testScheme(t)
+	build := &kovav1.KovaBuild{
+		ObjectMeta: metav1.ObjectMeta{Name: "invalid-source", Namespace: "jobs", Finalizers: []string{cleanupFinalizer}},
+		Status: kovav1.KovaBuildStatus{
+			Phase: kovav1.PhaseStarting, RunnerPodName: "kova-job-invalid-source",
+		},
+	}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "kova-job-invalid-source", Namespace: "jobs"},
+		Status: corev1.PodStatus{Phase: corev1.PodPending, InitContainerStatuses: []corev1.ContainerStatus{{
+			Name: "source-fetch", State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
+				ExitCode: 1, Message: "source digest mismatch",
+			}},
+		}}},
+	}
+	crClient := crfake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&kovav1.KovaBuild{}).WithObjects(build, pod).Build()
+	reconciler := KovaBuildReconciler{Client: crClient, Scheme: scheme, Kube: &fakeKube{}}
+	if _, err := reconciler.submitWhenReady(context.Background(), build); err != nil {
+		t.Fatal(err)
+	}
+	var updated kovav1.KovaBuild
+	if err := crClient.Get(context.Background(), types.NamespacedName{Namespace: "jobs", Name: "invalid-source"}, &updated); err != nil {
+		t.Fatal(err)
+	}
+	if updated.Status.Phase != kovav1.PhaseFailed || updated.Status.Reason != "InvalidSource" || updated.Status.Message != "source digest mismatch" {
+		t.Fatalf("status = %#v", updated.Status)
+	}
+}
+
+func TestSubmitWhenReadyValidatesExactSourceTargetSetBeforeBuild(t *testing.T) {
+	tests := []struct {
+		name          string
+		inspection    string
+		inspectionErr error
+		wantReason    string
+		wantBuild     bool
+	}{
+		{name: "extra", inspection: `{"targets":["registry.example/a:dev","registry.example/extra:dev"]}`, wantReason: "InvalidTargets"},
+		{name: "missing", inspection: `{"targets":[]}`, wantReason: "InvalidTargets"},
+		{name: "different", inspection: `{"targets":["registry.example/b:dev"]}`, wantReason: "InvalidTargets"},
+		{name: "duplicate", inspectionErr: errors.New("duplicate target"), wantReason: "InvalidSource"},
+		{name: "same-set-different-order", inspection: `{"targets":["registry.example/b:dev","registry.example/a:dev"]}`, wantBuild: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			scheme := testScheme(t)
+			build := &kovav1.KovaBuild{
+				ObjectMeta: metav1.ObjectMeta{Name: "contract", Namespace: "jobs", Finalizers: []string{cleanupFinalizer}},
+				Spec: kovav1.KovaBuildSpec{
+					Targets: []string{"registry.example/a:dev", "registry.example/b:dev"},
+					Build:   kovav1.KovaBuildOptions{Format: "oci", Concurrency: 1},
+				},
+				Status: kovav1.KovaBuildStatus{Phase: kovav1.PhaseStarting, RunnerPodName: "kova-job-contract"},
+			}
+			pod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: "kova-job-contract", Namespace: "jobs"},
+				Status: corev1.PodStatus{Phase: corev1.PodRunning, Conditions: []corev1.PodCondition{{
+					Type: corev1.PodReady, Status: corev1.ConditionTrue,
+				}}},
+			}
+			crClient := crfake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&kovav1.KovaBuild{}).WithObjects(build, pod).Build()
+			kubeClient := &fakeKube{}
+			kubeClient.execFn = func(opts kube.ExecOptions) error {
+				command := strings.Join(opts.Command, " ")
+				if strings.Contains(command, "source inspect") {
+					if tt.inspectionErr != nil {
+						return tt.inspectionErr
+					}
+					_, _ = io.WriteString(opts.Stdout, tt.inspection)
+					return nil
+				}
+				_, _ = io.WriteString(opts.Stdout, `{"status":"running"}`)
+				return nil
+			}
+			reconciler := KovaBuildReconciler{Client: crClient, Scheme: scheme, Kube: kubeClient}
+			if _, err := reconciler.submitWhenReady(context.Background(), build); err != nil {
+				t.Fatal(err)
+			}
+			var updated kovav1.KovaBuild
+			if err := crClient.Get(context.Background(), types.NamespacedName{Namespace: "jobs", Name: "contract"}, &updated); err != nil {
+				t.Fatal(err)
+			}
+			buildCalled := false
+			for _, command := range kubeClient.execCalls {
+				if strings.Contains(strings.Join(command, " "), " transport ") {
+					buildCalled = true
+				}
+			}
+			if buildCalled != tt.wantBuild {
+				t.Fatalf("buildCalled=%v commands=%#v", buildCalled, kubeClient.execCalls)
+			}
+			if tt.wantBuild {
+				if updated.Status.Phase != kovav1.PhaseRunning {
+					t.Fatalf("status = %#v", updated.Status)
+				}
+			} else if updated.Status.Phase != kovav1.PhaseFailed || updated.Status.Reason != tt.wantReason {
+				t.Fatalf("status = %#v", updated.Status)
+			}
+		})
+	}
+}
+
+func TestReconcilerDeleteCleansPodAndFinalizer(t *testing.T) {
 	scheme := testScheme(t)
 	client := crfake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&kovav1.KovaBuild{}).
 		Build()
-	root := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(root, "builds", "abc"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(root, "builds", "abc", "source.zip"), []byte("zip"), 0o644); err != nil {
-		t.Fatal(err)
-	}
 	kube := &fakeKube{}
-	store, err := artifactstore.NewFilesystem(root)
-	if err != nil {
-		t.Fatal(err)
-	}
 	reconciler := KovaBuildReconciler{
 		Client: client,
 		Scheme: scheme,
 		Kube:   kube,
-		Store:  store,
-		Cfg:    config.Config{ArtifactRoot: root},
 	}
 	build := &kovav1.KovaBuild{
 		TypeMeta: metav1.TypeMeta{APIVersion: kovav1.Group + "/" + kovav1.Version, Kind: "KovaBuild"},
@@ -264,17 +358,11 @@ func TestReconcilerDeleteCleansPodSourceAndFinalizer(t *testing.T) {
 			Namespace:  "jobs",
 			Finalizers: []string{cleanupFinalizer},
 		},
-		Spec: kovav1.KovaBuildSpec{Source: kovav1.KovaBuildSourceSpec{
-			URI: "file://" + filepath.Join(root, "builds", "abc", "source.zip"), Digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-		}},
 		Status: kovav1.KovaBuildStatus{RunnerPodName: "kova-job-abc"},
 	}
 
 	if _, err := reconciler.reconcileDelete(context.Background(), build); err != nil {
 		t.Fatal(err)
-	}
-	if _, err := os.Stat(filepath.Join(root, "builds", "abc", "source.zip")); !os.IsNotExist(err) {
-		t.Fatalf("source still exists or unexpected error: %v", err)
 	}
 	if len(kube.deleted) != 1 || kube.deleted[0] != "jobs/kova-job-abc" {
 		t.Fatalf("deleted pods = %#v", kube.deleted)
@@ -290,16 +378,11 @@ func TestReconcilerDeleteKeepsFinalizerWhenPodDeleteFails(t *testing.T) {
 		WithScheme(scheme).
 		WithStatusSubresource(&kovav1.KovaBuild{}).
 		Build()
-	root := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(root, "builds", "abc"), 0o755); err != nil {
-		t.Fatal(err)
-	}
 	kube := &fakeKube{deleteErr: errors.New("delete failed")}
 	reconciler := KovaBuildReconciler{
 		Client: client,
 		Scheme: scheme,
 		Kube:   kube,
-		Cfg:    config.Config{ArtifactRoot: root},
 	}
 	build := &kovav1.KovaBuild{
 		ObjectMeta: metav1.ObjectMeta{
@@ -316,8 +399,28 @@ func TestReconcilerDeleteKeepsFinalizerWhenPodDeleteFails(t *testing.T) {
 	if len(build.Finalizers) != 1 || build.Finalizers[0] != cleanupFinalizer {
 		t.Fatalf("finalizers = %#v", build.Finalizers)
 	}
-	if _, err := os.Stat(filepath.Join(root, "builds", "abc")); err != nil {
-		t.Fatalf("source dir removed before pod cleanup succeeded: %v", err)
+}
+
+func TestTerminalFailurePreservesVerifiedPartialOutputs(t *testing.T) {
+	scheme := testScheme(t)
+	build := &kovav1.KovaBuild{
+		ObjectMeta: metav1.ObjectMeta{Name: "partial", Namespace: "jobs"},
+		Status: kovav1.KovaBuildStatus{Outputs: []kovav1.BuildOutput{{
+			Format: "oci", Image: "registry.example.com/team/a:dev",
+			ManifestDigest: "sha256:" + strings.Repeat("a", 64),
+		}}},
+	}
+	crClient := crfake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&kovav1.KovaBuild{}).WithObjects(build).Build()
+	reconciler := KovaBuildReconciler{Client: crClient}
+	if err := reconciler.finish(context.Background(), build, kovav1.PhaseFailed, "ResultVerificationFailed", "another output failed"); err != nil {
+		t.Fatal(err)
+	}
+	var updated kovav1.KovaBuild
+	if err := crClient.Get(context.Background(), types.NamespacedName{Namespace: "jobs", Name: "partial"}, &updated); err != nil {
+		t.Fatal(err)
+	}
+	if updated.Status.Phase != kovav1.PhaseFailed || len(updated.Status.Outputs) != 1 || updated.Status.Outputs[0].ManifestDigest == "" {
+		t.Fatalf("status = %#v", updated.Status)
 	}
 }
 
@@ -392,71 +495,6 @@ func TestReconcilerProcessesCancellationRequest(t *testing.T) {
 	if updated.Status.Phase != kovav1.PhaseCancelled || len(kube.deleted) != 1 {
 		t.Fatalf("status=%#v deleted=%#v", updated.Status, kube.deleted)
 	}
-}
-
-func TestPersistResultsStoresFullSetAndBoundsStatus(t *testing.T) {
-	store, err := artifactstore.NewFilesystem(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	build := &kovav1.KovaBuild{ObjectMeta: metav1.ObjectMeta{Name: "results"}}
-	for range 101 {
-		build.Status.Results = append(build.Status.Results, kovav1.BuildResult{Status: "succeeded"})
-	}
-	reconciler := KovaBuildReconciler{Store: store}
-	if err := reconciler.persistResults(context.Background(), build); err != nil {
-		t.Fatal(err)
-	}
-	if build.Status.ResultSummary.Total != 101 || build.Status.ResultSummary.Succeeded != 101 {
-		t.Fatalf("summary = %#v", build.Status.ResultSummary)
-	}
-	if len(build.Status.Results) != 100 || build.Status.ResultArtifactURI == "" {
-		t.Fatalf("inline=%d artifact=%q", len(build.Status.Results), build.Status.ResultArtifactURI)
-	}
-	reader, err := store.Open(context.Background(), build.Status.ResultArtifactURI)
-	if err != nil {
-		t.Fatal(err)
-	}
-	raw, err := io.ReadAll(reader)
-	if closeErr := reader.Close(); err == nil {
-		err = closeErr
-	}
-	if err != nil || bytes.Count(raw, []byte(`"status":"succeeded"`)) != 101 {
-		t.Fatalf("stored result count=%d err=%v", bytes.Count(raw, []byte(`"status":"succeeded"`)), err)
-	}
-}
-
-func TestPersistLogsKeepsBoundedTailAndDigest(t *testing.T) {
-	store, err := artifactstore.NewFilesystem(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	kube := &fakeKubeWithLogs{fakeKube: fakeKube{}, logs: "0123456789"}
-	build := &kovav1.KovaBuild{ObjectMeta: metav1.ObjectMeta{Name: "logs", Namespace: "jobs"}, Status: kovav1.KovaBuildStatus{RunnerPodName: "runner"}}
-	reconciler := KovaBuildReconciler{Store: store, Kube: kube, Cfg: config.Config{MaxLogBytes: 5}}
-	reconciler.persistLogs(context.Background(), build)
-	if build.Status.LogArtifactURI == "" || !strings.HasPrefix(build.Status.LogArtifactDigest, "sha256:") {
-		t.Fatalf("status = %#v", build.Status)
-	}
-	reader, err := store.Open(context.Background(), build.Status.LogArtifactURI)
-	if err != nil {
-		t.Fatal(err)
-	}
-	raw, err := io.ReadAll(reader)
-	_ = reader.Close()
-	if err != nil || string(raw) != "56789" {
-		t.Fatalf("logs=%q err=%v", raw, err)
-	}
-}
-
-type fakeKubeWithLogs struct {
-	fakeKube
-	logs string
-}
-
-func (f *fakeKubeWithLogs) WritePodLogsTail(_ context.Context, _ string, _ string, _ int64, out io.Writer) error {
-	_, err := io.WriteString(out, f.logs)
-	return err
 }
 
 func testScheme(t *testing.T) *runtime.Scheme {

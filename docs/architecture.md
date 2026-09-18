@@ -1,127 +1,110 @@
 # Architecture
 
-Kova is a cloud-provider-neutral Kubernetes image build service. It turns
-Dockerfile contexts into OCI or Nydus images, pushes them to OCI registries,
-and can preheat successful results through Dragonfly.
+Kova is the seed image build execution plane for agentic infrastructure.
+It accepts a verifiable immutable source reference, schedules BuildKit work, pushes OCI or Nydus images, and returns the pushed OCI manifest digest.
+It is cloud-provider-neutral and can be used independently or called by Axern, Axrun, or another orchestrator through its public HTTP and CRD contracts.
+
+Kova does not own episodes, seeds, workflow recovery, caller retries, long-term logs, or a general artifact lifecycle.
+Those concerns remain with the caller.
+
+## Public Contract
+
+A build request contains:
+
+- an `oci://` source URI pinned by OCI manifest digest, or an immutable HTTPS archive URI;
+- the SHA-256 digest of the exact source zip bytes;
+- 1–100 unique tagged output image references;
+- bounded build options and an optional caller-scoped idempotency key.
+
+The source zip contains top-level image directories with `Dockerfile` and `metadata.json` files.
+`kova source push` and local `kova job submit` inputs create the same deterministic archive and publish it as `application/vnd.cofy.kova.source.v1+zip` in an OCI registry.
+The returned source URI is manifest-digest-pinned.
+
+Targets are normalized with the OCI reference parser and must be tagged push destinations.
+Digest-only destinations are rejected.
+The controller inspects the fetched and digest-verified archive before invoking BuildKit and requires its normalized target set to equal `spec.targets` exactly.
+Missing, extra, invalid, or duplicate source targets produce `InvalidSource` or `InvalidTargets` without an image push.
+
+The `KovaBuild` spec is immutable.
+One build has at most 100 logical targets and at most 200 concrete outputs when `format=both`.
+Each successful output contains only its format, image reference, and verified manifest digest.
+Larger workloads are split by the caller into multiple `KovaBuild` resources that reuse the same immutable source contract.
+
+The source bundle and output image are retained by registry policy or the caller.
+Kova does not create a source store, result object, log object, garbage collector, or shared storage volume.
 
 ## Runtime Roles
 
-Kova publishes three Linux image roles from the same version:
+Kova publishes three Linux image roles from the same release:
 
-- **controller** runs `kova-controller service`, the authenticated HTTP API,
-  and the `KovaBuild` controller. It does not contain BuildKit or Nydus tools.
-- **runner** runs one isolated `kovad daemon` per job. It contains `buildctl`,
-  `nydusify`, `nydus-image`, and diagnostic tools, but not `buildkitd`.
-- **worker** runs upstream rootless BuildKit. It contains no Kova binary and
-  provides shared execution and cache capacity.
+- **controller** runs the authenticated HTTP API and the `KovaBuild` controller;
+- **runner** runs one isolated `kovad daemon` per build and includes the client-side build tools;
+- **worker** runs upstream rootless BuildKit and provides shared execution and cache capacity.
 
-The cross-platform `kova` CLI is distributed separately. It can operate a
-runner directly for development or call a service deployment for platform
-integration.
+## Build Flow
 
-## Job and Storage Model
+1. The caller creates or identifies an immutable source bundle and records its content digest.
+2. The Service authenticates the caller, normalizes the request, and creates an immutable `KovaBuild`.
+3. Capacity admission reserves BuildKit slots and creates one runner Pod.
+4. A runner init container fetches the source from OCI or HTTPS, verifies its SHA-256 digest, and writes it to job-local `emptyDir` storage.
+5. The controller inspects the archive and verifies exact equality with the requested target set.
+6. The runner dispatches targets to shared BuildKit workers, which push the images.
+7. The controller verifies pushed descriptors with bounded parallelism and records manifest digests.
+8. The runner Pod and job-local source disappear after completion and TTL cleanup.
 
-`KovaBuild` is the canonical service job. Its spec is immutable and contains
-the authenticated requester, immutable archive targets, an artifact URI,
-SHA-256 digest, build options, and an optional caller-scoped idempotency key.
-Status contains
-`observedGeneration`, a `Ready` Condition, timestamps, the assigned runner,
-requested and allocated concurrency, stable failure reasons, persisted log and
-result digests, a typed result summary, and at most 100 inline results.
+If a Pod, node, network, or BuildKit operation fails, Kova records a deterministic terminal failure.
+The caller may submit a new build with the same source URI, digest, targets, and options because the input is immutable.
+Kova does not resume or retry a failed build internally.
 
-The artifact store has two drivers:
-
-- `filesystem` stores artifacts below a configured root. Kubernetes service
-  deployments mount that root from a PVC.
-- `s3` stores artifacts in an S3-compatible bucket. A runner init container
-  downloads and verifies the source into a job-local `emptyDir`.
-
-The full result set and bounded trailing runner logs are persisted in the same
-store. Credentials are read from Kubernetes Secrets and never copied into
-`KovaBuild` resources. A leader-elected collector removes aged artifact
-directories that no longer have a `KovaBuild` owner.
-
-## Internal Protocol
-
-The daemon listens on `/tmp/kova.sock`. Both the local CLI and the service
-controller use a typed Go client and invoke the hidden `kovad transport`
-command through Kubernetes exec. The transport streams request files and
-responses over the Unix socket without constructing shell or `curl` commands.
-
-## Worker Discovery and Scheduling
-
-The Helm chart creates a headless Service for worker Pods. Runners resolve its
-DNS name into independent BuildKit endpoints, keep the address pool refreshed,
-apply consistent target placement, enforce per-worker concurrency, and cool
-down workers after OOM-style failures.
-
-The service controller reserves actual worker slots for admitted jobs. Queued
-jobs are interleaved by authenticated requester and then ordered by creation
-time. Admission is work-conserving, respects global and per-requester active
-limits, and records the fixed allocation used by each runner. Direct CLI
-runners remain a development path and do not participate in service admission.
+Different targets may use different OCI registries when credentials, networking, and TLS policy allow each destination.
+Registry pushes are not transactional: a job can fail overall while status retains every successfully verified image digest.
+Kova does not roll back pushed images, and callers must treat the manifest digest rather than a mutable tag as the result fact.
 
 ## Topology
 
 ```mermaid
 flowchart LR
-  client["CLI or API client"]
-  controller["controller image<br/>kova-controller"]
+  caller["caller or CLI"]
+  source["OCI source bundle or immutable HTTPS archive"]
+  controller["Kova controller"]
   api["Kubernetes API"]
-  store["filesystem or S3 artifacts"]
-  runner["runner image<br/>kovad daemon"]
-  transport["typed Unix-socket transport"]
-  workers["worker images<br/>rootless buildkitd"]
-  registry["OCI registry"]
-  dragonfly["Dragonfly"]
+  runner["per-build runner Pod"]
+  workers["rootless BuildKit workers"]
+  registry["OCI registries"]
 
-  client --> controller
-  controller --> store
+  caller --> source
+  caller --> controller
   controller --> api
   api --> runner
-  runner --> transport
-  transport --> workers
+  source --> runner
+  runner --> workers
   workers --> registry
-  runner --> registry
-  runner --> dragonfly
+  controller --> registry
+  registry --> caller
 ```
 
-## Service Build Flow
+## Failure and Log Semantics
 
-1. The service authenticates the caller with Kubernetes TokenReview or an
-   explicitly configured static token.
-2. It stages the upload, validates the archive, computes its SHA-256 digest,
-   and writes an immutable source artifact.
-3. It creates an immutable `KovaBuild`. Reusing an idempotency key with
-   different inputs returns a conflict.
-4. Fair, work-conserving capacity admission reserves runner concurrency and
-   creates a runner Pod. S3 sources are materialized and verified by an init
-   container.
-5. The controller streams the source path to the daemon transport. The runner
-   dispatches targets across healthy BuildKit workers.
-6. The controller resolves registry descriptors, persists results and logs,
-   updates typed status, and removes the job and artifacts after its TTL.
+Kova exposes runner logs only while the runner is active.
+After terminal cleanup, the logs endpoint returns `410 Gone` rather than implying durable retention.
+Callers that need long-term logs or evidence must stream or collect them into their own lifecycle system.
 
-## Security Boundaries
+An idempotency key deduplicates an identical create request; it is not a retry counter.
+A caller retry is a new request using the same immutable source contract, normally with a new idempotency key.
 
-- Controller and runner containers run as UID/GID 65532 with all capabilities
-  dropped and the runtime-default seccomp profile.
-- Worker containers run upstream rootless BuildKit as UID/GID 1000. Rootless
-  BuildKit requires unconfined seccomp and AppArmor plus
-  `--oci-worker-no-process-sandbox`; it is not a privileged container.
-- TokenReview is the default service authentication mode. SubjectAccessReview
-  checks a virtual Service resource. Submitters have no direct write access to
-  `KovaBuild`, Pods, or Secrets and may control only jobs owned by their
-  authenticated username. `unsafe-none` must be selected explicitly and is
-  intended only for isolated development.
-- The chart restricts the unauthenticated BuildKit TCP endpoint to Kova runner
-  Pods by default when the cluster network plugin enforces NetworkPolicy.
-- Registry, artifact, and API credentials are external Secret inputs.
+## Scheduling and Security
+
+Queued builds are interleaved by authenticated requester and admitted against global, per-requester, and worker-slot limits.
+Requested concurrency is between 1 and 100 and cannot exceed the logical target count.
+Controller reconciles run concurrently, while a process-local admission lock preserves fair-share and slot accounting.
+Registry descriptor verification is independently bounded to at most eight concurrent requests and never exceeds the admitted build concurrency.
+
+Controller and runner containers run as UID/GID 65532 with all capabilities dropped and the runtime-default seccomp profile.
+Rootless BuildKit workers run as UID/GID 1000 with the upstream-required no-process-sandbox configuration.
+TokenReview and SubjectAccessReview are the production authentication boundary.
+Registry and API credentials are external Kubernetes Secret inputs and are never copied into `KovaBuild` resources.
 
 ## Observability
 
-Stable OpenTelemetry metrics cover queue delay, job duration and outcomes,
-capacity waits, artifact write latency and outcomes, authentication denials,
-and cancellations. Labels are limited to bounded values such as phase, result,
-and storage driver. `/healthz` remains an unauthenticated process liveness
-endpoint.
+Stable OpenTelemetry signals cover queue latency, capacity waits, terminal outcomes, authentication and authorization denials, cancellations, and build operations.
+Kova telemetry is operational data, not a long-term per-build evidence store.

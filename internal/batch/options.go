@@ -27,9 +27,7 @@ type Options struct {
 	Verbose                   bool
 	Target                    string
 	ExportTargets             []string
-	SkipFail                  bool
 	FromResultPath            string
-	Retry                     int
 	DragonflySchedulerAddr    string
 	PreheatInsecureSkipVerify bool
 	DockerConfigPath          string

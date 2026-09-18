@@ -1,14 +1,12 @@
 package serviceclient
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
-	"io"
-	"mime/multipart"
 	"net/http"
 	"net/url"
-	"os"
-	"path"
 	"regexp"
 	"strconv"
 	"strings"
@@ -18,15 +16,14 @@ import (
 )
 
 type CreateBuildOptions struct {
-	ArchivePath    string
-	Target         string
+	SourceURI      string
+	SourceDigest   string
+	Targets        []string
 	Format         string
 	Concurrency    int
 	Timeout        int
-	Retry          int
 	OOMCooldown    time.Duration
 	FailFast       bool
-	SkipFail       bool
 	Verbose        bool
 	Variables      []string
 	IdempotencyKey string
@@ -36,65 +33,23 @@ func (c *Client) CreateBuild(ctx context.Context, opts CreateBuildOptions) (serv
 	if err := c.CheckCompatible(ctx); err != nil {
 		return serviceapi.BuildJob{}, err
 	}
-	archive, err := os.Open(opts.ArchivePath)
+	body, err := json.Marshal(serviceapi.CreateBuildRequest{
+		SourceURI: opts.SourceURI, SourceDigest: opts.SourceDigest, Targets: opts.Targets,
+		Format: opts.Format, Concurrency: opts.Concurrency, Timeout: opts.Timeout,
+		OOMCooldown: opts.OOMCooldown.String(), FailFast: opts.FailFast, Verbose: opts.Verbose,
+		Variables: opts.Variables, IdempotencyKey: opts.IdempotencyKey,
+	})
 	if err != nil {
 		return serviceapi.BuildJob{}, err
 	}
-	defer archive.Close()
-
-	reader, writer := io.Pipe()
-	multipartWriter := multipart.NewWriter(writer)
-	writeErr := make(chan error, 1)
-	go func() {
-		err := writeCreateBuildForm(multipartWriter, archive, opts)
-		if closeErr := multipartWriter.Close(); err == nil {
-			err = closeErr
-		}
-		_ = writer.CloseWithError(err)
-		writeErr <- err
-	}()
-	req, err := c.request(ctx, http.MethodPost, "/v1/builds", reader)
+	req, err := c.request(ctx, http.MethodPost, "/v1/builds", bytes.NewReader(body))
 	if err != nil {
 		return serviceapi.BuildJob{}, err
 	}
-	req.Header.Set("Content-Type", multipartWriter.FormDataContentType())
+	req.Header.Set("Content-Type", "application/json")
 	var job serviceapi.BuildJob
 	err = c.do(req, &job)
-	_ = reader.CloseWithError(err)
-	if formErr := <-writeErr; err == nil && formErr != nil {
-		err = formErr
-	}
 	return job, err
-}
-
-func writeCreateBuildForm(writer *multipart.Writer, archive io.Reader, opts CreateBuildOptions) error {
-	file, err := writer.CreateFormFile("file", path.Base(opts.ArchivePath))
-	if err != nil {
-		return err
-	}
-	if _, err := io.Copy(file, archive); err != nil {
-		return err
-	}
-	fields := [][2]string{
-		{"target", opts.Target}, {"format", opts.Format},
-		{"concurrency", strconv.Itoa(opts.Concurrency)}, {"timeout", strconv.Itoa(opts.Timeout)},
-		{"retry", strconv.Itoa(opts.Retry)}, {"oom-cooldown", opts.OOMCooldown.String()},
-		{"fail-fast", strconv.FormatBool(opts.FailFast)}, {"skip-fail", strconv.FormatBool(opts.SkipFail)},
-		{"verbose", strconv.FormatBool(opts.Verbose)}, {"idempotency_key", opts.IdempotencyKey},
-	}
-	for _, field := range fields {
-		if field[1] != "" {
-			if err := writer.WriteField(field[0], field[1]); err != nil {
-				return err
-			}
-		}
-	}
-	for _, value := range opts.Variables {
-		if err := writer.WriteField("var", value); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 func (c *Client) List(ctx context.Context) (serviceapi.JobList, error) {

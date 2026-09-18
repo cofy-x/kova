@@ -3,6 +3,7 @@ package buildcontroller
 import (
 	"context"
 	"time"
+	"unicode/utf8"
 
 	kovav1 "github.com/cofy-x/kova/internal/apis/kova/v1alpha1"
 
@@ -13,17 +14,13 @@ import (
 )
 
 func (r *KovaBuildReconciler) finish(ctx context.Context, build *kovav1.KovaBuild, phase string, reason string, message string) error {
-	r.persistLogs(ctx, build)
 	now := metav1.Now()
 	build.Status.Phase = phase
 	build.Status.ObservedGeneration = build.Generation
-	build.Status.Reason = reason
-	build.Status.Message = message
+	build.Status.Reason = truncate(reason, 128)
+	build.Status.Message = truncate(message, 2048)
 	build.Status.FinishedAt = &now
-	if build.Status.ResultSummary.Total == 0 {
-		build.Status.ResultSummary = summarize(build.Status.Results)
-	}
-	setPhaseCondition(build, phase, reason, message)
+	setPhaseCondition(build, phase, build.Status.Reason, build.Status.Message)
 	if r.Recorder != nil {
 		eventType := corev1.EventTypeNormal
 		if phase == kovav1.PhaseFailed {
@@ -46,6 +43,8 @@ func defaultMessage(message, fallback string) string {
 }
 
 func setPhaseCondition(build *kovav1.KovaBuild, phase, reason, message string) {
+	reason = truncate(reason, 128)
+	message = truncate(message, 2048)
 	status := metav1.ConditionUnknown
 	if phase == kovav1.PhaseSucceeded {
 		status = metav1.ConditionTrue
@@ -61,16 +60,15 @@ func setPhaseCondition(build *kovav1.KovaBuild, phase, reason, message string) {
 	})
 }
 
-func summarize(results []kovav1.BuildResult) kovav1.BuildResultSummary {
-	summary := kovav1.BuildResultSummary{Total: int32(len(results))}
-	for _, result := range results {
-		if result.Status == "succeeded" {
-			summary.Succeeded++
-		} else {
-			summary.Failed++
-		}
+func truncate(value string, limit int) string {
+	if len(value) <= limit {
+		return value
 	}
-	return summary
+	value = value[:limit]
+	for !utf8.ValidString(value) {
+		value = value[:len(value)-1]
+	}
+	return value
 }
 
 func cancellationRequested(build *kovav1.KovaBuild) bool {

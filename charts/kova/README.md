@@ -23,13 +23,8 @@ Always apply the selected release CRD before upgrading. Helm installs files in
 `crds/` for a new release but does not update them on later upgrades.
 
 The default installs one worker. Production environments should provide an
-environment-owned values file for capacity, storage, registry credentials,
+environment-owned values file for capacity, registry credentials,
 scheduling, and service configuration.
-
-For S3-compatible storage, prefer
-`artifactStore.credentials.provider=file`. The chart mounts an external Secret
-whose keys are named `KOVA_S3_ACCESS_KEY`, `KOVA_S3_SECRET_KEY`, and optionally
-`KOVA_S3_SESSION_TOKEN`; Kova rereads projected credentials after rotation.
 
 `values.schema.json` rejects unknown or invalid chart values. The worker
 NetworkPolicy allows Kova runner Pods from the configured runner namespace by
@@ -38,8 +33,12 @@ when it is enabled.
 
 Service deployments reuse the runner image pull Secret to authenticate output
 descriptor verification by default. Set `serviceDaemon.registrySecret` when
-those credentials differ. Plain HTTP registries must be listed explicitly in
+those credentials differ. The same Secret authorizes OCI source pulls.
+Plain HTTP registries must be listed explicitly in
 `serviceDaemon.registryPlainHTTP` and are intended only for development.
+
+The chart does not provision object storage or a shared PVC.
+Runner Pods use job-local `emptyDir` storage for digest-verified source bundles.
 
 See the [Quick Start](../../docs/quickstart.md) and
 [Kubernetes deployment guide](../../docs/deployment/kubernetes.md) for the

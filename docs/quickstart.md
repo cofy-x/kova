@@ -33,8 +33,7 @@ kubectl -n kova create secret generic kova-service-auth \
   --from-literal=token="${KOVA_SERVICE_TOKEN}"
 ```
 
-Apply the selected release CRD, then install the public OCI chart with the
-Service and a filesystem artifact PVC enabled:
+Apply the selected release CRD, then install the public OCI chart with the Service enabled:
 
 ```bash
 helm show crds oci://ghcr.io/cofy-x/charts/kova \
@@ -47,7 +46,6 @@ helm upgrade --install kova oci://ghcr.io/cofy-x/charts/kova \
   --set serviceDaemon.authentication.mode=static \
   --set serviceDaemon.authentication.staticPrincipal=kova:quickstart \
   --set serviceDaemon.authentication.staticTokenSecret.name=kova-service-auth \
-  --set artifactStore.filesystem.pvc.create=true \
   --wait
 ```
 
@@ -63,9 +61,9 @@ kubectl -n kova create rolebinding kova-quickstart \
   --user=kova:quickstart
 ```
 
-The installation creates the Service controller, one rootless BuildKit worker,
-and the artifact PVC. Published charts bind controller, runner, and worker image
-tags to the same Kova release automatically.
+The installation creates the Service controller and one rootless BuildKit worker.
+Published charts bind controller, runner, and worker image tags to the same Kova release automatically.
+Kova needs no object store or shared PVC.
 
 Verify the installation:
 
@@ -110,6 +108,7 @@ Set the Secret name, or leave it empty for an anonymous development registry:
 ```bash
 export KOVA_REGISTRY_SECRET=kova-registry
 export KOVA_TARGET=REGISTRY_HOST/kova-quickstart/hello:dev
+export KOVA_SOURCE_REPOSITORY=REGISTRY_HOST/kova-quickstart/source:dev
 ```
 
 Replace the uppercase registry placeholders before running these commands. For
@@ -154,11 +153,13 @@ printf 'FROM scratch\nCOPY hello.txt /\n' \
   > .work/kova-quickstart/Dockerfile
 printf 'hello from kova\n' > .work/kova-quickstart/hello.txt
 
-kova job submit .work/kova-quickstart \
+kova job submit \
+  --source-repository "${KOVA_SOURCE_REPOSITORY}" \
   --target "${KOVA_TARGET}" \
   --format oci \
   --concurrency 1 \
-  --fail-fast
+  --fail-fast \
+  .work/kova-quickstart
 ```
 
 Copy the returned job ID, then inspect the complete lifecycle:
@@ -170,16 +171,14 @@ kova job results <job-id>
 kova job logs <job-id>
 ```
 
-Pull `${KOVA_TARGET}` as an additional registry-path check when the workstation
-can reach the target registry. Logs and typed results remain available from the
-artifact store after the short-lived runner Pod disappears.
+Pull `${KOVA_TARGET}` as an additional registry-path check when the workstation can reach the target registry.
+The successful result is the verified manifest digest returned by `kova job results`.
+Logs are available only while the runner Pod is active; long-term log collection belongs to the caller.
 
-The [authenticated Service workflow](service.md) covers TokenReview, batch
-archives, cancellation, Nydus output, and production artifact storage. The
+The [authenticated Service workflow](service.md) covers TokenReview, immutable source bundles, cancellation, bounded target batches, and Nydus output. The
 [direct runner workflow](cli-workflow.md) is reserved for development and
 low-level debugging. The
-[Kubernetes deployment guide](deployment/kubernetes.md) covers private registry
-credentials, service mode, artifact storage, capacity, and production overlays.
+[Kubernetes deployment guide](deployment/kubernetes.md) covers private registry credentials, service mode, capacity, and production overlays.
 
 ## Uninstall
 
