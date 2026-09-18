@@ -1,6 +1,11 @@
 package service
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/cofy-x/kova/internal/buildcontract"
+	"github.com/cofy-x/kova/internal/service/config"
+)
 
 func TestParseNodeSelector(t *testing.T) {
 	got, err := parseNodeSelector([]string{"kova.cofy.io/source-node=true", "topology.kubernetes.io/zone=zone-b"})
@@ -55,5 +60,19 @@ func TestRunnerObservabilityEnvUsesRunnerServiceName(t *testing.T) {
 	env := runnerObservabilityEnv()
 	if env["KOVA_OTEL_ENABLED"] != "true" || env["OTEL_SERVICE_NAME"] != "kova-runner" {
 		t.Fatalf("runner env = %#v", env)
+	}
+}
+
+func TestValidateCapacityConfigRejectsUnboundedWorkerSlots(t *testing.T) {
+	valid := config.Config{
+		MaxActiveJobs: 20, MaxActiveJobsPerRequester: 4, MaxQueuedJobsPerRequester: 100,
+		WorkerSlots: 20, ControllerConcurrency: buildcontract.DefaultControllerConcurrency,
+	}
+	if err := validateCapacityConfig(valid); err != nil {
+		t.Fatal(err)
+	}
+	valid.WorkerSlots = 0
+	if err := validateCapacityConfig(valid); err == nil {
+		t.Fatal("expected worker-slots=0 to be rejected")
 	}
 }

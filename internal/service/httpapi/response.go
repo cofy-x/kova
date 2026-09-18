@@ -16,13 +16,12 @@ func buildJobFromCR(build *kovav1.KovaBuild, cfg config.Config) BuildJob {
 		CreatedAt:             build.CreationTimestamp.Time,
 		BuildkitAddr:          cfg.BuildkitAddr,
 		SourceDigest:          build.Spec.Source.Digest,
+		SourceURI:             build.Spec.Source.URI,
 		IdempotencyKey:        build.Spec.IdempotencyKey,
 		Requester:             build.Spec.Requester.Username,
 		CancellationRequested: build.Annotations[kovav1.CancellationRequestedAnnotation] != "",
 		RequestedConcurrency:  requestedConcurrency(build),
 		AllocatedConcurrency:  build.Status.AllocatedConcurrency,
-		LogArtifactURI:        build.Status.LogArtifactURI,
-		LogArtifactDigest:     build.Status.LogArtifactDigest,
 	}
 	if job.PodName == "" {
 		job.PodName = buildPodName(build.Name)

@@ -2,11 +2,16 @@ package source
 
 import (
 	"archive/zip"
+	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/cofy-x/kova/internal/buildcontract"
 )
 
 func TestParseBuildVariablesRequiresPrefix(t *testing.T) {
@@ -74,6 +79,38 @@ func TestBuildArchiveTargetsReturnsSortedBatchTargets(t *testing.T) {
 	}
 	if len(targets) != 2 || targets[0] != "registry.example/a:dev" || targets[1] != "registry.example/b:dev" {
 		t.Fatalf("targets = %#v", targets)
+	}
+}
+
+func TestBuildArchiveTargetsRejectsMoreThanContractLimit(t *testing.T) {
+	archive := filepath.Join(t.TempDir(), "source.zip")
+	file, err := os.Create(archive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writer := zip.NewWriter(file)
+	for index := 0; index <= buildcontract.MaxLogicalTargets; index++ {
+		dir := fmt.Sprintf("image-%03d", index)
+		dockerfile, createErr := writer.Create(dir + "/Dockerfile")
+		if createErr != nil {
+			t.Fatal(createErr)
+		}
+		_, _ = dockerfile.Write([]byte("FROM scratch\n"))
+		metadataFile, createErr := writer.Create(dir + "/metadata.json")
+		if createErr != nil {
+			t.Fatal(createErr)
+		}
+		metadata := fmt.Sprintf("{\"target\":%q}\n", fmt.Sprintf("registry.example.com/team/image-%03d:dev", index))
+		_, _ = metadataFile.Write([]byte(metadata))
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := BuildArchiveTargets(archive); err == nil {
+		t.Fatal("expected source contract target limit rejection")
 	}
 }
 
@@ -281,5 +318,36 @@ func TestResolveArchiveSymlinkTargetAllowsParentWithinBuildContext(t *testing.T)
 	}
 	if target != "../hello.txt" {
 		t.Fatalf("target = %q", target)
+	}
+}
+
+func TestCreateSingleImageArchiveIsDeterministicAcrossMtimeChanges(t *testing.T) {
+	imageDir := t.TempDir()
+	dockerfile := filepath.Join(imageDir, "Dockerfile")
+	if err := os.WriteFile(dockerfile, []byte("FROM scratch\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	first := filepath.Join(t.TempDir(), "first.zip")
+	second := filepath.Join(t.TempDir(), "second.zip")
+	if err := CreateSingleImageArchive(imageDir, "registry.example.com/team/image:dev", first); err != nil {
+		t.Fatal(err)
+	}
+	later := time.Now().Add(24 * time.Hour)
+	if err := os.Chtimes(dockerfile, later, later); err != nil {
+		t.Fatal(err)
+	}
+	if err := CreateSingleImageArchive(imageDir, "registry.example.com/team/image:dev", second); err != nil {
+		t.Fatal(err)
+	}
+	firstBytes, err := os.ReadFile(first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondBytes, err := os.ReadFile(second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(firstBytes, secondBytes) {
+		t.Fatal("source archive changed when only input mtimes changed")
 	}
 }

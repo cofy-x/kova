@@ -3,8 +3,6 @@ package httpapi
 import (
 	"bytes"
 	"context"
-	"fmt"
-	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -69,27 +67,12 @@ func (s *Server) handleBuildLogs(c echo.Context) error {
 	if err != nil || tail < 0 {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "tail_lines must be a non-negative integer"})
 	}
-	if build.Status.LogArtifactURI != "" {
-		reader, err := s.store.Open(c.Request().Context(), build.Status.LogArtifactURI)
-		if err != nil {
-			return c.JSON(http.StatusInternalServerError, map[string]string{"error": fmt.Sprintf("read persisted logs: %v", err)})
-		}
-		raw, readErr := io.ReadAll(io.LimitReader(reader, s.cfg.MaxLogBytes+1))
-		closeErr := reader.Close()
-		if readErr != nil {
-			return c.JSON(http.StatusInternalServerError, map[string]string{"error": fmt.Sprintf("read persisted logs: %v", readErr)})
-		}
-		if closeErr != nil {
-			return c.JSON(http.StatusInternalServerError, map[string]string{"error": fmt.Sprintf("close persisted logs: %v", closeErr)})
-		}
-		if int64(len(raw)) > s.cfg.MaxLogBytes {
-			return c.JSON(http.StatusInternalServerError, map[string]string{"error": "persisted logs exceed the configured limit"})
-		}
-		return c.Blob(http.StatusOK, "text/plain; charset=utf-8", tailLogLines(raw, tail))
-	}
 	var out bytes.Buffer
 	if build.Status.RunnerPodName == "" {
 		return c.JSON(http.StatusNotFound, map[string]string{"error": "job logs are not available"})
+	}
+	if isTerminalPhase(build.Status.Phase) {
+		return c.JSON(http.StatusGone, map[string]string{"error": "job logs are only available while the runner is active"})
 	}
 	if err := s.kube.WritePodLogsTail(c.Request().Context(), build.Namespace, build.Status.RunnerPodName, tail, &out); err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})

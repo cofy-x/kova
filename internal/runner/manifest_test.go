@@ -121,25 +121,28 @@ func TestRenderPrepareManifestWithObservabilityEnv(t *testing.T) {
 	mustContain(t, manifest, "kova-runner")
 }
 
-func TestPreparePodMountsRotatableS3Credentials(t *testing.T) {
+func TestPreparePodFetchesImmutableOCISource(t *testing.T) {
 	pod := PreparePod(ManifestOptions{
-		PodName: "s3", Namespace: "jobs", Image: "registry.local/kova:dev",
-		SourceURI: "s3://builds/source.zip", ArtifactSecret: "s3-credentials",
-		S3CredentialProvider: "file", S3CredentialDir: "/credentials",
+		PodName: "source", Namespace: "jobs", Image: "registry.local/kova:dev",
+		ImagePullSecret:   "registry-secret",
+		SourceURI:         "oci://registry.local/sources/demo@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		SourceDigest:      "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		RegistryPlainHTTP: []string{"registry.local"},
 	})
 	if len(pod.Spec.InitContainers) != 1 {
 		t.Fatalf("init containers = %#v", pod.Spec.InitContainers)
 	}
 	fetch := pod.Spec.InitContainers[0]
-	if len(fetch.EnvFrom) != 0 {
-		t.Fatalf("file credentials must not use envFrom: %#v", fetch.EnvFrom)
+	command := strings.Join(fetch.Command, " ")
+	if !strings.Contains(command, "source fetch") || !strings.Contains(command, "--registry-plain-http registry.local") {
+		t.Fatalf("fetch command = %q", command)
 	}
-	if len(fetch.VolumeMounts) != 2 || fetch.VolumeMounts[1].MountPath != "/credentials" {
-		t.Fatalf("credential mounts = %#v", fetch.VolumeMounts)
+	if len(fetch.VolumeMounts) != 2 || fetch.VolumeMounts[1].MountPath != "/home/kova/.docker" {
+		t.Fatalf("source mounts = %#v", fetch.VolumeMounts)
 	}
 	if len(pod.Spec.Volumes) != 2 || pod.Spec.Volumes[1].Secret == nil ||
-		pod.Spec.Volumes[1].Secret.SecretName != "s3-credentials" {
-		t.Fatalf("credential volumes = %#v", pod.Spec.Volumes)
+		pod.Spec.Volumes[1].Secret.SecretName != "registry-secret" {
+		t.Fatalf("source auth volumes = %#v", pod.Spec.Volumes)
 	}
 }
 

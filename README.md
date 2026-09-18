@@ -11,8 +11,8 @@
   English | <a href="README.zh-CN.md">中文</a>
 </p>
 
-Kova turns batches of Dockerfile contexts into OCI or Nydus images on your own Kubernetes cluster.
-Powered by BuildKit, it pushes results to any OCI registry and can preheat them across a Dragonfly P2P cluster — without tying you to a cloud provider.
+Kova is a cloud-neutral seed image build execution plane for agentic infrastructure.
+It verifies immutable source bundles, schedules BuildKit, pushes OCI or Nydus images, and returns verified OCI manifest digests.
 
 ## Quick start
 
@@ -28,7 +28,7 @@ kova version
 ```
 
 Install the service.
-The quick-start profile uses a generated static token and a filesystem PVC; shared environments should use TokenReview and S3-compatible storage instead:
+The quick-start profile uses a generated static token; shared environments should use TokenReview:
 
 ```bash
 export KOVA_VERSION=vX.Y.Z
@@ -48,7 +48,6 @@ helm upgrade --install kova oci://ghcr.io/cofy-x/charts/kova \
   --set serviceDaemon.authentication.mode=static \
   --set serviceDaemon.authentication.staticPrincipal=kova:quickstart \
   --set serviceDaemon.authentication.staticTokenSecret.name=kova-service-auth \
-  --set artifactStore.filesystem.pvc.create=true \
   --wait
 
 kubectl -n kova create rolebinding kova-quickstart \
@@ -65,7 +64,10 @@ kubectl -n kova port-forward service/kova-service 8080:8080 &
 
 kova ctx set --mode service --service-url http://127.0.0.1:8080 --use quickstart
 kova doctor
-kova job submit ./image --target registry.example.com/team/image:dev
+kova job submit \
+  --source-repository registry.example.com/team/kova-sources:quickstart \
+  --target registry.example.com/team/image:dev \
+  ./image
 kova job wait <job-id>
 kova job results <job-id>
 ```
@@ -74,19 +76,19 @@ Registry credentials, Nydus output, and batch archives are covered in the [insta
 
 ## Why Kova
 
-- **Batch in, images out** — one job builds many Dockerfile targets into OCI or Nydus images; typed per-target results and logs persist in the artifact store after the short-lived runner Pod is gone.
-- **A real job model** — the `KovaBuild` CRD has an immutable spec, SHA-256-pinned source artifacts, and caller-scoped idempotency keys.
+- **Immutable source to verified image** — every build consumes a digest-verified OCI or HTTPS source and returns the pushed image manifest digest.
+- **A bounded execution model** — one immutable `KovaBuild` accepts up to 100 logical targets and records at most 200 concrete outputs; callers own larger workflow partitioning and retries.
 - **Fair, work-conserving scheduling** — queued jobs interleave by authenticated requester; admission reserves actual BuildKit worker slots.
 - **Isolated execution** — one runner Pod per job drives shared upstream rootless BuildKit workers; controller and runner run as non-root with all capabilities dropped.
 - **Kubernetes-native auth** — TokenReview and SubjectAccessReview by default; submitters never touch Pods, Secrets, or other users' jobs.
-- **Cloud-provider-neutral** — registry, artifact, and API credentials are external Secret inputs. The chart creates no clusters, cloud accounts, or registries.
+- **Cloud-provider-neutral** — registry and API credentials are external Secret inputs. The chart creates no clusters, cloud accounts, object stores, or registries.
 - **Observable** — stable OpenTelemetry metrics for queue delay, job duration, and capacity waits.
 
 ## Documentation
 
 - [Documentation map](docs/README.md): choose the guide for a task.
 - [Installation and first build](docs/quickstart.md): OCI chart, matching CLI, and a verified build.
-- [Service job workflow](docs/service.md): identity, RBAC, contexts, artifact storage, and job operations.
+- [Service job workflow](docs/service.md): immutable sources, identity, RBAC, bounded results, and job operations.
 - [CLI workflow](docs/cli-workflow.md): direct runner builds for development and low-level debugging.
 - [Runtime design](docs/architecture.md): roles, topology, build/export, preheat, and scaling flows.
 - [Kubernetes deployment](docs/deployment/kubernetes.md): registry credentials, worker sizing, and production configuration.

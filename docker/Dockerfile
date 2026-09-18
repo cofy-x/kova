@@ -59,9 +59,9 @@ RUN set -eux; \
     tar -xzf /tmp/nydus.tgz -C /out --strip-components=1 nydus-static/nydusify nydus-static/nydus-image
 
 FROM ubuntu-base AS runtime-builder
-ARG GO_VERSION=1.26.5
-ARG GO_SHA256_AMD64=5c2c3b16caefa1d968a94c1daca04a7ca301a496d9b086e17ad77bb81393f053
-ARG GO_SHA256_ARM64=fe4789e92b1f33358680864bbe8704289e7bb5fc207d80623c308935bd696d49
+ARG GO_VERSION=1.26.8
+ARG GO_SHA256_AMD64=d0f743b33e8d8945e6b1f432edd15785c70507121d6e2a723b21285eddf8b57b
+ARG GO_SHA256_ARM64=211ffced9dcb9633a55eac6364816ec0ddd951389a740e88fa8b3337971bdda0
 ARG TARGETOS=linux
 ARG TARGETARCH
 RUN apt-get update \

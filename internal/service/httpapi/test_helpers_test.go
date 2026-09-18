@@ -1,21 +1,19 @@
 package httpapi
 
 import (
-	"archive/zip"
 	"bytes"
 	"context"
-	"fmt"
+	"encoding/json"
 	"io"
-	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	kovav1 "github.com/cofy-x/kova/internal/apis/kova/v1alpha1"
-	"github.com/cofy-x/kova/internal/artifactstore"
 	"github.com/cofy-x/kova/internal/kube"
 	serviceauth "github.com/cofy-x/kova/internal/service/auth"
 	"github.com/cofy-x/kova/internal/service/config"
@@ -113,15 +111,11 @@ func newTestServerWithRoot(t *testing.T, kube *fakeKube, root string) *Server {
 		t.Fatal(err)
 	}
 	client := crfake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&kovav1.KovaBuild{}).Build()
-	store, err := artifactstore.NewFilesystem(root)
-	if err != nil {
-		t.Fatal(err)
-	}
 	authenticator, err := serviceauth.New(serviceauth.ModeStatic, "token", "test-user", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return NewServer(testConfig(root), kube, client, client, store, authenticator, serviceauth.AllowAllAuthorizer{})
+	return NewServer(testConfig(root), kube, client, client, authenticator, serviceauth.AllowAllAuthorizer{})
 }
 
 func testConfig(root string) config.Config {
@@ -130,9 +124,6 @@ func testConfig(root string) config.Config {
 		RunnerImage:           "registry.local/kova:dev",
 		RunnerImagePullPolicy: "IfNotPresent",
 		BuildkitAddr:          "tcp://kova.kova.svc:9094",
-		SourcePVCClaim:        "kova-sources",
-		ArtifactDriver:        artifactstore.DriverFilesystem,
-		ArtifactRoot:          root,
 		JobTTL:                time.Hour,
 		AuthToken:             "token",
 		AuthMode:              serviceauth.ModeStatic,
@@ -155,43 +146,55 @@ func multipartBuildRequestWithTarget(t *testing.T, fields map[string]string, arc
 
 func multipartBuildRequestWithTargets(t *testing.T, fields map[string]string, archiveTargets []string) *http.Request {
 	t.Helper()
-	var body bytes.Buffer
-	writer := multipart.NewWriter(&body)
-	file, err := writer.CreateFormFile("file", "source.zip")
+	body := map[string]any{
+		"source_uri":    "oci://registry.local/sources/test@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		"source_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		"targets":       archiveTargets,
+		"concurrency":   1,
+	}
+	for key, value := range fields {
+		switch key {
+		case "target":
+			body["targets"] = []string{value}
+		case "formats":
+			body["format"] = "both"
+		case "concurrency", "timeout":
+			number, err := strconv.Atoi(value)
+			if err != nil {
+				body[key] = value
+			} else {
+				body[key] = number
+			}
+		case "fail-fast":
+			parsed, err := strconv.ParseBool(value)
+			if err != nil {
+				body["fail_fast"] = value
+			} else {
+				body["fail_fast"] = parsed
+			}
+		case "verbose":
+			parsed, err := strconv.ParseBool(value)
+			if err != nil {
+				body["verbose"] = value
+			} else {
+				body["verbose"] = parsed
+			}
+		case "oom-cooldown":
+			body["oom_cooldown"] = value
+		case "var":
+			body["variables"] = []string{value}
+		case "idempotency_key":
+			body[key] = value
+		default:
+			body[key] = value
+		}
+	}
+	raw, err := json.Marshal(body)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var archive bytes.Buffer
-	zw := zip.NewWriter(&archive)
-	for index, target := range archiveTargets {
-		directory := fmt.Sprintf("image-%d", index)
-		dockerfile, err := zw.Create(directory + "/Dockerfile")
-		if err != nil {
-			t.Fatal(err)
-		}
-		_, _ = dockerfile.Write([]byte("FROM scratch\n"))
-		metadata, err := zw.Create(directory + "/metadata.json")
-		if err != nil {
-			t.Fatal(err)
-		}
-		_, _ = metadata.Write([]byte(`{"target":"` + target + `"}`))
-	}
-	if err := zw.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := file.Write(archive.Bytes()); err != nil {
-		t.Fatal(err)
-	}
-	for key, value := range fields {
-		if err := writer.WriteField(key, value); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := writer.Close(); err != nil {
-		t.Fatal(err)
-	}
-	req := httptest.NewRequest(http.MethodPost, "/v1/builds", &body)
-	req.Header.Set("Content-Type", writer.FormDataContentType())
+	req := httptest.NewRequest(http.MethodPost, "/v1/builds", bytes.NewReader(raw))
+	req.Header.Set("Content-Type", "application/json")
 	return req
 }
 

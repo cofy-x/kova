@@ -142,10 +142,10 @@ jobs:
         env:
           E2E_BUILD_IMAGE: "false"
         run: make e2e-helm-quickstart
-      - name: Verify S3 Service lifecycle
+      - name: Verify immutable-source Service lifecycle
         env:
           E2E_SERVICE_BUILD_CLI: "false"
           E2E_SERVICE_BUILD_IMAGE: "false"
           KIND_LOAD_IMAGES: "false"
           START_OBSERVABILITY: "false"
-        run: make e2e-service-s3
+        run: make e2e-service

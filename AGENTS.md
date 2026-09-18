@@ -5,10 +5,9 @@ the [agent context map](.x/README.md) before making changes.
 
 ## Project
 
-Kova is a Kubernetes-native, cloud-provider-neutral image build service powered
-by BuildKit. It builds batches of Dockerfile contexts into OCI or Nydus images,
-pushes them to OCI registries, and can preheat successful build results through
-a Dragonfly P2P cluster.
+Kova is the Kubernetes-native, cloud-provider-neutral seed image build execution plane for agentic infrastructure.
+It verifies immutable source contracts, schedules BuildKit, pushes OCI or Nydus images, and delivers verified OCI manifest digests.
+Callers own workflow recovery, retries, long-term logs, and source or image retention.
 
 ## Hard Rules
 
@@ -17,8 +16,9 @@ a Dragonfly P2P cluster.
   the consuming environment repository.
 - Never commit `.env`, kubeconfig, registry passwords, tokens, or cloud
   credentials.
-- Keep behavior stable unless the user explicitly asks for behavior changes.
-- Preserve the CLI surface and daemon API paths unless a migration is planned.
+- Keep the execution contract bounded: at most 100 logical targets and 200 concrete outputs per build.
+- Do not add workflow recovery, durable logs, or a Kova-owned source/result storage lifecycle.
+- Breaking changes are acceptable when they remove an invalid boundary; do not preserve compatibility layers without an explicit requirement.
 - Be careful with dirty worktrees. Do not revert user changes unless asked.
 - Use the narrowest useful verification for the change.
 

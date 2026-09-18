@@ -3,6 +3,7 @@ package runnerexec
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/url"
 	"strconv"
@@ -17,6 +18,25 @@ import (
 type Client struct {
 	Kube         kube.API
 	BuildkitAddr string
+}
+
+func (c Client) SourceTargets(ctx context.Context, build *kovav1.KovaBuild, sourcePath string) ([]string, error) {
+	var stdout, stderr bytes.Buffer
+	err := c.Kube.Exec(ctx, build.Namespace, build.Status.RunnerPodName, kube.ExecOptions{
+		Stdout:  &stdout,
+		Stderr:  &stderr,
+		Command: []string{"kovad", "source", "inspect", "--input", sourcePath},
+	})
+	if err != nil {
+		return nil, ExecError("inspect source contract", stderr.Bytes(), err)
+	}
+	var contract struct {
+		Targets []string `json:"targets"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &contract); err != nil {
+		return nil, fmt.Errorf("parse source contract: %w", err)
+	}
+	return contract.Targets, nil
 }
 
 func (c Client) SubmitBuild(ctx context.Context, build *kovav1.KovaBuild, sourcePath string) error {
@@ -88,7 +108,6 @@ func BuildQuery(build *kovav1.KovaBuild, buildkitAddr string) string {
 	}
 	opts := build.Spec.Build
 	setString(values, "format", opts.Format)
-	setString(values, "target", opts.Target)
 	setString(values, "oom-cooldown", opts.OOMCooldown)
 	concurrency := opts.Concurrency
 	if build.Status.AllocatedConcurrency > 0 {
@@ -100,14 +119,8 @@ func BuildQuery(build *kovav1.KovaBuild, buildkitAddr string) string {
 	if opts.Timeout > 0 {
 		values.Set("timeout", strconv.Itoa(opts.Timeout))
 	}
-	if opts.Retry > 0 {
-		values.Set("retry", strconv.Itoa(opts.Retry))
-	}
 	if opts.FailFast {
 		values.Set("fail-fast", "true")
-	}
-	if opts.SkipFail {
-		values.Set("skip-fail", "true")
 	}
 	if opts.Verbose {
 		values.Set("verbose", "true")

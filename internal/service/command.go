@@ -10,10 +10,9 @@ import (
 	"time"
 
 	kovav1 "github.com/cofy-x/kova/internal/apis/kova/v1alpha1"
-	"github.com/cofy-x/kova/internal/artifactstore"
+	"github.com/cofy-x/kova/internal/buildcontract"
 	"github.com/cofy-x/kova/internal/kube"
 	"github.com/cofy-x/kova/internal/runner"
-	"github.com/cofy-x/kova/internal/service/artifactgc"
 	serviceauth "github.com/cofy-x/kova/internal/service/auth"
 	"github.com/cofy-x/kova/internal/service/buildcontroller"
 	"github.com/cofy-x/kova/internal/service/config"
@@ -46,24 +45,7 @@ func CLICommand() *cli.Command {
 			&cli.StringSliceFlag{Name: "runner-node-selector", Usage: "node selector for runner Pods; repeatable key=value"},
 			&cli.StringSliceFlag{Name: "registry-plain-http", EnvVars: []string{"KOVA_SERVICE_REGISTRY_PLAIN_HTTP"}, Usage: "output registry host that uses plain HTTP; repeatable and intended for development"},
 			&cli.StringFlag{Name: "buildkit-addr", Value: defaults.BuildkitAddr, Usage: "BuildKit address passed to runner daemon and build requests"},
-			&cli.StringFlag{Name: "source-pvc-claim", Usage: "PVC claim backing filesystem artifacts; not used by S3 storage"},
-			&cli.StringFlag{Name: "artifact-driver", Value: artifactstore.DriverFilesystem, EnvVars: []string{"KOVA_ARTIFACT_DRIVER"}, Usage: "artifact storage driver: filesystem or s3"},
-			&cli.StringFlag{Name: "artifact-root", Value: artifactstore.DefaultRoot, EnvVars: []string{"KOVA_ARTIFACT_ROOT"}, Usage: "filesystem artifact root"},
-			&cli.StringFlag{Name: "artifact-secret", EnvVars: []string{"KOVA_ARTIFACT_SECRET"}, Usage: "Secret whose environment variables allow runner init containers to read artifacts"},
-			&cli.StringFlag{Name: "s3-endpoint", EnvVars: []string{"KOVA_S3_ENDPOINT"}},
-			&cli.StringFlag{Name: "s3-bucket", EnvVars: []string{"KOVA_S3_BUCKET"}},
-			&cli.StringFlag{Name: "s3-region", EnvVars: []string{"KOVA_S3_REGION"}},
-			&cli.StringFlag{Name: "s3-credential-provider", Value: artifactstore.S3CredentialProviderStatic, EnvVars: []string{"KOVA_S3_CREDENTIAL_PROVIDER"}},
-			&cli.StringFlag{Name: "s3-credential-dir", Value: artifactstore.DefaultS3CredentialDir, EnvVars: []string{"KOVA_S3_CREDENTIAL_DIR"}},
-			&cli.StringFlag{Name: "s3-access-key", EnvVars: []string{"KOVA_S3_ACCESS_KEY"}},
-			&cli.StringFlag{Name: "s3-secret-key", EnvVars: []string{"KOVA_S3_SECRET_KEY"}},
-			&cli.StringFlag{Name: "s3-session-token", EnvVars: []string{"KOVA_S3_SESSION_TOKEN"}},
-			&cli.BoolFlag{Name: "s3-secure", Value: true, EnvVars: []string{"KOVA_S3_SECURE"}},
 			&cli.DurationFlag{Name: "job-ttl", Value: 2 * time.Hour, Usage: "duration to retain terminal jobs before cleanup"},
-			&cli.Int64Flag{Name: "max-upload-bytes", Value: 1 << 30, Usage: "maximum multipart build request size in bytes"},
-			&cli.Int64Flag{Name: "max-log-bytes", Value: 16 << 20, Usage: "maximum trailing runner log bytes retained per job"},
-			&cli.DurationFlag{Name: "artifact-gc-interval", Value: 10 * time.Minute, Usage: "interval for collecting artifacts without a KovaBuild owner"},
-			&cli.DurationFlag{Name: "artifact-orphan-ttl", Value: time.Hour, Usage: "minimum age before an ownerless artifact is collected"},
 			&cli.StringFlag{Name: "auth-mode", Value: serviceauth.ModeTokenReview, EnvVars: []string{"KOVA_SERVICE_AUTH_MODE"}, Usage: "API authentication mode: tokenreview, static, or unsafe-none"},
 			&cli.StringFlag{Name: "auth-token", EnvVars: []string{"KOVA_SERVICE_AUTH_TOKEN"}, Usage: "bearer token required by static authentication"},
 			&cli.StringFlag{Name: "auth-static-principal", Value: "kova:static", EnvVars: []string{"KOVA_SERVICE_AUTH_STATIC_PRINCIPAL"}, Usage: "Kubernetes username represented by the static token"},
@@ -73,6 +55,7 @@ func CLICommand() *cli.Command {
 			&cli.IntFlag{Name: "max-active-jobs-per-requester", Value: 4, Usage: "maximum concurrently active jobs for one authenticated requester"},
 			&cli.IntFlag{Name: "max-queued-jobs-per-requester", Value: 100, Usage: "maximum queued jobs for one authenticated requester"},
 			&cli.IntFlag{Name: "worker-slots", Value: 20, Usage: "total build slots shared fairly across active jobs"},
+			&cli.IntFlag{Name: "controller-concurrency", Value: buildcontract.DefaultControllerConcurrency, Usage: "maximum concurrent KovaBuild reconciliations"},
 			&cli.BoolFlag{Name: "leader-elect", Value: true, Usage: "enable controller-runtime leader election"},
 			&cli.StringFlag{Name: "leader-election-namespace", Usage: "namespace used for controller leader election leases; defaults to --namespace"},
 		},
@@ -113,24 +96,7 @@ func CLICommand() *cli.Command {
 				RunnerEnv:                 runnerObservabilityEnv(),
 				RegistryPlainHTTP:         plainHTTPRegistries,
 				BuildkitAddr:              c.String("buildkit-addr"),
-				SourcePVCClaim:            strings.TrimSpace(c.String("source-pvc-claim")),
-				ArtifactDriver:            c.String("artifact-driver"),
-				ArtifactRoot:              c.String("artifact-root"),
-				ArtifactSecret:            c.String("artifact-secret"),
-				S3Endpoint:                c.String("s3-endpoint"),
-				S3Bucket:                  c.String("s3-bucket"),
-				S3Region:                  c.String("s3-region"),
-				S3CredentialProvider:      c.String("s3-credential-provider"),
-				S3CredentialDir:           c.String("s3-credential-dir"),
-				S3AccessKey:               c.String("s3-access-key"),
-				S3SecretKey:               c.String("s3-secret-key"),
-				S3SessionToken:            c.String("s3-session-token"),
-				S3Secure:                  c.Bool("s3-secure"),
 				JobTTL:                    c.Duration("job-ttl"),
-				MaxUploadBytes:            c.Int64("max-upload-bytes"),
-				MaxLogBytes:               c.Int64("max-log-bytes"),
-				ArtifactGCInterval:        c.Duration("artifact-gc-interval"),
-				ArtifactOrphanTTL:         c.Duration("artifact-orphan-ttl"),
 				AuthToken:                 c.String("auth-token"),
 				AuthMode:                  strings.TrimSpace(c.String("auth-mode")),
 				AuthStaticPrincipal:       strings.TrimSpace(c.String("auth-static-principal")),
@@ -140,15 +106,9 @@ func CLICommand() *cli.Command {
 				MaxActiveJobsPerRequester: c.Int("max-active-jobs-per-requester"),
 				MaxQueuedJobsPerRequester: c.Int("max-queued-jobs-per-requester"),
 				WorkerSlots:               c.Int("worker-slots"),
+				ControllerConcurrency:     c.Int("controller-concurrency"),
 			}
-			store, err := artifactstore.New(artifactstore.Config{
-				Driver: cfg.ArtifactDriver, Root: cfg.ArtifactRoot,
-				S3Endpoint: cfg.S3Endpoint, S3Bucket: cfg.S3Bucket, S3Region: cfg.S3Region,
-				S3CredentialProvider: cfg.S3CredentialProvider, S3CredentialDir: cfg.S3CredentialDir,
-				S3AccessKey: cfg.S3AccessKey, S3SecretKey: cfg.S3SecretKey,
-				S3SessionKey: cfg.S3SessionToken, S3Secure: cfg.S3Secure,
-			})
-			if err != nil {
+			if err := validateCapacityConfig(cfg); err != nil {
 				return err
 			}
 			authenticator, err := serviceauth.New(cfg.AuthMode, cfg.AuthToken, cfg.AuthStaticPrincipal, clientset.AuthenticationV1().TokenReviews())
@@ -173,30 +133,42 @@ func CLICommand() *cli.Command {
 			if err != nil {
 				return err
 			}
-			if err := mgr.Add(&artifactgc.Collector{
-				Reader: mgr.GetAPIReader(), Store: store, Namespace: cfg.Namespace,
-				Interval: cfg.ArtifactGCInterval, OrphanTTL: cfg.ArtifactOrphanTTL,
-			}); err != nil {
-				return err
-			}
 			if err := (&buildcontroller.KovaBuildReconciler{
 				Client:   mgr.GetClient(),
 				Scheme:   mgr.GetScheme(),
 				Kube:     kubeClient,
-				Store:    store,
 				Cfg:      cfg,
 				Recorder: mgr.GetEventRecorderFor("kova-service"),
 			}).SetupWithManager(mgr); err != nil {
 				return err
 			}
 			go func() {
-				if err := httpapi.NewServer(cfg, kubeClient, mgr.GetClient(), mgr.GetAPIReader(), store, authenticator, authorizer).Start(ctx); err != nil {
+				if err := httpapi.NewServer(cfg, kubeClient, mgr.GetClient(), mgr.GetAPIReader(), authenticator, authorizer).Start(ctx); err != nil {
 					stop()
 				}
 			}()
 			return mgr.Start(ctx)
 		},
 	}
+}
+
+func validateCapacityConfig(cfg config.Config) error {
+	if cfg.MaxActiveJobs < 1 {
+		return fmt.Errorf("max-active-jobs must be at least 1")
+	}
+	if cfg.MaxActiveJobsPerRequester < 1 || cfg.MaxActiveJobsPerRequester > cfg.MaxActiveJobs {
+		return fmt.Errorf("max-active-jobs-per-requester must be between 1 and max-active-jobs")
+	}
+	if cfg.MaxQueuedJobsPerRequester < 1 {
+		return fmt.Errorf("max-queued-jobs-per-requester must be at least 1")
+	}
+	if cfg.WorkerSlots < 1 {
+		return fmt.Errorf("worker-slots must be at least 1")
+	}
+	if cfg.ControllerConcurrency < 1 || cfg.ControllerConcurrency > buildcontract.MaxControllerConcurrency {
+		return fmt.Errorf("controller-concurrency must be between 1 and %d", buildcontract.MaxControllerConcurrency)
+	}
+	return nil
 }
 
 func runnerObservabilityEnv() map[string]string {

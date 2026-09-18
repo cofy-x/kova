@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/cofy-x/kova/internal/batch"
+	"github.com/cofy-x/kova/internal/buildcontract"
 	"github.com/cofy-x/kova/internal/scheduler"
 	"github.com/cofy-x/kova/internal/source"
 )
@@ -97,7 +98,7 @@ func queryDurationStrict(q url.Values, key string, def time.Duration, min time.D
 }
 
 func buildOptionsFromQuery(q url.Values, defaultAddrs string, resultDB string, logsFile string) (batch.Options, error) {
-	if err := validateQueryKeys(q, "addrs", "concurrency", "fail-fast", "format", "oom-cooldown", "timeout", "retry", "verbose", "target", "skip-fail", "var"); err != nil {
+	if err := validateQueryKeys(q, "addrs", "concurrency", "fail-fast", "format", "oom-cooldown", "timeout", "verbose", "target", "var"); err != nil {
 		return batch.Options{}, err
 	}
 	addrsValue, ok, err := queryValue(q, "addrs")
@@ -115,11 +116,10 @@ func buildOptionsFromQuery(q url.Values, defaultAddrs string, resultDB string, l
 	if err != nil {
 		return batch.Options{}, err
 	}
-	timeout, err := queryIntStrict(q, "timeout", 300, 0)
-	if err != nil {
-		return batch.Options{}, err
+	if concurrency > buildcontract.MaxBuildConcurrency {
+		return batch.Options{}, fmt.Errorf("query parameter %q must be less than or equal to %d", "concurrency", buildcontract.MaxBuildConcurrency)
 	}
-	retry, err := queryIntStrict(q, "retry", 0, 0)
+	timeout, err := queryIntStrict(q, "timeout", 300, 0)
 	if err != nil {
 		return batch.Options{}, err
 	}
@@ -148,13 +148,15 @@ func buildOptionsFromQuery(q url.Values, defaultAddrs string, resultDB string, l
 	if err != nil {
 		return batch.Options{}, err
 	}
-	skipFail, err := queryBoolStrict(q, "skip-fail", false)
-	if err != nil {
-		return batch.Options{}, err
-	}
 	target, _, err := queryValue(q, "target")
 	if err != nil {
 		return batch.Options{}, err
+	}
+	if strings.TrimSpace(target) != "" {
+		target, err = buildcontract.NormalizeTarget(target)
+		if err != nil {
+			return batch.Options{}, err
+		}
 	}
 	buildVars, err := source.ParseBuildVariables(q["var"])
 	if err != nil {
@@ -171,10 +173,8 @@ func buildOptionsFromQuery(q url.Values, defaultAddrs string, resultDB string, l
 		LogsPath:    logsFile,
 		Vars:        buildVars,
 		Timeout:     timeout,
-		Retry:       retry,
 		Verbose:     verbose,
-		Target:      strings.TrimSpace(target),
-		SkipFail:    skipFail,
+		Target:      target,
 	}, nil
 }
 

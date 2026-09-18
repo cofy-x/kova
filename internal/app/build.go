@@ -22,8 +22,6 @@ func buildCLICommand() *cli.Command {
 			&cli.StringFlag{Name: "format", Value: "nydus", Usage: "build output format: nydus, oci, or both"},
 			&cli.DurationFlag{Name: "oom-cooldown", Value: defaultBuildkitOOMCooldown, Usage: "pause scheduling new tasks for an affected BuildKit address after an OOM-style connection refusal"},
 			&cli.IntFlag{Name: "timeout", Value: 300, Usage: "kill a buildctl task if it runs longer than the given number of seconds; 0 disables timeout"},
-			&cli.IntFlag{Name: "retry", Value: 0, Usage: "number of times to retry a failed build before giving up; 0 disables retry"},
-			&cli.BoolFlag{Name: "skip-fail", Usage: "skip targets previously recorded as failed by the runner"},
 			&cli.BoolFlag{Name: "verbose", Usage: "stream buildctl subprocess output to the console"},
 		},
 		Action: func(c *cli.Context) error {

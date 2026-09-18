@@ -4,6 +4,20 @@ import "time"
 
 const APIVersion = "v1"
 
+type CreateBuildRequest struct {
+	SourceURI      string   `json:"source_uri"`
+	SourceDigest   string   `json:"source_digest"`
+	Targets        []string `json:"targets"`
+	Format         string   `json:"format,omitempty"`
+	Concurrency    int      `json:"concurrency,omitempty"`
+	Timeout        int      `json:"timeout,omitempty"`
+	OOMCooldown    string   `json:"oom_cooldown,omitempty"`
+	FailFast       bool     `json:"fail_fast,omitempty"`
+	Verbose        bool     `json:"verbose,omitempty"`
+	Variables      []string `json:"variables,omitempty"`
+	IdempotencyKey string   `json:"idempotency_key,omitempty"`
+}
+
 type VersionInfo struct {
 	APIVersion string `json:"api_version"`
 	Version    string `json:"version"`
@@ -33,32 +47,26 @@ type BuildJob struct {
 	ExpiresAt             *time.Time `json:"expires_at,omitempty"`
 	BuildkitAddr          string     `json:"buildkit_addr,omitempty"`
 	SourceDigest          string     `json:"source_digest,omitempty"`
+	SourceURI             string     `json:"source_uri,omitempty"`
 	IdempotencyKey        string     `json:"idempotency_key,omitempty"`
 	Requester             string     `json:"requester"`
 	CancellationRequested bool       `json:"cancellation_requested,omitempty"`
 	RequestedConcurrency  int        `json:"requested_concurrency,omitempty"`
 	AllocatedConcurrency  int32      `json:"allocated_concurrency,omitempty"`
-	LogArtifactURI        string     `json:"log_artifact_uri,omitempty"`
-	LogArtifactDigest     string     `json:"log_artifact_digest,omitempty"`
 }
 
-type BuildResult struct {
+type BuildOutput struct {
 	Format         string `json:"format"`
-	Status         string `json:"status"`
-	Repository     string `json:"repository"`
-	ManifestDigest string `json:"manifest_digest,omitempty"`
-	MediaType      string `json:"media_type,omitempty"`
-	Size           int64  `json:"size,omitempty"`
-	Error          string `json:"error,omitempty"`
+	Image          string `json:"image"`
+	ManifestDigest string `json:"manifest_digest"`
 }
 
 type BuildResults struct {
-	ID                   string        `json:"id"`
-	SourceDigest         string        `json:"source_digest,omitempty"`
-	IdempotencyKey       string        `json:"idempotency_key,omitempty"`
-	ResultArtifactURI    string        `json:"result_artifact_uri,omitempty"`
-	ResultArtifactDigest string        `json:"result_artifact_digest,omitempty"`
-	Results              []BuildResult `json:"results"`
+	ID             string        `json:"id"`
+	SourceURI      string        `json:"source_uri"`
+	SourceDigest   string        `json:"source_digest"`
+	IdempotencyKey string        `json:"idempotency_key,omitempty"`
+	Outputs        []BuildOutput `json:"outputs"`
 }
 
 type JobList struct {

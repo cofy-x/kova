@@ -11,7 +11,7 @@ policy; those inputs belong to the consuming environment.
 - Helm and credentials allowed to install the release
 - an OCI registry reachable from runner and worker Pods
 - published controller, runner, and worker images for the cluster architecture
-- external Secrets for private images, output registries, or artifact storage
+- external Secrets for private images and source or output registries
 
 Rootless BuildKit runs as UID/GID 1000 without a privileged container. It uses
 unconfined seccomp and AppArmor plus `--oci-worker-no-process-sandbox`, as
@@ -76,36 +76,12 @@ The default chart mode installs one worker only. Use the
 a starting point for capacity and availability settings. Enable
 `serviceDaemon` for an authenticated HTTP API and managed `KovaBuild` jobs.
 
-## Artifact Storage
+## Source and Result Storage
 
-Production service deployments should use an S3-compatible artifact store:
-
-```yaml
-artifactStore:
-  driver: s3
-  secretName: kova-artifact-credentials
-  credentials:
-    provider: file
-    mountPath: /var/run/secrets/kova/s3
-  s3:
-    endpoint: objects.example.com
-    bucket: kova-builds
-    region: us-east-1
-    secure: true
-```
-
-The external Secret uses `KOVA_S3_ACCESS_KEY`, `KOVA_S3_SECRET_KEY`, and an
-optional `KOVA_S3_SESSION_TOKEN`. With the recommended `file` provider, the
-controller and source-fetch init containers mount the Secret and reread it as
-credentials expire. Kubernetes Secret projection can therefore rotate
-credentials without embedding provider-specific identity logic in Kova.
-If `serviceDaemon.runnerNamespace` differs from the release namespace, create
-the same external Secret in both namespaces because source-fetch init
-containers run beside the runner.
-
-Filesystem storage remains available for local or deliberately shared-volume
-environments. A ReadWriteOnce PVC may require matching
-`serviceDaemon.nodeSelector` and `serviceDaemon.runnerNodeSelector` values.
+Kova reads immutable source bundles and pushes results through OCI registries.
+It does not require an object store, shared filesystem, or RWX PVC.
+Each runner materializes a digest-verified source into job-local `emptyDir` storage.
+Source and output retention are controlled by registry policy or the caller.
 
 ## Authentication
 
@@ -120,7 +96,7 @@ and maps the token to `serviceDaemon.authentication.staticPrincipal`.
 `unsafe-none` must be selected explicitly and should never be exposed outside
 an isolated development cluster.
 
-See the [service API and storage guide](../service.md) for complete values.
+See the [Service contract guide](../service.md) for complete values.
 
 ## Registry Credentials
 
@@ -142,6 +118,9 @@ values and release history.
 Registry transport is HTTPS by default. Only isolated development registries
 that do not support TLS should be listed under
 `serviceDaemon.registryPlainHTTP`.
+
+One build may push targets to multiple registries when this Docker config, network policy, and TLS configuration authorize every destination.
+Those pushes are not transactional: a terminally failed build can retain verified digests for outputs that were already pushed successfully.
 
 ## Capacity And Placement
 

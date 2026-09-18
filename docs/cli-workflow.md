@@ -98,24 +98,22 @@ The runner Pod starts `kovad daemon` from the runner image.
 
 ## Start Builds
 
-For a single image, pass the build context directory directly. If the directory
-does not have `metadata.json`, provide the image name with `--target`:
+The direct runner accepts a source zip on standard input.
+Create the same deterministic single-context bundle used by the public Service contract:
 
 ```bash
-kova --name quickstart \
-  build examples/simple \
+kova source pack \
   --target kind-registry:5000/kova-examples/simple:dev \
-  --format oci --concurrency 1 --timeout 600 --fail-fast --verbose
+  --output .work/source.zip \
+  examples/simple
 ```
 
-If the directory already has `metadata.json`, you can use its `target` field and
-only provide variable values:
+Stream that immutable input to the low-level runner:
 
 ```bash
 kova --name quickstart \
-  build examples/simple \
-  --format oci --concurrency 1 --timeout 600 --fail-fast --verbose \
-  --var KOVA_IMAGE_REGISTRY=kind-registry:5000
+  build --format oci --concurrency 1 --timeout 600 --fail-fast --verbose \
+  < .work/source.zip
 ```
 
 Use `--format both` when the same context should produce both the OCI target and
@@ -123,24 +121,12 @@ the Nydus target in one build pass. The Nydus target uses the `_nydus_v3` suffix
 
 ```bash
 kova --name quickstart \
-  build examples/simple \
-  --target kind-registry:5000/kova-examples/simple:dev \
-  --format both
-```
-
-For batch or CI input, Kova also reads a zip stream from stdin. Each image
-directory in the zip must contain a `Dockerfile` and `metadata.json`. The
-built-in example target uses `$KOVA_IMAGE_REGISTRY`, supplied during `build`:
-
-```bash
-mkdir -p .work
-cd examples && zip -qr ../.work/source.zip simple && cd ..
-
-kova --name quickstart \
-  build --format oci --concurrency 1 --timeout 600 --fail-fast --verbose \
-  --var KOVA_IMAGE_REGISTRY=kind-registry:5000 \
+  build --format both --concurrency 1 \
   < .work/source.zip
 ```
+
+Batch archives follow the same layout: every top-level image directory contains a `Dockerfile` and `metadata.json` with a unique tagged target.
+Shared environments should publish the archive with `kova source push` and submit it through the Service instead of managing a runner directly.
 
 The runner daemon unpacks the zip, resolves the `kova` headless Service to
 worker Pod IPs, and starts `buildctl` subprocesses that connect to BuildKit

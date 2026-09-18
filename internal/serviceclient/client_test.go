@@ -60,23 +60,18 @@ func TestClientAppliesTLSOptionsWithBearerToken(t *testing.T) {
 	}
 }
 
-func TestCreateBuildStreamsMultipartArchive(t *testing.T) {
+func TestCreateBuildSendsImmutableSourceContract(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/version" {
 			_ = json.NewEncoder(w).Encode(serviceapi.VersionInfo{APIVersion: serviceapi.APIVersion})
 			return
 		}
-		if err := r.ParseMultipartForm(1 << 20); err != nil {
+		var request serviceapi.CreateBuildRequest
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		file, _, err := r.FormFile("file")
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		_ = file.Close()
-		if r.FormValue("target") != "registry.example/app:dev" || r.FormValue("format") != "oci" {
+		if request.SourceURI == "" || request.SourceDigest == "" || len(request.Targets) != 1 || request.Format != "oci" {
 			http.Error(w, "invalid fields", http.StatusBadRequest)
 			return
 		}
@@ -84,16 +79,14 @@ func TestCreateBuildStreamsMultipartArchive(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(serviceapi.BuildJob{ID: "job-1", Status: serviceapi.JobStatusQueued})
 	}))
 	defer server.Close()
-	archive := filepath.Join(t.TempDir(), "source.zip")
-	if err := os.WriteFile(archive, []byte("archive"), 0o600); err != nil {
-		t.Fatal(err)
-	}
 	client, err := New(Config{BaseURL: server.URL, Token: "secret", HTTPClient: server.Client()})
 	if err != nil {
 		t.Fatal(err)
 	}
 	job, err := client.CreateBuild(context.Background(), CreateBuildOptions{
-		ArchivePath: archive, Target: "registry.example/app:dev", Format: "oci", Concurrency: 1,
+		SourceURI:    "oci://registry.example/sources/app@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		SourceDigest: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		Targets:      []string{"registry.example/app:dev"}, Format: "oci", Concurrency: 1,
 	})
 	if err != nil || job.ID != "job-1" {
 		t.Fatalf("job=%#v err=%v", job, err)

@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"net/url"
 	"strings"
+
+	"github.com/cofy-x/kova/internal/buildcontract"
 )
 
 func BuildQuery(args []string) (string, error) {
@@ -43,10 +45,10 @@ func BuildQuery(args []string) (string, error) {
 			}
 			target = strings.TrimPrefix(arg, "--target=")
 			i++
-		case arg == "--fail-fast" || arg == "--skip-fail" || arg == "--verbose":
+		case arg == "--fail-fast" || arg == "--verbose":
 			values.Set(strings.TrimPrefix(arg, "--"), "true")
 			i++
-		case arg == "--format" || arg == "--concurrency" || arg == "--oom-cooldown" || arg == "--timeout" || arg == "--retry":
+		case arg == "--format" || arg == "--concurrency" || arg == "--oom-cooldown" || arg == "--timeout":
 			if i+1 >= len(args) {
 				return "", fmt.Errorf("%s requires a value", arg)
 			}
@@ -54,7 +56,7 @@ func BuildQuery(args []string) (string, error) {
 			i += 2
 		case strings.HasPrefix(arg, "--format=") ||
 			strings.HasPrefix(arg, "--concurrency=") || strings.HasPrefix(arg, "--oom-cooldown=") ||
-			strings.HasPrefix(arg, "--timeout=") || strings.HasPrefix(arg, "--retry="):
+			strings.HasPrefix(arg, "--timeout="):
 			key, value, _ := strings.Cut(strings.TrimPrefix(arg, "--"), "=")
 			values.Set(key, value)
 			i++
@@ -69,7 +71,11 @@ func BuildQuery(args []string) (string, error) {
 		}
 	}
 	if target != "" {
-		values.Set("target", target)
+		normalized, err := buildcontract.NormalizeTarget(target)
+		if err != nil {
+			return "", err
+		}
+		values.Set("target", normalized)
 	}
 	return values.Encode(), nil
 }

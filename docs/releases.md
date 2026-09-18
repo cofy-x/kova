@@ -55,11 +55,11 @@ The tag workflow:
 7. creates the GitHub release with installation guidance and generated change
    notes only after every blocking gate succeeds.
 
-After a successful release, the released-artifact smoke downloads the public
-CLI and checksum file, pulls the exact public chart and role images, and runs
-the S3-backed Service lifecycle in a fresh kind cluster. It can also be started
-manually for an exact tag. This catches registry availability and packaging
-regressions that cannot be observed until artifacts are public.
+After a successful release, the release smoke downloads the public CLI and
+checksum file, pulls the exact public chart and role images, and runs the
+immutable-source Service lifecycle in a fresh kind cluster. It can also be
+started manually for an exact tag. This catches registry availability and
+packaging regressions that cannot be observed until the release is public.
 
 Create a tag only from a commit whose required CI and CodeQL checks have
 passed. The GHCR package must be public before the first tag workflow can pass

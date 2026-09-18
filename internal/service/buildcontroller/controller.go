@@ -2,9 +2,10 @@ package buildcontroller
 
 import (
 	"context"
+	"sync"
 
 	kovav1 "github.com/cofy-x/kova/internal/apis/kova/v1alpha1"
-	"github.com/cofy-x/kova/internal/artifactstore"
+	"github.com/cofy-x/kova/internal/buildcontract"
 	"github.com/cofy-x/kova/internal/kube"
 	"github.com/cofy-x/kova/internal/observability"
 	"github.com/cofy-x/kova/internal/service/config"
@@ -31,9 +32,10 @@ type KovaBuildReconciler struct {
 	client.Client
 	Scheme   *runtime.Scheme
 	Kube     kube.API
-	Store    artifactstore.Store
 	Cfg      config.Config
 	Recorder record.EventRecorder
+
+	admissionMu sync.Mutex
 }
 
 func (r *KovaBuildReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -58,6 +60,14 @@ func (r *KovaBuildReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	}
 	switch build.Status.Phase {
 	case "", kovav1.PhaseQueued:
+		if _, err := buildcontract.NormalizeTargets(build.Spec.Targets); err != nil {
+			return ctrl.Result{}, r.finish(ctx, &build, kovav1.PhaseFailed, "InvalidTargets", err.Error())
+		}
+		if err := buildcontract.ValidateConcurrency(requestedConcurrency(&build), len(build.Spec.Targets)); err != nil {
+			return ctrl.Result{}, r.finish(ctx, &build, kovav1.PhaseFailed, "InvalidTargets", err.Error())
+		}
+		r.admissionMu.Lock()
+		defer r.admissionMu.Unlock()
 		return r.startBuild(ctx, &build)
 	case kovav1.PhaseStarting:
 		return r.submitWhenReady(ctx, &build)
@@ -69,9 +79,13 @@ func (r *KovaBuildReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 }
 
 func (r *KovaBuildReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	concurrency := r.Cfg.ControllerConcurrency
+	if concurrency <= 0 {
+		concurrency = buildcontract.DefaultControllerConcurrency
+	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&kovav1.KovaBuild{}).
 		Owns(&corev1.Pod{}).
-		WithOptions(controllerOptions.Options{MaxConcurrentReconciles: 1}).
+		WithOptions(controllerOptions.Options{MaxConcurrentReconciles: concurrency}).
 		Complete(r)
 }

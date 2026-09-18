@@ -65,13 +65,10 @@ E2E_SERVICE_BUILD_CLI=false \
 E2E_SERVICE_BUILD_IMAGE=false \
 KIND_LOAD_IMAGES=false \
 START_OBSERVABILITY=false \
-ARTIFACT_DRIVER=s3 \
-KIND_CLUSTER=kova-released-artifact-smoke \
+KIND_CLUSTER=kova-release-smoke \
 KIND_CONFIG=deploy/quickstart-kind-cluster.yaml \
-KIND_KUBECONFIG=.kind/kova-released-artifact-smoke.kubeconfig \
+KIND_KUBECONFIG=.kind/kova-release-smoke.kubeconfig \
 KIND_WORKERS=1 \
 KIND_VALUES=deploy/quickstart-kind-values.yaml \
 KOVA_VALUES="${ROOT}/deploy/quickstart-kind-values.yaml" \
-SOURCE_ZIP=.work/source-released-artifact.zip \
-RESULT_JSONL=.work/result-released-artifact.jsonl \
 "${ROOT}/scripts/e2e/e2e-service.sh"

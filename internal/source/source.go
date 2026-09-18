@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/cofy-x/kova/internal/buildcontract"
 )
 
 const NydusV3TargetSuffix = "_nydus_v3"
@@ -132,9 +134,9 @@ func loadImageMetadata(metaPath string) (ImageMetadata, error) {
 	if err := json.Unmarshal(raw, &meta); err != nil {
 		return ImageMetadata{}, fmt.Errorf("invalid %s: %w", metaPath, err)
 	}
-	meta.Target = strings.TrimSpace(meta.Target)
-	if meta.Target == "" {
-		return ImageMetadata{}, fmt.Errorf("%s has empty target", metaPath)
+	meta.Target, err = buildcontract.NormalizeTarget(meta.Target)
+	if err != nil {
+		return ImageMetadata{}, fmt.Errorf("invalid target in %s: %w", metaPath, err)
 	}
 	return meta, nil
 }

@@ -73,51 +73,6 @@
         "sessionAffinity": { "type": "string" }
       }
     },
-    "artifactStore": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "driver": { "type": "string", "enum": ["filesystem", "s3"] },
-        "secretName": { "type": "string" },
-        "credentials": {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "provider": { "type": "string", "enum": ["static", "file", "anonymous"] },
-            "mountPath": { "type": "string", "minLength": 1 }
-          }
-        },
-        "filesystem": {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "mountPath": { "type": "string", "minLength": 1 },
-            "pvc": {
-              "type": "object",
-              "additionalProperties": false,
-              "properties": {
-                "create": { "type": "boolean" },
-                "existingClaim": { "type": "string" },
-                "name": { "type": "string" },
-                "accessModes": { "type": "array", "items": { "type": "string" } },
-                "storageClassName": { "type": "string" },
-                "size": { "type": "string" }
-              }
-            }
-          }
-        },
-        "s3": {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "endpoint": { "type": "string" },
-            "bucket": { "type": "string" },
-            "region": { "type": "string" },
-            "secure": { "type": "boolean" }
-          }
-        }
-      }
-    },
     "serviceDaemon": {
       "type": "object",
       "additionalProperties": false,
@@ -151,16 +106,13 @@
           }
         },
         "jobTTL": { "type": "string" },
-        "maxUploadBytes": { "type": "integer", "minimum": 1 },
-        "maxLogBytes": { "type": "integer", "minimum": 1 },
-        "artifactGCInterval": { "type": "string" },
-        "artifactOrphanTTL": { "type": "string" },
         "wait": { "type": "string" },
         "pollInterval": { "type": "string" },
         "maxActiveJobs": { "type": "integer", "minimum": 1 },
         "maxActiveJobsPerRequester": { "type": "integer", "minimum": 1 },
         "maxQueuedJobsPerRequester": { "type": "integer", "minimum": 1 },
         "workerSlots": { "type": "integer", "minimum": 1 },
+        "controllerConcurrency": { "type": "integer", "minimum": 1, "maximum": 32 },
         "leaderElect": { "type": "boolean" },
         "runnerNamespace": { "type": "string" },
         "runnerImagePullSecret": { "type": "string" },

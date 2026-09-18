@@ -3,10 +3,10 @@ package buildcontroller
 import (
 	"context"
 	"fmt"
-	"net/url"
 	"time"
 
 	kovav1 "github.com/cofy-x/kova/internal/apis/kova/v1alpha1"
+	"github.com/cofy-x/kova/internal/buildcontract"
 	"github.com/cofy-x/kova/internal/runner"
 	"github.com/cofy-x/kova/internal/service/buildresult"
 	"github.com/cofy-x/kova/internal/service/runnerexec"
@@ -37,45 +37,19 @@ func (r *KovaBuildReconciler) startBuild(ctx context.Context, build *kovav1.Kova
 		}
 		return ctrl.Result{RequeueAfter: r.Cfg.PollInterval}, nil
 	}
-	source, err := url.Parse(build.Spec.Source.URI)
-	if err != nil {
-		return ctrl.Result{}, r.finish(ctx, build, kovav1.PhaseFailed, "SourceInvalid", err.Error())
-	}
-	if r.Store != nil {
-		reader, err := r.Store.Open(ctx, build.Spec.Source.URI)
-		if err != nil {
-			return ctrl.Result{}, r.finish(ctx, build, kovav1.PhaseFailed, "ArtifactUnavailable", fmt.Sprintf("open source artifact: %v", err))
-		}
-		if err := reader.Close(); err != nil {
-			return ctrl.Result{}, r.finish(ctx, build, kovav1.PhaseFailed, "ArtifactUnavailable", fmt.Sprintf("close source artifact: %v", err))
-		}
-	}
-	if source.Scheme == "file" && r.Cfg.SourcePVCClaim == "" {
-		return ctrl.Result{}, r.finish(ctx, build, kovav1.PhaseFailed, "ConfigurationInvalid", "filesystem artifacts require --source-pvc-claim")
-	}
 	podName := buildPodName(build.Name)
 	pod := runner.PreparePod(runner.ManifestOptions{
-		PodName:              podName,
-		Namespace:            build.Namespace,
-		Image:                r.Cfg.RunnerImage,
-		ImagePullPolicy:      r.Cfg.RunnerImagePullPolicy,
-		ImagePullSecret:      r.Cfg.RunnerImagePullSecret,
-		BuildkitAddr:         r.Cfg.BuildkitAddr,
-		NodeSelector:         r.Cfg.RunnerNodeSelector,
-		Env:                  r.Cfg.RunnerEnv,
-		SourcePVCClaim:       filesystemPVC(source, r.Cfg.SourcePVCClaim),
-		SourceMountPath:      filesystemMount(source, r.Cfg.ArtifactRoot),
-		SourceReadOnly:       true,
-		SourceURI:            build.Spec.Source.URI,
-		SourceDigest:         build.Spec.Source.Digest,
-		ArtifactRoot:         r.Cfg.ArtifactRoot,
-		ArtifactSecret:       r.Cfg.ArtifactSecret,
-		S3Endpoint:           r.Cfg.S3Endpoint,
-		S3Bucket:             r.Cfg.S3Bucket,
-		S3Region:             r.Cfg.S3Region,
-		S3CredentialProvider: r.Cfg.S3CredentialProvider,
-		S3CredentialDir:      r.Cfg.S3CredentialDir,
-		S3Secure:             r.Cfg.S3Secure,
+		PodName:           podName,
+		Namespace:         build.Namespace,
+		Image:             r.Cfg.RunnerImage,
+		ImagePullPolicy:   r.Cfg.RunnerImagePullPolicy,
+		ImagePullSecret:   r.Cfg.RunnerImagePullSecret,
+		BuildkitAddr:      r.Cfg.BuildkitAddr,
+		NodeSelector:      r.Cfg.RunnerNodeSelector,
+		Env:               r.Cfg.RunnerEnv,
+		SourceURI:         build.Spec.Source.URI,
+		SourceDigest:      build.Spec.Source.Digest,
+		RegistryPlainHTTP: r.Cfg.RegistryPlainHTTP,
 		Labels: map[string]string{
 			"kova.cofy.dev/build-id": build.Name,
 		},
@@ -107,7 +81,6 @@ func (r *KovaBuildReconciler) cancelBuild(ctx context.Context, build *kovav1.Kov
 		// deleting the runner Pod is the authoritative stop operation.
 		_ = (runnerexec.Client{Kube: r.Kube, BuildkitAddr: r.Cfg.BuildkitAddr}).CancelBuild(ctx, build)
 	}
-	r.persistLogs(ctx, build)
 	if build.Status.RunnerPodName != "" {
 		if err := r.Kube.DeletePod(ctx, build.Namespace, build.Status.RunnerPodName); err != nil {
 			return ctrl.Result{}, err
@@ -125,6 +98,9 @@ func (r *KovaBuildReconciler) submitWhenReady(ctx context.Context, build *kovav1
 		return ctrl.Result{}, err
 	}
 	if !podReady(&pod) {
+		if message, failed := sourceFetchFailure(&pod); failed {
+			return ctrl.Result{}, r.finish(ctx, build, kovav1.PhaseFailed, "InvalidSource", message)
+		}
 		if pod.Status.Phase == corev1.PodFailed || pod.Status.Phase == corev1.PodSucceeded {
 			return ctrl.Result{}, r.finish(ctx, build, kovav1.PhaseFailed, "RunnerUnavailable", fmt.Sprintf("runner Pod terminated before becoming ready: %s", pod.Status.Phase))
 		}
@@ -133,7 +109,15 @@ func (r *KovaBuildReconciler) submitWhenReady(ctx context.Context, build *kovav1
 		}
 		return ctrl.Result{RequeueAfter: time.Second}, nil
 	}
-	if err := (runnerexec.Client{Kube: r.Kube, BuildkitAddr: r.Cfg.BuildkitAddr}).SubmitBuild(ctx, build, sourcePath(build)); err != nil {
+	client := runnerexec.Client{Kube: r.Kube, BuildkitAddr: r.Cfg.BuildkitAddr}
+	sourceTargets, err := client.SourceTargets(ctx, build, sourcePath(build))
+	if err != nil {
+		return ctrl.Result{}, r.finish(ctx, build, kovav1.PhaseFailed, "InvalidSource", err.Error())
+	}
+	if !buildcontract.EqualTargetSets(build.Spec.Targets, sourceTargets) {
+		return ctrl.Result{}, r.finish(ctx, build, kovav1.PhaseFailed, "InvalidTargets", "source targets do not exactly match requested targets")
+	}
+	if err := client.SubmitBuild(ctx, build, sourcePath(build)); err != nil {
 		return ctrl.Result{}, r.finish(ctx, build, kovav1.PhaseFailed, "BuildSubmissionFailed", err.Error())
 	}
 	build.Status.Phase = kovav1.PhaseRunning
@@ -144,6 +128,23 @@ func (r *KovaBuildReconciler) submitWhenReady(ctx context.Context, build *kovav1
 		return ctrl.Result{}, err
 	}
 	return ctrl.Result{RequeueAfter: r.Cfg.PollInterval}, nil
+}
+
+func sourceFetchFailure(pod *corev1.Pod) (string, bool) {
+	for _, status := range pod.Status.InitContainerStatuses {
+		if status.Name != "source-fetch" || status.State.Terminated == nil || status.State.Terminated.ExitCode == 0 {
+			continue
+		}
+		message := status.State.Terminated.Message
+		if message == "" {
+			message = status.State.Terminated.Reason
+		}
+		if message == "" {
+			message = fmt.Sprintf("source fetch exited with code %d", status.State.Terminated.ExitCode)
+		}
+		return message, true
+	}
+	return "", false
 }
 
 func (r *KovaBuildReconciler) pollBuild(ctx context.Context, build *kovav1.KovaBuild) (ctrl.Result, error) {
@@ -166,12 +167,10 @@ func (r *KovaBuildReconciler) pollBuild(ctx context.Context, build *kovav1.KovaB
 	} else {
 		build.Status.Phase = kovav1.PhaseFailed
 	}
-	build.Status.Results = buildresult.Resolve(ctx, client, build, r.Cfg.RegistryPlainHTTP)
-	if success && !buildresult.AllSucceeded(build.Status.Results) {
+	resolved := buildresult.Resolve(ctx, client, build, r.Cfg.RegistryPlainHTTP)
+	build.Status.Outputs = buildresult.Outputs(resolved)
+	if success && !buildresult.AllSucceeded(resolved) {
 		return ctrl.Result{}, r.finish(ctx, build, kovav1.PhaseFailed, "ResultVerificationFailed", "one or more build results could not be verified")
-	}
-	if err := r.persistResults(ctx, build); err != nil {
-		return ctrl.Result{}, r.finish(ctx, build, kovav1.PhaseFailed, "ArtifactStoreUnavailable", err.Error())
 	}
 	if success {
 		return ctrl.Result{}, r.finish(ctx, build, kovav1.PhaseSucceeded, "Completed", "")
@@ -199,21 +198,6 @@ func (r *KovaBuildReconciler) reconcileTerminal(ctx context.Context, build *kova
 func (r *KovaBuildReconciler) reconcileDelete(ctx context.Context, build *kovav1.KovaBuild) (ctrl.Result, error) {
 	if build.Status.RunnerPodName != "" {
 		if err := r.Kube.DeletePod(ctx, build.Namespace, build.Status.RunnerPodName); err != nil {
-			return ctrl.Result{}, err
-		}
-	}
-	if r.Store != nil {
-		if build.Status.ResultArtifactURI != "" {
-			if err := r.Store.Delete(ctx, build.Status.ResultArtifactURI); err != nil {
-				return ctrl.Result{}, err
-			}
-		}
-		if build.Status.LogArtifactURI != "" {
-			if err := r.Store.Delete(ctx, build.Status.LogArtifactURI); err != nil {
-				return ctrl.Result{}, err
-			}
-		}
-		if err := r.Store.Delete(ctx, build.Spec.Source.URI); err != nil {
 			return ctrl.Result{}, err
 		}
 	}

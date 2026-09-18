@@ -97,16 +97,6 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- end -}}
 {{- end -}}
 
-{{- define "kova.sourcePVCName" -}}
-{{- if .Values.artifactStore.filesystem.pvc.existingClaim -}}
-{{- .Values.artifactStore.filesystem.pvc.existingClaim -}}
-{{- else if .Values.artifactStore.filesystem.pvc.name -}}
-{{- .Values.artifactStore.filesystem.pvc.name -}}
-{{- else -}}
-{{- printf "%s-sources" (include "kova.fullname" .) | trunc 63 | trimSuffix "-" -}}
-{{- end -}}
-{{- end -}}
-
 {{- define "kova.observabilityEnv" -}}
 - name: KOVA_OTEL_ENABLED
   value: {{ .Values.observability.enabled | quote }}

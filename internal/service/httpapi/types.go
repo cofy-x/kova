@@ -12,6 +12,6 @@ const (
 )
 
 type BuildJob = serviceapi.BuildJob
-type BuildResult = serviceapi.BuildResult
+type BuildOutput = serviceapi.BuildOutput
 type buildResultsResponse = serviceapi.BuildResults
 type jobListResponse = serviceapi.JobList
