@@ -55,8 +55,11 @@ the categorized paths below.
 
 - `e2e/e2e-runtime-preflight.sh`: validate local tools and registry readiness
   before the full runtime smoke.
-- `e2e/e2e-helm-quickstart.sh`: install a packaged chart into a minimal kind
-  cluster and run the public CLI build flow.
+- `e2e/e2e-helm-quickstart.sh`: install a packaged chart into an ephemeral
+  minimal kind cluster, run the public CLI build flow, and clean up the
+  test-owned cluster on exit. `KEEP_KIND_CLUSTER=true` retains a cluster
+  created by the test for debugging; `REUSE_KIND_CLUSTER=true` explicitly
+  reuses a caller-owned cluster without deleting it.
 - `e2e/e2e.sh`: run the basic local OCI build smoke.
 - `e2e/e2e-service.sh`: run the service daemon HTTP build smoke.
 - `e2e/e2e-concurrent.sh`: run concurrent local builds.
