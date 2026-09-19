@@ -31,7 +31,7 @@ kova source push \
   ./image
 ```
 
-Kova also accepts an immutable HTTPS archive URL when the caller supplies the expected SHA-256 content digest.
+Kova also accepts an immutable HTTPS archive URL without user information, query credentials, or fragments when the caller supplies the expected SHA-256 content digest.
 OCI bundle retention and garbage collection belong to the registry or caller.
 
 Each request has 1–100 logical targets.
@@ -88,7 +88,79 @@ kova job cancel <job-id>
 Logs are available only while the runner Pod is active.
 The results endpoint returns the source identity and verified image outputs; it does not return an object-store URI.
 
+## Go SDK
+
+The public Go contract is `github.com/cofy-x/kova/pkg/api/v1` and the public client is `github.com/cofy-x/kova/pkg/client`.
+The Kova CLI uses this same client implementation.
+
+```go
+package main
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"time"
+
+	apiv1 "github.com/cofy-x/kova/pkg/api/v1"
+	"github.com/cofy-x/kova/pkg/client"
+)
+
+func main() {
+	ctx := context.Background()
+	kova, err := client.New(client.Config{
+		BaseURL: "https://kova.example.com",
+		Token:   os.Getenv("KOVA_SERVICE_TOKEN"),
+	})
+	if err != nil {
+		panic(err)
+	}
+	if err := kova.CheckCompatible(ctx); err != nil {
+		panic(err)
+	}
+	job, err := kova.CreateBuild(ctx, apiv1.CreateBuildRequest{
+		SourceURI:      "oci://registry.example.com/team/sources@sha256:<manifest-digest>",
+		SourceDigest:   "sha256:<source-content-digest>",
+		Targets:        []string{"registry.example.com/team/seed:build-123"},
+		Format:         "oci",
+		Concurrency:    1,
+		IdempotencyKey: "build-123",
+	})
+	if err != nil {
+		panic(err)
+	}
+	if _, err := kova.WaitBuild(ctx, job.ID, 2*time.Second); err != nil {
+		panic(err)
+	}
+	results, err := kova.GetResults(ctx, job.ID)
+	if err != nil {
+		panic(err)
+	}
+	for _, output := range results.Outputs {
+		fmt.Println(output.ImmutableRef, output.ManifestDigest)
+	}
+}
+```
+
+Every network method accepts `context.Context`, and `WaitBuild` stops when that context is cancelled.
+`client.Config` accepts a bearer token, kubeconfig, CA file, insecure TLS mode for controlled development, an injected `http.Client`, and an optional response-size bound.
+Responses are bounded to 64 MiB by default so a faulty endpoint cannot cause unbounded client allocation.
+Compatibility checks are explicit; `CreateBuild` does not add a hidden `/version` request before submission.
+The SDK does not automatically retry `CreateBuild`, cancellation, or any other mutating request.
+Callers use a stable idempotency key when a submission may need to be retried safely.
+
+An HTTP failure can be inspected with `errors.As` into `*client.APIError`.
+It exposes the HTTP status, stable error code, safe message, retryable flag, and parsed `Retry-After` duration when the server supplied one.
+The client never includes the bearer token in returned errors.
+
+The SDK is an execution-plane client, not a workflow engine.
+Terminal Kova jobs have a configured TTL and are removed after it expires.
+Before then, callers must persist the immutable source URI and digest, Kova build ID, manifest digest, and `immutable_ref` in their own durable system.
+The manifest digest and `immutable_ref` are the success facts; an image tag or transient runner log is not.
+
 ## HTTP API
+
+The stable HTTP v1 surface is described by the [OpenAPI 3.1 Service contract](../api/openapi.yaml).
 
 Create requests use JSON:
 
@@ -119,11 +191,15 @@ GET  /v1/builds/<id>
 GET  /v1/builds/<id>/results
 GET  /v1/builds/<id>/logs?tail_lines=100
 POST /v1/builds/<id>/cancel
-POST /v1/builds/<id>/export
-POST /v1/builds/<id>/preheat
 ```
 
-Each successful output is the tuple `(format, image, manifest_digest)`.
+Job responses contain the public execution state and a stable `failure_code` for terminal failures.
+They do not expose runner Pod names, Kubernetes namespaces, or internal BuildKit addresses.
+List pages are limited to 500 jobs, and log requests are limited to the last 10,000 lines.
+
+Each successful output contains `format`, the mutable pushed `image` tag, `manifest_digest`, and a server-derived `immutable_ref`.
+The Service removes the explicit tag, preserves registry ports and nested repositories, validates the SHA-256 digest, and returns a canonical `repository@sha256:...` reference.
+Clients must not construct this reference themselves.
 Registry descriptor checks use bounded parallelism.
 If one of several registries fails, the job is `Failed` while already verified output digests remain in status.
 Registry pushes are not transactional and Kova does not roll them back.
@@ -131,6 +207,32 @@ Registry pushes are not transactional and Kova does not roll them back.
 A caller can retry safely by creating a new request with the same immutable source URI, source digest, targets, and build options.
 Kova does not resume a failed build internally.
 Workloads above 100 logical targets must be split by the caller into several bounded builds.
+
+## Error Contract
+
+All Service API failures use a structured response:
+
+```json
+{
+  "code": "queue_capacity_exceeded",
+  "message": "requester queue limit is reached",
+  "retryable": true
+}
+```
+
+| Code | HTTP status | Retryable semantics |
+| --- | --- | --- |
+| `invalid_request` | 400 or 405 | False; change the request before retrying. |
+| `unauthenticated` | 401 | False; provide valid credentials. |
+| `forbidden` | 403 | False; change caller authorization. |
+| `not_found` | 404 | False; the job may never have existed or its TTL may have expired. |
+| `conflict` | 409 | False; the idempotency key is bound to different immutable inputs. |
+| `queue_capacity_exceeded` | 429 | True; respect `Retry-After` before making a new idempotent submission attempt. |
+| `logs_unavailable` | 404 or 410 | True before a runner starts and false after terminal cleanup begins. |
+| `internal` | 500 or 503 | True only for transient service failures; false for deterministic service configuration or stored-contract failures. Mutating retries still require an idempotency key. |
+
+Non-administrative responses do not include raw Kubernetes, runner, Pod, registry credential, or implementation errors.
+Detailed implementation failures remain in operator-controlled logs and Kubernetes status rather than the public error response.
 
 ## Helm Configuration
 

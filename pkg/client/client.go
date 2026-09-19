@@ -1,4 +1,5 @@
-package serviceclient
+// Package client provides the public Go client for Kova Service HTTP API v1.
+package client
 
 import (
 	"fmt"
@@ -10,19 +11,26 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 )
 
+const (
+	defaultMaxResponseBytes int64 = 64 << 20
+	maximumResponseBytes    int64 = 1 << 30
+)
+
 type Config struct {
-	BaseURL    string
-	Token      string
-	Kubeconfig string
-	CAFile     string
-	Insecure   bool
-	HTTPClient *http.Client
+	BaseURL          string
+	Token            string
+	Kubeconfig       string
+	CAFile           string
+	Insecure         bool
+	HTTPClient       *http.Client
+	MaxResponseBytes int64
 }
 
 type Client struct {
-	baseURL *url.URL
-	http    *http.Client
-	token   string
+	baseURL          *url.URL
+	http             *http.Client
+	token            string
+	maxResponseBytes int64
 }
 
 func New(cfg Config) (*Client, error) {
@@ -44,7 +52,14 @@ func New(cfg Config) (*Client, error) {
 			return nil, err
 		}
 	}
-	return &Client{baseURL: baseURL, http: httpClient, token: strings.TrimSpace(cfg.Token)}, nil
+	maxResponseBytes := cfg.MaxResponseBytes
+	if maxResponseBytes < 0 || maxResponseBytes > maximumResponseBytes {
+		return nil, fmt.Errorf("maximum response size must be between 0 and %d bytes", maximumResponseBytes)
+	}
+	if maxResponseBytes == 0 {
+		maxResponseBytes = defaultMaxResponseBytes
+	}
+	return &Client{baseURL: baseURL, http: httpClient, token: strings.TrimSpace(cfg.Token), maxResponseBytes: maxResponseBytes}, nil
 }
 
 func authenticatedHTTPClient(cfg Config, baseURL *url.URL) (*http.Client, error) {
@@ -56,7 +71,7 @@ func authenticatedHTTPClient(cfg Config, baseURL *url.URL) (*http.Client, error)
 			return nil, fmt.Errorf("load service credentials from kubeconfig: %w", err)
 		}
 	} else if strings.TrimSpace(cfg.Token) == "" {
-		return nil, fmt.Errorf("service authentication requires KOVA_SERVICE_TOKEN or a kubeconfig")
+		return nil, fmt.Errorf("service authentication requires a bearer token or kubeconfig")
 	} else {
 		restConfig = &rest.Config{}
 	}
@@ -64,10 +79,10 @@ func authenticatedHTTPClient(cfg Config, baseURL *url.URL) (*http.Client, error)
 	restConfig.TLSClientConfig.CAFile = strings.TrimSpace(cfg.CAFile)
 	restConfig.TLSClientConfig.CAData = nil
 	restConfig.TLSClientConfig.Insecure = cfg.Insecure
-	client, err := rest.HTTPClientFor(restConfig)
+	httpClient, err := rest.HTTPClientFor(restConfig)
 	if err != nil {
 		return nil, fmt.Errorf("configure service credentials: %w", err)
 	}
-	client.Timeout = 0
-	return client, nil
+	httpClient.Timeout = 0
+	return httpClient, nil
 }

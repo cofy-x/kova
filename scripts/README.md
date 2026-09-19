@@ -13,6 +13,10 @@ the categorized paths below.
 
 - `docs/check.sh`: validate relative links in public and contributor Markdown.
 
+## CI
+
+- `ci/public-go-consumer.sh`: compile a clean external module against the local public Go SDK or an exact release tag, and verify versioned `go install` for releases.
+
 ## Build
 
 - `build/build-image.sh`: build the controller, runner, and worker images.

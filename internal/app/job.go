@@ -11,9 +11,10 @@ import (
 
 	"github.com/cofy-x/kova/internal/buildcontract"
 	"github.com/cofy-x/kova/internal/ctxconfig"
-	"github.com/cofy-x/kova/internal/serviceclient"
 	"github.com/cofy-x/kova/internal/source"
 	"github.com/cofy-x/kova/internal/sourcebundle"
+	apiv1 "github.com/cofy-x/kova/pkg/api/v1"
+	kovaclient "github.com/cofy-x/kova/pkg/client"
 
 	cli "github.com/urfave/cli/v2"
 )
@@ -104,10 +105,10 @@ func jobSubmitCLICommand() *cli.Command {
 			if err != nil {
 				return err
 			}
-			job, err := client.CreateBuild(c.Context, serviceclient.CreateBuildOptions{
+			job, err := client.CreateBuild(c.Context, apiv1.CreateBuildRequest{
 				SourceURI: sourceURI, SourceDigest: sourceDigest, Targets: targets, Format: c.String("format"),
 				Concurrency: c.Int("concurrency"), Timeout: c.Int("timeout"),
-				OOMCooldown: c.Duration("oom-cooldown"), FailFast: c.Bool("fail-fast"),
+				OOMCooldown: c.Duration("oom-cooldown").String(), FailFast: c.Bool("fail-fast"),
 				Verbose: c.Bool("verbose"), Variables: c.StringSlice("var"),
 				IdempotencyKey: c.String("idempotency-key"),
 			})
@@ -138,7 +139,7 @@ func jobListCLICommand() *cli.Command {
 			if err != nil {
 				return err
 			}
-			jobs, err := client.ListPage(c.Context, c.Int("limit"), c.String("continue"))
+			jobs, err := client.ListBuildsPage(c.Context, c.Int("limit"), c.String("continue"))
 			if err != nil {
 				return err
 			}
@@ -165,8 +166,8 @@ func jobListCLICommand() *cli.Command {
 }
 
 func jobGetCLICommand() *cli.Command {
-	return jobIDCommand("get", "show a service job", func(c *cli.Context, client *serviceclient.Client, id string) error {
-		job, err := client.Get(c.Context, id)
+	return jobIDCommand("get", "show a service job", func(c *cli.Context, client *kovaclient.Client, id string) error {
+		job, err := client.GetBuild(c.Context, id)
 		if err != nil {
 			return err
 		}
@@ -175,8 +176,8 @@ func jobGetCLICommand() *cli.Command {
 }
 
 func jobLogsCLICommand() *cli.Command {
-	command := jobIDCommand("logs", "print service job logs", func(c *cli.Context, client *serviceclient.Client, id string) error {
-		raw, err := client.Logs(c.Context, id, c.Int64("tail"))
+	command := jobIDCommand("logs", "print service job logs", func(c *cli.Context, client *kovaclient.Client, id string) error {
+		raw, err := client.GetLogs(c.Context, id, c.Int64("tail"))
 		if err != nil {
 			return err
 		}
@@ -188,14 +189,14 @@ func jobLogsCLICommand() *cli.Command {
 }
 
 func jobWaitCLICommand() *cli.Command {
-	command := jobIDCommand("wait", "wait for a service job to finish", func(c *cli.Context, client *serviceclient.Client, id string) error {
+	command := jobIDCommand("wait", "wait for a service job to finish", func(c *cli.Context, client *kovaclient.Client, id string) error {
 		ctx := c.Context
 		cancel := func() {}
 		if timeout := c.Duration("timeout"); timeout > 0 {
 			ctx, cancel = context.WithTimeout(ctx, timeout)
 		}
 		defer cancel()
-		job, err := client.Wait(ctx, id, c.Duration("interval"))
+		job, err := client.WaitBuild(ctx, id, c.Duration("interval"))
 		if err != nil {
 			return err
 		}
@@ -209,8 +210,8 @@ func jobWaitCLICommand() *cli.Command {
 }
 
 func jobCancelCLICommand() *cli.Command {
-	return jobIDCommand("cancel", "cancel a service job", func(c *cli.Context, client *serviceclient.Client, id string) error {
-		job, err := client.Cancel(c.Context, id)
+	return jobIDCommand("cancel", "cancel a service job", func(c *cli.Context, client *kovaclient.Client, id string) error {
+		job, err := client.CancelBuild(c.Context, id)
 		if err != nil {
 			return err
 		}
@@ -219,8 +220,8 @@ func jobCancelCLICommand() *cli.Command {
 }
 
 func jobResultsCLICommand() *cli.Command {
-	return jobIDCommand("results", "show typed service job results", func(c *cli.Context, client *serviceclient.Client, id string) error {
-		results, err := client.Results(c.Context, id)
+	return jobIDCommand("results", "show typed service job results", func(c *cli.Context, client *kovaclient.Client, id string) error {
+		results, err := client.GetResults(c.Context, id)
 		if err != nil {
 			return err
 		}
@@ -228,7 +229,7 @@ func jobResultsCLICommand() *cli.Command {
 	})
 }
 
-func jobIDCommand(name, usage string, action func(*cli.Context, *serviceclient.Client, string) error) *cli.Command {
+func jobIDCommand(name, usage string, action func(*cli.Context, *kovaclient.Client, string) error) *cli.Command {
 	return &cli.Command{
 		Name: name, Usage: usage, ArgsUsage: "<job-id>",
 		Action: func(c *cli.Context) error {
@@ -244,7 +245,7 @@ func jobIDCommand(name, usage string, action func(*cli.Context, *serviceclient.C
 	}
 }
 
-func serviceClientFromContext(c *cli.Context) (*serviceclient.Client, error) {
+func serviceClientFromContext(c *cli.Context) (*kovaclient.Client, error) {
 	cfg, err := loadCtxConfig(c)
 	if err != nil {
 		return nil, err
@@ -278,7 +279,7 @@ func serviceClientFromContext(c *cli.Context) (*serviceclient.Client, error) {
 	if !c.IsSet("service-insecure") && hasCtx {
 		insecure = selected.ServiceInsecure
 	}
-	return serviceclient.New(serviceclient.Config{
+	return kovaclient.New(kovaclient.Config{
 		BaseURL: baseURL, Token: envValue("KOVA_SERVICE_TOKEN"), Kubeconfig: kubeconfig,
 		CAFile: caFile, Insecure: insecure,
 	})

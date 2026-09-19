@@ -11,6 +11,10 @@ func TestNormalizeTargetRequiresTaggedPushDestination(t *testing.T) {
 	if err != nil || valid != "registry.example.com/team/image:dev" {
 		t.Fatalf("NormalizeTarget() = %q, %v", valid, err)
 	}
+	dockerHub, err := NormalizeTarget("alpine:3.20")
+	if err != nil || dockerHub != "index.docker.io/library/alpine:3.20" {
+		t.Fatalf("NormalizeTarget() = %q, %v", dockerHub, err)
+	}
 	for _, value := range []string{
 		"", " registry.example.com/team/image:dev", "registry.example.com/team/image",
 		"registry.example.com/team/image@sha256:" + strings.Repeat("a", 64),
@@ -35,6 +39,9 @@ func TestNormalizeTargetsIsSortedUniqueAndBounded(t *testing.T) {
 	}
 	if _, err := NormalizeTargets([]string{targets[0], targets[0]}); err == nil {
 		t.Fatal("expected duplicate target rejection")
+	}
+	if _, err := NormalizeTargets([]string{"alpine:3.20", "index.docker.io/library/alpine:3.20"}); err == nil {
+		t.Fatal("expected canonical duplicate target rejection")
 	}
 	tooMany := make([]string, MaxLogicalTargets+1)
 	for index := range tooMany {

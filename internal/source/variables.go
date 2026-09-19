@@ -9,7 +9,10 @@ import (
 	"strings"
 )
 
-var kovaVarPattern = regexp.MustCompile(`\$\{?(KOVA_[A-Za-z0-9_]+)\}?`)
+var (
+	kovaVarPattern           = regexp.MustCompile(`\$\{?(KOVA_[A-Za-z0-9_]+)\}?`)
+	buildVariableNamePattern = regexp.MustCompile(`^KOVA_[A-Za-z0-9_]+$`)
+)
 
 func replaceBuildVariablesInFile(path string, buildVars map[string]string) error {
 	raw, err := os.ReadFile(path)
@@ -72,12 +75,11 @@ func ParseBuildVariables(items []string) (map[string]string, error) {
 		if !found {
 			return nil, fmt.Errorf("invalid --var %q, expected KEY=value", item)
 		}
-		key = strings.TrimSpace(key)
-		if key == "" {
-			return nil, fmt.Errorf("invalid --var %q, key must not be empty", item)
+		if key != strings.TrimSpace(key) || !buildVariableNamePattern.MatchString(key) {
+			return nil, fmt.Errorf("invalid --var %q, key must match KOVA_[A-Za-z0-9_]+", item)
 		}
-		if !strings.HasPrefix(key, "KOVA_") {
-			return nil, fmt.Errorf("invalid --var %q, key must start with KOVA_", item)
+		if _, exists := buildVars[key]; exists {
+			return nil, fmt.Errorf("build variable %q is duplicated", key)
 		}
 		buildVars[key] = value
 	}

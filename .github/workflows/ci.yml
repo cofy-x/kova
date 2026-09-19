@@ -40,6 +40,8 @@ jobs:
           fi
       - name: Check module files
         run: go mod tidy -diff
+      - name: Verify external Go SDK consumer
+        run: make sdk-smoke
       - name: Run vet
         run: go vet ./...
       - name: Run tests with race detection

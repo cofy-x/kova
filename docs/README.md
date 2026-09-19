@@ -12,7 +12,8 @@ with the [complete CLI workflow](cli-workflow.md) for build operations or the
   export, and cleanup for development.
 - [Runtime design](architecture.md): roles, topology, build/export,
   preheat, and scaling flows.
-- [Service job workflow](service.md): immutable source contract, authenticated job CLI, HTTP API, RBAC, and bounded results.
+- [Service API and Go SDK](service.md): immutable source contract, authenticated job CLI, public Go client, structured errors, RBAC, and bounded results.
+- [Machine-readable Service API](../api/openapi.yaml): stable OpenAPI 3.1 operations, schemas, authentication, and error responses.
 - [Validation matrix](testing.md): static checks, E2E targets, and runtime smoke
   expectations.
 - [Release artifacts](releases.md): versioning, CLI archives, runtime images,

@@ -1,14 +1,14 @@
-package serviceclient
+package client
 
 import (
 	"context"
 	"fmt"
 
-	"github.com/cofy-x/kova/internal/serviceapi"
+	apiv1 "github.com/cofy-x/kova/pkg/api/v1"
 )
 
-func (c *Client) Version(ctx context.Context) (serviceapi.VersionInfo, error) {
-	var info serviceapi.VersionInfo
+func (c *Client) Version(ctx context.Context) (apiv1.VersionInfo, error) {
+	var info apiv1.VersionInfo
 	err := c.getJSON(ctx, "/version", &info)
 	return info, err
 }
@@ -18,16 +18,14 @@ func (c *Client) CheckCompatible(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("query Kova service version: %w", err)
 	}
-	if info.APIVersion != serviceapi.APIVersion {
-		return fmt.Errorf("incompatible Kova service API %q; client requires %q", info.APIVersion, serviceapi.APIVersion)
+	if info.APIVersion != apiv1.APIVersion {
+		return fmt.Errorf("incompatible Kova service API %q; client requires %q", info.APIVersion, apiv1.APIVersion)
 	}
 	return nil
 }
 
 func (c *Client) Ready(ctx context.Context) error {
-	var status struct {
-		Status string `json:"status"`
-	}
+	var status apiv1.ReadyStatus
 	if err := c.getJSON(ctx, "/readyz", &status); err != nil {
 		return err
 	}

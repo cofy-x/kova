@@ -9,6 +9,7 @@ import (
 
 	kovav1 "github.com/cofy-x/kova/internal/apis/kova/v1alpha1"
 	serviceauth "github.com/cofy-x/kova/internal/service/auth"
+	apiv1 "github.com/cofy-x/kova/pkg/api/v1"
 
 	"github.com/labstack/echo/v4"
 )
@@ -23,16 +24,16 @@ func (s *Server) authMiddleware(next echo.HandlerFunc) echo.HandlerFunc {
 		token, err := serviceauth.Bearer(c.Request().Header.Get("Authorization"))
 		if err != nil && s.cfg.AuthMode != serviceauth.ModeUnsafeNone {
 			authDenied.Add(c.Request().Context(), 1)
-			return c.JSON(http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+			return writeAPIError(c, http.StatusUnauthorized, apiv1.ErrorCodeUnauthenticated, "authentication is required", false, 0)
 		}
 		if s.auth == nil {
 			authDenied.Add(c.Request().Context(), 1)
-			return c.JSON(http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+			return writeAPIError(c, http.StatusUnauthorized, apiv1.ErrorCodeUnauthenticated, "authentication is required", false, 0)
 		}
 		principal, err := s.auth.Authenticate(c.Request().Context(), token)
 		if err != nil {
 			authDenied.Add(c.Request().Context(), 1)
-			return c.JSON(http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+			return writeAPIError(c, http.StatusUnauthorized, apiv1.ErrorCodeUnauthenticated, "authentication failed", false, 0)
 		}
 		c.Set(principalContextKey, principal)
 		return next(c)
@@ -70,5 +71,5 @@ func (s *Server) authorizeBuild(ctx context.Context, principal serviceauth.Princ
 
 func forbidden(c echo.Context) error {
 	authzDenied.Add(c.Request().Context(), 1)
-	return c.JSON(http.StatusForbidden, map[string]string{"error": "forbidden"})
+	return writeAPIError(c, http.StatusForbidden, apiv1.ErrorCodeForbidden, "access is forbidden", false, 0)
 }

@@ -39,8 +39,8 @@ func Validate(uri, digest string) error {
 	}
 	switch parsed.Scheme {
 	case "https":
-		if parsed.User != nil || parsed.Fragment != "" {
-			return fmt.Errorf("HTTPS source URI must not contain credentials or a fragment")
+		if parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+			return fmt.Errorf("HTTPS source URI must not contain credentials, a query, or a fragment")
 		}
 	case "oci":
 		if parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {

@@ -8,11 +8,15 @@ container runtime behavior.
 
 ```bash
 go test ./...
+make sdk-smoke
 make docs-check
 make lint-scripts
 make helm-template
 git diff --check
 ```
+
+`make sdk-smoke` compiles a clean external module against the public `pkg/api/v1` and `pkg/client` packages.
+Tagged releases run the same consumer check against the exact module version and verify `go install github.com/cofy-x/kova/cmd/kova@vX.Y.Z`.
 
 ## Network Overrides
 

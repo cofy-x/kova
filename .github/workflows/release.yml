@@ -58,6 +58,8 @@ jobs:
           cache: true
       - name: Build CLI archives
         run: scripts/release/build-cli.sh "${GITHUB_REF_NAME}"
+      - name: Verify tagged Go SDK and go install
+        run: scripts/ci/public-go-consumer.sh "${GITHUB_REF_NAME}"
       - name: Generate CLI SBOM
         env:
           CGO_ENABLED: "0"

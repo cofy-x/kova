@@ -74,6 +74,65 @@ kova job results <job-id>
 
 Registry credentials, Nydus output, and batch archives are covered in the [installation and first-build guide](docs/quickstart.md).
 
+## Go SDK
+
+External Go callers can use the stable Service API types in `pkg/api/v1` and the shared client used by the Kova CLI in `pkg/client`:
+
+```go
+package main
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"time"
+
+	apiv1 "github.com/cofy-x/kova/pkg/api/v1"
+	"github.com/cofy-x/kova/pkg/client"
+)
+
+func main() {
+	ctx := context.Background()
+	kova, err := client.New(client.Config{
+		BaseURL: "https://kova.example.com",
+		Token:   os.Getenv("KOVA_SERVICE_TOKEN"),
+	})
+	if err != nil {
+		panic(err)
+	}
+	if err := kova.CheckCompatible(ctx); err != nil {
+		panic(err)
+	}
+	job, err := kova.CreateBuild(ctx, apiv1.CreateBuildRequest{
+		SourceURI:      "oci://registry.example.com/team/sources@sha256:<manifest-digest>",
+		SourceDigest:   "sha256:<source-content-digest>",
+		Targets:        []string{"registry.example.com/team/seed:build-123"},
+		Format:         "oci",
+		Concurrency:    1,
+		IdempotencyKey: "build-123",
+	})
+	if err != nil {
+		panic(err)
+	}
+	if _, err := kova.WaitBuild(ctx, job.ID, 2*time.Second); err != nil {
+		panic(err)
+	}
+	results, err := kova.GetResults(ctx, job.ID)
+	if err != nil {
+		panic(err)
+	}
+	for _, output := range results.Outputs {
+		fmt.Println(output.ImmutableRef, output.ManifestDigest)
+	}
+}
+```
+
+Compatibility checks are explicit, so `CreateBuild` performs exactly one submission request.
+The SDK does not own retry or recovery workflows and never automatically retries `CreateBuild` or other mutating requests.
+Callers use an idempotency key for safe submission retries and persist the immutable source identity, build ID, manifest digest, and immutable reference before the terminal Kova job expires.
+The verified manifest digest and `immutable_ref` are success facts; tags and ephemeral logs are not.
+See the [external Go client and HTTP contract](docs/service.md#go-sdk) and the [machine-readable Service API](api/openapi.yaml).
+
 ## Why Kova
 
 - **Immutable source to verified image** — every build consumes a digest-verified OCI or HTTPS source and returns the pushed image manifest digest.

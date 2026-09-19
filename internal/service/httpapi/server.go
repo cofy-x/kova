@@ -11,8 +11,8 @@ import (
 	"github.com/cofy-x/kova/internal/observability"
 	serviceauth "github.com/cofy-x/kova/internal/service/auth"
 	"github.com/cofy-x/kova/internal/service/config"
-	"github.com/cofy-x/kova/internal/serviceapi"
 	"github.com/cofy-x/kova/internal/version"
+	apiv1 "github.com/cofy-x/kova/pkg/api/v1"
 
 	"github.com/labstack/echo/v4"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -76,21 +76,22 @@ func (s *Server) routes() *echo.Echo {
 	e := echo.New()
 	e.HideBanner = true
 	e.HidePort = true
+	e.HTTPErrorHandler = s.httpErrorHandler
 	e.GET("/healthz", func(c echo.Context) error {
 		return c.JSON(http.StatusOK, map[string]string{"status": "ok"})
 	})
 	e.GET("/version", func(c echo.Context) error {
-		return c.JSON(http.StatusOK, serviceapi.VersionInfo{
-			APIVersion: serviceapi.APIVersion, Version: version.Version,
+		return c.JSON(http.StatusOK, apiv1.VersionInfo{
+			APIVersion: apiv1.APIVersion, Version: version.Version,
 			Commit: version.Commit, BuildDate: version.BuildDate,
 		})
 	})
 	e.GET("/readyz", func(c echo.Context) error {
 		var builds kovav1.KovaBuildList
 		if err := s.reader.List(c.Request().Context(), &builds, client.InNamespace(s.cfg.Namespace), client.Limit(1)); err != nil {
-			return c.JSON(http.StatusServiceUnavailable, map[string]string{"status": "unavailable"})
+			return serviceUnavailable(c, err)
 		}
-		return c.JSON(http.StatusOK, map[string]string{"status": "ready"})
+		return c.JSON(http.StatusOK, apiv1.ReadyStatus{Status: "ready"})
 	})
 	v1 := e.Group("/v1", s.authMiddleware)
 	v1.POST("/builds", s.handleCreateBuild)

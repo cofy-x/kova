@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -12,6 +13,7 @@ import (
 
 	kovav1 "github.com/cofy-x/kova/internal/apis/kova/v1alpha1"
 	serviceauth "github.com/cofy-x/kova/internal/service/auth"
+	apiv1 "github.com/cofy-x/kova/pkg/api/v1"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -75,9 +77,7 @@ func TestOwnerAccessIsIsolatedWithoutAdministrativeRBAC(t *testing.T) {
 	if rec := request("/v1/builds/owned"); rec.Code != http.StatusOK {
 		t.Fatalf("owner get status=%d body=%s", rec.Code, rec.Body.String())
 	}
-	if rec := request("/v1/builds/other"); rec.Code != http.StatusForbidden {
-		t.Fatalf("other get status=%d body=%s", rec.Code, rec.Body.String())
-	}
+	assertAPIError(t, request("/v1/builds/other"), http.StatusForbidden, apiv1.ErrorCodeForbidden, false)
 	list := request("/v1/builds")
 	if list.Code != http.StatusOK || !strings.Contains(list.Body.String(), `"id":"owned"`) || strings.Contains(list.Body.String(), `"id":"other"`) {
 		t.Fatalf("filtered list status=%d body=%s", list.Code, list.Body.String())
@@ -137,7 +137,7 @@ func TestCreateBuildCreatesCRFromImmutableSource(t *testing.T) {
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
 	}
-	var job BuildJob
+	var job apiv1.BuildJob
 	if err := json.Unmarshal(rec.Body.Bytes(), &job); err != nil {
 		t.Fatal(err)
 	}
@@ -171,9 +171,10 @@ func TestCreateBuildRejectsRequesterQueueOverflow(t *testing.T) {
 	req.Header.Set("Authorization", "Bearer token")
 	rec := httptest.NewRecorder()
 	srv.routes().ServeHTTP(rec, req)
-	if rec.Code != http.StatusTooManyRequests || rec.Header().Get("Retry-After") == "" {
+	if rec.Header().Get("Retry-After") == "" {
 		t.Fatalf("status=%d headers=%v body=%s", rec.Code, rec.Header(), rec.Body.String())
 	}
+	assertAPIError(t, rec, http.StatusTooManyRequests, apiv1.ErrorCodeQueueCapacityExceeded, true)
 }
 
 func TestCreateBuildUsesArchiveTargetWithoutOverride(t *testing.T) {
@@ -201,7 +202,7 @@ func TestCreateBuildStoresBatchArchiveTargets(t *testing.T) {
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
-	var job BuildJob
+	var job apiv1.BuildJob
 	if err := json.Unmarshal(rec.Body.Bytes(), &job); err != nil {
 		t.Fatal(err)
 	}
@@ -248,6 +249,67 @@ func TestCreateBuildRejectsInvalidOptions(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestCreateBuildEnforcesPublicRequestBounds(t *testing.T) {
+	srv := newTestServer(t, &fakeKube{})
+	valid := map[string]any{
+		"source_uri":    "oci://registry.local/sources/test@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		"source_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		"targets":       []string{"registry.local/example:dev"},
+		"concurrency":   1,
+	}
+	request := func(body map[string]any, suffix, contentType string) *httptest.ResponseRecorder {
+		raw, err := json.Marshal(body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req := httptest.NewRequest(http.MethodPost, "/v1/builds", bytes.NewReader(append(raw, suffix...)))
+		req.Header.Set("Authorization", "Bearer token")
+		req.Header.Set("Content-Type", contentType)
+		rec := httptest.NewRecorder()
+		srv.routes().ServeHTTP(rec, req)
+		return rec
+	}
+
+	assertAPIError(t, request(valid, "{}", "application/json"), http.StatusBadRequest, apiv1.ErrorCodeInvalidRequest, false)
+	assertAPIError(t, request(valid, "", "text/plain"), http.StatusBadRequest, apiv1.ErrorCodeInvalidRequest, false)
+
+	tooManyVariables := make([]string, apiv1.MaxBuildVariables+1)
+	for index := range tooManyVariables {
+		tooManyVariables[index] = fmt.Sprintf("KOVA_VALUE_%d=value", index)
+	}
+	withVariables := cloneRequest(valid)
+	withVariables["variables"] = tooManyVariables
+	assertAPIError(t, request(withVariables, "", "application/json"), http.StatusBadRequest, apiv1.ErrorCodeInvalidRequest, false)
+
+	withLongVariable := cloneRequest(valid)
+	withLongVariable["variables"] = []string{"KOVA_VALUE=" + strings.Repeat("x", apiv1.MaxBuildVariableLength)}
+	assertAPIError(t, request(withLongVariable, "", "application/json"), http.StatusBadRequest, apiv1.ErrorCodeInvalidRequest, false)
+
+	withDuplicateVariables := cloneRequest(valid)
+	withDuplicateVariables["variables"] = []string{"KOVA_VALUE=one", "KOVA_VALUE=two"}
+	assertAPIError(t, request(withDuplicateVariables, "", "application/json"), http.StatusBadRequest, apiv1.ErrorCodeInvalidRequest, false)
+
+	withWhitespaceKey := cloneRequest(valid)
+	withWhitespaceKey["idempotency_key"] = " request-123"
+	assertAPIError(t, request(withWhitespaceKey, "", "application/json"), http.StatusBadRequest, apiv1.ErrorCodeInvalidRequest, false)
+
+	withLongSource := cloneRequest(valid)
+	withLongSource["source_uri"] = "https://sources.example.com/" + strings.Repeat("x", apiv1.MaxSourceURILength)
+	assertAPIError(t, request(withLongSource, "", "application/json"), http.StatusBadRequest, apiv1.ErrorCodeInvalidRequest, false)
+
+	oversized := cloneRequest(valid)
+	oversized["source_uri"] = "https://sources.example.com/" + strings.Repeat("x", maxCreateBuildRequestBytes)
+	assertAPIError(t, request(oversized, "", "application/json"), http.StatusBadRequest, apiv1.ErrorCodeInvalidRequest, false)
+}
+
+func cloneRequest(input map[string]any) map[string]any {
+	output := make(map[string]any, len(input))
+	for key, value := range input {
+		output[key] = value
+	}
+	return output
 }
 
 func TestCreateBuildEnforcesBoundedTaggedTargets(t *testing.T) {
@@ -319,7 +381,7 @@ func TestCreateBuildIsIdempotentAndRejectsConflicts(t *testing.T) {
 	if second.Code != http.StatusOK {
 		t.Fatalf("second status=%d body=%s", second.Code, second.Body.String())
 	}
-	var a, b BuildJob
+	var a, b apiv1.BuildJob
 	if err := json.Unmarshal(first.Body.Bytes(), &a); err != nil {
 		t.Fatal(err)
 	}
@@ -339,6 +401,7 @@ func TestCreateBuildIsIdempotentAndRejectsConflicts(t *testing.T) {
 	if conflict.Code != http.StatusConflict {
 		t.Fatalf("conflict status=%d body=%s", conflict.Code, conflict.Body.String())
 	}
+	assertAPIError(t, conflict, http.StatusConflict, apiv1.ErrorCodeConflict, false)
 	var original kovav1.KovaBuild
 	if err := srv.client.Get(context.Background(), kubeObjectKey("jobs", a.ID), &original); err != nil {
 		t.Fatal(err)
@@ -402,12 +465,210 @@ func TestBuildResultsReturnsVerifiedOutputs(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
-	var response buildResultsResponse
+	var response apiv1.BuildResults
 	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
 		t.Fatal(err)
 	}
 	if len(response.Outputs) != 1 || response.Outputs[0].ManifestDigest == "" || response.IdempotencyKey != "key" {
 		t.Fatalf("response=%#v", response)
+	}
+	if response.Outputs[0].ImmutableRef != "registry.local/demo@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" {
+		t.Fatalf("immutable_ref=%q", response.Outputs[0].ImmutableRef)
+	}
+}
+
+func TestBuildJobExposesStableFailureWithoutRuntimeInternals(t *testing.T) {
+	srv := newTestServer(t, &fakeKube{})
+	build := &kovav1.KovaBuild{
+		ObjectMeta: metav1.ObjectMeta{Name: "failed", Namespace: "jobs"},
+		Status: kovav1.KovaBuildStatus{
+			Phase: kovav1.PhaseFailed, Reason: "ResultVerificationFailed",
+			Message:       "registry credential secret-name failed",
+			RunnerPodName: "kova-job-failed",
+		},
+	}
+	if err := srv.client.Create(context.Background(), build); err != nil {
+		t.Fatal(err)
+	}
+	if err := srv.client.Status().Update(context.Background(), build); err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/v1/builds/failed", nil)
+	req.Header.Set("Authorization", "Bearer token")
+	rec := httptest.NewRecorder()
+	srv.routes().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var job apiv1.BuildJob
+	if err := json.Unmarshal(rec.Body.Bytes(), &job); err != nil {
+		t.Fatal(err)
+	}
+	if job.FailureCode != apiv1.BuildFailureVerificationFailed || job.Error != "one or more build results could not be verified" {
+		t.Fatalf("job=%#v", job)
+	}
+	for _, forbidden := range []string{"secret-name", "pod_name", "namespace", "buildkit_addr"} {
+		if strings.Contains(rec.Body.String(), forbidden) {
+			t.Fatalf("public job leaked %q: %s", forbidden, rec.Body.String())
+		}
+	}
+}
+
+func TestPublicBuildFailureContract(t *testing.T) {
+	for reason, want := range map[string]apiv1.BuildFailureCode{
+		"InvalidSource":            apiv1.BuildFailureInvalidSource,
+		"InvalidTargets":           apiv1.BuildFailureInvalidTargets,
+		"RunnerCreateFailed":       apiv1.BuildFailureRunnerUnavailable,
+		"RunnerUnavailable":        apiv1.BuildFailureRunnerUnavailable,
+		"BuildSubmissionFailed":    apiv1.BuildFailureSubmissionFailed,
+		"ResultVerificationFailed": apiv1.BuildFailureVerificationFailed,
+		"BuildFailed":              apiv1.BuildFailureExecutionFailed,
+		"Cancelled":                apiv1.BuildFailureCancelled,
+	} {
+		if got := publicBuildFailureCode(reason); got != want {
+			t.Errorf("reason %q mapped to %q, want %q", reason, got, want)
+		}
+		if publicBuildError(reason) == "" {
+			t.Errorf("reason %q has no safe public message", reason)
+		}
+	}
+}
+
+func TestBuildResultsRejectsInvalidStoredReferenceWithoutRetry(t *testing.T) {
+	srv := newTestServer(t, &fakeKube{})
+	build := &kovav1.KovaBuild{
+		ObjectMeta: metav1.ObjectMeta{Name: "invalid-output", Namespace: "jobs"},
+		Status: kovav1.KovaBuildStatus{Phase: kovav1.PhaseSucceeded, Outputs: []kovav1.BuildOutput{{
+			Format: "oci", Image: "registry.local/demo", ManifestDigest: "sha256:" + strings.Repeat("b", 64),
+		}}},
+	}
+	if err := srv.client.Create(context.Background(), build); err != nil {
+		t.Fatal(err)
+	}
+	if err := srv.client.Status().Update(context.Background(), build); err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/v1/builds/invalid-output/results", nil)
+	req.Header.Set("Authorization", "Bearer token")
+	rec := httptest.NewRecorder()
+	srv.routes().ServeHTTP(rec, req)
+	assertAPIError(t, rec, http.StatusInternalServerError, apiv1.ErrorCodeInternal, false)
+	if strings.Contains(rec.Body.String(), "registry.local") {
+		t.Fatalf("invalid stored output leaked: %s", rec.Body.String())
+	}
+}
+
+func TestImmutableReferenceNormalization(t *testing.T) {
+	digest := "sha256:" + strings.Repeat("a", 64)
+	for _, tc := range []struct {
+		name  string
+		image string
+		want  string
+	}{
+		{name: "docker hub", image: "alpine:3.20", want: "index.docker.io/library/alpine@" + digest},
+		{name: "registry port", image: "registry.example.com:5443/team/image:dev", want: "registry.example.com:5443/team/image@" + digest},
+		{name: "nested repository", image: "registry.example.com/team/nested/image:release", want: "registry.example.com/team/nested/image@" + digest},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := immutableReference(tc.image, digest)
+			if err != nil || got != tc.want {
+				t.Fatalf("immutableReference()=(%q, %v), want %q", got, err, tc.want)
+			}
+		})
+	}
+	for _, image := range []string{
+		"registry.example.com/team/image",
+		"registry.example.com/team/image@" + digest,
+		" registry.example.com/team/image:dev",
+		"oci://registry.example.com/team/image:dev",
+	} {
+		if _, err := immutableReference(image, digest); err == nil {
+			t.Fatalf("expected image %q to fail", image)
+		}
+	}
+	if _, err := immutableReference("registry.example.com/team/image:dev", "sha256:bad"); err == nil {
+		t.Fatal("expected invalid digest to fail")
+	}
+}
+
+func TestStructuredAPIErrorsDoNotExposeInternalDetails(t *testing.T) {
+	srv := newTestServer(t, &fakeKube{})
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/builds", nil)
+	rec := httptest.NewRecorder()
+	srv.routes().ServeHTTP(rec, req)
+	assertAPIError(t, rec, http.StatusUnauthorized, apiv1.ErrorCodeUnauthenticated, false)
+
+	srv.cfg.RunnerImage = ""
+	req = multipartBuildRequest(t, map[string]string{"target": "registry.local/example:dev"})
+	req.Header.Set("Authorization", "Bearer token")
+	rec = httptest.NewRecorder()
+	srv.routes().ServeHTTP(rec, req)
+	assertAPIError(t, rec, http.StatusInternalServerError, apiv1.ErrorCodeInternal, false)
+	if strings.Contains(rec.Body.String(), "runner image") {
+		t.Fatalf("internal implementation detail leaked: %s", rec.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/v1/builds/missing", nil)
+	req.Header.Set("Authorization", "Bearer token")
+	rec = httptest.NewRecorder()
+	srv.routes().ServeHTTP(rec, req)
+	assertAPIError(t, rec, http.StatusNotFound, apiv1.ErrorCodeNotFound, false)
+
+	srv = newTestServer(t, &fakeKube{})
+	req = multipartBuildRequest(t, map[string]string{"var": "SECRET=do-not-expose"})
+	req.Header.Set("Authorization", "Bearer token")
+	rec = httptest.NewRecorder()
+	srv.routes().ServeHTTP(rec, req)
+	assertAPIError(t, rec, http.StatusBadRequest, apiv1.ErrorCodeInvalidRequest, false)
+	if strings.Contains(rec.Body.String(), "do-not-expose") {
+		t.Fatalf("invalid variable value leaked: %s", rec.Body.String())
+	}
+}
+
+func TestLogsUnavailableRetryability(t *testing.T) {
+	srv := newTestServer(t, &fakeKube{})
+	build := &kovav1.KovaBuild{
+		ObjectMeta: metav1.ObjectMeta{Name: "logs", Namespace: "jobs"},
+		Status:     kovav1.KovaBuildStatus{Phase: kovav1.PhaseQueued},
+	}
+	if err := srv.client.Create(context.Background(), build); err != nil {
+		t.Fatal(err)
+	}
+	oversizedReq := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/v1/builds/logs/logs?tail_lines=%d", apiv1.MaxLogTailLines+1), nil)
+	oversizedReq.Header.Set("Authorization", "Bearer token")
+	oversizedRec := httptest.NewRecorder()
+	srv.routes().ServeHTTP(oversizedRec, oversizedReq)
+	assertAPIError(t, oversizedRec, http.StatusBadRequest, apiv1.ErrorCodeInvalidRequest, false)
+
+	request := func() *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, "/v1/builds/logs/logs", nil)
+		req.Header.Set("Authorization", "Bearer token")
+		rec := httptest.NewRecorder()
+		srv.routes().ServeHTTP(rec, req)
+		return rec
+	}
+	assertAPIError(t, request(), http.StatusNotFound, apiv1.ErrorCodeLogsUnavailable, true)
+
+	build.Status.Phase = kovav1.PhaseSucceeded
+	build.Status.RunnerPodName = "kova-job-logs"
+	if err := srv.client.Status().Update(context.Background(), build); err != nil {
+		t.Fatal(err)
+	}
+	assertAPIError(t, request(), http.StatusGone, apiv1.ErrorCodeLogsUnavailable, false)
+}
+
+func assertAPIError(t *testing.T, rec *httptest.ResponseRecorder, status int, code apiv1.ErrorCode, retryable bool) {
+	t.Helper()
+	if rec.Code != status {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var response apiv1.ErrorResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Code != code || response.Message == "" || response.Retryable != retryable {
+		t.Fatalf("error response=%#v", response)
 	}
 }
 

@@ -5,14 +5,16 @@ import (
 	"sort"
 	"strings"
 
+	apiv1 "github.com/cofy-x/kova/pkg/api/v1"
+
 	"github.com/google/go-containerregistry/pkg/name"
 )
 
 const (
-	MaxLogicalTargets                  = 100
-	MaxConcreteOutputs                 = MaxLogicalTargets * 2
-	MaxTargetLength                    = 512
-	MaxBuildConcurrency                = MaxLogicalTargets
+	MaxLogicalTargets                  = apiv1.MaxLogicalTargets
+	MaxConcreteOutputs                 = apiv1.MaxConcreteOutputs
+	MaxTargetLength                    = apiv1.MaxTargetLength
+	MaxBuildConcurrency                = apiv1.MaxBuildConcurrency
 	MaxManifestVerificationConcurrency = 8
 	DefaultControllerConcurrency       = 4
 	MaxControllerConcurrency           = 32
@@ -40,11 +42,15 @@ func NormalizeTarget(raw string) (string, error) {
 	if strings.LastIndexByte(value, ':') <= strings.LastIndexByte(value, '/') {
 		return "", fmt.Errorf("target must include an explicit tag")
 	}
-	tag, err := name.NewTag(value, name.StrictValidation)
+	tag, err := name.NewTag(value)
 	if err != nil {
 		return "", fmt.Errorf("invalid tagged image target %q: %w", value, err)
 	}
-	return tag.Name(), nil
+	normalized := tag.Name()
+	if _, err := name.NewTag(normalized, name.StrictValidation); err != nil {
+		return "", fmt.Errorf("invalid tagged image target %q: %w", value, err)
+	}
+	return normalized, nil
 }
 
 func NormalizeTargets(values []string) ([]string, error) {
