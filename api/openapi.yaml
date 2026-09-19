@@ -1,0 +1,515 @@
+openapi: 3.1.0
+info:
+  title: Kova Service API
+  version: v1
+  description: Bounded immutable source to verified OCI image build execution.
+paths:
+  /version:
+    get:
+      operationId: version
+      responses:
+        "200":
+          description: Service API and build version.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VersionInfo"
+  /readyz:
+    get:
+      operationId: ready
+      responses:
+        "200":
+          description: The Service can reach its Kubernetes API dependencies.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReadyStatus"
+        "503":
+          $ref: "#/components/responses/InternalError"
+  /v1/builds:
+    post:
+      operationId: createBuild
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateBuildRequest"
+      responses:
+        "200":
+          description: An existing build matched the caller-scoped idempotency key.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BuildJob"
+        "202":
+          description: The build was accepted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BuildJob"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "429":
+          $ref: "#/components/responses/QueueCapacityExceeded"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    get:
+      operationId: listBuilds
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+            default: 100
+        - name: continue
+          in: query
+          schema:
+            type: string
+      responses:
+        "200":
+          description: A bounded page of visible builds.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JobList"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/builds/{id}:
+    get:
+      operationId: getBuild
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/BuildID"
+      responses:
+        "200":
+          description: Current bounded build status.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BuildJob"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/builds/{id}/results:
+    get:
+      operationId: getResults
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/BuildID"
+      responses:
+        "200":
+          description: Verified image outputs retained in the terminal build status.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BuildResults"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/builds/{id}/logs:
+    get:
+      operationId: getLogs
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/BuildID"
+        - name: tail_lines
+          in: query
+          schema:
+            type: integer
+            minimum: 0
+            maximum: 10000
+            default: 100
+      responses:
+        "200":
+          description: Ephemeral runner logs while the build is active.
+          content:
+            text/plain:
+              schema:
+                type: string
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/LogsUnavailable"
+        "410":
+          $ref: "#/components/responses/LogsUnavailable"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/builds/{id}/cancel:
+    post:
+      operationId: cancelBuild
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/BuildID"
+      responses:
+        "200":
+          description: The build was already terminal.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BuildJob"
+        "202":
+          description: Cancellation was requested.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BuildJob"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+  parameters:
+    BuildID:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        maxLength: 253
+        pattern: "^[a-z0-9](?:[-a-z0-9]*[a-z0-9])?$"
+  headers:
+    RetryAfter:
+      description: Seconds until the caller should try a new request.
+      schema:
+        type: integer
+        minimum: 1
+  responses:
+    InvalidRequest:
+      description: The request does not satisfy the public API contract.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/InvalidRequestError"
+    Unauthenticated:
+      description: Authentication is required or failed.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/UnauthenticatedError"
+    Forbidden:
+      description: The authenticated caller is not allowed to perform the operation.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ForbiddenError"
+    NotFound:
+      description: The build does not exist or has expired.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/NotFoundError"
+    Conflict:
+      description: The idempotency key is already bound to different immutable inputs.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ConflictError"
+    QueueCapacityExceeded:
+      description: The caller has reached its bounded queued-build capacity.
+      headers:
+        Retry-After:
+          $ref: "#/components/headers/RetryAfter"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/QueueCapacityExceededError"
+    LogsUnavailable:
+      description: Ephemeral logs are not currently or no longer available.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/LogsUnavailableError"
+    InternalError:
+      description: The Service could not complete the request without exposing implementation details.
+      headers:
+        Retry-After:
+          $ref: "#/components/headers/RetryAfter"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/InternalAPIError"
+  schemas:
+    CreateBuildRequest:
+      type: object
+      additionalProperties: false
+      required: [source_uri, source_digest, targets, concurrency]
+      properties:
+        source_uri:
+          type: string
+          format: uri
+          description: Manifest-pinned OCI source or credential-free HTTPS archive without a query or fragment.
+          minLength: 1
+          maxLength: 2048
+        source_digest:
+          type: string
+          pattern: "^sha256:[a-f0-9]{64}$"
+        targets:
+          type: array
+          minItems: 1
+          maxItems: 100
+          uniqueItems: true
+          items:
+            type: string
+            maxLength: 512
+            pattern: "^[^\\s@]+:[^\\s@/]+$"
+        format:
+          type: string
+          enum: [oci, nydus, both]
+          default: oci
+        concurrency:
+          type: integer
+          minimum: 1
+          maximum: 100
+        timeout:
+          type: integer
+          minimum: 0
+        oom_cooldown:
+          type: string
+        fail_fast:
+          type: boolean
+        verbose:
+          type: boolean
+        variables:
+          type: array
+          maxItems: 100
+          uniqueItems: true
+          items:
+            type: string
+            maxLength: 2048
+            pattern: "^KOVA_[A-Za-z0-9_]+=[\\s\\S]*$"
+        idempotency_key:
+          type: string
+          maxLength: 256
+    VersionInfo:
+      type: object
+      additionalProperties: false
+      required: [api_version, version, commit, build_date]
+      properties:
+        api_version:
+          type: string
+          enum: [v1]
+        version:
+          type: string
+        commit:
+          type: string
+        build_date:
+          type: string
+    ReadyStatus:
+      type: object
+      additionalProperties: false
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [ready]
+    BuildJob:
+      type: object
+      additionalProperties: false
+      required: [id, status, created_at, requester]
+      properties:
+        id:
+          type: string
+        status:
+          type: string
+          enum: [queued, starting, running, succeeded, failed, cancelled]
+        error:
+          type: string
+        failure_code:
+          type: string
+          enum: [invalid_source, invalid_targets, runner_unavailable, build_submission_failed, result_verification_failed, build_failed, cancelled]
+        created_at:
+          type: string
+          format: date-time
+        started_at:
+          type: string
+          format: date-time
+        finished_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: string
+          format: date-time
+        source_digest:
+          type: string
+        source_uri:
+          type: string
+        idempotency_key:
+          type: string
+        requester:
+          type: string
+        cancellation_requested:
+          type: boolean
+        requested_concurrency:
+          type: integer
+        allocated_concurrency:
+          type: integer
+          format: int32
+    BuildOutput:
+      type: object
+      additionalProperties: false
+      required: [format, image, manifest_digest, immutable_ref]
+      properties:
+        format:
+          type: string
+          enum: [oci, nydus]
+        image:
+          type: string
+        manifest_digest:
+          type: string
+          pattern: "^sha256:[a-f0-9]{64}$"
+        immutable_ref:
+          type: string
+          pattern: "^.+@sha256:[a-f0-9]{64}$"
+    BuildResults:
+      type: object
+      additionalProperties: false
+      required: [id, source_uri, source_digest, outputs]
+      properties:
+        id:
+          type: string
+        source_uri:
+          type: string
+        source_digest:
+          type: string
+        idempotency_key:
+          type: string
+        outputs:
+          type: array
+          maxItems: 200
+          items:
+            $ref: "#/components/schemas/BuildOutput"
+    JobList:
+      type: object
+      additionalProperties: false
+      required: [jobs]
+      properties:
+        jobs:
+          type: array
+          maxItems: 500
+          items:
+            $ref: "#/components/schemas/BuildJob"
+        continue:
+          type: string
+    ErrorResponse:
+      type: object
+      additionalProperties: false
+      required: [code, message, retryable]
+      properties:
+        code:
+          type: string
+          enum: [invalid_request, unauthenticated, forbidden, not_found, conflict, queue_capacity_exceeded, logs_unavailable, internal]
+        message:
+          type: string
+        retryable:
+          type: boolean
+    InvalidRequestError:
+      allOf:
+        - $ref: "#/components/schemas/ErrorResponse"
+        - type: object
+          properties:
+            code:
+              const: invalid_request
+            retryable:
+              const: false
+    UnauthenticatedError:
+      allOf:
+        - $ref: "#/components/schemas/ErrorResponse"
+        - type: object
+          properties:
+            code:
+              const: unauthenticated
+            retryable:
+              const: false
+    ForbiddenError:
+      allOf:
+        - $ref: "#/components/schemas/ErrorResponse"
+        - type: object
+          properties:
+            code:
+              const: forbidden
+            retryable:
+              const: false
+    NotFoundError:
+      allOf:
+        - $ref: "#/components/schemas/ErrorResponse"
+        - type: object
+          properties:
+            code:
+              const: not_found
+            retryable:
+              const: false
+    ConflictError:
+      allOf:
+        - $ref: "#/components/schemas/ErrorResponse"
+        - type: object
+          properties:
+            code:
+              const: conflict
+            retryable:
+              const: false
+    QueueCapacityExceededError:
+      allOf:
+        - $ref: "#/components/schemas/ErrorResponse"
+        - type: object
+          properties:
+            code:
+              const: queue_capacity_exceeded
+            retryable:
+              const: true
+    LogsUnavailableError:
+      allOf:
+        - $ref: "#/components/schemas/ErrorResponse"
+        - type: object
+          properties:
+            code:
+              const: logs_unavailable
+    InternalAPIError:
+      allOf:
+        - $ref: "#/components/schemas/ErrorResponse"
+        - type: object
+          properties:
+            code:
+              const: internal

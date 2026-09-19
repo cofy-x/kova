@@ -15,10 +15,10 @@ import (
 func (s *Server) handleCancelBuild(c echo.Context) error {
 	build, err := s.getBuild(c.Request().Context(), c.Param("id"))
 	if apierrors.IsNotFound(err) {
-		return c.JSON(http.StatusNotFound, map[string]string{"error": "job not found"})
+		return notFound(c)
 	}
 	if err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return internalError(c, err)
 	}
 	if err := s.authorizeBuild(c.Request().Context(), principalFromContext(c), "delete", build); err != nil {
 		return forbidden(c)
@@ -34,7 +34,7 @@ func (s *Server) handleCancelBuild(c echo.Context) error {
 		build.Annotations[kovav1.CancellationRequestedAnnotation] = time.Now().UTC().Format(time.RFC3339Nano)
 	}
 	if err := s.client.Patch(c.Request().Context(), build, client.MergeFrom(base)); err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return internalError(c, err)
 	}
 	buildCancels.Add(c.Request().Context(), 1)
 	return c.JSON(http.StatusAccepted, buildJobFromCR(build, s.cfg))
@@ -51,17 +51,17 @@ func (s *Server) handlePreheatBuild(c echo.Context) error {
 func (s *Server) handleRunnerAction(c echo.Context, action, contentType string) error {
 	build, err := s.getBuild(c.Request().Context(), c.Param("id"))
 	if apierrors.IsNotFound(err) {
-		return c.JSON(http.StatusNotFound, map[string]string{"error": "job not found"})
+		return notFound(c)
 	}
 	if err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return internalError(c, err)
 	}
 	if err := s.authorizeBuild(c.Request().Context(), principalFromContext(c), "update", build); err != nil {
 		return forbidden(c)
 	}
 	out, err := s.runner().Post(c.Request().Context(), build, action, c.QueryString())
 	if err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return internalError(c, err)
 	}
 	return c.Blob(http.StatusOK, contentType, out)
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"net/http"
 	"reflect"
 	"strings"
@@ -23,22 +24,25 @@ func (s *Server) handleCreateBuild(c echo.Context) error {
 		return forbidden(c)
 	}
 	if strings.TrimSpace(s.cfg.RunnerImage) == "" {
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "runner image is required"})
+		return internalContractError(c, &configurationError{message: "runner image is required"})
 	}
 	request, err := buildRequestFromJSON(c)
 	if err != nil {
-		return c.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return invalidRequest(c, err)
 	}
 	id := idempotentJobID(principal.Username, request.IdempotencyKey)
 	if id == "" {
 		id, err = newJobID()
 		if err != nil {
-			return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return internalError(c, err)
 		}
 	}
 	if err := s.ensureQueueCapacity(c.Request().Context(), principal, id, request.IdempotencyKey != ""); err != nil {
-		c.Response().Header().Set("Retry-After", "5")
-		return c.JSON(http.StatusTooManyRequests, map[string]string{"error": err.Error()})
+		var capacityErr *queueCapacityError
+		if errors.As(err, &capacityErr) {
+			return queueCapacityExceeded(c)
+		}
+		return internalError(c, err)
 	}
 	build := kovav1.KovaBuild{
 		TypeMeta: metav1.TypeMeta{APIVersion: kovav1.Group + "/" + kovav1.Version, Kind: "KovaBuild"},
@@ -57,14 +61,14 @@ func (s *Server) handleCreateBuild(c echo.Context) error {
 		if apierrors.IsAlreadyExists(err) && request.IdempotencyKey != "" {
 			var existing kovav1.KovaBuild
 			if getErr := s.reader.Get(c.Request().Context(), client.ObjectKey{Namespace: s.cfg.Namespace, Name: id}, &existing); getErr != nil {
-				return c.JSON(http.StatusInternalServerError, map[string]string{"error": getErr.Error()})
+				return internalError(c, getErr)
 			}
 			if !sameBuildRequest(&existing, request) {
-				return c.JSON(http.StatusConflict, map[string]string{"error": "idempotency key is already used with different build parameters"})
+				return conflict(c, "idempotency key is already used with different build parameters")
 			}
 			return c.JSON(http.StatusOK, buildJobFromCR(&existing, s.cfg))
 		}
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return internalError(c, err)
 	}
 	return c.JSON(http.StatusAccepted, buildJobFromCR(&build, s.cfg))
 }
@@ -115,3 +119,7 @@ func (s *Server) ensureQueueCapacity(ctx context.Context, principal serviceauth.
 type queueCapacityError struct{ limit int }
 
 func (e *queueCapacityError) Error() string { return "requester queue limit is reached" }
+
+type configurationError struct{ message string }
+
+func (e *configurationError) Error() string { return e.message }

@@ -19,6 +19,7 @@ func TestValidateRequiresImmutableVerifiableSource(t *testing.T) {
 		"oci://registry.example.com/team/source:latest",
 		"http://sources.example.com/source.zip",
 		"https://user:password@sources.example.com/source.zip",
+		"https://sources.example.com/source.zip?token=secret",
 	} {
 		if err := Validate(uri, digest); err == nil {
 			t.Fatalf("expected %q to be rejected", uri)

@@ -3,14 +3,14 @@ package app
 import (
 	"fmt"
 
-	"github.com/cofy-x/kova/internal/serviceapi"
+	apiv1 "github.com/cofy-x/kova/pkg/api/v1"
 
 	cli "github.com/urfave/cli/v2"
 )
 
 type doctorReport struct {
-	Service serviceapi.VersionInfo `json:"service"`
-	Checks  []doctorCheck          `json:"checks"`
+	Service apiv1.VersionInfo `json:"service"`
+	Checks  []doctorCheck     `json:"checks"`
 }
 
 type doctorCheck struct {
@@ -34,8 +34,8 @@ func doctorCLICommand() *cli.Command {
 				return fmt.Errorf("service version check failed: %w", err)
 			}
 			report.Service = info
-			if info.APIVersion != serviceapi.APIVersion {
-				report.Checks = append(report.Checks, doctorCheck{Name: "compatibility", Status: "failed", Detail: fmt.Sprintf("server=%s client=%s", info.APIVersion, serviceapi.APIVersion)})
+			if info.APIVersion != apiv1.APIVersion {
+				report.Checks = append(report.Checks, doctorCheck{Name: "compatibility", Status: "failed", Detail: fmt.Sprintf("server=%s client=%s", info.APIVersion, apiv1.APIVersion)})
 				_ = writeJSON(c, report)
 				return fmt.Errorf("Kova service API is incompatible")
 			}
@@ -46,7 +46,7 @@ func doctorCLICommand() *cli.Command {
 				return fmt.Errorf("service readiness check failed: %w", err)
 			}
 			report.Checks = append(report.Checks, doctorCheck{Name: "readiness", Status: "ok"})
-			if _, err := client.ListPage(c.Context, 1, ""); err != nil {
+			if _, err := client.ListBuildsPage(c.Context, 1, ""); err != nil {
 				report.Checks = append(report.Checks, doctorCheck{Name: "authorization", Status: "failed", Detail: err.Error()})
 				_ = writeJSON(c, report)
 				return fmt.Errorf("service authorization check failed: %w", err)

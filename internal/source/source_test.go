@@ -15,9 +15,18 @@ import (
 )
 
 func TestParseBuildVariablesRequiresPrefix(t *testing.T) {
-	_, err := ParseBuildVariables([]string{"FOO=bar"})
-	if err == nil || !strings.Contains(err.Error(), "KOVA_") {
-		t.Fatalf("expected prefix validation error, got %v", err)
+	for _, value := range []string{"FOO=bar", "KOVA_=bar", " KOVA_FOO=bar", "KOVA_FOO BAR=value"} {
+		_, err := ParseBuildVariables([]string{value})
+		if err == nil || !strings.Contains(err.Error(), "KOVA_") {
+			t.Fatalf("expected name validation error for %q, got %v", value, err)
+		}
+	}
+}
+
+func TestParseBuildVariablesRejectsDuplicateKeys(t *testing.T) {
+	_, err := ParseBuildVariables([]string{"KOVA_VALUE=one", "KOVA_VALUE=two"})
+	if err == nil || !strings.Contains(err.Error(), "duplicated") {
+		t.Fatalf("expected duplicate validation error, got %v", err)
 	}
 }
 
