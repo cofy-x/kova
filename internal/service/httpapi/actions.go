@@ -67,5 +67,5 @@ func (s *Server) handleRunnerAction(c echo.Context, action, contentType string) 
 }
 
 func (s *Server) runner() runnerexec.Client {
-	return runnerexec.Client{Kube: s.kube, BuildkitAddr: s.cfg.BuildkitAddr}
+	return runnerexec.Client{Kube: s.kube, BuildkitPlatformAddrs: s.cfg.BuildkitPlatformAddrs}
 }

@@ -83,7 +83,7 @@ SOURCE_ZIP="${OCI_SOURCE_ZIP}" EXAMPLE_DIRS=service-oci "${ROOT}/scripts/package
 
 "${KOVA[@]}" --kubeconfig "${KUBECONFIG}" --name "${KOVA_RUNNER_NAME}" wait --timeout 600
 "${KOVA[@]}" --kubeconfig "${KUBECONFIG}" --name "${KOVA_RUNNER_NAME}" export --result "${ROOT}/${OCI_RESULT_JSONL}" --oci
-"${KOVA[@]}" --kubeconfig "${KUBECONFIG}" --name "${KOVA_RUNNER_NAME}" preheat --oci --dragonfly-scheduler-addr "${DRAGONFLY_SCHEDULER_ADDR}" --concurrency 1 --timeout 60 --verbose --insecure-skip-verify
+"${KOVA[@]}" --kubeconfig "${KUBECONFIG}" --name "${KOVA_RUNNER_NAME}" preheat --oci --dragonfly-scheduler-addr "${DRAGONFLY_SCHEDULER_ADDR}" --registry-plain-http "${CLUSTER_REGISTRY}" --concurrency 1 --timeout 60 --verbose --insecure-skip-verify
 
 SOURCE_ZIP="${NYDUS_SOURCE_ZIP}" EXAMPLE_DIRS=service-nydus "${ROOT}/scripts/package/package-example.sh"
 "${KOVA[@]}" \
@@ -96,7 +96,7 @@ SOURCE_ZIP="${NYDUS_SOURCE_ZIP}" EXAMPLE_DIRS=service-nydus "${ROOT}/scripts/pac
 
 "${KOVA[@]}" --kubeconfig "${KUBECONFIG}" --name "${KOVA_RUNNER_NAME}" wait --timeout 600
 "${KOVA[@]}" --kubeconfig "${KUBECONFIG}" --name "${KOVA_RUNNER_NAME}" export --result "${ROOT}/${NYDUS_RESULT_JSONL}"
-"${KOVA[@]}" --kubeconfig "${KUBECONFIG}" --name "${KOVA_RUNNER_NAME}" preheat --dragonfly-scheduler-addr "${DRAGONFLY_SCHEDULER_ADDR}" --concurrency 1 --timeout 60 --verbose --insecure-skip-verify
+"${KOVA[@]}" --kubeconfig "${KUBECONFIG}" --name "${KOVA_RUNNER_NAME}" preheat --dragonfly-scheduler-addr "${DRAGONFLY_SCHEDULER_ADDR}" --registry-plain-http "${CLUSTER_REGISTRY}" --concurrency 1 --timeout 60 --verbose --insecure-skip-verify
 
 if ! grep -q '"success":true' "${ROOT}/${OCI_RESULT_JSONL}"; then
   echo "error: ${OCI_RESULT_JSONL} does not contain a successful OCI build" >&2

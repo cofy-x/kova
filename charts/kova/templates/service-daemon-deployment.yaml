@@ -59,7 +59,13 @@ spec:
             {{- range .Values.serviceDaemon.registryPlainHTTP }}
             - {{ printf "--registry-plain-http=%s" . | quote }}
             {{- end }}
-            - --buildkit-addr={{ default (printf "tcp://%s.%s.svc:%v" (include "kova.fullname" .) (include "kova.namespace" .) .Values.service.port) .Values.serviceDaemon.buildkitAddr }}
+            {{- if .Values.serviceDaemon.buildkitPlatformAddrs }}
+            {{- range $platform, $address := .Values.serviceDaemon.buildkitPlatformAddrs }}
+            - {{ printf "--buildkit-platform-addr=%s=%s" $platform $address | quote }}
+            {{- end }}
+            {{- else }}
+            - {{ printf "--buildkit-platform-addr=%s=tcp://%s.%s.svc:%v" .Values.worker.platform (include "kova.fullname" .) (include "kova.namespace" .) .Values.service.port | quote }}
+            {{- end }}
             - --auth-mode={{ .Values.serviceDaemon.authentication.mode }}
             - --auth-static-principal={{ .Values.serviceDaemon.authentication.staticPrincipal }}
             - --job-ttl={{ .Values.serviceDaemon.jobTTL }}

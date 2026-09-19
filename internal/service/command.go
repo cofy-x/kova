@@ -44,7 +44,7 @@ func CLICommand() *cli.Command {
 			&cli.StringFlag{Name: "runner-image-pull-secret", Value: defaults.ImagePullSecret, Usage: "runner image pull secret name"},
 			&cli.StringSliceFlag{Name: "runner-node-selector", Usage: "node selector for runner Pods; repeatable key=value"},
 			&cli.StringSliceFlag{Name: "registry-plain-http", EnvVars: []string{"KOVA_SERVICE_REGISTRY_PLAIN_HTTP"}, Usage: "output registry host that uses plain HTTP; repeatable and intended for development"},
-			&cli.StringFlag{Name: "buildkit-addr", Value: defaults.BuildkitAddr, Usage: "BuildKit address passed to runner daemon and build requests"},
+			&cli.StringSliceFlag{Name: "buildkit-platform-addr", Usage: "BuildKit worker pool as platform=address; repeatable"},
 			&cli.DurationFlag{Name: "job-ttl", Value: 2 * time.Hour, Usage: "duration to retain terminal jobs before cleanup"},
 			&cli.StringFlag{Name: "auth-mode", Value: serviceauth.ModeTokenReview, EnvVars: []string{"KOVA_SERVICE_AUTH_MODE"}, Usage: "API authentication mode: tokenreview, static, or unsafe-none"},
 			&cli.StringFlag{Name: "auth-token", EnvVars: []string{"KOVA_SERVICE_AUTH_TOKEN"}, Usage: "bearer token required by static authentication"},
@@ -62,6 +62,10 @@ func CLICommand() *cli.Command {
 		Action: func(c *cli.Context) error {
 			ctrl.SetLogger(ctrlzap.New(ctrlzap.UseDevMode(false), ctrlzap.WriteTo(os.Stderr)))
 			runnerNodeSelector, err := parseNodeSelector(c.StringSlice("runner-node-selector"))
+			if err != nil {
+				return err
+			}
+			platformAddrs, err := buildcontract.ParsePlatformAddresses(c.StringSlice("buildkit-platform-addr"))
 			if err != nil {
 				return err
 			}
@@ -95,7 +99,7 @@ func CLICommand() *cli.Command {
 				RunnerNodeSelector:        runnerNodeSelector,
 				RunnerEnv:                 runnerObservabilityEnv(),
 				RegistryPlainHTTP:         plainHTTPRegistries,
-				BuildkitAddr:              c.String("buildkit-addr"),
+				BuildkitPlatformAddrs:     platformAddrs,
 				JobTTL:                    c.Duration("job-ttl"),
 				AuthToken:                 c.String("auth-token"),
 				AuthMode:                  strings.TrimSpace(c.String("auth-mode")),

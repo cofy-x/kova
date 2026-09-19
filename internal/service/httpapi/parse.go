@@ -24,7 +24,7 @@ const maxCreateBuildRequestBytes = 1 << 20
 type createBuildRequest struct {
 	SourceURI      string
 	SourceDigest   string
-	Targets        []string
+	Targets        []kovav1.KovaBuildTargetSpec
 	Options        kovav1.KovaBuildOptions
 	IdempotencyKey string
 }
@@ -53,11 +53,18 @@ func buildRequestFromJSON(c echo.Context) (createBuildRequest, error) {
 	if err := sourcebundle.Validate(body.SourceURI, body.SourceDigest); err != nil {
 		return createBuildRequest{}, err
 	}
-	normalizedTargets, err := buildcontract.NormalizeTargets(body.Targets)
+	contractTargets := make([]buildcontract.TargetSpec, 0, len(body.Targets))
+	for _, target := range body.Targets {
+		contractTargets = append(contractTargets, buildcontract.TargetSpec{Target: target.Target, Platform: string(target.Platform)})
+	}
+	normalizedTargets, err := buildcontract.NormalizeTargetSpecs(contractTargets)
 	if err != nil {
 		return createBuildRequest{}, err
 	}
-	body.Targets = normalizedTargets
+	targets := make([]kovav1.KovaBuildTargetSpec, 0, len(normalizedTargets))
+	for _, target := range normalizedTargets {
+		targets = append(targets, kovav1.KovaBuildTargetSpec{Target: target.Target, Platform: target.Platform})
+	}
 	format := strings.ToLower(strings.TrimSpace(body.Format))
 	if format == "" {
 		format = "oci"
@@ -65,7 +72,7 @@ func buildRequestFromJSON(c echo.Context) (createBuildRequest, error) {
 	if _, err := source.ParseBuildFormats(format); err != nil {
 		return createBuildRequest{}, err
 	}
-	if err := buildcontract.ValidateConcurrency(body.Concurrency, len(body.Targets)); err != nil {
+	if err := buildcontract.ValidateConcurrency(body.Concurrency, len(targets)); err != nil {
 		return createBuildRequest{}, err
 	}
 	if body.Timeout < 0 {
@@ -98,7 +105,7 @@ func buildRequestFromJSON(c echo.Context) (createBuildRequest, error) {
 	}
 	return createBuildRequest{
 		SourceURI: body.SourceURI, SourceDigest: body.SourceDigest,
-		Targets: body.Targets, IdempotencyKey: body.IdempotencyKey,
+		Targets: targets, IdempotencyKey: body.IdempotencyKey,
 		Options: kovav1.KovaBuildOptions{
 			Format: format, Concurrency: body.Concurrency, Timeout: body.Timeout,
 			OOMCooldown: oomCooldown, FailFast: body.FailFast, Verbose: body.Verbose,

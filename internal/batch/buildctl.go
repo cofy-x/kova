@@ -121,6 +121,7 @@ func buildCommandArgs(spec source.Spec, addr *scheduler.Addr) []string {
 		"--addr", addr.Addr,
 		"build",
 		"--frontend=dockerfile.v0",
+		"--opt", "platform=" + spec.Platform,
 	}
 
 	if spec.Dir != "" {

@@ -7,8 +7,9 @@ import (
 )
 
 type buildJob struct {
-	key   string
-	specs []source.Spec
+	key      string
+	platform string
+	specs    []source.Spec
 }
 
 func groupBuildSpecs(specs []source.Spec) []buildJob {
@@ -37,7 +38,7 @@ func groupBuildSpecs(specs []source.Spec) []buildJob {
 			}
 			return jobSpecs[i].Target < jobSpecs[j].Target
 		})
-		jobs = append(jobs, buildJob{key: key, specs: jobSpecs})
+		jobs = append(jobs, buildJob{key: key, platform: jobSpecs[0].Platform, specs: jobSpecs})
 	}
 	return jobs
 }

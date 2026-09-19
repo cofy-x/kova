@@ -33,6 +33,7 @@ The quick-start profile uses a generated static token; shared environments shoul
 ```bash
 export KOVA_VERSION=vX.Y.Z
 export KOVA_SERVICE_TOKEN=$(openssl rand -hex 32)
+export KOVA_PLATFORM=linux/amd64 # or linux/arm64
 
 kubectl create namespace kova --dry-run=client -o yaml | kubectl apply -f -
 kubectl -n kova create secret generic kova-service-auth \
@@ -48,6 +49,7 @@ helm upgrade --install kova oci://ghcr.io/cofy-x/charts/kova \
   --set serviceDaemon.authentication.mode=static \
   --set serviceDaemon.authentication.staticPrincipal=kova:quickstart \
   --set serviceDaemon.authentication.staticTokenSecret.name=kova-service-auth \
+  --set-string worker.platform="${KOVA_PLATFORM}" \
   --wait
 
 kubectl -n kova create rolebinding kova-quickstart \
@@ -67,6 +69,7 @@ kova doctor
 kova job submit \
   --source-repository registry.example.com/team/kova-sources:quickstart \
   --target registry.example.com/team/image:dev \
+  --platform "${KOVA_PLATFORM}" \
   ./image
 kova job wait <job-id>
 kova job results <job-id>
@@ -83,14 +86,14 @@ python -m pip install kova-client
 ```
 
 ```python
-from kova_client import ClientConfig, CreateBuildRequest, KovaClient
+from kova_client import ClientConfig, CreateBuildRequest, KovaClient, Platform, TargetSpec
 
 with KovaClient(ClientConfig.from_env()) as kova:
     job = kova.create_build(
         CreateBuildRequest(
             source_uri="oci://registry.example.com/team/sources@sha256:<manifest-digest>",
             source_digest="sha256:<source-content-digest>",
-            targets=("registry.example.com/team/seed:build-123",),
+            targets=(TargetSpec("registry.example.com/team/seed:build-123", Platform.LINUX_AMD64),),
             concurrency=1,
             idempotency_key="build-123",
         )
@@ -98,7 +101,7 @@ with KovaClient(ClientConfig.from_env()) as kova:
     terminal = kova.wait_build(job.id, timeout=600)
     if terminal.status == "succeeded":
         for output in kova.get_results(job.id).outputs:
-            print(output.immutable_ref, output.manifest_digest)
+            print(output.platform, output.immutable_ref, output.manifest_digest)
 ```
 
 The synchronous and asynchronous clients expose the same thin HTTP v1 operations and never own workflow recovery or durable receipts.
@@ -136,7 +139,7 @@ func main() {
 	job, err := kova.CreateBuild(ctx, apiv1.CreateBuildRequest{
 		SourceURI:      "oci://registry.example.com/team/sources@sha256:<manifest-digest>",
 		SourceDigest:   "sha256:<source-content-digest>",
-		Targets:        []string{"registry.example.com/team/seed:build-123"},
+		Targets:        []apiv1.TargetSpec{{Target: "registry.example.com/team/seed:build-123", Platform: apiv1.PlatformLinuxAMD64}},
 		Format:         "oci",
 		Concurrency:    1,
 		IdempotencyKey: "build-123",
@@ -152,7 +155,7 @@ func main() {
 		panic(err)
 	}
 	for _, output := range results.Outputs {
-		fmt.Println(output.ImmutableRef, output.ManifestDigest)
+		fmt.Println(output.Platform, output.ImmutableRef, output.ManifestDigest)
 	}
 }
 ```
@@ -165,7 +168,7 @@ See the [external Go client and HTTP contract](docs/service.md#go-sdk) and the [
 
 ## Why Kova
 
-- **Immutable source to verified image** — every build consumes a digest-verified OCI or HTTPS source and returns the pushed image manifest digest.
+- **Immutable source to verified image** — every build consumes a digest-verified OCI or HTTPS source and returns the pushed single-platform image manifest digest and verified platform.
 - **A bounded execution model** — one immutable `KovaBuild` accepts up to 100 logical targets and records at most 200 concrete outputs; callers own larger workflow partitioning and retries.
 - **Fair, work-conserving scheduling** — queued jobs interleave by authenticated requester; admission reserves actual BuildKit worker slots.
 - **Isolated execution** — one runner Pod per job drives shared upstream rootless BuildKit workers; controller and runner run as non-root with all capabilities dropped.

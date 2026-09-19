@@ -38,6 +38,7 @@ func jobSubmitCLICommand() *cli.Command {
 		ArgsUsage: "<oci-or-https-source|context-directory|source.zip>",
 		Flags: []cli.Flag{
 			&cli.StringSliceFlag{Name: "target", Usage: "output image reference; repeatable for a batch source"},
+			&cli.StringSliceFlag{Name: "platform", Usage: "platform paired by position with --target; repeatable"},
 			&cli.StringFlag{Name: "source-digest", Usage: "required SHA-256 content digest for a remote source"},
 			&cli.StringFlag{Name: "source-repository", Usage: "OCI repository tag used to publish a local directory or zip"},
 			&cli.StringSliceFlag{Name: "registry-plain-http", Usage: "registry host using plain HTTP; repeatable and intended for development"},
@@ -56,7 +57,10 @@ func jobSubmitCLICommand() *cli.Command {
 			}
 			input := strings.TrimSpace(c.Args().First())
 			sourceURI, sourceDigest := input, strings.TrimSpace(c.String("source-digest"))
-			targets := c.StringSlice("target")
+			targets, err := requestedTargetSpecs(c.StringSlice("target"), c.StringSlice("platform"))
+			if err != nil {
+				return err
+			}
 			if _, err := os.Stat(input); err == nil {
 				if strings.TrimSpace(c.String("source-repository")) == "" {
 					return fmt.Errorf("--source-repository is required for a local source")
@@ -71,11 +75,11 @@ func jobSubmitCLICommand() *cli.Command {
 						return err
 					}
 				}
-				targets, err = buildcontract.NormalizeTargets(targets)
+				targets, err = buildcontract.NormalizeTargetSpecs(targets)
 				if err != nil {
 					return err
 				}
-				archive, cleanup, err := sourceArchive(input, firstValue(targets))
+				archive, cleanup, err := sourceArchive(input, targets[0].Target, targets[0].Platform)
 				if err != nil {
 					return err
 				}
@@ -90,7 +94,7 @@ func jobSubmitCLICommand() *cli.Command {
 			}
 			if !isLocalPath(input) {
 				var err error
-				targets, err = buildcontract.NormalizeTargets(targets)
+				targets, err = buildcontract.NormalizeTargetSpecs(targets)
 				if err != nil {
 					return err
 				}
@@ -105,8 +109,12 @@ func jobSubmitCLICommand() *cli.Command {
 			if err != nil {
 				return err
 			}
+			apiTargets := make([]apiv1.TargetSpec, 0, len(targets))
+			for _, target := range targets {
+				apiTargets = append(apiTargets, apiv1.TargetSpec{Target: target.Target, Platform: apiv1.Platform(target.Platform)})
+			}
 			job, err := client.CreateBuild(c.Context, apiv1.CreateBuildRequest{
-				SourceURI: sourceURI, SourceDigest: sourceDigest, Targets: targets, Format: c.String("format"),
+				SourceURI: sourceURI, SourceDigest: sourceDigest, Targets: apiTargets, Format: c.String("format"),
 				Concurrency: c.Int("concurrency"), Timeout: c.Int("timeout"),
 				OOMCooldown: c.Duration("oom-cooldown").String(), FailFast: c.Bool("fail-fast"),
 				Verbose: c.Bool("verbose"), Variables: c.StringSlice("var"),
@@ -285,11 +293,18 @@ func serviceClientFromContext(c *cli.Context) (*kovaclient.Client, error) {
 	})
 }
 
-func firstValue(values []string) string {
-	if len(values) == 0 {
-		return ""
+func requestedTargetSpecs(targets, platforms []string) ([]buildcontract.TargetSpec, error) {
+	if len(targets) != len(platforms) {
+		return nil, fmt.Errorf("each --target requires one --platform in the same position")
 	}
-	return values[0]
+	values := make([]buildcontract.TargetSpec, 0, len(targets))
+	for index := range targets {
+		values = append(values, buildcontract.TargetSpec{Target: targets[index], Platform: platforms[index]})
+	}
+	if len(values) == 0 {
+		return values, nil
+	}
+	return buildcontract.NormalizeTargetSpecs(values)
 }
 
 func writeJSON(c *cli.Context, value any) error {

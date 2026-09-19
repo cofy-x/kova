@@ -13,6 +13,7 @@ func TestBuildQueryEncodesFlagsVarsAndTarget(t *testing.T) {
 		"--concurrency", "2",
 		"--timeout=600",
 		"--oom-cooldown=45s",
+		"--platform=linux/amd64",
 		"--var", "KOVA_IMAGE_REGISTRY=host.docker.internal:5001",
 		"--var=NAME=value with spaces",
 		"localhost:5001/example/simple:dev",
@@ -32,6 +33,7 @@ func TestBuildQueryEncodesFlagsVarsAndTarget(t *testing.T) {
 	assertQueryValue(t, values, "timeout", "600")
 	assertQueryValue(t, values, "oom-cooldown", "45s")
 	assertQueryValue(t, values, "target", "localhost:5001/example/simple:dev")
+	assertQueryValue(t, values, "platform", "linux/amd64")
 	if got := values["var"]; len(got) != 2 || got[0] != "KOVA_IMAGE_REGISTRY=host.docker.internal:5001" || got[1] != "NAME=value with spaces" {
 		t.Fatalf("unexpected var values: %#v", got)
 	}
@@ -50,7 +52,7 @@ func TestBuildQueryEncodesBothFormat(t *testing.T) {
 }
 
 func TestBuildQueryEncodesExplicitTarget(t *testing.T) {
-	raw, err := BuildQuery([]string{"--target", "localhost:5002/example/simple:dev"})
+	raw, err := BuildQuery([]string{"--target", "localhost:5002/example/simple:dev", "--platform", "linux/arm64"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -59,10 +61,23 @@ func TestBuildQueryEncodesExplicitTarget(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertQueryValue(t, values, "target", "localhost:5002/example/simple:dev")
+	assertQueryValue(t, values, "platform", "linux/arm64")
+}
+
+func TestBuildQueryRequiresCanonicalPlatformWithTarget(t *testing.T) {
+	for _, args := range [][]string{
+		{"--target", "localhost:5002/example/simple:dev"},
+		{"--target", "localhost:5002/example/simple:dev", "--platform", "linux/s390x"},
+		{"--platform", "linux/amd64"},
+	} {
+		if _, err := BuildQuery(args); err == nil {
+			t.Fatalf("expected %#v to fail", args)
+		}
+	}
 }
 
 func TestBuildQueryRejectsExplicitAndPositionalTarget(t *testing.T) {
-	if _, err := BuildQuery([]string{"--target", "localhost:5002/example/simple:dev", "localhost:5002/example/other:dev"}); err == nil {
+	if _, err := BuildQuery([]string{"--target", "localhost:5002/example/simple:dev", "--platform", "linux/amd64", "localhost:5002/example/other:dev"}); err == nil {
 		t.Fatal("expected target conflict to fail")
 	}
 }
@@ -109,6 +124,8 @@ func TestPreheatQuery(t *testing.T) {
 		"--interval", "2",
 		"--timeout=9",
 		"--insecure-skip-verify=false",
+		"--registry-plain-http", "kind-registry:5000",
+		"--registry-plain-http=mirror.local:5000",
 		"--fail-fast",
 		"--oci",
 		"--verbose",
@@ -126,6 +143,9 @@ func TestPreheatQuery(t *testing.T) {
 	assertQueryValue(t, values, "interval", "2")
 	assertQueryValue(t, values, "timeout", "9")
 	assertQueryValue(t, values, "insecure-skip-verify", "false")
+	if got := values["registry-plain-http"]; len(got) != 2 || got[0] != "kind-registry:5000" || got[1] != "mirror.local:5000" {
+		t.Fatalf("plain HTTP registries = %#v", got)
+	}
 	assertQueryValue(t, values, "fail-fast", "true")
 	assertQueryValue(t, values, "oci", "true")
 	assertQueryValue(t, values, "verbose", "true")

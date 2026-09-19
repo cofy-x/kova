@@ -13,6 +13,7 @@ import (
 	"github.com/cofy-x/kova/internal/service/config"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -26,6 +27,14 @@ type fakeKube struct {
 	deleteErr error
 	execFn    func(kube.ExecOptions) error
 	execCalls [][]string
+}
+
+func buildTargets(targets ...string) []kovav1.KovaBuildTargetSpec {
+	result := make([]kovav1.KovaBuildTargetSpec, 0, len(targets))
+	for _, target := range targets {
+		result = append(result, kovav1.KovaBuildTargetSpec{Target: target, Platform: "linux/amd64"})
+	}
+	return result
 }
 
 func (f *fakeKube) GetSecretData(context.Context, string, string, string) (string, error) {
@@ -85,7 +94,7 @@ func TestReconcilerCreatesRunnerWithImmutableSourceFetcher(t *testing.T) {
 			Namespace: "jobs",
 		},
 		Spec: kovav1.KovaBuildSpec{
-			Targets: []string{"registry.local/example:dev"},
+			Targets: buildTargets("registry.local/example:dev"),
 			Source: kovav1.KovaBuildSourceSpec{
 				URI:    "oci://registry.local/sources/abc@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
 				Digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -105,7 +114,7 @@ func TestReconcilerCreatesRunnerWithImmutableSourceFetcher(t *testing.T) {
 		Cfg: config.Config{
 			RunnerImage:           "registry.local/kova:dev",
 			RunnerImagePullPolicy: "IfNotPresent",
-			BuildkitAddr:          "tcp://kova.kova.svc:9094",
+			BuildkitPlatformAddrs: map[string]string{"linux/amd64": "tcp://kova.kova.svc:9094"},
 			RegistryPlainHTTP:     []string{"registry.local"},
 			JobTTL:                time.Hour,
 			PollInterval:          time.Millisecond,
@@ -160,7 +169,7 @@ func TestReconcilerMaterializesHTTPSSource(t *testing.T) {
 	build := &kovav1.KovaBuild{
 		ObjectMeta: metav1.ObjectMeta{Name: "pending", Namespace: "jobs", Finalizers: []string{cleanupFinalizer}},
 		Spec: kovav1.KovaBuildSpec{
-			Targets: []string{"registry.local/example:dev"},
+			Targets: buildTargets("registry.local/example:dev"),
 			Source: kovav1.KovaBuildSourceSpec{
 				URI: "https://sources.example.com/pending.zip", Digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 			},
@@ -168,7 +177,7 @@ func TestReconcilerMaterializesHTTPSSource(t *testing.T) {
 		},
 	}
 	client := crfake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&kovav1.KovaBuild{}).WithObjects(build).Build()
-	reconciler := KovaBuildReconciler{Client: client, Scheme: scheme, Kube: &fakeKube{}, Cfg: config.Config{RunnerImage: "registry.local/kova:dev"}}
+	reconciler := KovaBuildReconciler{Client: client, Scheme: scheme, Kube: &fakeKube{}, Cfg: config.Config{RunnerImage: "registry.local/kova:dev", BuildkitPlatformAddrs: map[string]string{"linux/amd64": "tcp://kova.kova.svc:9094"}}}
 	_, err := reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "jobs", Name: "pending"}})
 	if err != nil {
 		t.Fatal(err)
@@ -182,6 +191,37 @@ func TestReconcilerMaterializesHTTPSSource(t *testing.T) {
 	}
 	if command := strings.Join(pod.Spec.InitContainers[0].Command, " "); !strings.Contains(command, "https://sources.example.com/pending.zip") {
 		t.Fatalf("fetch command = %q", command)
+	}
+}
+
+func TestReconcilerFailsWithoutRequestedPlatformCapacity(t *testing.T) {
+	scheme := testScheme(t)
+	build := &kovav1.KovaBuild{
+		ObjectMeta: metav1.ObjectMeta{Name: "no-arm64", Namespace: "jobs", Finalizers: []string{cleanupFinalizer}},
+		Spec: kovav1.KovaBuildSpec{
+			Targets: []kovav1.KovaBuildTargetSpec{{Target: "registry.local/example:dev", Platform: "linux/arm64"}},
+			Source:  kovav1.KovaBuildSourceSpec{URI: "https://sources.example.com/source.zip", Digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+			Build:   kovav1.KovaBuildOptions{Format: "oci", Concurrency: 1},
+		},
+	}
+	crClient := crfake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&kovav1.KovaBuild{}).WithObjects(build).Build()
+	reconciler := KovaBuildReconciler{Client: crClient, Scheme: scheme, Kube: &fakeKube{}, Cfg: config.Config{
+		RunnerImage: "registry.local/kova:dev", BuildkitPlatformAddrs: map[string]string{"linux/amd64": "tcp://kova.kova.svc:9094"},
+	}}
+	if _, err := reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "jobs", Name: "no-arm64"}}); err != nil {
+		t.Fatal(err)
+	}
+	var updated kovav1.KovaBuild
+	if err := crClient.Get(context.Background(), types.NamespacedName{Namespace: "jobs", Name: "no-arm64"}, &updated); err != nil {
+		t.Fatal(err)
+	}
+	if updated.Status.Phase != kovav1.PhaseFailed || updated.Status.Reason != "WorkerPlatformUnavailable" {
+		t.Fatalf("status = %#v", updated.Status)
+	}
+	var pod corev1.Pod
+	err := crClient.Get(context.Background(), types.NamespacedName{Namespace: "jobs", Name: "kova-job-no-arm64"}, &pod)
+	if !apierrors.IsNotFound(err) {
+		t.Fatalf("runner pod lookup error = %v", err)
 	}
 }
 
@@ -274,11 +314,12 @@ func TestSubmitWhenReadyValidatesExactSourceTargetSetBeforeBuild(t *testing.T) {
 		wantReason    string
 		wantBuild     bool
 	}{
-		{name: "extra", inspection: `{"targets":["registry.example/a:dev","registry.example/extra:dev"]}`, wantReason: "InvalidTargets"},
+		{name: "extra", inspection: `{"targets":[{"target":"registry.example/a:dev","platform":"linux/amd64"},{"target":"registry.example/extra:dev","platform":"linux/amd64"}]}`, wantReason: "InvalidTargets"},
 		{name: "missing", inspection: `{"targets":[]}`, wantReason: "InvalidTargets"},
-		{name: "different", inspection: `{"targets":["registry.example/b:dev"]}`, wantReason: "InvalidTargets"},
+		{name: "different", inspection: `{"targets":[{"target":"registry.example/b:dev","platform":"linux/amd64"}]}`, wantReason: "InvalidTargets"},
+		{name: "different-platform", inspection: `{"targets":[{"target":"registry.example/a:dev","platform":"linux/arm64"},{"target":"registry.example/b:dev","platform":"linux/amd64"}]}`, wantReason: "InvalidTargets"},
 		{name: "duplicate", inspectionErr: errors.New("duplicate target"), wantReason: "InvalidSource"},
-		{name: "same-set-different-order", inspection: `{"targets":["registry.example/b:dev","registry.example/a:dev"]}`, wantBuild: true},
+		{name: "same-set-different-order", inspection: `{"targets":[{"target":"registry.example/b:dev","platform":"linux/amd64"},{"target":"registry.example/a:dev","platform":"linux/amd64"}]}`, wantBuild: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -286,7 +327,7 @@ func TestSubmitWhenReadyValidatesExactSourceTargetSetBeforeBuild(t *testing.T) {
 			build := &kovav1.KovaBuild{
 				ObjectMeta: metav1.ObjectMeta{Name: "contract", Namespace: "jobs", Finalizers: []string{cleanupFinalizer}},
 				Spec: kovav1.KovaBuildSpec{
-					Targets: []string{"registry.example/a:dev", "registry.example/b:dev"},
+					Targets: buildTargets("registry.example/a:dev", "registry.example/b:dev"),
 					Build:   kovav1.KovaBuildOptions{Format: "oci", Concurrency: 1},
 				},
 				Status: kovav1.KovaBuildStatus{Phase: kovav1.PhaseStarting, RunnerPodName: "kova-job-contract"},
@@ -311,7 +352,7 @@ func TestSubmitWhenReadyValidatesExactSourceTargetSetBeforeBuild(t *testing.T) {
 				_, _ = io.WriteString(opts.Stdout, `{"status":"running"}`)
 				return nil
 			}
-			reconciler := KovaBuildReconciler{Client: crClient, Scheme: scheme, Kube: kubeClient}
+			reconciler := KovaBuildReconciler{Client: crClient, Scheme: scheme, Kube: kubeClient, Cfg: config.Config{BuildkitPlatformAddrs: map[string]string{"linux/amd64": "tcp://kova.kova.svc:9094"}}}
 			if _, err := reconciler.submitWhenReady(context.Background(), build); err != nil {
 				t.Fatal(err)
 			}

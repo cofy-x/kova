@@ -148,7 +148,7 @@ func TestCreateBuildCreatesCRFromImmutableSource(t *testing.T) {
 	if build.Spec.Build.Format != "oci" || build.Spec.Build.Concurrency != 1 {
 		t.Fatalf("build options = %#v", build.Spec.Build)
 	}
-	if len(build.Spec.Targets) != 1 || build.Spec.Targets[0] != "registry.local/example:dev" {
+	if len(build.Spec.Targets) != 1 || build.Spec.Targets[0].Target != "registry.local/example:dev" || build.Spec.Targets[0].Platform != "linux/amd64" {
 		t.Fatalf("build targets = %#v", build.Spec.Targets)
 	}
 	if !strings.HasPrefix(build.Spec.Source.URI, "oci://") || build.Spec.Source.Digest == "" {
@@ -210,8 +210,8 @@ func TestCreateBuildStoresBatchArchiveTargets(t *testing.T) {
 	if err := srv.client.Get(context.Background(), kubeObjectKey("jobs", job.ID), &build); err != nil {
 		t.Fatal(err)
 	}
-	if fmt.Sprint(build.Spec.Targets) != fmt.Sprint(targets) {
-		t.Fatalf("build targets = %#v, want %#v", build.Spec.Targets, targets)
+	if fmt.Sprint(build.Spec.Targets) != fmt.Sprint([]kovav1.KovaBuildTargetSpec{{Target: targets[0], Platform: "linux/amd64"}, {Target: targets[1], Platform: "linux/amd64"}}) {
+		t.Fatalf("build targets = %#v", build.Spec.Targets)
 	}
 }
 
@@ -256,7 +256,7 @@ func TestCreateBuildEnforcesPublicRequestBounds(t *testing.T) {
 	valid := map[string]any{
 		"source_uri":    "oci://registry.local/sources/test@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 		"source_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-		"targets":       []string{"registry.local/example:dev"},
+		"targets":       requestTargets([]string{"registry.local/example:dev"}),
 		"concurrency":   1,
 	}
 	request := func(body map[string]any, suffix, contentType string) *httptest.ResponseRecorder {
@@ -318,13 +318,14 @@ func TestCreateBuildEnforcesBoundedTaggedTargets(t *testing.T) {
 		valid[index] = fmt.Sprintf("registry.example.com/team/image-%03d:dev", index)
 	}
 	for name, targets := range map[string][]string{
-		"too-many":    append(append([]string(nil), valid...), "registry.example.com/team/overflow:dev"),
-		"duplicate":   {"registry.example.com/team/image:dev", "registry.example.com/team/image:dev"},
-		"empty":       {""},
-		"whitespace":  {" registry.example.com/team/image:dev"},
-		"invalid":     {"not a reference"},
-		"digest-only": {"registry.example.com/team/image@sha256:" + strings.Repeat("a", 64)},
-		"too-long":    {"registry.example.com/team/" + strings.Repeat("a", 500) + ":dev"},
+		"too-many":              append(append([]string(nil), valid...), "registry.example.com/team/overflow:dev"),
+		"duplicate":             {"registry.example.com/team/image:dev", "registry.example.com/team/image:dev"},
+		"empty":                 {""},
+		"whitespace":            {" registry.example.com/team/image:dev"},
+		"invalid":               {"not a reference"},
+		"digest-only":           {"registry.example.com/team/image@sha256:" + strings.Repeat("a", 64)},
+		"too-long":              {"registry.example.com/team/" + strings.Repeat("a", 500) + ":dev"},
+		"reserved-nydus-output": {"registry.example.com/team/image:dev_nydus_v3"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			srv := newTestServer(t, &fakeKube{})
@@ -345,6 +346,40 @@ func TestCreateBuildEnforcesBoundedTaggedTargets(t *testing.T) {
 	srv.routes().ServeHTTP(rec, req)
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("100 targets status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestCreateBuildRejectsUnsupportedOrAmbiguousTargetPlatforms(t *testing.T) {
+	for name, targets := range map[string][]map[string]string{
+		"unsupported": {{"target": "registry.example.com/team/image:dev", "platform": "linux/s390x"}},
+		"missing":     {{"target": "registry.example.com/team/image:dev"}},
+		"same-destination-two-platforms": {
+			{"target": "registry.example.com/team/image:dev", "platform": "linux/amd64"},
+			{"target": "registry.example.com/team/image:dev", "platform": "linux/arm64"},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			srv := newTestServer(t, &fakeKube{})
+			body := map[string]any{
+				"source_uri":    "oci://registry.local/sources/test@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+				"source_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+				"targets":       targets,
+				"format":        "oci",
+				"concurrency":   1,
+			}
+			raw, err := json.Marshal(body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			req := httptest.NewRequest(http.MethodPost, "/v1/builds", bytes.NewReader(raw))
+			req.Header.Set("Authorization", "Bearer token")
+			req.Header.Set("Content-Type", "application/json")
+			rec := httptest.NewRecorder()
+			srv.routes().ServeHTTP(rec, req)
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+			}
+		})
 	}
 }
 
@@ -402,6 +437,15 @@ func TestCreateBuildIsIdempotentAndRejectsConflicts(t *testing.T) {
 		t.Fatalf("conflict status=%d body=%s", conflict.Code, conflict.Body.String())
 	}
 	assertAPIError(t, conflict, http.StatusConflict, apiv1.ErrorCodeConflict, false)
+	platformConflictFields := make(map[string]string, len(fields)+1)
+	for key, value := range fields {
+		platformConflictFields[key] = value
+	}
+	platformConflictFields["platform"] = "linux/arm64"
+	platformConflict := create(platformConflictFields)
+	if platformConflict.Code != http.StatusConflict {
+		t.Fatalf("platform conflict status=%d body=%s", platformConflict.Code, platformConflict.Body.String())
+	}
 	var original kovav1.KovaBuild
 	if err := srv.client.Get(context.Background(), kubeObjectKey("jobs", a.ID), &original); err != nil {
 		t.Fatal(err)
@@ -450,7 +494,7 @@ func TestBuildResultsReturnsVerifiedOutputs(t *testing.T) {
 	build := &kovav1.KovaBuild{
 		ObjectMeta: metav1.ObjectMeta{Name: "typed", Namespace: "jobs"},
 		Spec:       kovav1.KovaBuildSpec{Source: kovav1.KovaBuildSourceSpec{URI: "https://sources.example.com/source.zip", Digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}, IdempotencyKey: "key", Build: kovav1.KovaBuildOptions{Format: "both"}},
-		Status:     kovav1.KovaBuildStatus{Phase: kovav1.PhaseSucceeded, Outputs: []kovav1.BuildOutput{{Format: "oci", Image: "registry.local/demo:payload", ManifestDigest: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}},
+		Status:     kovav1.KovaBuildStatus{Phase: kovav1.PhaseSucceeded, Outputs: []kovav1.BuildOutput{{Format: "oci", Image: "registry.local/demo:payload", ManifestDigest: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", Platform: "linux/amd64"}}},
 	}
 	if err := srv.client.Create(context.Background(), build); err != nil {
 		t.Fatal(err)
@@ -469,7 +513,7 @@ func TestBuildResultsReturnsVerifiedOutputs(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
 		t.Fatal(err)
 	}
-	if len(response.Outputs) != 1 || response.Outputs[0].ManifestDigest == "" || response.IdempotencyKey != "key" {
+	if len(response.Outputs) != 1 || response.Outputs[0].ManifestDigest == "" || response.Outputs[0].Platform != "linux/amd64" || response.IdempotencyKey != "key" {
 		t.Fatalf("response=%#v", response)
 	}
 	if response.Outputs[0].ImmutableRef != "registry.local/demo@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" {

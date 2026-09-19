@@ -4,7 +4,7 @@ This directory contains build inputs used by local E2E and smoke tests, plus foc
 Each image example directory is a build context and includes:
 
 - `Dockerfile`
-- `metadata.json` with a `target` field
+- `metadata.json` with a unique tagged `target` and canonical `platform`
 
 For one-off local builds, pass a directory directly to `kova build`. For batch
 or CI builds, the package scripts zip selected example directories and stream
@@ -74,7 +74,10 @@ export KOVA_SERVICE_TOKEN=REPLACE_WITH_TOKEN
 python examples/python-service-receipt.py \
   --source-uri 'oci://registry.example.com/team/sources@sha256:<manifest-digest>' \
   --source-digest 'sha256:<source-content-digest>' \
+  --recipe-digest 'sha256:<recipe-digest>' \
   --target registry.example.com/team/seed:build-123 \
+  --target-role task \
+  --platform linux/amd64 \
   --idempotency-key build-123 \
   --receipt ./build-123.receipt.json
 ```

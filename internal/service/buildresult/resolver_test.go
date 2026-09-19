@@ -3,6 +3,7 @@ package buildresult
 import (
 	"context"
 	"fmt"
+	"net/http/httptest"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -11,12 +12,24 @@ import (
 	kovav1 "github.com/cofy-x/kova/internal/apis/kova/v1alpha1"
 
 	"github.com/google/go-containerregistry/pkg/name"
+	"github.com/google/go-containerregistry/pkg/registry"
+	"github.com/google/go-containerregistry/pkg/v1/empty"
+	"github.com/google/go-containerregistry/pkg/v1/mutate"
+	"github.com/google/go-containerregistry/pkg/v1/remote"
 )
 
-type registryResolverFunc func(context.Context, string, []string) (string, error)
+type registryResolverFunc func(context.Context, string, []string) (string, string, error)
 
-func (fn registryResolverFunc) Resolve(ctx context.Context, target string, plainHTTP []string) (string, error) {
+func (fn registryResolverFunc) Resolve(ctx context.Context, target string, plainHTTP []string) (string, string, error) {
 	return fn(ctx, target, plainHTTP)
+}
+
+func targetSpecs(targets ...string) []kovav1.KovaBuildTargetSpec {
+	result := make([]kovav1.KovaBuildTargetSpec, 0, len(targets))
+	for _, target := range targets {
+		result = append(result, kovav1.KovaBuildTargetSpec{Target: target, Platform: "linux/amd64"})
+	}
+	return result
 }
 
 func TestReferenceOptionsUsePlainHTTPOnlyForLocalRegistries(t *testing.T) {
@@ -49,6 +62,41 @@ func TestReferenceOptionsUseConfiguredPlainHTTPRegistry(t *testing.T) {
 	}
 }
 
+func TestRegistryResolverReadsPlatformFromDigestPinnedImageConfig(t *testing.T) {
+	t.Setenv("DOCKER_CONFIG", t.TempDir())
+	server := httptest.NewServer(registry.New())
+	defer server.Close()
+	host := strings.TrimPrefix(server.URL, "http://")
+	ref, err := name.NewTag(host+"/team/image:dev", name.Insecure)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config, err := empty.Image.ConfigFile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	config.OS = "linux"
+	config.Architecture = "arm64"
+	image, err := mutate.ConfigFile(empty.Image, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := remote.Write(ref, image); err != nil {
+		t.Fatal(err)
+	}
+	wantDigest, err := image.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest, platform, err := (remoteRegistryResolver{}).Resolve(context.Background(), ref.Name(), []string{host})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if digest != wantDigest.String() || platform != "linux/arm64" {
+		t.Fatalf("digest=%q platform=%q, want %q linux/arm64", digest, platform, wantDigest)
+	}
+}
+
 type exporterFunc func(context.Context, *kovav1.KovaBuild, string, string) ([]byte, error)
 
 func (fn exporterFunc) Post(ctx context.Context, build *kovav1.KovaBuild, path, query string) ([]byte, error) {
@@ -56,7 +104,7 @@ func (fn exporterFunc) Post(ctx context.Context, build *kovav1.KovaBuild, path, 
 }
 
 func TestResolvePreservesTypedPartialFailures(t *testing.T) {
-	build := &kovav1.KovaBuild{Spec: kovav1.KovaBuildSpec{Targets: []string{"registry.example/demo:payload"}, Build: kovav1.KovaBuildOptions{Format: "both"}}}
+	build := &kovav1.KovaBuild{Spec: kovav1.KovaBuildSpec{Targets: targetSpecs("registry.example/demo:payload"), Build: kovav1.KovaBuildOptions{Format: "both"}}}
 	var queries []string
 	results := Resolve(context.Background(), exporterFunc(func(_ context.Context, _ *kovav1.KovaBuild, path, query string) ([]byte, error) {
 		if path != "export" {
@@ -75,7 +123,7 @@ func TestResolvePreservesTypedPartialFailures(t *testing.T) {
 }
 
 func TestResolvePreservesSuccessfulVariantWhenOtherExportFails(t *testing.T) {
-	build := &kovav1.KovaBuild{Spec: kovav1.KovaBuildSpec{Targets: []string{"registry.example/demo:payload"}, Build: kovav1.KovaBuildOptions{Format: "both"}}}
+	build := &kovav1.KovaBuild{Spec: kovav1.KovaBuildSpec{Targets: targetSpecs("registry.example/demo:payload"), Build: kovav1.KovaBuildOptions{Format: "both"}}}
 	results := Resolve(context.Background(), exporterFunc(func(_ context.Context, _ *kovav1.KovaBuild, _, query string) ([]byte, error) {
 		if query == "with-fail=true&oci=true" {
 			return nil, context.DeadlineExceeded
@@ -89,7 +137,7 @@ func TestResolvePreservesSuccessfulVariantWhenOtherExportFails(t *testing.T) {
 
 func TestCancelledResultsDoNotCallExporter(t *testing.T) {
 	called := false
-	build := &kovav1.KovaBuild{Spec: kovav1.KovaBuildSpec{Targets: []string{"registry.example/demo:payload"}, Build: kovav1.KovaBuildOptions{Format: "oci"}}, Status: kovav1.KovaBuildStatus{Phase: kovav1.PhaseCancelled}}
+	build := &kovav1.KovaBuild{Spec: kovav1.KovaBuildSpec{Targets: targetSpecs("registry.example/demo:payload"), Build: kovav1.KovaBuildOptions{Format: "oci"}}, Status: kovav1.KovaBuildStatus{Phase: kovav1.PhaseCancelled}}
 	results := Resolve(context.Background(), exporterFunc(func(context.Context, *kovav1.KovaBuild, string, string) ([]byte, error) {
 		called = true
 		return nil, nil
@@ -101,7 +149,7 @@ func TestCancelledResultsDoNotCallExporter(t *testing.T) {
 
 func TestPendingExpandsBatchTargetsAndFormats(t *testing.T) {
 	build := &kovav1.KovaBuild{Spec: kovav1.KovaBuildSpec{
-		Targets: []string{"registry.example/a:dev", "registry.example/b:dev"},
+		Targets: targetSpecs("registry.example/a:dev", "registry.example/b:dev"),
 		Build:   kovav1.KovaBuildOptions{Format: "both"},
 	}}
 	results := Pending(build)
@@ -119,7 +167,7 @@ func TestHundredLogicalTargetsExpandToTwoHundredConcreteOutputs(t *testing.T) {
 		targets[index] = fmt.Sprintf("registry.example/image-%03d:dev", index)
 	}
 	pending := Pending(&kovav1.KovaBuild{Spec: kovav1.KovaBuildSpec{
-		Targets: targets,
+		Targets: targetSpecs(targets...),
 		Build:   kovav1.KovaBuildOptions{Format: "both", Concurrency: kovav1.MaxBuildConcurrency},
 	}})
 	if len(pending) != kovav1.MaxConcreteOutputs {
@@ -136,24 +184,42 @@ func TestHundredLogicalTargetsExpandToTwoHundredConcreteOutputs(t *testing.T) {
 
 func TestResolvePreservesSuccessfulDigestsWhenAnotherRegistryFails(t *testing.T) {
 	build := &kovav1.KovaBuild{Spec: kovav1.KovaBuildSpec{
-		Targets: []string{"registry.example/a:dev", "registry.example/b:dev"},
+		Targets: targetSpecs("registry.example/a:dev", "registry.example/b:dev"),
 		Build:   kovav1.KovaBuildOptions{Format: "oci", Concurrency: 2},
 	}}
 	exporter := exporterFunc(func(context.Context, *kovav1.KovaBuild, string, string) ([]byte, error) {
 		return []byte("{\"target\":\"registry.example/a:dev\",\"success\":true}\n" +
 			"{\"target\":\"registry.example/b:dev\",\"success\":true}\n"), nil
 	})
-	results := resolveWithRegistry(context.Background(), exporter, registryResolverFunc(func(_ context.Context, target string, _ []string) (string, error) {
+	results := resolveWithRegistry(context.Background(), exporter, registryResolverFunc(func(_ context.Context, target string, _ []string) (string, string, error) {
 		if strings.Contains(target, "/b:") {
-			return "", fmt.Errorf("registry unavailable")
+			return "", "", fmt.Errorf("registry unavailable")
 		}
-		return "sha256:" + strings.Repeat("a", 64), nil
+		return "sha256:" + strings.Repeat("a", 64), "linux/amd64", nil
 	}), build, nil)
 	if AllSucceeded(results) {
 		t.Fatal("expected overall failure")
 	}
 	outputs := Outputs(results)
 	if len(outputs) != 1 || outputs[0].Image != "registry.example/a:dev" || outputs[0].ManifestDigest == "" {
+		t.Fatalf("outputs = %#v", outputs)
+	}
+}
+
+func TestResolveRejectsDigestPinnedImagePlatformMismatch(t *testing.T) {
+	build := &kovav1.KovaBuild{Spec: kovav1.KovaBuildSpec{
+		Targets: targetSpecs("registry.example/a:dev"),
+		Build:   kovav1.KovaBuildOptions{Format: "oci", Concurrency: 1},
+	}}
+	results := resolveWithRegistry(context.Background(), exporterFunc(func(context.Context, *kovav1.KovaBuild, string, string) ([]byte, error) {
+		return []byte("{\"target\":\"registry.example/a:dev\",\"success\":true}\n"), nil
+	}), registryResolverFunc(func(context.Context, string, []string) (string, string, error) {
+		return "sha256:" + strings.Repeat("c", 64), "linux/arm64", nil
+	}), build, nil)
+	if len(results) != 1 || results[0].Status != "failed" || !strings.Contains(results[0].Error, "does not match requested platform") {
+		t.Fatalf("results = %#v", results)
+	}
+	if outputs := Outputs(results); len(outputs) != 0 {
 		t.Fatalf("outputs = %#v", outputs)
 	}
 }
@@ -167,11 +233,11 @@ func TestResolveBoundsManifestVerificationConcurrency(t *testing.T) {
 		fmt.Fprintf(&exported, "{\"target\":%q,\"success\":true}\n", targets[index])
 	}
 	build := &kovav1.KovaBuild{
-		Spec:   kovav1.KovaBuildSpec{Targets: targets, Build: kovav1.KovaBuildOptions{Format: "oci", Concurrency: count}},
+		Spec:   kovav1.KovaBuildSpec{Targets: targetSpecs(targets...), Build: kovav1.KovaBuildOptions{Format: "oci", Concurrency: count}},
 		Status: kovav1.KovaBuildStatus{AllocatedConcurrency: 4},
 	}
 	var active, maximum atomic.Int32
-	resolver := registryResolverFunc(func(context.Context, string, []string) (string, error) {
+	resolver := registryResolverFunc(func(context.Context, string, []string) (string, string, error) {
 		current := active.Add(1)
 		defer active.Add(-1)
 		for {
@@ -181,7 +247,7 @@ func TestResolveBoundsManifestVerificationConcurrency(t *testing.T) {
 			}
 		}
 		time.Sleep(10 * time.Millisecond)
-		return "sha256:" + strings.Repeat("b", 64), nil
+		return "sha256:" + strings.Repeat("b", 64), "linux/amd64", nil
 	})
 	results := resolveWithRegistry(context.Background(), exporterFunc(func(context.Context, *kovav1.KovaBuild, string, string) ([]byte, error) {
 		return []byte(exported.String()), nil

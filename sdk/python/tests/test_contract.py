@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import fields
 from pathlib import Path
 
+import pytest
 import yaml
 
 from kova_client import (
@@ -14,6 +15,8 @@ from kova_client import (
     JobList,
     JobStatus,
     OutputFormat,
+    Platform,
+    TargetSpec,
 )
 
 OPENAPI = Path(__file__).resolve().parents[3] / "api" / "openapi.yaml"
@@ -23,6 +26,7 @@ def test_python_models_match_openapi_properties_and_enums() -> None:
     document = yaml.safe_load(OPENAPI.read_text())
     schemas = document["components"]["schemas"]
     assert _field_names(CreateBuildRequest) == set(schemas["CreateBuildRequest"]["properties"])
+    assert _field_names(TargetSpec) == set(schemas["TargetSpec"]["properties"])
     assert _field_names(BuildJob) == set(schemas["BuildJob"]["properties"])
     assert _field_names(BuildOutput) == set(schemas["BuildOutput"]["properties"])
     assert _field_names(BuildResults) == set(schemas["BuildResults"]["properties"])
@@ -34,6 +38,12 @@ def test_python_models_match_openapi_properties_and_enums() -> None:
     )
     assert {item.value for item in OutputFormat} == set(
         schemas["BuildOutput"]["properties"]["format"]["enum"]
+    )
+    assert {item.value for item in Platform} == set(
+        schemas["TargetSpec"]["properties"]["platform"]["enum"]
+    )
+    assert {item.value for item in Platform} == set(
+        schemas["BuildOutput"]["properties"]["platform"]["enum"]
     )
 
 
@@ -55,6 +65,11 @@ def test_public_operations_exist_in_openapi() -> None:
         "getLogs",
         "cancelBuild",
     }
+
+
+def test_target_platform_is_not_a_free_form_label() -> None:
+    with pytest.raises(TypeError, match="Platform value"):
+        TargetSpec(target="registry.example.com/team/image:dev", platform="linux/s390x")  # type: ignore[arg-type]
 
 
 def _field_names(model: type[object]) -> set[str]:

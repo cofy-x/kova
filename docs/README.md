@@ -10,10 +10,11 @@ with the [complete CLI workflow](cli-workflow.md) for build operations or the
   matching CLI, then verify a build.
 - [Direct runner workflow](cli-workflow.md): prepare, build, logs, wait,
   export, and cleanup for development.
-- [Runtime design](architecture.md): roles, topology, build/export,
-  preheat, and scaling flows.
+- [Runtime design](architecture.md): roles, explicit platform worker pools,
+  build/export, preheat, and scaling flows.
 - [Service API and official SDKs](service.md): immutable source contract, authenticated job CLI, Python and Go clients, structured errors, RBAC, and bounded results.
 - [Machine-readable Service API](../api/openapi.yaml): stable OpenAPI 3.1 operations, schemas, authentication, and error responses.
+- [Caller-owned seed build receipt](examples/seed-build-receipt-v1.json): non-authoritative example that records recipe, source, Kova version, role, platform, and immutable output facts outside Kova.
 - [Validation matrix](testing.md): static checks, E2E targets, and runtime smoke
   expectations.
 - [Release artifacts](releases.md): versioning, CLI archives, runtime images,

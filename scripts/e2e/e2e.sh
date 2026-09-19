@@ -16,6 +16,7 @@ RESULT_JSONL=${RESULT_JSONL:-${WORK_DIR}/result.jsonl}
 CLUSTER_REGISTRY=${CLUSTER_REGISTRY:-kind-registry:5000}
 REGISTRY_HOST=${REGISTRY_HOST:-localhost:5002}
 E2E_BUILD_IMAGE=${E2E_BUILD_IMAGE:-true}
+KOVA_PLATFORM=$(kova_platform)
 
 if [[ "${KIND_KUBECONFIG}" == /* ]]; then
   kubeconfig=${KIND_KUBECONFIG}
@@ -50,6 +51,7 @@ else
 fi
 "${KOVA[@]}" source pack \
   --target "${CLUSTER_REGISTRY}/kova-examples/simple:dev" \
+  --platform "${KOVA_PLATFORM}" \
   --output "${source_zip_path}" \
   "${ROOT}/examples/simple"
 

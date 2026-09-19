@@ -8,9 +8,10 @@ import (
 
 func TestBuildPreheatURL(t *testing.T) {
 	tests := []struct {
-		name   string
-		target string
-		want   string
+		name      string
+		target    string
+		plainHTTP []string
+		want      string
 	}{
 		{
 			name:   "tag",
@@ -42,11 +43,17 @@ func TestBuildPreheatURL(t *testing.T) {
 			target: "registry.example.com/ns/image",
 			want:   "https://registry.example.com/v2/ns/image/manifests/latest",
 		},
+		{
+			name:      "explicit plain HTTP registry",
+			target:    "kind-registry:5000/ns/image:dev",
+			plainHTTP: []string{"kind-registry:5000"},
+			want:      "http://kind-registry:5000/v2/ns/image/manifests/dev",
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := buildPreheatURL(tt.target)
+			got, err := buildPreheatURL(tt.target, tt.plainHTTP)
 			if err != nil {
 				t.Fatalf("expected success, got %v", err)
 			}
@@ -60,7 +67,7 @@ func TestBuildPreheatURL(t *testing.T) {
 func TestBuildPreheatURLRejectsInvalidTargets(t *testing.T) {
 	for _, target := range []string{"", "busybox:latest", "registry.example.com/"} {
 		t.Run(target, func(t *testing.T) {
-			if _, err := buildPreheatURL(target); err == nil {
+			if _, err := buildPreheatURL(target, nil); err == nil {
 				t.Fatal("expected error")
 			}
 		})

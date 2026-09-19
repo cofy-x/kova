@@ -52,7 +52,7 @@ func (s *Server) handleCreateBuild(c echo.Context) error {
 		},
 		Spec: kovav1.KovaBuildSpec{
 			Requester: kovav1.KovaBuildRequester{Username: principal.Username, UID: principal.UID},
-			Targets:   append([]string(nil), request.Targets...),
+			Targets:   append([]kovav1.KovaBuildTargetSpec(nil), request.Targets...),
 			Source:    kovav1.KovaBuildSourceSpec{URI: request.SourceURI, Digest: request.SourceDigest},
 			Build:     request.Options, IdempotencyKey: request.IdempotencyKey,
 		},

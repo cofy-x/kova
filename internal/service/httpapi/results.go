@@ -41,7 +41,11 @@ func apiOutputs(outputs []kovav1.BuildOutput) ([]apiv1.BuildOutput, error) {
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, apiv1.BuildOutput{Format: output.Format, Image: output.Image, ManifestDigest: output.ManifestDigest, ImmutableRef: immutableRef})
+		platform, err := buildcontract.NormalizePlatform(output.Platform)
+		if err != nil {
+			return nil, fmt.Errorf("normalize output platform: %w", err)
+		}
+		out = append(out, apiv1.BuildOutput{Format: output.Format, Image: output.Image, ManifestDigest: output.ManifestDigest, ImmutableRef: immutableRef, Platform: apiv1.Platform(platform)})
 	}
 	return out, nil
 }

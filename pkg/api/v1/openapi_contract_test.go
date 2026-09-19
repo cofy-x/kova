@@ -42,7 +42,7 @@ func TestOpenAPIContractMatchesPublicTypes(t *testing.T) {
 	}
 	schemas := object(t, object(t, document, "components"), "schemas")
 	for name, model := range map[string]any{
-		"CreateBuildRequest": CreateBuildRequest{}, "VersionInfo": VersionInfo{},
+		"CreateBuildRequest": CreateBuildRequest{}, "TargetSpec": TargetSpec{}, "VersionInfo": VersionInfo{},
 		"ReadyStatus": ReadyStatus{}, "BuildJob": BuildJob{}, "BuildOutput": BuildOutput{},
 		"BuildResults": BuildResults{}, "JobList": JobList{}, "ErrorResponse": ErrorResponse{},
 	} {
@@ -65,7 +65,7 @@ func TestOpenAPIContractMatchesPublicTypes(t *testing.T) {
 	assertStringEnum(t, object(t, object(t, object(t, schemas, "BuildJob"), "properties"), "failure_code"), []string{
 		string(BuildFailureCancelled), string(BuildFailureExecutionFailed), string(BuildFailureInvalidSource),
 		string(BuildFailureInvalidTargets), string(BuildFailureRunnerUnavailable), string(BuildFailureSubmissionFailed),
-		string(BuildFailureVerificationFailed),
+		string(BuildFailureVerificationFailed), string(BuildFailureWorkerPlatformUnavailable),
 	})
 	assertStringEnum(t, object(t, object(t, object(t, schemas, "ErrorResponse"), "properties"), "code"), []string{
 		string(ErrorCodeConflict), string(ErrorCodeForbidden), string(ErrorCodeInternal), string(ErrorCodeInvalidRequest),
@@ -74,7 +74,9 @@ func TestOpenAPIContractMatchesPublicTypes(t *testing.T) {
 	createProperties := object(t, object(t, schemas, "CreateBuildRequest"), "properties")
 	assertInteger(t, object(t, createProperties, "source_uri")["maxLength"], MaxSourceURILength)
 	assertInteger(t, object(t, createProperties, "targets")["maxItems"], MaxLogicalTargets)
-	assertInteger(t, object(t, object(t, createProperties, "targets"), "items")["maxLength"], MaxTargetLength)
+	assertInteger(t, object(t, object(t, object(t, schemas, "TargetSpec"), "properties"), "target")["maxLength"], MaxTargetLength)
+	assertStringEnum(t, object(t, object(t, object(t, schemas, "TargetSpec"), "properties"), "platform"), []string{string(PlatformLinuxAMD64), string(PlatformLinuxARM64)})
+	assertStringEnum(t, object(t, object(t, object(t, schemas, "BuildOutput"), "properties"), "platform"), []string{string(PlatformLinuxAMD64), string(PlatformLinuxARM64)})
 	assertInteger(t, object(t, createProperties, "concurrency")["maximum"], MaxBuildConcurrency)
 	assertInteger(t, object(t, createProperties, "variables")["maxItems"], MaxBuildVariables)
 	assertInteger(t, object(t, object(t, createProperties, "variables"), "items")["maxLength"], MaxBuildVariableLength)

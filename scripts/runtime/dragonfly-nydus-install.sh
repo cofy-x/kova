@@ -62,20 +62,12 @@ case "${DRAGONFLY_PROXY_MODE}" in
     ;;
 esac
 
-for node in $(kind_worker_nodes "${KIND_CLUSTER}"); do
-  echo "Using overlayfs while installing Dragonfly on ${node}" >&2
-  docker exec "${node}" bash -lc "
-set -euo pipefail
-conf=/etc/containerd/config.toml
-if grep -q 'snapshotter = \"nydus\"' \"\$conf\"; then
-  sed -i 's/snapshotter = \"nydus\"/snapshotter = \"overlayfs\"/g' \"\$conf\"
-  systemctl restart containerd
-fi
-"
-done
+echo "Using overlayfs while installing Dragonfly" >&2
+kind_use_overlayfs_snapshotter "${KIND_CLUSTER}"
 
 helm repo add dragonfly https://dragonflyoss.github.io/helm-charts/ >/dev/null 2>&1 || true
-helm repo update >/dev/null
+# Keep runtime validation independent from unrelated user-level Helm repos.
+helm repo update dragonfly >/dev/null
 
 helm_args=(
   --namespace "${DRAGONFLY_NAMESPACE}"

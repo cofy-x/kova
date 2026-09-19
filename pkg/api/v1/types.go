@@ -5,6 +5,13 @@ import "time"
 
 const APIVersion = "v1"
 
+type Platform string
+
+const (
+	PlatformLinuxAMD64 Platform = "linux/amd64"
+	PlatformLinuxARM64 Platform = "linux/arm64"
+)
+
 const (
 	MaxLogicalTargets       = 100
 	MaxConcreteOutputs      = MaxLogicalTargets * 2
@@ -19,17 +26,22 @@ const (
 )
 
 type CreateBuildRequest struct {
-	SourceURI      string   `json:"source_uri"`
-	SourceDigest   string   `json:"source_digest"`
-	Targets        []string `json:"targets"`
-	Format         string   `json:"format,omitempty"`
-	Concurrency    int      `json:"concurrency,omitempty"`
-	Timeout        int      `json:"timeout,omitempty"`
-	OOMCooldown    string   `json:"oom_cooldown,omitempty"`
-	FailFast       bool     `json:"fail_fast,omitempty"`
-	Verbose        bool     `json:"verbose,omitempty"`
-	Variables      []string `json:"variables,omitempty"`
-	IdempotencyKey string   `json:"idempotency_key,omitempty"`
+	SourceURI      string       `json:"source_uri"`
+	SourceDigest   string       `json:"source_digest"`
+	Targets        []TargetSpec `json:"targets"`
+	Format         string       `json:"format,omitempty"`
+	Concurrency    int          `json:"concurrency,omitempty"`
+	Timeout        int          `json:"timeout,omitempty"`
+	OOMCooldown    string       `json:"oom_cooldown,omitempty"`
+	FailFast       bool         `json:"fail_fast,omitempty"`
+	Verbose        bool         `json:"verbose,omitempty"`
+	Variables      []string     `json:"variables,omitempty"`
+	IdempotencyKey string       `json:"idempotency_key,omitempty"`
+}
+
+type TargetSpec struct {
+	Target   string   `json:"target"`
+	Platform Platform `json:"platform"`
 }
 
 type VersionInfo struct {
@@ -57,13 +69,14 @@ const (
 type BuildFailureCode string
 
 const (
-	BuildFailureInvalidSource      BuildFailureCode = "invalid_source"
-	BuildFailureInvalidTargets     BuildFailureCode = "invalid_targets"
-	BuildFailureRunnerUnavailable  BuildFailureCode = "runner_unavailable"
-	BuildFailureSubmissionFailed   BuildFailureCode = "build_submission_failed"
-	BuildFailureVerificationFailed BuildFailureCode = "result_verification_failed"
-	BuildFailureExecutionFailed    BuildFailureCode = "build_failed"
-	BuildFailureCancelled          BuildFailureCode = "cancelled"
+	BuildFailureInvalidSource             BuildFailureCode = "invalid_source"
+	BuildFailureInvalidTargets            BuildFailureCode = "invalid_targets"
+	BuildFailureRunnerUnavailable         BuildFailureCode = "runner_unavailable"
+	BuildFailureWorkerPlatformUnavailable BuildFailureCode = "worker_platform_unavailable"
+	BuildFailureSubmissionFailed          BuildFailureCode = "build_submission_failed"
+	BuildFailureVerificationFailed        BuildFailureCode = "result_verification_failed"
+	BuildFailureExecutionFailed           BuildFailureCode = "build_failed"
+	BuildFailureCancelled                 BuildFailureCode = "cancelled"
 )
 
 type BuildJob struct {
@@ -85,10 +98,11 @@ type BuildJob struct {
 }
 
 type BuildOutput struct {
-	Format         string `json:"format"`
-	Image          string `json:"image"`
-	ManifestDigest string `json:"manifest_digest"`
-	ImmutableRef   string `json:"immutable_ref"`
+	Format         string   `json:"format"`
+	Image          string   `json:"image"`
+	ManifestDigest string   `json:"manifest_digest"`
+	ImmutableRef   string   `json:"immutable_ref"`
+	Platform       Platform `json:"platform"`
 }
 
 type BuildResults struct {

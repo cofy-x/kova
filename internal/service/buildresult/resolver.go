@@ -24,21 +24,38 @@ type Exporter interface {
 }
 
 type RegistryResolver interface {
-	Resolve(context.Context, string, []string) (string, error)
+	Resolve(context.Context, string, []string) (string, string, error)
 }
 
 type remoteRegistryResolver struct{}
 
-func (remoteRegistryResolver) Resolve(ctx context.Context, target string, plainHTTPRegistries []string) (string, error) {
+func (remoteRegistryResolver) Resolve(ctx context.Context, target string, plainHTTPRegistries []string) (string, string, error) {
 	ref, err := name.ParseReference(target, referenceOptions(target, plainHTTPRegistries)...)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	descriptor, err := remote.Get(ref, remote.WithContext(ctx), remote.WithAuthFromKeychain(authn.DefaultKeychain))
 	if err != nil {
-		return "", fmt.Errorf("resolve pushed descriptor: %w", err)
+		return "", "", fmt.Errorf("resolve pushed descriptor: %w", err)
 	}
-	return descriptor.Descriptor.Digest.String(), nil
+	digest := descriptor.Descriptor.Digest.String()
+	digestRef, err := name.NewDigest(ref.Context().Name()+"@"+digest, referenceOptions(target, plainHTTPRegistries)...)
+	if err != nil {
+		return "", "", fmt.Errorf("parse pushed digest reference: %w", err)
+	}
+	image, err := remote.Image(digestRef, remote.WithContext(ctx), remote.WithAuthFromKeychain(authn.DefaultKeychain))
+	if err != nil {
+		return "", "", fmt.Errorf("resolve pushed single-platform image: %w", err)
+	}
+	config, err := image.ConfigFile()
+	if err != nil {
+		return "", "", fmt.Errorf("read pushed image platform: %w", err)
+	}
+	platform, err := buildcontract.NormalizePlatform(config.OS + "/" + config.Architecture)
+	if err != nil {
+		return "", "", fmt.Errorf("pushed image has unsupported platform: %w", err)
+	}
+	return digest, platform, nil
 }
 
 type Result struct {
@@ -46,6 +63,7 @@ type Result struct {
 	Status         string
 	Repository     string
 	ManifestDigest string
+	Platform       string
 	Error          string
 }
 
@@ -119,9 +137,14 @@ func resolveWithRegistry(ctx context.Context, exporter Exporter, registry Regist
 		go func() {
 			defer wg.Done()
 			for index := range jobs {
-				digest, err := registry.Resolve(ctx, expected[index].Repository, plainHTTPRegistries)
+				digest, platform, err := registry.Resolve(ctx, expected[index].Repository, plainHTTPRegistries)
 				if err != nil {
 					expected[index].Status, expected[index].Error = "failed", err.Error()
+					continue
+				}
+				if platform != expected[index].Platform {
+					expected[index].Status = "failed"
+					expected[index].Error = fmt.Sprintf("pushed image platform %s does not match requested platform %s", platform, expected[index].Platform)
 					continue
 				}
 				expected[index].Status = "succeeded"
@@ -172,14 +195,14 @@ func Pending(build *kovav1.KovaBuild) []Result {
 	if err != nil {
 		return nil
 	}
-	targets, err := buildcontract.NormalizeTargets(build.Spec.Targets)
+	targets, err := buildcontract.NormalizeTargetSpecs(contractTargets(build.Spec.Targets))
 	if err != nil {
 		return nil
 	}
 	results := make([]Result, 0, len(formats)*len(targets))
 	for _, target := range targets {
 		for _, format := range formats {
-			results = append(results, Result{Format: string(format), Status: "pending", Repository: source.NormalizeTargetForFormat(target, format)})
+			results = append(results, Result{Format: string(format), Status: "pending", Repository: source.NormalizeTargetForFormat(target.Target, format), Platform: target.Platform})
 		}
 	}
 	return results
@@ -227,8 +250,16 @@ func Outputs(results []Result) []kovav1.BuildOutput {
 			continue
 		}
 		outputs = append(outputs, kovav1.BuildOutput{
-			Format: result.Format, Image: result.Repository, ManifestDigest: result.ManifestDigest,
+			Format: result.Format, Image: result.Repository, ManifestDigest: result.ManifestDigest, Platform: result.Platform,
 		})
 	}
 	return outputs
+}
+
+func contractTargets(values []kovav1.KovaBuildTargetSpec) []buildcontract.TargetSpec {
+	targets := make([]buildcontract.TargetSpec, 0, len(values))
+	for _, value := range values {
+		targets = append(targets, buildcontract.TargetSpec{Target: value.Target, Platform: value.Platform})
+	}
+	return targets
 }

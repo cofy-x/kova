@@ -29,6 +29,7 @@ BASELINE_CHART=${BASELINE_CHART:-}
 BASELINE_CONTROLLER_IMAGE=${BASELINE_CONTROLLER_IMAGE:-}
 BASELINE_RUNNER_IMAGE=${BASELINE_RUNNER_IMAGE:-}
 BASELINE_WORKER_IMAGE=${BASELINE_WORKER_IMAGE:-}
+KOVA_PLATFORM=$(kova_platform)
 
 require_cmd curl
 require_cmd docker
@@ -92,6 +93,7 @@ helm upgrade --install "${RELEASE_NAME}" "${KOVA_CHART}" \
   --set-string "images.runner.tag=${RUNNER_IMAGE##*:}" \
   --set-string "images.worker.repository=${WORKER_IMAGE%:*}" \
   --set-string "images.worker.tag=${WORKER_IMAGE##*:}" \
+  --set-string "worker.platform=${KOVA_PLATFORM}" \
   --set serviceDaemon.enabled=true \
   --set-string serviceDaemon.authentication.mode=static \
   --set-string "serviceDaemon.authentication.staticTokenSecret.name=${SERVICE_AUTH_SECRET}" \
@@ -109,8 +111,8 @@ kubectl --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" -n "${NAMESPACE}" \
 kubectl --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" -n "${NAMESPACE}" \
   rollout status "deployment/${RELEASE_NAME}-service" --timeout=180s
 
-too_many_targets=$(jq -n --arg registry "${CLUSTER_REGISTRY}" \
-  '[range(0;101) | $registry + "/kova-examples/limit-" + tostring + ":dev"]')
+too_many_targets=$(jq -n --arg registry "${CLUSTER_REGISTRY}" --arg platform "${KOVA_PLATFORM}" \
+  '[range(0;101) | {target: ($registry + "/kova-examples/limit-" + tostring + ":dev"), platform: $platform}]')
 if jq -n --argjson targets "${too_many_targets}" --arg namespace "${NAMESPACE}" --arg uri \
   "oci://${CLUSTER_REGISTRY}/kova-sources/invalid@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" \
   '{apiVersion:"kova.cofy.dev/v1alpha1",kind:"KovaBuild",metadata:{name:"too-many-targets",namespace:$namespace},spec:{requester:{username:"e2e"},targets:$targets,source:{uri:$uri,digest:"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},build:{format:"oci",concurrency:1}}}' | \
@@ -131,16 +133,18 @@ assert_kubernetes_rejects_targets() {
 }
 
 assert_kubernetes_rejects_targets empty-array '[]'
-assert_kubernetes_rejects_targets empty-string '[""]'
-assert_kubernetes_rejects_targets duplicate "[\"${SERVICE_TARGET}\",\"${SERVICE_TARGET}\"]"
-assert_kubernetes_rejects_targets whitespace "[\" ${SERVICE_TARGET}\"]"
-assert_kubernetes_rejects_targets invalid '["not a reference"]'
+assert_kubernetes_rejects_targets empty-string "[{\"target\":\"\",\"platform\":\"${KOVA_PLATFORM}\"}]"
+assert_kubernetes_rejects_targets duplicate "[{\"target\":\"${SERVICE_TARGET}\",\"platform\":\"${KOVA_PLATFORM}\"},{\"target\":\"${SERVICE_TARGET}\",\"platform\":\"${KOVA_PLATFORM}\"}]"
+assert_kubernetes_rejects_targets whitespace "[{\"target\":\" ${SERVICE_TARGET}\",\"platform\":\"${KOVA_PLATFORM}\"}]"
+assert_kubernetes_rejects_targets invalid "[{\"target\":\"not a reference\",\"platform\":\"${KOVA_PLATFORM}\"}]"
 assert_kubernetes_rejects_targets digest-only \
-  "[\"${CLUSTER_REGISTRY}/kova-examples/simple@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"]"
+  "[{\"target\":\"${CLUSTER_REGISTRY}/kova-examples/simple@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"platform\":\"${KOVA_PLATFORM}\"}]"
 overlong_target=$(jq -nr --arg registry "${CLUSTER_REGISTRY}" '$registry + "/kova-examples/" + ("a" * 500) + ":dev"')
-assert_kubernetes_rejects_targets overlong "[\"${overlong_target}\"]"
+assert_kubernetes_rejects_targets overlong "[{\"target\":\"${overlong_target}\",\"platform\":\"${KOVA_PLATFORM}\"}]"
+assert_kubernetes_rejects_targets unsupported-platform "[{\"target\":\"${SERVICE_TARGET}\",\"platform\":\"linux/s390x\"}]"
 
 source_push=$("${KOVA_CLI}" source push --target "${SERVICE_TARGET}" \
+  --platform "${KOVA_PLATFORM}" \
   --repository "${SOURCE_REPOSITORY}" \
   --registry-plain-http "${REGISTRY_HOST}" \
   "${ROOT}/examples/simple")
@@ -172,8 +176,8 @@ KOVA_SERVICE_TOKEN=${SERVICE_AUTH_TOKEN} "${KOVA_CLI}" --service-url "${BASE}" d
 create_build() {
   local target=$1
   jq -n --arg source_uri "${source_uri}" --arg source_digest "${source_digest}" \
-    --arg target "${target}" --arg registry "${CLUSTER_REGISTRY}" \
-    '{source_uri:$source_uri,source_digest:$source_digest,targets:[$target],format:"oci",concurrency:1,timeout:600,fail_fast:true,verbose:true,variables:["KOVA_IMAGE_REGISTRY="+$registry]}' | \
+    --arg target "${target}" --arg platform "${KOVA_PLATFORM}" --arg registry "${CLUSTER_REGISTRY}" \
+    '{source_uri:$source_uri,source_digest:$source_digest,targets:[{target:$target,platform:$platform}],format:"both",concurrency:1,timeout:600,fail_fast:true,verbose:true,variables:["KOVA_IMAGE_REGISTRY="+$registry]}' | \
     curl -fsS -X POST "${auth_header[@]}" -H 'Content-Type: application/json' \
       --data-binary @- "${BASE}/v1/builds"
 }
@@ -207,10 +211,12 @@ fi
 failed_repository=${SERVICE_PULL_TARGET#*/}
 failed_repository=${failed_repository%:*}
 failed_tag=${SERVICE_PULL_TARGET##*:}-expected-failure
-if curl -fsS "http://${REGISTRY_HOST}/v2/${failed_repository}/manifests/${failed_tag}" >/dev/null 2>&1; then
-  echo "error: target-contract failure pushed an undeclared image" >&2
-  exit 1
-fi
+for unexpected_tag in "${failed_tag}" "${failed_tag}_nydus_v3"; do
+  if curl -fsS "http://${REGISTRY_HOST}/v2/${failed_repository}/manifests/${unexpected_tag}" >/dev/null 2>&1; then
+    echo "error: target-contract failure pushed an undeclared image: ${unexpected_tag}" >&2
+    exit 1
+  fi
+done
 
 # A caller retries with the same immutable source URI and digest. Kova owns no
 # recovery state; the new request independently produces and verifies the OCI image.
@@ -224,8 +230,15 @@ if [[ "${status}" != "succeeded" ]]; then
 fi
 
 results=$(curl -fsS "${auth_header[@]}" "${BASE}/v1/builds/${job_id}/results")
-printf '%s' "${results}" | jq -e --arg image "${SERVICE_TARGET}" --arg digest "${source_digest}" \
-  '.source_digest == $digest and (.outputs | length) == 1 and .outputs[0].image == $image and (.outputs[0].manifest_digest | startswith("sha256:"))' >/dev/null
+printf '%s' "${results}" | jq -e --arg image "${SERVICE_TARGET}" --arg digest "${source_digest}" --arg platform "${KOVA_PLATFORM}" \
+  '.source_digest == $digest and (.outputs | length) == 2 and
+   ([.outputs[].format] | sort) == ["nydus", "oci"] and
+   (.outputs | all(. as $output |
+     $output.platform == $platform and
+     ($output.manifest_digest | startswith("sha256:")) and
+     ($output.immutable_ref | endswith("@" + $output.manifest_digest)))) and
+   (.outputs | any(.format == "oci" and .image == $image)) and
+   (.outputs | any(.format == "nydus" and .image == ($image + "_nydus_v3")))' >/dev/null
 kubectl --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" -n "${NAMESPACE}" get kovabuild "${job_id}" \
   -o jsonpath='{.status.outputs[0].manifestDigest}' | grep -E '^sha256:[a-f0-9]{64}$' >/dev/null
 

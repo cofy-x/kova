@@ -6,21 +6,23 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 
 	kovav1 "github.com/cofy-x/kova/internal/apis/kova/v1alpha1"
+	"github.com/cofy-x/kova/internal/buildcontract"
 	"github.com/cofy-x/kova/internal/daemonclient"
 	"github.com/cofy-x/kova/internal/kube"
 	"github.com/cofy-x/kova/internal/runner"
 )
 
 type Client struct {
-	Kube         kube.API
-	BuildkitAddr string
+	Kube                  kube.API
+	BuildkitPlatformAddrs map[string]string
 }
 
-func (c Client) SourceTargets(ctx context.Context, build *kovav1.KovaBuild, sourcePath string) ([]string, error) {
+func (c Client) SourceTargets(ctx context.Context, build *kovav1.KovaBuild, sourcePath string) ([]buildcontract.TargetSpec, error) {
 	var stdout, stderr bytes.Buffer
 	err := c.Kube.Exec(ctx, build.Namespace, build.Status.RunnerPodName, kube.ExecOptions{
 		Stdout:  &stdout,
@@ -31,7 +33,7 @@ func (c Client) SourceTargets(ctx context.Context, build *kovav1.KovaBuild, sour
 		return nil, ExecError("inspect source contract", stderr.Bytes(), err)
 	}
 	var contract struct {
-		Targets []string `json:"targets"`
+		Targets []buildcontract.TargetSpec `json:"targets"`
 	}
 	if err := json.Unmarshal(stdout.Bytes(), &contract); err != nil {
 		return nil, fmt.Errorf("parse source contract: %w", err)
@@ -44,7 +46,7 @@ func (c Client) SubmitBuild(ctx context.Context, build *kovav1.KovaBuild, source
 	err := c.Kube.Exec(ctx, build.Namespace, build.Status.RunnerPodName, kube.ExecOptions{
 		Stdout:  &stdout,
 		Stderr:  &stderr,
-		Command: daemonclient.TransportCommand("POST", daemonclient.BuildPath, BuildQuery(build, c.BuildkitAddr), sourcePath),
+		Command: daemonclient.TransportCommand("POST", daemonclient.BuildPath, BuildQuery(build, c.BuildkitPlatformAddrs), sourcePath),
 	})
 	if err != nil {
 		return ExecError("submit build", stderr.Bytes(), err)
@@ -101,10 +103,15 @@ func (c Client) Post(ctx context.Context, build *kovav1.KovaBuild, path string, 
 	return out.Bytes(), nil
 }
 
-func BuildQuery(build *kovav1.KovaBuild, buildkitAddr string) string {
+func BuildQuery(build *kovav1.KovaBuild, platformAddrs map[string]string) string {
 	values := url.Values{}
-	if strings.TrimSpace(buildkitAddr) != "" {
-		values.Set("addrs", strings.TrimSpace(buildkitAddr))
+	platforms := make([]string, 0, len(platformAddrs))
+	for platform := range platformAddrs {
+		platforms = append(platforms, platform)
+	}
+	sort.Strings(platforms)
+	for _, platform := range platforms {
+		values.Add("platform-addr", platform+"="+platformAddrs[platform])
 	}
 	opts := build.Spec.Build
 	setString(values, "format", opts.Format)

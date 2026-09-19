@@ -19,6 +19,7 @@ selected tag, including a prerelease suffix when applicable:
 ```bash
 export KOVA_VERSION=vX.Y.Z
 export KOVA_CHART_VERSION=${KOVA_VERSION#v}
+export KOVA_PLATFORM=linux/amd64 # or linux/arm64 for the worker nodes
 ```
 
 ## Install Kova
@@ -46,6 +47,7 @@ helm upgrade --install kova oci://ghcr.io/cofy-x/charts/kova \
   --set serviceDaemon.authentication.mode=static \
   --set serviceDaemon.authentication.staticPrincipal=kova:quickstart \
   --set serviceDaemon.authentication.staticTokenSecret.name=kova-service-auth \
+  --set-string worker.platform="${KOVA_PLATFORM}" \
   --wait
 ```
 
@@ -156,6 +158,7 @@ printf 'hello from kova\n' > .work/kova-quickstart/hello.txt
 kova job submit \
   --source-repository "${KOVA_SOURCE_REPOSITORY}" \
   --target "${KOVA_TARGET}" \
+  --platform "${KOVA_PLATFORM}" \
   --format oci \
   --concurrency 1 \
   --fail-fast \

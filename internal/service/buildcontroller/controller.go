@@ -60,11 +60,16 @@ func (r *KovaBuildReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	}
 	switch build.Status.Phase {
 	case "", kovav1.PhaseQueued:
-		if _, err := buildcontract.NormalizeTargets(build.Spec.Targets); err != nil {
+		if _, err := buildcontract.NormalizeTargetSpecs(contractTargets(build.Spec.Targets)); err != nil {
 			return ctrl.Result{}, r.finish(ctx, &build, kovav1.PhaseFailed, "InvalidTargets", err.Error())
 		}
 		if err := buildcontract.ValidateConcurrency(requestedConcurrency(&build), len(build.Spec.Targets)); err != nil {
 			return ctrl.Result{}, r.finish(ctx, &build, kovav1.PhaseFailed, "InvalidTargets", err.Error())
+		}
+		for _, target := range build.Spec.Targets {
+			if _, ok := r.Cfg.BuildkitPlatformAddrs[target.Platform]; !ok {
+				return ctrl.Result{}, r.finish(ctx, &build, kovav1.PhaseFailed, "WorkerPlatformUnavailable", "no BuildKit worker pool is configured for platform "+target.Platform)
+			}
 		}
 		r.admissionMu.Lock()
 		defer r.admissionMu.Unlock()
@@ -76,6 +81,14 @@ func (r *KovaBuildReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	default:
 		return ctrl.Result{RequeueAfter: r.Cfg.PollInterval}, nil
 	}
+}
+
+func contractTargets(values []kovav1.KovaBuildTargetSpec) []buildcontract.TargetSpec {
+	targets := make([]buildcontract.TargetSpec, 0, len(values))
+	for _, value := range values {
+		targets = append(targets, buildcontract.TargetSpec{Target: value.Target, Platform: value.Platform})
+	}
+	return targets
 }
 
 func (r *KovaBuildReconciler) SetupWithManager(mgr ctrl.Manager) error {

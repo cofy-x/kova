@@ -48,13 +48,14 @@ func BuildQuery(args []string) (string, error) {
 		case arg == "--fail-fast" || arg == "--verbose":
 			values.Set(strings.TrimPrefix(arg, "--"), "true")
 			i++
-		case arg == "--format" || arg == "--concurrency" || arg == "--oom-cooldown" || arg == "--timeout":
+		case arg == "--format" || arg == "--platform" || arg == "--concurrency" || arg == "--oom-cooldown" || arg == "--timeout":
 			if i+1 >= len(args) {
 				return "", fmt.Errorf("%s requires a value", arg)
 			}
 			values.Set(strings.TrimPrefix(arg, "--"), args[i+1])
 			i += 2
 		case strings.HasPrefix(arg, "--format=") ||
+			strings.HasPrefix(arg, "--platform=") ||
 			strings.HasPrefix(arg, "--concurrency=") || strings.HasPrefix(arg, "--oom-cooldown=") ||
 			strings.HasPrefix(arg, "--timeout="):
 			key, value, _ := strings.Cut(strings.TrimPrefix(arg, "--"), "=")
@@ -71,11 +72,21 @@ func BuildQuery(args []string) (string, error) {
 		}
 	}
 	if target != "" {
-		normalized, err := buildcontract.NormalizeTarget(target)
+		normalized, err := buildcontract.NormalizeLogicalTarget(target)
 		if err != nil {
 			return "", err
 		}
 		values.Set("target", normalized)
+	}
+	platform := values.Get("platform")
+	if target != "" {
+		normalized, err := buildcontract.NormalizePlatform(platform)
+		if err != nil {
+			return "", fmt.Errorf("--platform is required with --target: %w", err)
+		}
+		values.Set("platform", normalized)
+	} else if strings.TrimSpace(platform) != "" {
+		return "", fmt.Errorf("--platform requires --target")
 	}
 	return values.Encode(), nil
 }
@@ -133,10 +144,19 @@ func PreheatQuery(args []string) (string, error) {
 			}
 			values.Set(strings.TrimPrefix(arg, "--"), args[i+1])
 			i += 2
+		case arg == "--registry-plain-http":
+			if i+1 >= len(args) {
+				return "", fmt.Errorf("--registry-plain-http requires a value")
+			}
+			values.Add("registry-plain-http", args[i+1])
+			i += 2
 		case strings.HasPrefix(arg, "--target=") || strings.HasPrefix(arg, "--dragonfly-scheduler-addr=") || strings.HasPrefix(arg, "--concurrency=") ||
 			strings.HasPrefix(arg, "--interval=") || strings.HasPrefix(arg, "--timeout=") || strings.HasPrefix(arg, "--insecure-skip-verify="):
 			key, value, _ := strings.Cut(strings.TrimPrefix(arg, "--"), "=")
 			values.Set(key, value)
+			i++
+		case strings.HasPrefix(arg, "--registry-plain-http="):
+			values.Add("registry-plain-http", strings.TrimPrefix(arg, "--registry-plain-http="))
 			i++
 		case strings.HasPrefix(arg, "--"):
 			return "", fmt.Errorf("unknown preheat flag: %s", arg)

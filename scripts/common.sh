@@ -23,9 +23,43 @@ docker_arch() {
   docker info --format '{{.Architecture}}' 2>/dev/null | sed -e 's/aarch64/arm64/' -e 's/x86_64/amd64/'
 }
 
+kova_platform() {
+  local platform=${KOVA_PLATFORM:-}
+  local arch
+  if [[ -z "${platform}" ]]; then
+    arch=$(docker_arch || true)
+    if [[ -z "${arch}" ]]; then
+      arch=$(uname -m | sed -e 's/aarch64/arm64/' -e 's/arm64/arm64/' -e 's/x86_64/amd64/')
+    fi
+    platform=linux/${arch}
+  fi
+  case ${platform} in
+    linux/amd64|linux/arm64) printf '%s\n' "${platform}" ;;
+    *)
+      echo "error: unsupported KOVA_PLATFORM ${platform}; expected linux/amd64 or linux/arm64" >&2
+      return 2
+      ;;
+  esac
+}
+
 kind_worker_nodes() {
   local cluster=$1
   kind get nodes --name "${cluster}" | grep -v 'control-plane'
+}
+
+kind_use_overlayfs_snapshotter() {
+  local cluster=$1
+  local node
+  for node in $(kind_worker_nodes "${cluster}"); do
+    docker exec "${node}" bash -lc '
+set -euo pipefail
+conf=/etc/containerd/config.toml
+if grep -q '\''snapshotter = "nydus"'\'' "${conf}"; then
+  sed -i '\''s/snapshotter = "nydus"/snapshotter = "overlayfs"/g'\'' "${conf}"
+  systemctl restart containerd
+fi
+'
+  done
 }
 
 require_cmd() {

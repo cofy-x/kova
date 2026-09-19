@@ -29,6 +29,7 @@ kova version
 ```bash
 export KOVA_VERSION=vX.Y.Z
 export KOVA_SERVICE_TOKEN=$(openssl rand -hex 32)
+export KOVA_PLATFORM=linux/amd64 # 或 linux/arm64
 
 kubectl create namespace kova --dry-run=client -o yaml | kubectl apply -f -
 kubectl -n kova create secret generic kova-service-auth \
@@ -44,6 +45,7 @@ helm upgrade --install kova oci://ghcr.io/cofy-x/charts/kova \
   --set serviceDaemon.authentication.mode=static \
   --set serviceDaemon.authentication.staticPrincipal=kova:quickstart \
   --set serviceDaemon.authentication.staticTokenSecret.name=kova-service-auth \
+  --set-string worker.platform="${KOVA_PLATFORM}" \
   --wait
 
 kubectl -n kova create rolebinding kova-quickstart \
@@ -63,6 +65,7 @@ kova doctor
 kova job submit \
   --source-repository registry.example.com/team/kova-sources:quickstart \
   --target registry.example.com/team/image:dev \
+  --platform "${KOVA_PLATFORM}" \
   ./image
 kova job wait <job-id>
 kova job results <job-id>
@@ -79,14 +82,14 @@ python -m pip install kova-client
 ```
 
 ```python
-from kova_client import ClientConfig, CreateBuildRequest, KovaClient
+from kova_client import ClientConfig, CreateBuildRequest, KovaClient, Platform, TargetSpec
 
 with KovaClient(ClientConfig.from_env()) as kova:
     job = kova.create_build(
         CreateBuildRequest(
             source_uri="oci://registry.example.com/team/sources@sha256:<manifest-digest>",
             source_digest="sha256:<source-content-digest>",
-            targets=("registry.example.com/team/seed:build-123",),
+            targets=(TargetSpec("registry.example.com/team/seed:build-123", Platform.LINUX_AMD64),),
             concurrency=1,
             idempotency_key="build-123",
         )
@@ -94,14 +97,14 @@ with KovaClient(ClientConfig.from_env()) as kova:
     terminal = kova.wait_build(job.id, timeout=600)
     if terminal.status == "succeeded":
         for output in kova.get_results(job.id).outputs:
-            print(output.immutable_ref, output.manifest_digest)
+            print(output.platform, output.immutable_ref, output.manifest_digest)
 ```
 
 `create_build` 不会自动重试；调用方必须使用稳定的 idempotency key，并在 Kova 终态任务 TTL 到期前持久化 source identity、build ID、manifest digest 和服务端返回的 `immutable_ref`。完整合同见 [Python SDK 与调用方 receipt 示例](docs/service.md#python-sdk)。
 
 ## 为什么选择 Kova
 
-- **不可变 source 到可信镜像** — 每个构建消费经过 digest 验证的 OCI 或 HTTPS source，并返回已推送镜像的 manifest digest。
+- **不可变 source 到可信镜像** — 每个构建消费经过 digest 验证的 OCI 或 HTTPS source，并返回已推送单平台镜像的 manifest digest 和验证后的 platform。
 - **有界执行模型** — 一个不可变 `KovaBuild` 最多接受 100 个 logical targets 并记录 200 个 concrete outputs；更大任务的分片和重试由调用方负责。
 - **公平且不浪费算力的调度** — 排队任务按认证身份交错；准入控制为任务预留真实的 BuildKit worker 槽位。
 - **隔离执行** — 每个任务一个 runner Pod，驱动共享的上游 rootless BuildKit worker；controller 和 runner 以非 root 运行并丢弃全部 capabilities。

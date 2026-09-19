@@ -1,0 +1,18 @@
+{
+  "schema": "kova.seed-build-receipt/v1",
+  "recipe_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+  "source_uri": "oci://registry.example.com/team/sources@sha256:2222222222222222222222222222222222222222222222222222222222222222",
+  "source_digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+  "kova_build_id": "build-example",
+  "kova_version": "vX.Y.Z",
+  "outputs": [
+    {
+      "role": "task",
+      "platform": "linux/amd64",
+      "format": "oci",
+      "image": "registry.example.com/team/task:build-example",
+      "manifest_digest": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+      "immutable_ref": "registry.example.com/team/task@sha256:4444444444444444444444444444444444444444444444444444444444444444"
+    }
+  ]
+}

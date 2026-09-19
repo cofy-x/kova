@@ -9,7 +9,7 @@ python -m pip install kova-client
 ```
 
 ```python
-from kova_client import ClientConfig, CreateBuildRequest, KovaClient
+from kova_client import ClientConfig, CreateBuildRequest, KovaClient, Platform, TargetSpec
 
 config = ClientConfig.from_env()
 with KovaClient(config) as kova:
@@ -17,7 +17,12 @@ with KovaClient(config) as kova:
         CreateBuildRequest(
             source_uri="oci://registry.example.com/team/sources@sha256:<manifest-digest>",
             source_digest="sha256:<source-content-digest>",
-            targets=("registry.example.com/team/seed:build-123",),
+            targets=(
+                TargetSpec(
+                    target="registry.example.com/team/seed:build-123",
+                    platform=Platform.LINUX_AMD64,
+                ),
+            ),
             concurrency=1,
             idempotency_key="build-123",
         )
@@ -25,7 +30,7 @@ with KovaClient(config) as kova:
     terminal = kova.wait_build(job.id, timeout=600)
     if terminal.status == "succeeded":
         for output in kova.get_results(job.id).outputs:
-            print(output.immutable_ref, output.manifest_digest)
+            print(output.platform, output.immutable_ref, output.manifest_digest)
 ```
 
 `ClientConfig.from_env()` explicitly reads `KOVA_SERVICE_URL`, `KOVA_SERVICE_TOKEN`, `KOVA_SERVICE_CA_FILE`, and `KOVA_SERVICE_INSECURE`.

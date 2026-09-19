@@ -14,6 +14,7 @@ require_cmd docker
 require_kind
 
 "${ROOT}/scripts/kind/kind-create.sh"
+kind_use_overlayfs_snapshotter "${KIND_CLUSTER}"
 
 for image in "${CONTROLLER_IMAGE}" "${RUNNER_IMAGE}" "${WORKER_IMAGE}"; do
   docker push "${image}"

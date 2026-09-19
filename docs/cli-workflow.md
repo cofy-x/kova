@@ -104,6 +104,7 @@ Create the same deterministic single-context bundle used by the public Service c
 ```bash
 kova source pack \
   --target kind-registry:5000/kova-examples/simple:dev \
+  --platform linux/amd64 \
   --output .work/source.zip \
   examples/simple
 ```
@@ -117,7 +118,8 @@ kova --name quickstart \
 ```
 
 Use `--format both` when the same context should produce both the OCI target and
-the Nydus target in one build pass. The Nydus target uses the `_nydus_v3` suffix:
+the Nydus target in one build pass. Kova reserves the `_nydus_v3` suffix for the
+derived Nydus target, so logical targets must not already use it:
 
 ```bash
 kova --name quickstart \
@@ -125,8 +127,10 @@ kova --name quickstart \
   < .work/source.zip
 ```
 
-Batch archives follow the same layout: every top-level image directory contains a `Dockerfile` and `metadata.json` with a unique tagged target.
+Batch archives follow the same layout: every top-level image directory contains a `Dockerfile` and `metadata.json` with a unique tagged target and a canonical `platform` field.
 Shared environments should publish the archive with `kova source push` and submit it through the Service instead of managing a runner directly.
+
+When preheating through Dragonfly, registries use HTTPS by default. Development registries that intentionally serve plain HTTP must be named explicitly with repeatable `kova preheat --registry-plain-http host:port`; `--insecure-skip-verify` only controls TLS certificate verification.
 
 The runner daemon unpacks the zip, resolves the `kova` headless Service to
 worker Pod IPs, and starts `buildctl` subprocesses that connect to BuildKit

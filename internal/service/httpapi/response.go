@@ -58,6 +58,8 @@ func publicBuildFailureCode(reason string) apiv1.BuildFailureCode {
 		return apiv1.BuildFailureInvalidSource
 	case "InvalidTargets":
 		return apiv1.BuildFailureInvalidTargets
+	case "WorkerPlatformUnavailable":
+		return apiv1.BuildFailureWorkerPlatformUnavailable
 	case "RunnerCreateFailed", "RunnerUnavailable":
 		return apiv1.BuildFailureRunnerUnavailable
 	case "BuildSubmissionFailed":
@@ -94,6 +96,8 @@ func publicBuildError(reason string) string {
 		return "immutable source validation failed"
 	case "InvalidTargets":
 		return "source targets do not exactly match requested targets"
+	case "WorkerPlatformUnavailable":
+		return "no BuildKit worker capacity is configured for a requested platform"
 	case "RunnerCreateFailed", "RunnerUnavailable":
 		return "build runner is unavailable"
 	case "BuildSubmissionFailed":

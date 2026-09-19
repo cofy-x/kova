@@ -33,24 +33,36 @@ func TestGeneratedCRDMatchesBoundedBuildContract(t *testing.T) {
 	}
 	validations := schema["x-kubernetes-validations"].([]any)
 	hasTargetUniqueness := false
+	hasReservedSuffixValidation := false
 	for _, validation := range validations {
 		rule := validation.(map[string]any)["rule"].(string)
-		if rule == "self.spec.targets.all(target, self.spec.targets.filter(candidate, candidate == target).size() == 1)" {
+		if rule == "self.spec.targets.all(target, self.spec.targets.filter(candidate, candidate.target == target.target).size() == 1)" {
 			hasTargetUniqueness = true
+		}
+		if rule == "self.spec.targets.all(target, !target.target.endsWith('_nydus_v3'))" {
+			hasReservedSuffixValidation = true
 		}
 	}
 	if !hasTargetUniqueness {
 		t.Fatal("CRD is missing bounded target uniqueness validation")
 	}
-	items := targets["items"].(map[string]any)
-	if int(items["maxLength"].(float64)) != 512 || items["pattern"] == "" {
+	if !hasReservedSuffixValidation {
+		t.Fatal("CRD is missing reserved Nydus output suffix validation")
+	}
+	items := targets["items"].(map[string]any)["properties"].(map[string]any)
+	target := items["target"].(map[string]any)
+	if int(target["maxLength"].(float64)) != 512 || target["pattern"] == "" {
 		t.Fatalf("target item schema = %#v", items)
 	}
-	pattern := regexp.MustCompile(items["pattern"].(string))
+	pattern := regexp.MustCompile(target["pattern"].(string))
 	for _, target := range []string{"ubuntu:dev", "registry.example.com/team/image:dev", "registry.example.com:5000/team/image:dev"} {
 		if !pattern.MatchString(target) {
 			t.Fatalf("target pattern rejects valid tagged reference %q", target)
 		}
+	}
+	platform := items["platform"].(map[string]any)
+	if values := platform["enum"].([]any); len(values) != 2 || values[0] != "linux/amd64" || values[1] != "linux/arm64" {
+		t.Fatalf("platform schema = %#v", platform)
 	}
 	for _, target := range []string{"registry.example.com/team/image", "registry.example.com/team/image@sha256:deadbeef", " registry.example.com/team/image:dev"} {
 		if pattern.MatchString(target) {
@@ -59,6 +71,10 @@ func TestGeneratedCRDMatchesBoundedBuildContract(t *testing.T) {
 	}
 	if int(outputs["maxItems"].(float64)) != MaxConcreteOutputs {
 		t.Fatalf("outputs.maxItems = %v", outputs["maxItems"])
+	}
+	outputPlatform := outputs["items"].(map[string]any)["properties"].(map[string]any)["platform"].(map[string]any)
+	if values := outputPlatform["enum"].([]any); len(values) != 2 || values[0] != "linux/amd64" || values[1] != "linux/arm64" {
+		t.Fatalf("output platform schema = %#v", outputPlatform)
 	}
 	if int(build["concurrency"].(map[string]any)["maximum"].(float64)) != MaxBuildConcurrency {
 		t.Fatalf("concurrency schema = %#v", build["concurrency"])

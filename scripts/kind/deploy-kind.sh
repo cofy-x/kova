@@ -15,6 +15,7 @@ KOVA_CHART=${KOVA_CHART:-${ROOT}/charts/kova}
 KIND_VALUES=${KIND_VALUES:-${ROOT}/deploy/kind-values.yaml}
 KIND_LOAD_IMAGES=${KIND_LOAD_IMAGES:-true}
 START_OBSERVABILITY=${START_OBSERVABILITY:-true}
+KOVA_PLATFORM=$(kova_platform)
 
 if [[ "${KOVA_CHART}" != /* ]]; then
   KOVA_CHART=${ROOT}/${KOVA_CHART}
@@ -49,4 +50,5 @@ helm upgrade --install "${RELEASE_NAME}" "${KOVA_CHART}" \
   --set-string "images.runner.repository=${RUNNER_IMAGE%:*}" \
   --set-string "images.runner.tag=${RUNNER_IMAGE##*:}" \
   --set-string "images.worker.repository=${WORKER_IMAGE%:*}" \
-  --set-string "images.worker.tag=${WORKER_IMAGE##*:}"
+  --set-string "images.worker.tag=${WORKER_IMAGE##*:}" \
+  --set-string "worker.platform=${KOVA_PLATFORM}"

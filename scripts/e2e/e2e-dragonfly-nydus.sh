@@ -85,7 +85,7 @@ fi
 "${KOVA[@]}" \
   --kubeconfig "${KUBECONFIG}" \
   --name "${KOVA_RUNNER_NAME}" \
-  preheat --dragonfly-scheduler-addr "${DRAGONFLY_SCHEDULER_ADDR}" --concurrency 1 --timeout 60 --verbose --insecure-skip-verify
+  preheat --dragonfly-scheduler-addr "${DRAGONFLY_SCHEDULER_ADDR}" --registry-plain-http "${CLUSTER_REGISTRY}" --concurrency 1 --timeout 60 --verbose --insecure-skip-verify
 
 for node in $(kind_worker_nodes "${KIND_CLUSTER}"); do
   docker exec "${node}" bash -lc "grep -q 'snapshotter = \"nydus\"' /etc/containerd/config.toml"

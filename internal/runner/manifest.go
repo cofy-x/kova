@@ -63,12 +63,7 @@ func PreparePod(opts ManifestOptions) corev1.Pod {
 					Name:            "runner",
 					Image:           opts.Image,
 					ImagePullPolicy: corev1.PullPolicy(opts.ImagePullPolicy),
-					Command: []string{
-						"kovad",
-						"daemon",
-						"--addrs",
-						opts.BuildkitAddr,
-					},
+					Command:         []string{"kovad", "daemon"},
 					ReadinessProbe: &corev1.Probe{
 						ProbeHandler: corev1.ProbeHandler{Exec: &corev1.ExecAction{
 							Command: []string{"/usr/bin/test", "-S", "/tmp/kova.sock"},
@@ -90,6 +85,9 @@ func PreparePod(opts ManifestOptions) corev1.Pod {
 				},
 			},
 		},
+	}
+	if opts.BuildkitAddr != "" {
+		pod.Spec.Containers[0].Command = append(pod.Spec.Containers[0].Command, "--addrs", opts.BuildkitAddr)
 	}
 	maps.Copy(pod.Labels, opts.Labels)
 	if len(opts.NodeSelector) > 0 {
