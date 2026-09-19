@@ -8,3 +8,10 @@
 /source
 /.kind
 /.generated
+/sdk/python/.pytest_cache/
+/sdk/python/.ruff_cache/
+/sdk/python/.mypy_cache/
+/sdk/python/.venv/
+/sdk/python/dist/
+/sdk/python/src/kova_client/_version.py
+**/__pycache__/

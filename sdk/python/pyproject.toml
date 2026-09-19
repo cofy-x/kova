@@ -1,0 +1,81 @@
+[build-system]
+requires = ["hatchling>=1.27", "hatch-vcs>=0.5"]
+build-backend = "hatchling.build"
+
+[project]
+name = "kova-client"
+dynamic = ["version"]
+description = "Official Python client for the Kova Service API"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+authors = [{ name = "Kova Authors" }]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: Apache Software License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Typing :: Typed",
+]
+dependencies = ["httpx>=0.27,<1"]
+
+[project.urls]
+Documentation = "https://github.com/cofy-x/kova/blob/main/docs/service.md#python-sdk"
+Issues = "https://github.com/cofy-x/kova/issues"
+Repository = "https://github.com/cofy-x/kova"
+
+[dependency-groups]
+dev = [
+  "build>=1.2,<2",
+  "mypy>=1.18,<2",
+  "pytest>=8,<10",
+  "pyyaml>=6,<7",
+  "ruff>=0.12,<1",
+]
+
+[tool.hatch.version]
+source = "vcs"
+
+[tool.hatch.version.raw-options]
+fallback_version = "0.0.0.dev0"
+local_scheme = "no-local-version"
+search_parent_directories = true
+
+[tool.hatch.build.hooks.vcs]
+version-file = "src/kova_client/_version.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/kova_client"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+  "/README.md",
+  "/pyproject.toml",
+  "/src/kova_client",
+]
+
+[tool.hatch.build.targets.sdist.force-include]
+"../../LICENSE" = "LICENSE"
+
+[tool.pytest.ini_options]
+addopts = "-ra"
+testpaths = ["tests"]
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+
+[tool.uv]
+default-groups = ["dev"]

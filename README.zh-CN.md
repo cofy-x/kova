@@ -70,6 +70,35 @@ kova job results <job-id>
 
 registry 凭证、Nydus 输出和批量归档见[安装与首次构建指南](docs/quickstart.md)。
 
+## Python SDK
+
+`kova-client` 是官方的 Python-first Service SDK，同时提供行为一致的 `KovaClient` 和 `AsyncKovaClient`。它只封装公开 HTTP v1 合同，不拥有 workflow 恢复、artifact retention 或 receipt 存储。
+
+```bash
+python -m pip install kova-client
+```
+
+```python
+from kova_client import ClientConfig, CreateBuildRequest, KovaClient
+
+with KovaClient(ClientConfig.from_env()) as kova:
+    job = kova.create_build(
+        CreateBuildRequest(
+            source_uri="oci://registry.example.com/team/sources@sha256:<manifest-digest>",
+            source_digest="sha256:<source-content-digest>",
+            targets=("registry.example.com/team/seed:build-123",),
+            concurrency=1,
+            idempotency_key="build-123",
+        )
+    )
+    terminal = kova.wait_build(job.id, timeout=600)
+    if terminal.status == "succeeded":
+        for output in kova.get_results(job.id).outputs:
+            print(output.immutable_ref, output.manifest_digest)
+```
+
+`create_build` 不会自动重试；调用方必须使用稳定的 idempotency key，并在 Kova 终态任务 TTL 到期前持久化 source identity、build ID、manifest digest 和服务端返回的 `immutable_ref`。完整合同见 [Python SDK 与调用方 receipt 示例](docs/service.md#python-sdk)。
+
 ## 为什么选择 Kova
 
 - **不可变 source 到可信镜像** — 每个构建消费经过 digest 验证的 OCI 或 HTTPS source，并返回已推送镜像的 manifest digest。

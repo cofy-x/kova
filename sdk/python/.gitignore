@@ -1,0 +1,7 @@
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.venv/
+dist/
+src/kova_client/_version.py
+**/__pycache__/
