@@ -88,6 +88,51 @@ kova job cancel <job-id>
 Logs are available only while the runner Pod is active.
 The results endpoint returns the source identity and verified image outputs; it does not return an object-store URI.
 
+## Python SDK
+
+The official Python distribution is `kova-client`, with the import package `kova_client`.
+The distribution name makes its narrow HTTP client role explicit and avoids conflating the package with the Kova service and CLI.
+Both `KovaClient` and `AsyncKovaClient` implement the same OpenAPI v1 operations without importing Kubernetes, Kova Go internals, Axern, or Axrun types.
+
+```bash
+python -m pip install kova-client
+```
+
+```python
+from kova_client import ClientConfig, CreateBuildRequest, JobStatus, KovaClient
+
+config = ClientConfig.from_env()
+with KovaClient(config) as kova:
+    job = kova.create_build(
+        CreateBuildRequest(
+            source_uri="oci://registry.example.com/team/sources@sha256:<manifest-digest>",
+            source_digest="sha256:<source-content-digest>",
+            targets=("registry.example.com/team/seed:build-123",),
+            concurrency=1,
+            idempotency_key="build-123",
+        )
+    )
+    terminal = kova.wait_build(job.id, timeout=600)
+    if terminal.status is JobStatus.SUCCEEDED:
+        results = kova.get_results(job.id)
+        for output in results.outputs:
+            print(output.immutable_ref, output.manifest_digest)
+```
+
+Constructors are explicit and do not inspect a home directory or environment variables.
+`ClientConfig.from_env()` is the opt-in environment adapter for `KOVA_SERVICE_URL`, `KOVA_SERVICE_TOKEN`, `KOVA_SERVICE_CA_FILE`, and `KOVA_SERVICE_INSECURE`.
+Tokens are excluded from configuration representations and are never included in SDK exceptions or logs.
+The unauthenticated `version` and `ready` calls do not send the configured bearer token.
+
+`create_build` performs exactly one HTTP submission and never retries automatically.
+`wait_build` only polls the idempotent build-status endpoint, stops on any terminal status, respects retryable API responses and `Retry-After`, and accepts a timeout plus a caller-owned cancellation event.
+External cancellation of an async task propagates normally.
+`KovaAPIError` exposes `status_code`, stable `code`, safe `message`, `retryable`, and `retry_after` as a `datetime.timedelta` when supplied.
+
+The SDK returns `immutable_ref` exactly as supplied and validated by the Service; it never reconstructs an immutable reference from the mutable tag.
+The caller owns retry policy and must persist source identity, build ID, manifest digest, and immutable reference before the terminal job TTL expires.
+The [caller-owned receipt example](../examples/python-service-receipt.py) demonstrates the complete source URI and digest to receipt flow without adding receipt storage to Kova.
+
 ## Go SDK
 
 The public Go contract is `github.com/cofy-x/kova/pkg/api/v1` and the public client is `github.com/cofy-x/kova/pkg/client`.

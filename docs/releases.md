@@ -19,6 +19,7 @@ asset names, checksums, and immutable deployment records.
 Each tag publishes:
 
 - `kova` archives for Linux, macOS, and Windows on `amd64` and `arm64`
+- the `kova-client` Python wheel and source distribution to PyPI and the GitHub release
 - `checksums.txt`, a CycloneDX CLI SBOM, and build-provenance attestations
 - `oci://ghcr.io/cofy-x/charts/kova` with a chart version matching the tag
 - the packaged Helm chart, its OCI digest, and build-provenance attestation
@@ -39,12 +40,24 @@ go install github.com/cofy-x/kova/cmd/kova@vX.Y.Z
 Use an explicit version in automation. `@latest` is convenient for interactive
 use but follows the version selected by the Go module proxy.
 
+Install the matching Python SDK from PyPI:
+
+```bash
+python -m pip install "kova-client==X.Y.Z"
+```
+
+Python package versions use PEP 440, so a Kova tag such as `vX.Y.Z-rc.1` is published as `X.Y.Zrc1`.
+The import package is `kova_client`.
+PyPI publication uses OIDC trusted publishing through the protected, tag-only `pypi` GitHub environment and occurs only after the candidate Service and upgrade smoke succeeds.
+The workflow grants the publishing job only `id-token: write`; it does not use `PYPI_TOKEN` or another long-lived registry credential.
+Registry environments are intentionally separate: `pypi` is only for the Python SDK, and any future TypeScript SDK must publish through its own `npm` environment.
+
 ## Release Gates
 
 The tag workflow:
 
 1. validates the semantic version;
-2. builds the six CLI archives in parallel and generates the CLI SBOM;
+2. builds the six CLI archives and the Python wheel and source distribution, validates their contents, and generates the CLI SBOM;
 3. packages and attests a candidate Helm chart while building and attesting
    controller, runner, and worker images for Linux `amd64` and `arm64`;
 4. upgrades a kind cluster from the previous public release to the candidate,

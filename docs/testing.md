@@ -17,6 +17,8 @@ git diff --check
 
 `make sdk-smoke` compiles a clean external module against the public `pkg/api/v1` and `pkg/client` packages.
 Tagged releases run the same consumer check against the exact module version and verify `go install github.com/cofy-x/kova/cmd/kova@vX.Y.Z`.
+`make python-sdk` runs sync and async clients against a local fake HTTP server, checks Python/OpenAPI drift, lints and type-checks the package and receipt example, and validates the exact wheel and source-distribution contents.
+CI executes this gate on the minimum supported Python 3.10 and current Python 3.14 runtimes.
 
 ## Network Overrides
 

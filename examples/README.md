@@ -1,7 +1,7 @@
 # Examples
 
-This directory contains build inputs used by local E2E and smoke tests. Each
-example directory is a build context and includes:
+This directory contains build inputs used by local E2E and smoke tests, plus focused public API examples.
+Each image example directory is a build context and includes:
 
 - `Dockerfile`
 - `metadata.json` with a `target` field
@@ -61,3 +61,20 @@ EXAMPLE_DIRS="simple service-oci" ./scripts/package/package-example.sh
 
 The generated archive is written to `source.zip` by default.
 Override `SOURCE_ZIP` when a test needs an isolated archive name.
+
+## Python Service Receipt
+
+[`python-service-receipt.py`](python-service-receipt.py) submits an immutable source URI and digest with a caller-owned idempotency key, waits for a terminal build, fetches verified results, and atomically writes a caller-owned JSON receipt.
+It deliberately keeps receipt storage outside Kova.
+
+```bash
+export KOVA_SERVICE_URL=https://kova.example.com
+export KOVA_SERVICE_TOKEN=REPLACE_WITH_TOKEN
+
+python examples/python-service-receipt.py \
+  --source-uri 'oci://registry.example.com/team/sources@sha256:<manifest-digest>' \
+  --source-digest 'sha256:<source-content-digest>' \
+  --target registry.example.com/team/seed:build-123 \
+  --idempotency-key build-123 \
+  --receipt ./build-123.receipt.json
+```

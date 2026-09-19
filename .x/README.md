@@ -15,6 +15,7 @@ how to work in Kova; public product and contributor documentation stays in
   build execution and runner-local ephemeral state.
 - `internal/buildcontract`, `internal/sourcebundle`: bounded target validation and the public immutable source contract.
 - `internal/service`: long-lived HTTP service and `KovaBuild` controller.
+- `sdk/python`: official thin sync and async clients for the public Service HTTP API v1.
 - `charts/`: provider-neutral Kova and observability Helm charts.
 - `deploy/`: local and non-local Kubernetes values baselines.
 - `scripts/`: build, Kind, packaging, runtime, and E2E entrypoints.

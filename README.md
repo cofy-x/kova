@@ -74,6 +74,36 @@ kova job results <job-id>
 
 Registry credentials, Nydus output, and batch archives are covered in the [installation and first-build guide](docs/quickstart.md).
 
+## Python SDK
+
+`kova-client` is the official Python-first Service SDK:
+
+```bash
+python -m pip install kova-client
+```
+
+```python
+from kova_client import ClientConfig, CreateBuildRequest, KovaClient
+
+with KovaClient(ClientConfig.from_env()) as kova:
+    job = kova.create_build(
+        CreateBuildRequest(
+            source_uri="oci://registry.example.com/team/sources@sha256:<manifest-digest>",
+            source_digest="sha256:<source-content-digest>",
+            targets=("registry.example.com/team/seed:build-123",),
+            concurrency=1,
+            idempotency_key="build-123",
+        )
+    )
+    terminal = kova.wait_build(job.id, timeout=600)
+    if terminal.status == "succeeded":
+        for output in kova.get_results(job.id).outputs:
+            print(output.immutable_ref, output.manifest_digest)
+```
+
+The synchronous and asynchronous clients expose the same thin HTTP v1 operations and never own workflow recovery or durable receipts.
+See the [Python client contract and caller-owned receipt example](docs/service.md#python-sdk).
+
 ## Go SDK
 
 External Go callers can use the stable Service API types in `pkg/api/v1` and the shared client used by the Kova CLI in `pkg/client`:
@@ -128,7 +158,7 @@ func main() {
 ```
 
 Compatibility checks are explicit, so `CreateBuild` performs exactly one submission request.
-The SDK does not own retry or recovery workflows and never automatically retries `CreateBuild` or other mutating requests.
+The SDKs do not own retry or recovery workflows and never automatically retry `CreateBuild` or other mutating requests.
 Callers use an idempotency key for safe submission retries and persist the immutable source identity, build ID, manifest digest, and immutable reference before the terminal Kova job expires.
 The verified manifest digest and `immutable_ref` are success facts; tags and ephemeral logs are not.
 See the [external Go client and HTTP contract](docs/service.md#go-sdk) and the [machine-readable Service API](api/openapi.yaml).
