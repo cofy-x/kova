@@ -86,6 +86,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     GOPROXY="${GOPROXY}" /usr/local/go/bin/go mod download
 COPY cmd ./cmd
 COPY internal ./internal
+COPY pkg ./pkg
 ARG VERSION=dev
 ARG COMMIT=unknown
 ARG BUILD_DATE=unknown

@@ -5,3 +5,5 @@
 !cmd/**
 !internal/
 !internal/**
+!pkg/
+!pkg/**
