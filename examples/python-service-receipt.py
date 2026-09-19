@@ -10,18 +10,26 @@ import tempfile
 from collections.abc import Mapping
 from pathlib import Path
 
-from kova_client import ClientConfig, CreateBuildRequest, JobStatus, KovaClient
+from kova_client import (
+    ClientConfig,
+    CreateBuildRequest,
+    JobStatus,
+    KovaClient,
+    Platform,
+    TargetSpec,
+)
 
 
 def main() -> None:
     args = parse_args()
     config = ClientConfig.from_env()
     with KovaClient(config) as kova:
+        version = kova.version()
         created = kova.create_build(
             CreateBuildRequest(
                 source_uri=args.source_uri,
                 source_digest=args.source_digest,
-                targets=tuple(args.target),
+                targets=(TargetSpec(target=args.target, platform=Platform(args.platform)),),
                 concurrency=args.concurrency,
                 format=args.format,
                 idempotency_key=args.idempotency_key,
@@ -36,13 +44,19 @@ def main() -> None:
         results = kova.get_results(terminal.id)
 
     receipt = {
+        "schema": "kova.seed-build-receipt/v1",
+        "recipe_digest": args.recipe_digest,
         "source_uri": results.source_uri,
         "source_digest": results.source_digest,
-        "build_id": terminal.id,
+        "kova_build_id": terminal.id,
+        "kova_version": version.version,
         "idempotency_key": results.idempotency_key,
         "outputs": [
             {
+                "role": args.target_role,
+                "platform": output.platform.value,
                 "format": output.format.value,
+                "image": output.image,
                 "manifest_digest": output.manifest_digest,
                 "immutable_ref": output.immutable_ref,
             }
@@ -56,7 +70,10 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source-uri", required=True)
     parser.add_argument("--source-digest", required=True)
-    parser.add_argument("--target", action="append", required=True)
+    parser.add_argument("--recipe-digest", required=True)
+    parser.add_argument("--target", required=True)
+    parser.add_argument("--target-role", required=True)
+    parser.add_argument("--platform", choices=("linux/amd64", "linux/arm64"), required=True)
     parser.add_argument("--idempotency-key", required=True)
     parser.add_argument("--receipt", type=Path, required=True)
     parser.add_argument("--format", choices=("oci", "nydus", "both"), default="oci")

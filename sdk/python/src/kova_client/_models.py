@@ -21,6 +21,7 @@ class JobStatus(str, Enum):
 class BuildFailureCode(str, Enum):
     INVALID_SOURCE = "invalid_source"
     INVALID_TARGETS = "invalid_targets"
+    WORKER_PLATFORM_UNAVAILABLE = "worker_platform_unavailable"
     RUNNER_UNAVAILABLE = "runner_unavailable"
     BUILD_SUBMISSION_FAILED = "build_submission_failed"
     RESULT_VERIFICATION_FAILED = "result_verification_failed"
@@ -39,11 +40,29 @@ class OutputFormat(str, Enum):
     NYDUS = "nydus"
 
 
+class Platform(str, Enum):
+    LINUX_AMD64 = "linux/amd64"
+    LINUX_ARM64 = "linux/arm64"
+
+
+@dataclass(frozen=True, slots=True)
+class TargetSpec:
+    target: str
+    platform: Platform
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.platform, Platform):
+            raise TypeError("platform must be a Platform value")
+
+    def to_dict(self) -> JSON:
+        return {"target": self.target, "platform": _enum_value(self.platform)}
+
+
 @dataclass(frozen=True, slots=True)
 class CreateBuildRequest:
     source_uri: str
     source_digest: str
-    targets: tuple[str, ...]
+    targets: tuple[TargetSpec, ...]
     concurrency: int
     format: BuildFormat | str = BuildFormat.OCI
     timeout: int | None = None
@@ -57,7 +76,7 @@ class CreateBuildRequest:
         payload: JSON = {
             "source_uri": self.source_uri,
             "source_digest": self.source_digest,
-            "targets": list(self.targets),
+            "targets": [target.to_dict() for target in self.targets],
             "format": _enum_value(self.format),
             "concurrency": self.concurrency,
         }
@@ -146,10 +165,11 @@ class BuildOutput:
     image: str
     manifest_digest: str
     immutable_ref: str
+    platform: Platform
 
     @classmethod
     def from_dict(cls, value: JSON) -> BuildOutput:
-        _require_fields(value, {"format", "image", "manifest_digest", "immutable_ref"})
+        _require_fields(value, {"format", "image", "manifest_digest", "immutable_ref", "platform"})
         manifest_digest = _digest(value, "manifest_digest")
         immutable_ref = _string(value, "immutable_ref")
         if not _IMMUTABLE_REFERENCE.fullmatch(immutable_ref):
@@ -161,6 +181,7 @@ class BuildOutput:
             image=_string(value, "image"),
             manifest_digest=manifest_digest,
             immutable_ref=immutable_ref,
+            platform=Platform(_string(value, "platform")),
         )
 
 

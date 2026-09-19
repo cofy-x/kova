@@ -44,6 +44,7 @@ helm upgrade --install kova oci://ghcr.io/cofy-x/charts/kova \
   --version "${KOVA_VERSION#v}" \
   --namespace kova \
   --create-namespace \
+  --set-string worker.platform=linux/amd64 \
   -f <environment-values.yaml>
 ```
 
@@ -124,6 +125,8 @@ Those pushes are not transactional: a terminally failed build can retain verifie
 
 ## Capacity And Placement
 
+Each chart release is one explicit BuildKit platform pool. Set `worker.platform` to `linux/amd64` or `linux/arm64`; the chart derives standard `kubernetes.io/os=linux` and `kubernetes.io/arch` placement and rejects conflicting node selectors. It does not use provider-specific labels or infer the platform from controller placement.
+
 Worker replicas are shared BuildKit capacity. Direct CLI jobs set their own
 `build --concurrency`. Service jobs reserve slots through fair admission:
 
@@ -139,6 +142,17 @@ The controller interleaves queued jobs by requester, allocates available worker
 slots without leaving usable capacity idle, and records each fixed allocation
 in job status. Runners resolve the headless Service into worker Pod IPs, avoid
 busy or cooling endpoints, and refresh DNS as replicas change.
+
+A Service that accepts both platforms maps each platform to an explicit BuildKit Service. The additional worker pool can be a separate Helm release with its Service endpoint listed in the Service release:
+
+```yaml
+serviceDaemon:
+  buildkitPlatformAddrs:
+    linux/amd64: tcp://kova-amd64.kova.svc:9094
+    linux/arm64: tcp://kova-arm64.kova.svc:9094
+```
+
+One logical target remains single-platform in v1. Kova does not build a multi-platform index. A supported target platform without a configured pool fails deterministically before BuildKit submission.
 
 The chart exposes worker resources, topology spread, disruption budget, HPA,
 node selectors, tolerations, affinity, priority class, and runtime class.

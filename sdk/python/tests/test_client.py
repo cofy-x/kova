@@ -19,6 +19,8 @@ from kova_client import (
     KovaProtocolError,
     KovaWaitCancelled,
     OutputFormat,
+    Platform,
+    TargetSpec,
 )
 from kova_client._transport import parse_retry_after
 
@@ -41,7 +43,12 @@ def request() -> CreateBuildRequest:
     return CreateBuildRequest(
         source_uri=f"oci://registry.example.com/sources@{DIGEST}",
         source_digest=DIGEST,
-        targets=("registry.example.com/team/image:build-1",),
+        targets=(
+            TargetSpec(
+                target="registry.example.com/team/image:build-1",
+                platform=Platform.LINUX_AMD64,
+            ),
+        ),
         concurrency=1,
         idempotency_key="build-1",
     )
@@ -72,6 +79,7 @@ def queue_lifecycle(service: FakeKovaService) -> None:
                     "image": "registry.example.com/team/image:build-1",
                     "manifest_digest": DIGEST,
                     "immutable_ref": f"registry.example.com/team/image@{DIGEST}",
+                    "platform": "linux/amd64",
                 }
             ],
         },
@@ -98,13 +106,18 @@ def test_sync_client_lifecycle_uses_server_immutable_ref(fake_service: FakeKovaS
         assert terminal.status is JobStatus.SUCCEEDED
         results = client.get_results("build-1")
         assert results.outputs[0].format is OutputFormat.OCI
+        assert results.outputs[0].platform is Platform.LINUX_AMD64
         assert results.outputs[0].immutable_ref == f"registry.example.com/team/image@{DIGEST}"
         assert client.get_logs("build-1", tail_lines=10) == "hello\n"
         assert client.cancel_build("build-1").cancellation_requested
 
     post = next(item for item in fake_service.requests if item[0:2] == ("POST", "/v1/builds"))
     assert post[2]["Authorization"] == "Bearer secret"
-    assert json.loads(post[3])["idempotency_key"] == "build-1"
+    payload = json.loads(post[3])
+    assert payload["idempotency_key"] == "build-1"
+    assert payload["targets"] == [
+        {"target": "registry.example.com/team/image:build-1", "platform": "linux/amd64"}
+    ]
     public_requests = [item for item in fake_service.requests if item[1] in {"/version", "/readyz"}]
     assert all("Authorization" not in item[2] for item in public_requests)
 
@@ -329,6 +342,7 @@ def test_rejects_inconsistent_server_immutable_reference(fake_service: FakeKovaS
                     "image": "registry.example.com/team/image:build-1",
                     "manifest_digest": DIGEST,
                     "immutable_ref": f"registry.example.com/team/image@{other_digest}",
+                    "platform": "linux/amd64",
                 }
             ],
         },

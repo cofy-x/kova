@@ -18,7 +18,7 @@ import (
 
 var deterministicArchiveTime = time.Date(1980, 1, 1, 0, 0, 0, 0, time.UTC)
 
-func PrepareSingleImageDir(imageDir, target string, buildVars map[string]string) (string, func(), error) {
+func PrepareSingleImageDir(imageDir, target, platform string, buildVars map[string]string) (string, func(), error) {
 	if err := requireRegularFile(filepath.Join(imageDir, "Dockerfile")); err != nil {
 		return "", nil, fmt.Errorf("%s: %w", imageDir, err)
 	}
@@ -52,7 +52,7 @@ func PrepareSingleImageDir(imageDir, target string, buildVars map[string]string)
 	}
 	metaPath := filepath.Join(dstDir, "metadata.json")
 	if strings.TrimSpace(target) != "" {
-		if err := writeImageMetadataTarget(metaPath, strings.TrimSpace(target)); err != nil {
+		if err := writeImageMetadata(metaPath, strings.TrimSpace(target), platform); err != nil {
 			cleanup()
 			return "", nil, err
 		}
@@ -64,10 +64,14 @@ func PrepareSingleImageDir(imageDir, target string, buildVars map[string]string)
 	return preparedRoot, cleanup, nil
 }
 
-func CreateSingleImageArchive(imageDir, target, zipPath string) error {
+func CreateSingleImageArchive(imageDir, target, platform, zipPath string) error {
 	if strings.TrimSpace(target) != "" {
 		var err error
-		target, err = buildcontract.NormalizeTarget(target)
+		target, err = buildcontract.NormalizeLogicalTarget(target)
+		if err != nil {
+			return err
+		}
+		platform, err = buildcontract.NormalizePlatform(platform)
 		if err != nil {
 			return err
 		}
@@ -174,7 +178,7 @@ func CreateSingleImageArchive(imageDir, target, zipPath string) error {
 		return err
 	}
 	if strings.TrimSpace(target) != "" || !sawMetadata {
-		raw, err := imageMetadataWithTarget(filepath.Join(imageDir, "metadata.json"), strings.TrimSpace(target))
+		raw, err := imageMetadataWithTarget(filepath.Join(imageDir, "metadata.json"), strings.TrimSpace(target), platform)
 		if err != nil {
 			return err
 		}
@@ -192,8 +196,8 @@ func CreateSingleImageArchive(imageDir, target, zipPath string) error {
 	return zw.Close()
 }
 
-func writeImageMetadataTarget(metaPath, target string) error {
-	raw, err := imageMetadataWithTarget(metaPath, target)
+func writeImageMetadata(metaPath, target, platform string) error {
+	raw, err := imageMetadataWithTarget(metaPath, target, platform)
 	if err != nil {
 		return err
 	}
@@ -206,7 +210,7 @@ func writeImageMetadataTarget(metaPath, target string) error {
 	return os.WriteFile(metaPath, raw, mode)
 }
 
-func imageMetadataWithTarget(metaPath, target string) ([]byte, error) {
+func imageMetadataWithTarget(metaPath, target, platform string) ([]byte, error) {
 	target = strings.TrimSpace(target)
 	if target == "" {
 		raw, err := os.ReadFile(metaPath)
@@ -226,6 +230,7 @@ func imageMetadataWithTarget(metaPath, target string) ([]byte, error) {
 		return nil, fmt.Errorf("read %s: %w", metaPath, err)
 	}
 	values["target"] = target
+	values["platform"] = platform
 	raw, err = json.MarshalIndent(values, "", "  ")
 	if err != nil {
 		return nil, err

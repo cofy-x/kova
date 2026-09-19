@@ -38,7 +38,8 @@ var SchemeGroupVersion = schema.GroupVersion{Group: Group, Version: Version}
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 // +kubebuilder:validation:XValidation:rule="self.spec == oldSelf.spec",message="spec is immutable"
 // +kubebuilder:validation:XValidation:rule="self.spec.build.concurrency == 0 || self.spec.build.concurrency <= size(self.spec.targets)",message="concurrency must not exceed the logical target count"
-// +kubebuilder:validation:XValidation:rule="self.spec.targets.all(target, self.spec.targets.filter(candidate, candidate == target).size() == 1)",message="targets must be unique"
+// +kubebuilder:validation:XValidation:rule="self.spec.targets.all(target, self.spec.targets.filter(candidate, candidate.target == target.target).size() == 1)",message="targets must be unique"
+// +kubebuilder:validation:XValidation:rule="self.spec.targets.all(target, !target.target.endsWith('_nydus_v3'))",message="target tag suffix _nydus_v3 is reserved for Kova Nydus outputs"
 type KovaBuild struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
@@ -54,15 +55,23 @@ type KovaBuildSpec struct {
 	Requester KovaBuildRequester `json:"requester"`
 	// +kubebuilder:validation:MinItems=1
 	// +kubebuilder:validation:MaxItems=100
-	// +kubebuilder:validation:items:MinLength=1
-	// +kubebuilder:validation:items:MaxLength=512
-	// +kubebuilder:validation:items:Pattern=`^[^[:space:]@]+:[^[:space:]@/]+$`
-	Targets []string `json:"targets"`
+	Targets []KovaBuildTargetSpec `json:"targets"`
 	// +kubebuilder:validation:Required
 	Source KovaBuildSourceSpec `json:"source,omitempty"`
 	Build  KovaBuildOptions    `json:"build,omitempty"`
 	// +kubebuilder:validation:MaxLength=256
 	IdempotencyKey string `json:"idempotencyKey,omitempty"`
+}
+
+type KovaBuildTargetSpec struct {
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=512
+	// +kubebuilder:validation:Pattern=`^[^[:space:]@]+:[^[:space:]@/]+$`
+	Target string `json:"target"`
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:Enum=linux/amd64;linux/arm64
+	Platform string `json:"platform"`
 }
 
 type KovaBuildRequester struct {
@@ -131,6 +140,8 @@ type BuildOutput struct {
 	Image string `json:"image"`
 	// +kubebuilder:validation:Pattern=`^sha256:[a-f0-9]{64}$`
 	ManifestDigest string `json:"manifestDigest"`
+	// +kubebuilder:validation:Enum=linux/amd64;linux/arm64
+	Platform string `json:"platform"`
 }
 
 // +kubebuilder:object:root=true

@@ -15,7 +15,7 @@ func TestRunBuildRejectsUnmatchedExplicitBatchTarget(t *testing.T) {
 	if err := os.Mkdir(imageDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(imageDir, "metadata.json"), []byte(`{"target":"registry.example.com/ns/present:dev"}`), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(imageDir, "metadata.json"), []byte(`{"target":"registry.example.com/ns/present:dev","platform":"linux/amd64"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(imageDir, "Dockerfile"), []byte("FROM scratch\n"), 0o600); err != nil {
@@ -25,6 +25,7 @@ func TestRunBuildRejectsUnmatchedExplicitBatchTarget(t *testing.T) {
 	err := RunBuild(Options{
 		ImageDirs:   root,
 		Target:      "registry.example.com/ns/missing:dev",
+		Platform:    "linux/amd64",
 		BuildFormat: "oci",
 		Addrs:       []*scheduler.Addr{{Addr: "tcp://unused:9094"}},
 		Concurrency: 1,

@@ -1,3 +1,4 @@
 {
-  "target": "$KOVA_IMAGE_REGISTRY/kova-examples/nydus-smoke:dev"
+  "target": "$KOVA_IMAGE_REGISTRY/kova-examples/nydus-smoke:dev",
+  "platform": "linux/amd64"
 }

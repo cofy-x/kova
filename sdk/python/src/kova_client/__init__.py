@@ -13,7 +13,9 @@ from ._models import (
     JobList,
     JobStatus,
     OutputFormat,
+    Platform,
     ReadyStatus,
+    TargetSpec,
     VersionInfo,
 )
 
@@ -38,7 +40,9 @@ __all__ = [
     "KovaProtocolError",
     "KovaWaitCancelled",
     "OutputFormat",
+    "Platform",
     "ReadyStatus",
+    "TargetSpec",
     "VersionInfo",
     "__version__",
 ]

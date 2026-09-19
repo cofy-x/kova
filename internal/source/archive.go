@@ -120,7 +120,7 @@ func ValidateBuildArchive(zipPath string) (int, error) {
 	return validCount, nil
 }
 
-func BuildArchiveTargets(zipPath string) ([]string, error) {
+func BuildArchiveTargets(zipPath string) ([]buildcontract.TargetSpec, error) {
 	count, err := ValidateBuildArchive(zipPath)
 	if err != nil {
 		return nil, err
@@ -130,7 +130,7 @@ func BuildArchiveTargets(zipPath string) ([]string, error) {
 		return nil, err
 	}
 	defer r.Close()
-	targetsByDirectory := make(map[string]string, count)
+	targetsByDirectory := make(map[string]buildcontract.TargetSpec, count)
 	directoriesByTarget := make(map[string]string, count)
 	for _, file := range r.File {
 		cleaned, err := ValidateBuildArchivePath(file.Name)
@@ -160,14 +160,18 @@ func BuildArchiveTargets(zipPath string) ([]string, error) {
 		if err := json.Unmarshal(raw, &metadata); err != nil {
 			return nil, fmt.Errorf("invalid %s: %w", cleaned, err)
 		}
-		target, err := buildcontract.NormalizeTarget(metadata.Target)
+		target, err := buildcontract.NormalizeLogicalTarget(metadata.Target)
 		if err != nil {
 			return nil, fmt.Errorf("invalid target in %s: %w", cleaned, err)
+		}
+		platform, err := buildcontract.NormalizePlatform(metadata.Platform)
+		if err != nil {
+			return nil, fmt.Errorf("invalid platform in %s: %w", cleaned, err)
 		}
 		if previous, exists := directoriesByTarget[target]; exists {
 			return nil, fmt.Errorf("image directories %q and %q use duplicate target %q", previous, parts[0], target)
 		}
-		targetsByDirectory[parts[0]] = target
+		targetsByDirectory[parts[0]] = buildcontract.TargetSpec{Target: target, Platform: platform}
 		directoriesByTarget[target] = parts[0]
 	}
 	if len(targetsByDirectory) != count {
@@ -178,11 +182,11 @@ func BuildArchiveTargets(zipPath string) ([]string, error) {
 		directories = append(directories, directory)
 	}
 	sort.Strings(directories)
-	targets := make([]string, 0, len(directories))
+	targets := make([]buildcontract.TargetSpec, 0, len(directories))
 	for _, directory := range directories {
 		targets = append(targets, targetsByDirectory[directory])
 	}
-	return buildcontract.NormalizeTargets(targets)
+	return buildcontract.NormalizeTargetSpecs(targets)
 }
 
 func ValidateBuildArchivePath(name string) (string, error) {

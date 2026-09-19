@@ -44,8 +44,8 @@ func RunBuild(opts Options) error {
 		logging.ResetCommandStartTime(time.Now())
 	}
 
-	if len(opts.Addrs) == 0 {
-		runErr = fmt.Errorf("--addrs is required")
+	if len(opts.Addrs) == 0 && len(opts.PlatformAddrs) == 0 {
+		runErr = fmt.Errorf("BuildKit platform addresses are required")
 		return runErr
 	}
 
@@ -59,7 +59,7 @@ func RunBuild(opts Options) error {
 	var singleCleanup func()
 	if opts.ImageDir != "" {
 		var err error
-		imageDirs, singleCleanup, err = source.PrepareSingleImageDir(opts.ImageDir, opts.Target, opts.Vars)
+		imageDirs, singleCleanup, err = source.PrepareSingleImageDir(opts.ImageDir, opts.Target, opts.Platform, opts.Vars)
 		if err != nil {
 			runErr = err
 			return runErr
@@ -67,7 +67,7 @@ func RunBuild(opts Options) error {
 		defer singleCleanup()
 	}
 
-	specs, cleanup, err := source.LoadBuildSpecsForFormats(imageDirs, opts.Target, buildFormats, opts.Vars)
+	specs, cleanup, err := source.LoadBuildSpecsForFormats(imageDirs, opts.Target, opts.Platform, buildFormats, opts.Vars)
 	if err != nil {
 		runErr = err
 		return runErr
@@ -103,16 +103,30 @@ func RunBuild(opts Options) error {
 	logging.ResetProgress(len(jobs))
 	defer logging.ClearProgress()
 
-	logging.Infof("Building %d target(s) across %d address(es), concurrency=%d",
-		len(jobs), len(opts.Addrs), opts.Concurrency)
-
-	addrPool := scheduler.NewPool(opts.Addrs, opts.Concurrency)
+	platformPools := make(map[string]*scheduler.Pool, len(opts.PlatformAddrs))
+	addressCount := 0
+	for platform, addrs := range opts.PlatformAddrs {
+		platformPools[platform] = scheduler.NewPool(addrs, opts.Concurrency)
+		addressCount += len(addrs)
+	}
+	var defaultPool *scheduler.Pool
+	if len(opts.Addrs) > 0 {
+		defaultPool = scheduler.NewPool(opts.Addrs, opts.Concurrency)
+		addressCount += len(opts.Addrs)
+	}
+	logging.Infof("Building %d target(s) across %d platform-scoped address(es), concurrency=%d",
+		len(jobs), addressCount, opts.Concurrency)
 	globalSem := make(chan struct{}, opts.Concurrency)
 	outcomeCounters := store.NewOutcomeCounters(totalTargets, nil)
 
 	ctx, cancel := context.WithCancel(opCtx)
 	defer cancel()
-	scheduler.StartRefresher(ctx, addrPool, opts.AddrsRaw, opts.OOMCooldown)
+	if defaultPool != nil {
+		scheduler.StartRefresher(ctx, defaultPool, opts.AddrsRaw, opts.OOMCooldown)
+	}
+	for platform, pool := range platformPools {
+		scheduler.StartRefresher(ctx, pool, opts.PlatformAddrsRaw[platform], opts.OOMCooldown)
+	}
 
 	if opts.Ctx == nil {
 		sigCh := make(chan os.Signal, 1)
@@ -157,6 +171,15 @@ func RunBuild(opts Options) error {
 			return false
 		}
 
+		addrPool := platformPools[task.job.platform]
+		if addrPool == nil {
+			addrPool = defaultPool
+		}
+		if addrPool == nil {
+			recordFatalErr(fmt.Errorf("no BuildKit worker capacity for platform %s", task.job.platform))
+			failed.Store(true)
+			return false
+		}
 		var slot *scheduler.Slot
 		for {
 			if ctx.Err() != nil {

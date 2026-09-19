@@ -176,6 +176,7 @@ func preheatCLICommand() *cli.Command {
 			&cli.BoolFlag{Name: "oci", Usage: "only preheat OCI (non-nydus) targets"},
 			&cli.BoolFlag{Name: "verbose", Usage: "stream grpcurl subprocess output to the console"},
 			&cli.BoolFlag{Name: "insecure-skip-verify", Usage: "skip registry TLS verification in Dragonfly preheat requests"},
+			&cli.StringSliceFlag{Name: "registry-plain-http", Usage: "registry host using plain HTTP; repeatable and intended for development"},
 		},
 		Action: func(c *cli.Context) error {
 			cfg, err := runnerConfigFromContext(c)

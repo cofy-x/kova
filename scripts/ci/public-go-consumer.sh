@@ -72,13 +72,14 @@ func main() {
 	_ = apiv1.CreateBuildRequest{
 		SourceURI:      "oci://registry.example.com/sources/example@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 		SourceDigest:   "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-		Targets:        []string{"registry.example.com/team/image:v1"},
+		Targets:        []apiv1.TargetSpec{{Target: "registry.example.com/team/image:v1", Platform: apiv1.PlatformLinuxAMD64}},
 		IdempotencyKey: "external-consumer-smoke",
 	}
 	_ = apiv1.BuildOutput{
 		Image:          "registry.example.com/team/image:v1",
 		ManifestDigest: "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
 		ImmutableRef:   "registry.example.com/team/image@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+		Platform:       apiv1.PlatformLinuxAMD64,
 	}
 	_ = client.APIError{
 		StatusCode: http.StatusTooManyRequests,

@@ -21,13 +21,14 @@ func sourceCLICommand() *cli.Command {
 			Name: "pack", Usage: "create a deterministic source bundle from one context directory", ArgsUsage: "<context-directory>",
 			Flags: []cli.Flag{
 				&cli.StringFlag{Name: "target", Required: true, Usage: "tagged output image reference"},
+				&cli.StringFlag{Name: "platform", Required: true, Usage: "target platform: linux/amd64 or linux/arm64"},
 				&cli.StringFlag{Name: "output", Required: true, Usage: "destination zip path"},
 			},
 			Action: func(c *cli.Context) error {
 				if c.NArg() != 1 {
 					return fmt.Errorf("source pack requires exactly one context directory")
 				}
-				target, err := buildcontract.NormalizeTarget(c.String("target"))
+				target, err := buildcontract.NormalizeLogicalTarget(c.String("target"))
 				if err != nil {
 					return err
 				}
@@ -35,27 +36,44 @@ func sourceCLICommand() *cli.Command {
 				if err := os.MkdirAll(filepath.Dir(output), 0o755); err != nil {
 					return err
 				}
-				return source.CreateSingleImageArchive(filepath.Clean(c.Args().First()), target, output)
+				platform, err := buildcontract.NormalizePlatform(c.String("platform"))
+				if err != nil {
+					return err
+				}
+				return source.CreateSingleImageArchive(filepath.Clean(c.Args().First()), target, platform, output)
 			},
 		}, {
 			Name: "push", Usage: "package and push a source bundle to an OCI registry", ArgsUsage: "<context-directory|source.zip>",
 			Flags: []cli.Flag{
 				&cli.StringFlag{Name: "repository", Required: true, Usage: "OCI repository tag used to publish the source bundle"},
 				&cli.StringFlag{Name: "target", Usage: "output image reference; required for a context directory"},
+				&cli.StringFlag{Name: "platform", Usage: "target platform; required for a context directory"},
 				&cli.StringSliceFlag{Name: "registry-plain-http", Usage: "registry host using plain HTTP; repeatable and intended for development"},
 			},
 			Action: func(c *cli.Context) error {
 				if c.NArg() != 1 {
 					return fmt.Errorf("source push requires exactly one context directory or source zip")
 				}
+				info, statErr := os.Stat(c.Args().First())
+				if statErr != nil {
+					return statErr
+				}
 				target := c.String("target")
-				if info, err := os.Stat(c.Args().First()); err == nil && info.IsDir() {
-					target, err = buildcontract.NormalizeTarget(target)
+				platform := c.String("platform")
+				if info.IsDir() {
+					var err error
+					target, err = buildcontract.NormalizeLogicalTarget(target)
 					if err != nil {
 						return err
 					}
+					platform, err = buildcontract.NormalizePlatform(platform)
+					if err != nil {
+						return err
+					}
+				} else if strings.TrimSpace(target) != "" || strings.TrimSpace(platform) != "" {
+					return fmt.Errorf("--target and --platform apply only to a context directory; archive metadata is authoritative")
 				}
-				archive, cleanup, err := sourceArchive(c.Args().First(), target)
+				archive, cleanup, err := sourceArchive(c.Args().First(), target, platform)
 				if err != nil {
 					return err
 				}
@@ -72,7 +90,7 @@ func sourceCLICommand() *cli.Command {
 	}
 }
 
-func sourceArchive(input, target string) (string, func(), error) {
+func sourceArchive(input, target, platform string) (string, func(), error) {
 	info, err := os.Stat(input)
 	if err != nil {
 		return "", func() {}, err
@@ -96,7 +114,7 @@ func sourceArchive(input, target string) (string, func(), error) {
 		return "", func() {}, err
 	}
 	cleanup := func() { _ = os.Remove(path) }
-	if err := source.CreateSingleImageArchive(filepath.Clean(input), target, path); err != nil {
+	if err := source.CreateSingleImageArchive(filepath.Clean(input), target, platform, path); err != nil {
 		cleanup()
 		return "", func() {}, err
 	}

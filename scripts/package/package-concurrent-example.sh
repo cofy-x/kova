@@ -9,6 +9,7 @@ WORK_DIR=${WORK_DIR:-.work}
 SOURCE_ZIP=${SOURCE_ZIP:-${WORK_DIR}/source-concurrent.zip}
 EXAMPLE_COUNT=${EXAMPLE_COUNT:-12}
 GENERATED_WORK_DIR=${GENERATED_WORK_DIR:-.generated/concurrent-examples}
+KOVA_PLATFORM=$(kova_platform)
 
 require_cmd zip
 
@@ -31,7 +32,8 @@ COPY hello.txt /hello.txt
 EOF
   cat > "${image_dir}/metadata.json" <<EOF
 {
-  "target": "\$KOVA_IMAGE_REGISTRY/kova-examples/${target}:dev"
+  "target": "\$KOVA_IMAGE_REGISTRY/kova-examples/${target}:dev",
+  "platform": "${KOVA_PLATFORM}"
 }
 EOF
   printf "hello from concurrent build %02d\n" "${i}" > "${image_dir}/hello.txt"

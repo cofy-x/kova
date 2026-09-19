@@ -123,7 +123,11 @@
           "uniqueItems": true
         },
         "runnerNodeSelector": { "type": "object", "additionalProperties": { "type": ["string", "number", "boolean"] } },
-        "buildkitAddr": { "type": "string" },
+        "buildkitPlatformAddrs": {
+          "type": "object",
+          "propertyNames": { "enum": ["linux/amd64", "linux/arm64"] },
+          "additionalProperties": { "type": "string", "minLength": 1 }
+        },
         "serviceAccount": { "$ref": "#/definitions/serviceAccount" },
         "podAnnotations": { "type": "object" },
         "podLabels": { "type": "object" },
@@ -161,6 +165,7 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
+        "platform": { "type": "string", "enum": ["linux/amd64", "linux/arm64"] },
         "name": { "type": "string" },
         "args": { "type": "array", "items": { "type": "string" } },
         "portName": { "type": "string" },

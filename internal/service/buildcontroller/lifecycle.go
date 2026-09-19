@@ -44,7 +44,6 @@ func (r *KovaBuildReconciler) startBuild(ctx context.Context, build *kovav1.Kova
 		Image:             r.Cfg.RunnerImage,
 		ImagePullPolicy:   r.Cfg.RunnerImagePullPolicy,
 		ImagePullSecret:   r.Cfg.RunnerImagePullSecret,
-		BuildkitAddr:      r.Cfg.BuildkitAddr,
 		NodeSelector:      r.Cfg.RunnerNodeSelector,
 		Env:               r.Cfg.RunnerEnv,
 		SourceURI:         build.Spec.Source.URI,
@@ -79,7 +78,7 @@ func (r *KovaBuildReconciler) cancelBuild(ctx context.Context, build *kovav1.Kov
 	if build.Status.Phase == kovav1.PhaseRunning && build.Status.RunnerPodName != "" {
 		// Cancellation remains effective when the daemon is already unavailable;
 		// deleting the runner Pod is the authoritative stop operation.
-		_ = (runnerexec.Client{Kube: r.Kube, BuildkitAddr: r.Cfg.BuildkitAddr}).CancelBuild(ctx, build)
+		_ = (runnerexec.Client{Kube: r.Kube, BuildkitPlatformAddrs: r.Cfg.BuildkitPlatformAddrs}).CancelBuild(ctx, build)
 	}
 	if build.Status.RunnerPodName != "" {
 		if err := r.Kube.DeletePod(ctx, build.Namespace, build.Status.RunnerPodName); err != nil {
@@ -109,12 +108,12 @@ func (r *KovaBuildReconciler) submitWhenReady(ctx context.Context, build *kovav1
 		}
 		return ctrl.Result{RequeueAfter: time.Second}, nil
 	}
-	client := runnerexec.Client{Kube: r.Kube, BuildkitAddr: r.Cfg.BuildkitAddr}
+	client := runnerexec.Client{Kube: r.Kube, BuildkitPlatformAddrs: r.Cfg.BuildkitPlatformAddrs}
 	sourceTargets, err := client.SourceTargets(ctx, build, sourcePath(build))
 	if err != nil {
 		return ctrl.Result{}, r.finish(ctx, build, kovav1.PhaseFailed, "InvalidSource", err.Error())
 	}
-	if !buildcontract.EqualTargetSets(build.Spec.Targets, sourceTargets) {
+	if !buildcontract.EqualTargetSpecSets(contractTargets(build.Spec.Targets), sourceTargets) {
 		return ctrl.Result{}, r.finish(ctx, build, kovav1.PhaseFailed, "InvalidTargets", "source targets do not exactly match requested targets")
 	}
 	if err := client.SubmitBuild(ctx, build, sourcePath(build)); err != nil {
@@ -148,7 +147,7 @@ func sourceFetchFailure(pod *corev1.Pod) (string, bool) {
 }
 
 func (r *KovaBuildReconciler) pollBuild(ctx context.Context, build *kovav1.KovaBuild) (ctrl.Result, error) {
-	client := runnerexec.Client{Kube: r.Kube, BuildkitAddr: r.Cfg.BuildkitAddr}
+	client := runnerexec.Client{Kube: r.Kube, BuildkitPlatformAddrs: r.Cfg.BuildkitPlatformAddrs}
 	state, err := client.BuildStatus(ctx, build)
 	if err != nil {
 		return ctrl.Result{}, r.finish(ctx, build, kovav1.PhaseFailed, "RunnerUnavailable", err.Error())

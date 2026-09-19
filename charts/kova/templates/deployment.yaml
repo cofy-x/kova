@@ -115,7 +115,25 @@ spec:
       {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
-        {{- toYaml . | nindent 8 }}
+        {{- if and (hasKey . "kubernetes.io/os") (ne (index . "kubernetes.io/os") "linux") }}
+        {{- fail "nodeSelector kubernetes.io/os must be linux" }}
+        {{- end }}
+        {{- $arch := last (splitList "/" $.Values.worker.platform) }}
+        {{- if and (hasKey . "kubernetes.io/arch") (ne (index . "kubernetes.io/arch") $arch) }}
+        {{- fail "nodeSelector kubernetes.io/arch must match worker.platform" }}
+        {{- end }}
+        kubernetes.io/os: linux
+        kubernetes.io/arch: {{ $arch }}
+        {{- range $key, $value := . }}
+        {{- if and (ne $key "kubernetes.io/os") (ne $key "kubernetes.io/arch") }}
+        {{ $key }}: {{ $value | quote }}
+        {{- end }}
+        {{- end }}
+      {{- end }}
+      {{- if not .Values.nodeSelector }}
+      nodeSelector:
+        kubernetes.io/os: linux
+        kubernetes.io/arch: {{ last (splitList "/" .Values.worker.platform) }}
       {{- end }}
       {{- with .Values.priorityClassName }}
       priorityClassName: {{ . }}

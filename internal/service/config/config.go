@@ -11,7 +11,7 @@ type Config struct {
 	RunnerNodeSelector        map[string]string
 	RunnerEnv                 map[string]string
 	RegistryPlainHTTP         []string
-	BuildkitAddr              string
+	BuildkitPlatformAddrs     map[string]string
 	JobTTL                    time.Duration
 	AuthToken                 string
 	AuthMode                  string

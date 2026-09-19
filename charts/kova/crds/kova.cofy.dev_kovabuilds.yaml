@@ -109,10 +109,21 @@ spec:
                 type: object
               targets:
                 items:
-                  maxLength: 512
-                  minLength: 1
-                  pattern: ^[^[:space:]@]+:[^[:space:]@/]+$
-                  type: string
+                  properties:
+                    platform:
+                      enum:
+                      - linux/amd64
+                      - linux/arm64
+                      type: string
+                    target:
+                      maxLength: 512
+                      minLength: 1
+                      pattern: ^[^[:space:]@]+:[^[:space:]@/]+$
+                      type: string
+                  required:
+                  - platform
+                  - target
+                  type: object
                 maxItems: 100
                 minItems: 1
                 type: array
@@ -210,10 +221,16 @@ spec:
                     manifestDigest:
                       pattern: ^sha256:[a-f0-9]{64}$
                       type: string
+                    platform:
+                      enum:
+                      - linux/amd64
+                      - linux/arm64
+                      type: string
                   required:
                   - format
                   - image
                   - manifestDigest
+                  - platform
                   type: object
                 maxItems: 200
                 type: array
@@ -247,7 +264,9 @@ spec:
             size(self.spec.targets)
         - message: targets must be unique
           rule: self.spec.targets.all(target, self.spec.targets.filter(candidate,
-            candidate == target).size() == 1)
+            candidate.target == target.target).size() == 1)
+        - message: target tag suffix _nydus_v3 is reserved for Kova Nydus outputs
+          rule: self.spec.targets.all(target, !target.target.endsWith('_nydus_v3'))
     served: true
     storage: true
     subresources:

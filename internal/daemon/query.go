@@ -22,7 +22,7 @@ func validateQueryKeys(q url.Values, allowed ...string) error {
 		if _, ok := allowedSet[key]; !ok {
 			return fmt.Errorf("unsupported query parameter %q", key)
 		}
-		if key == "var" || key == "target" {
+		if key == "var" || key == "target" || key == "platform-addr" || key == "registry-plain-http" {
 			continue
 		}
 		if len(values) > 1 {
@@ -98,7 +98,7 @@ func queryDurationStrict(q url.Values, key string, def time.Duration, min time.D
 }
 
 func buildOptionsFromQuery(q url.Values, defaultAddrs string, resultDB string, logsFile string) (batch.Options, error) {
-	if err := validateQueryKeys(q, "addrs", "concurrency", "fail-fast", "format", "oom-cooldown", "timeout", "verbose", "target", "var"); err != nil {
+	if err := validateQueryKeys(q, "addrs", "platform-addr", "platform", "concurrency", "fail-fast", "format", "oom-cooldown", "timeout", "verbose", "target", "var"); err != nil {
 		return batch.Options{}, err
 	}
 	addrsValue, ok, err := queryValue(q, "addrs")
@@ -108,9 +108,27 @@ func buildOptionsFromQuery(q url.Values, defaultAddrs string, resultDB string, l
 	if !ok || strings.TrimSpace(addrsValue) == "" {
 		addrsValue = defaultAddrs
 	}
-	addrs, err := scheduler.ParseAddrs(addrsValue)
-	if err != nil {
+	var addrs []*scheduler.Addr
+	if strings.TrimSpace(addrsValue) != "" {
+		addrs, err = scheduler.ParseAddrs(addrsValue)
+		if err != nil {
+			return batch.Options{}, err
+		}
+	}
+	platformValues, err := buildcontract.ParsePlatformAddresses(q["platform-addr"])
+	if err != nil && len(q["platform-addr"]) > 0 {
 		return batch.Options{}, err
+	}
+	platformAddrs := make(map[string][]*scheduler.Addr, len(platformValues))
+	for platform, raw := range platformValues {
+		parsed, parseErr := scheduler.ParseAddrs(raw)
+		if parseErr != nil {
+			return batch.Options{}, fmt.Errorf("platform %s: %w", platform, parseErr)
+		}
+		platformAddrs[platform] = parsed
+	}
+	if len(addrs) == 0 && len(platformAddrs) == 0 {
+		return batch.Options{}, fmt.Errorf("BuildKit platform addresses are required")
 	}
 	concurrency, err := queryIntStrict(q, "concurrency", 1, 1)
 	if err != nil {
@@ -130,6 +148,13 @@ func buildOptionsFromQuery(q url.Values, defaultAddrs string, resultDB string, l
 	for _, addr := range addrs {
 		if addr != nil {
 			addr.Cooldown = oomCooldown
+		}
+	}
+	for _, addresses := range platformAddrs {
+		for _, addr := range addresses {
+			if addr != nil {
+				addr.Cooldown = oomCooldown
+			}
 		}
 	}
 	failFast, err := queryBoolStrict(q, "fail-fast", false)
@@ -152,8 +177,18 @@ func buildOptionsFromQuery(q url.Values, defaultAddrs string, resultDB string, l
 	if err != nil {
 		return batch.Options{}, err
 	}
+	platform, _, err := queryValue(q, "platform")
+	if err != nil {
+		return batch.Options{}, err
+	}
+	if strings.TrimSpace(platform) != "" {
+		platform, err = buildcontract.NormalizePlatform(platform)
+		if err != nil {
+			return batch.Options{}, err
+		}
+	}
 	if strings.TrimSpace(target) != "" {
-		target, err = buildcontract.NormalizeTarget(target)
+		target, err = buildcontract.NormalizeLogicalTarget(target)
 		if err != nil {
 			return batch.Options{}, err
 		}
@@ -163,18 +198,21 @@ func buildOptionsFromQuery(q url.Values, defaultAddrs string, resultDB string, l
 		return batch.Options{}, err
 	}
 	return batch.Options{
-		Addrs:       addrs,
-		AddrsRaw:    addrsValue,
-		Concurrency: concurrency,
-		Failfast:    failFast,
-		BuildFormat: format,
-		OOMCooldown: oomCooldown,
-		ResultPath:  resultDB,
-		LogsPath:    logsFile,
-		Vars:        buildVars,
-		Timeout:     timeout,
-		Verbose:     verbose,
-		Target:      target,
+		Addrs:            addrs,
+		AddrsRaw:         addrsValue,
+		PlatformAddrs:    platformAddrs,
+		PlatformAddrsRaw: platformValues,
+		Concurrency:      concurrency,
+		Failfast:         failFast,
+		BuildFormat:      format,
+		OOMCooldown:      oomCooldown,
+		ResultPath:       resultDB,
+		LogsPath:         logsFile,
+		Vars:             buildVars,
+		Timeout:          timeout,
+		Verbose:          verbose,
+		Target:           target,
+		Platform:         platform,
 	}, nil
 }
 
@@ -214,7 +252,7 @@ func trimmedQueryValues(values []string) ([]string, error) {
 }
 
 func preheatOptionsFromQuery(q url.Values, resultDB string) (batch.Options, error) {
-	if err := validateQueryKeys(q, "target", "dragonfly-scheduler-addr", "concurrency", "interval", "timeout", "fail-fast", "oci", "verbose", "insecure-skip-verify"); err != nil {
+	if err := validateQueryKeys(q, "target", "dragonfly-scheduler-addr", "concurrency", "interval", "timeout", "fail-fast", "oci", "verbose", "insecure-skip-verify", "registry-plain-http"); err != nil {
 		return batch.Options{}, err
 	}
 	schedulerAddr, ok, err := queryValue(q, "dragonfly-scheduler-addr")
@@ -252,16 +290,26 @@ func preheatOptionsFromQuery(q url.Values, resultDB string) (batch.Options, erro
 	if err != nil {
 		return batch.Options{}, err
 	}
+	plainHTTPRegistries, err := trimmedQueryValues(q["registry-plain-http"])
+	if err != nil {
+		return batch.Options{}, err
+	}
+	for _, registry := range plainHTTPRegistries {
+		if strings.Contains(registry, "://") || strings.Contains(registry, "/") {
+			return batch.Options{}, fmt.Errorf("registry-plain-http values must be registry hosts without a scheme or path")
+		}
+	}
 	return batch.Options{
-		FromResultPath:            resultDB,
-		Target:                    strings.TrimSpace(q.Get("target")),
-		DragonflySchedulerAddr:    strings.TrimSpace(schedulerAddr),
-		PreheatInsecureSkipVerify: insecureSkipVerify,
-		Concurrency:               concurrency,
-		Interval:                  interval,
-		Timeout:                   timeout,
-		Failfast:                  failFast,
-		OCI:                       oci,
-		Verbose:                   verbose,
+		FromResultPath:             resultDB,
+		Target:                     strings.TrimSpace(q.Get("target")),
+		DragonflySchedulerAddr:     strings.TrimSpace(schedulerAddr),
+		PreheatInsecureSkipVerify:  insecureSkipVerify,
+		PreheatPlainHTTPRegistries: plainHTTPRegistries,
+		Concurrency:                concurrency,
+		Interval:                   interval,
+		Timeout:                    timeout,
+		Failfast:                   failFast,
+		OCI:                        oci,
+		Verbose:                    verbose,
 	}, nil
 }

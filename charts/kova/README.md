@@ -16,13 +16,14 @@ helm upgrade --install kova oci://ghcr.io/cofy-x/charts/kova \
   --version "${KOVA_VERSION#v}" \
   --namespace kova \
   --create-namespace \
+  --set-string worker.platform=linux/amd64 \
   --wait
 ```
 
 Always apply the selected release CRD before upgrading. Helm installs files in
 `crds/` for a new release but does not update them on later upgrades.
 
-The default installs one worker. Production environments should provide an
+Each release is one explicit `worker.platform` pool (`linux/amd64` or `linux/arm64`) and uses the standard Kubernetes OS and architecture labels. A Service release can route both platforms through explicit `serviceDaemon.buildkitPlatformAddrs` mappings to two BuildKit Services. The default installs one `linux/amd64` worker. Production environments should provide an
 environment-owned values file for capacity, registry credentials,
 scheduling, and service configuration.
 

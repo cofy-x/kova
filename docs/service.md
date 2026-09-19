@@ -27,6 +27,7 @@ The command creates a deterministic zip, publishes one custom OCI layer, and ret
 ```bash
 kova source push \
   --target registry.example.com/team/image:dev \
+  --platform linux/amd64 \
   --repository registry.example.com/team/kova-sources:request-123 \
   ./image
 ```
@@ -34,14 +35,15 @@ kova source push \
 Kova also accepts an immutable HTTPS archive URL without user information, query credentials, or fragments when the caller supplies the expected SHA-256 content digest.
 OCI bundle retention and garbage collection belong to the registry or caller.
 
-Each request has 1–100 logical targets.
-Targets must be unique, explicitly tagged OCI push destinations; digest-only destinations are rejected.
+Each request has 1–100 logical targets. Every target is an object containing one unique, explicitly tagged OCI push destination and exactly one supported platform: `linux/amd64` or `linux/arm64`.
+Digest-only destinations and free-form platform labels are rejected.
+The `_nydus_v3` tag suffix is reserved for Kova's derived Nydus output and is rejected on logical targets, preventing OCI and Nydus concrete output collisions.
 With `format=both`, status can contain at most 200 concrete outputs.
 Requested concurrency is between 1 and 100 and cannot exceed the logical target count.
 
 After a source is fetched and digest-verified, the controller inspects its metadata in the runner Pod.
-The normalized source target set must exactly match `spec.targets` before the build request is sent to BuildKit.
-Order is irrelevant, but missing, extra, invalid, and duplicate targets are deterministic failures with no image push.
+The normalized source `(target, platform)` set must exactly match `spec.targets` before the build request is sent to BuildKit.
+Order is irrelevant, but missing, extra, mismatched-platform, invalid, and duplicate targets are deterministic failures with no image push.
 
 ## CLI Workflow
 
@@ -60,6 +62,7 @@ Submit a local context through the public source contract by naming an OCI sourc
 kova job submit \
   --source-repository registry.example.com/team/kova-sources:request-123 \
   --target registry.example.com/team/image:dev \
+  --platform linux/amd64 \
   --format oci \
   --idempotency-key request-123 \
   ./image
@@ -71,6 +74,7 @@ Submit an already published source without uploading local bytes:
 kova job submit \
   --source-digest sha256:<content-digest> \
   --target registry.example.com/team/image:dev \
+  --platform linux/amd64 \
   oci://registry.example.com/team/kova-sources@sha256:<manifest-digest>
 ```
 
@@ -99,7 +103,7 @@ python -m pip install kova-client
 ```
 
 ```python
-from kova_client import ClientConfig, CreateBuildRequest, JobStatus, KovaClient
+from kova_client import ClientConfig, CreateBuildRequest, JobStatus, KovaClient, Platform, TargetSpec
 
 config = ClientConfig.from_env()
 with KovaClient(config) as kova:
@@ -107,7 +111,7 @@ with KovaClient(config) as kova:
         CreateBuildRequest(
             source_uri="oci://registry.example.com/team/sources@sha256:<manifest-digest>",
             source_digest="sha256:<source-content-digest>",
-            targets=("registry.example.com/team/seed:build-123",),
+            targets=(TargetSpec("registry.example.com/team/seed:build-123", Platform.LINUX_AMD64),),
             concurrency=1,
             idempotency_key="build-123",
         )
@@ -116,7 +120,7 @@ with KovaClient(config) as kova:
     if terminal.status is JobStatus.SUCCEEDED:
         results = kova.get_results(job.id)
         for output in results.outputs:
-            print(output.immutable_ref, output.manifest_digest)
+            print(output.platform, output.immutable_ref, output.manifest_digest)
 ```
 
 Constructors are explicit and do not inspect a home directory or environment variables.
@@ -131,7 +135,7 @@ External cancellation of an async task propagates normally.
 
 The SDK returns `immutable_ref` exactly as supplied and validated by the Service; it never reconstructs an immutable reference from the mutable tag.
 The caller owns retry policy and must persist source identity, build ID, manifest digest, and immutable reference before the terminal job TTL expires.
-The [caller-owned receipt example](../examples/python-service-receipt.py) demonstrates the complete source URI and digest to receipt flow without adding receipt storage to Kova.
+The [caller-owned Python receipt example](../examples/python-service-receipt.py) demonstrates the complete source URI and digest to receipt flow. The [seed build receipt example](examples/seed-build-receipt-v1.json) shows a non-authoritative persisted shape with recipe identity, target role, platform, format, image, digest, and immutable reference. The caller owns this receipt; Kova does not provide a long-term receipt store.
 
 ## Go SDK
 
@@ -166,7 +170,7 @@ func main() {
 	job, err := kova.CreateBuild(ctx, apiv1.CreateBuildRequest{
 		SourceURI:      "oci://registry.example.com/team/sources@sha256:<manifest-digest>",
 		SourceDigest:   "sha256:<source-content-digest>",
-		Targets:        []string{"registry.example.com/team/seed:build-123"},
+		Targets:        []apiv1.TargetSpec{{Target: "registry.example.com/team/seed:build-123", Platform: apiv1.PlatformLinuxAMD64}},
 		Format:         "oci",
 		Concurrency:    1,
 		IdempotencyKey: "build-123",
@@ -182,7 +186,7 @@ func main() {
 		panic(err)
 	}
 	for _, output := range results.Outputs {
-		fmt.Println(output.ImmutableRef, output.ManifestDigest)
+		fmt.Println(output.Platform, output.ImmutableRef, output.ManifestDigest)
 	}
 }
 ```
@@ -216,7 +220,10 @@ curl -sS -X POST "$BASE/v1/builds" \
   --data '{
     "source_uri": "oci://registry.example.com/team/kova-sources@sha256:<manifest-digest>",
     "source_digest": "sha256:<content-digest>",
-    "targets": ["registry.example.com/team/image:dev"],
+    "targets": [{
+      "target": "registry.example.com/team/image:dev",
+      "platform": "linux/amd64"
+    }],
     "format": "oci",
     "concurrency": 1,
     "timeout": 600,
@@ -242,10 +249,11 @@ Job responses contain the public execution state and a stable `failure_code` for
 They do not expose runner Pod names, Kubernetes namespaces, or internal BuildKit addresses.
 List pages are limited to 500 jobs, and log requests are limited to the last 10,000 lines.
 
-Each successful output contains `format`, the mutable pushed `image` tag, `manifest_digest`, and a server-derived `immutable_ref`.
+Each successful output contains `format`, `platform`, the mutable pushed `image` tag, `manifest_digest`, and a server-derived `immutable_ref`.
 The Service removes the explicit tag, preserves registry ports and nested repositories, validates the SHA-256 digest, and returns a canonical `repository@sha256:...` reference.
 Clients must not construct this reference themselves.
 Registry descriptor checks use bounded parallelism.
+Kova resolves the digest-pinned single-platform manifest, reads its image configuration, and requires its OS and architecture to match the request; it never verifies platform through the mutable tag.
 If one of several registries fails, the job is `Failed` while already verified output digests remain in status.
 Registry pushes are not transactional and Kova does not roll them back.
 
@@ -293,6 +301,9 @@ serviceDaemon:
   maxQueuedJobsPerRequester: 100
   workerSlots: 40
   controllerConcurrency: 4
+
+worker:
+  platform: linux/amd64
 ```
 
 Registry credentials are the only storage credentials needed by Kova.
@@ -311,6 +322,17 @@ serviceDaemon:
 Different targets may name different registries if the supplied Docker config, network policy, and TLS configuration cover all of them.
 `serviceDaemon.registryPlainHTTP` explicitly lists development registries without TLS.
 Production registries should use HTTPS.
+
+One chart release provides one platform-specific worker pool and selects its nodes with the standard `kubernetes.io/os` and `kubernetes.io/arch` labels. To serve both architectures, install another worker release for the second platform and configure the Service release with explicit addresses:
+
+```yaml
+serviceDaemon:
+  buildkitPlatformAddrs:
+    linux/amd64: tcp://kova-amd64.kova.svc:9094
+    linux/arm64: tcp://kova-arm64.kova.svc:9094
+```
+
+If a request names a supported platform without a configured pool, it terminates with `worker_platform_unavailable`. Kova does not infer a target platform from the controller or runner node.
 
 The Service needs no object store, shared filesystem, or RWX PVC.
 Each runner uses job-local `emptyDir` storage for the verified source bundle.

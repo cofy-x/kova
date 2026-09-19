@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/cofy-x/kova/internal/buildcontract"
 	"github.com/cofy-x/kova/internal/source"
 	"github.com/cofy-x/kova/internal/sourcebundle"
 
@@ -43,7 +44,7 @@ func CLICommand() *cli.Command {
 					return err
 				}
 				return json.NewEncoder(c.App.Writer).Encode(struct {
-					Targets []string `json:"targets"`
+					Targets []buildcontract.TargetSpec `json:"targets"`
 				}{Targets: targets})
 			},
 		}},

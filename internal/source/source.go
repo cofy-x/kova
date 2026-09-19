@@ -11,10 +11,11 @@ import (
 	"github.com/cofy-x/kova/internal/buildcontract"
 )
 
-const NydusV3TargetSuffix = "_nydus_v3"
+const NydusV3TargetSuffix = buildcontract.NydusV3TargetSuffix
 
 type ImageMetadata struct {
-	Target string `json:"target"`
+	Target   string `json:"target"`
+	Platform string `json:"platform"`
 }
 
 type BuildFormat string
@@ -25,20 +26,21 @@ const (
 )
 
 type Spec struct {
-	Dir    string
-	Target string
-	Format BuildFormat
+	Dir      string
+	Target   string
+	Platform string
+	Format   BuildFormat
 }
 
-func LoadBuildSpecs(imageDirs, target string, oci bool, buildVars map[string]string) ([]Spec, func(), error) {
+func LoadBuildSpecs(imageDirs, target, platform string, oci bool, buildVars map[string]string) ([]Spec, func(), error) {
 	format := BuildFormatNydus
 	if oci {
 		format = BuildFormatOCI
 	}
-	return LoadBuildSpecsForFormats(imageDirs, target, []BuildFormat{format}, buildVars)
+	return LoadBuildSpecsForFormats(imageDirs, target, platform, []BuildFormat{format}, buildVars)
 }
 
-func LoadBuildSpecsForFormats(imageDirs, target string, buildFormats []BuildFormat, buildVars map[string]string) ([]Spec, func(), error) {
+func LoadBuildSpecsForFormats(imageDirs, target, platform string, buildFormats []BuildFormat, buildVars map[string]string) ([]Spec, func(), error) {
 	if imageDirs == "" && target == "" {
 		return nil, nil, fmt.Errorf("either --image-dirs or a positional [target] is required")
 	}
@@ -47,11 +49,16 @@ func LoadBuildSpecsForFormats(imageDirs, target string, buildFormats []BuildForm
 	}
 
 	if imageDirs == "" {
+		normalizedPlatform, err := buildcontract.NormalizePlatform(platform)
+		if err != nil {
+			return nil, nil, err
+		}
 		specs := make([]Spec, 0, len(buildFormats))
 		for _, format := range buildFormats {
 			specs = append(specs, Spec{
-				Target: NormalizeTargetForFormat(target, format),
-				Format: format,
+				Target:   NormalizeTargetForFormat(target, format),
+				Platform: normalizedPlatform,
+				Format:   format,
 			})
 		}
 		sort.Slice(specs, func(i, j int) bool {
@@ -62,6 +69,11 @@ func LoadBuildSpecsForFormats(imageDirs, target string, buildFormats []BuildForm
 
 	targetFilters := make(map[string]struct{}, len(buildFormats))
 	if strings.TrimSpace(target) != "" {
+		normalizedPlatform, platformErr := buildcontract.NormalizePlatform(platform)
+		if platformErr != nil {
+			return nil, nil, platformErr
+		}
+		platform = normalizedPlatform
 		for _, format := range buildFormats {
 			targetFilters[NormalizeTargetForFormat(target, format)] = struct{}{}
 		}
@@ -109,12 +121,17 @@ func LoadBuildSpecsForFormats(imageDirs, target string, buildFormats []BuildForm
 				if _, ok := targetFilters[normalizedTarget]; !ok {
 					continue
 				}
+				if meta.Platform != platform {
+					cleanup()
+					return nil, nil, fmt.Errorf("target %q declares platform %s, not requested platform %s", meta.Target, meta.Platform, platform)
+				}
 			}
 
 			specs = append(specs, Spec{
-				Dir:    dir,
-				Target: normalizedTarget,
-				Format: format,
+				Dir:      dir,
+				Target:   normalizedTarget,
+				Platform: meta.Platform,
+				Format:   format,
 			})
 		}
 	}
@@ -134,9 +151,13 @@ func loadImageMetadata(metaPath string) (ImageMetadata, error) {
 	if err := json.Unmarshal(raw, &meta); err != nil {
 		return ImageMetadata{}, fmt.Errorf("invalid %s: %w", metaPath, err)
 	}
-	meta.Target, err = buildcontract.NormalizeTarget(meta.Target)
+	meta.Target, err = buildcontract.NormalizeLogicalTarget(meta.Target)
 	if err != nil {
 		return ImageMetadata{}, fmt.Errorf("invalid target in %s: %w", metaPath, err)
+	}
+	meta.Platform, err = buildcontract.NormalizePlatform(meta.Platform)
+	if err != nil {
+		return ImageMetadata{}, fmt.Errorf("invalid platform in %s: %w", metaPath, err)
 	}
 	return meta, nil
 }

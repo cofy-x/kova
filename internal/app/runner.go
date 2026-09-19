@@ -223,6 +223,7 @@ func runnerBuildArgsFromContext(c *cli.Context) []string {
 	}
 	if target := strings.TrimSpace(c.String("target")); target != "" {
 		args = append(args, "--target", target)
+		args = append(args, "--platform", strings.TrimSpace(c.String("platform")))
 	}
 	if c.Bool("fail-fast") {
 		args = append(args, "--fail-fast")
@@ -280,6 +281,9 @@ func runnerPreheatArgsFromContext(c *cli.Context) []string {
 	}
 	if c.Bool("insecure-skip-verify") {
 		args = append(args, "--insecure-skip-verify", "true")
+	}
+	for _, registry := range c.StringSlice("registry-plain-http") {
+		args = append(args, "--registry-plain-http", registry)
 	}
 	return args
 }

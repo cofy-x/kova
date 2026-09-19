@@ -91,7 +91,9 @@ serviceDaemon:
   # Registry hosts that intentionally use plain HTTP. Development only.
   registryPlainHTTP: []
   runnerNodeSelector: {}
-  buildkitAddr: ""
+  # Explicit platform-to-BuildKit worker Service mappings. Empty maps the
+  # local worker.platform to this release's headless Service.
+  buildkitPlatformAddrs: {}
   serviceAccount:
     create: true
     name: ""
@@ -132,6 +134,9 @@ networkPolicy:
     ingressFrom: []
 
 worker:
+  # One worker release serves exactly one platform. Install additional
+  # worker releases and map their Services above when both are required.
+  platform: linux/amd64
   name: buildkitd
   args:
     - --config

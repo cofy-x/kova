@@ -198,6 +198,12 @@ helm-template:
 	helm template $(RELEASE_NAME) ./charts/kova \
 		--set serviceDaemon.enabled=true \
 		--set serviceDaemon.authentication.mode=unsafe-none >/dev/null
+	helm template $(RELEASE_NAME) ./charts/kova \
+		--set-string worker.platform=linux/arm64 >/dev/null
+	helm template $(RELEASE_NAME) ./charts/kova \
+		--set serviceDaemon.enabled=true \
+		--set-string serviceDaemon.buildkitPlatformAddrs.linux/amd64=tcp://kova-amd64.kova.svc:9094 \
+		--set-string serviceDaemon.buildkitPlatformAddrs.linux/arm64=tcp://kova-arm64.kova.svc:9094 >/dev/null
 	helm template kova-observability ./charts/kova-observability \
 		--namespace kova-observability \
 		--set grafana.admin.existingSecret=test-secret >/dev/null

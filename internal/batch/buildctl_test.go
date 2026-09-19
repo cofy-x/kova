@@ -11,7 +11,7 @@ import (
 
 func TestBuildCommandArgsOCI(t *testing.T) {
 	args := buildCommandArgs(
-		source.Spec{Dir: "/tmp/src", Target: "localhost:5001/example:dev"},
+		source.Spec{Dir: "/tmp/src", Target: "localhost:5001/example:dev", Platform: "linux/amd64"},
 		&scheduler.Addr{Addr: "tcp://127.0.0.1:9094"},
 	)
 
@@ -19,6 +19,7 @@ func TestBuildCommandArgsOCI(t *testing.T) {
 		"--addr", "tcp://127.0.0.1:9094",
 		"build",
 		"--frontend=dockerfile.v0",
+		"--opt", "platform=linux/amd64",
 		"--local", "context=/tmp/src",
 		"--local", "dockerfile=/tmp/src",
 		"--output", "type=image,name=localhost:5001/example:dev,push=true,force-compression=true,oci-mediatypes=true,compression=gzip",
@@ -30,7 +31,7 @@ func TestBuildCommandArgsOCI(t *testing.T) {
 
 func TestBuildCommandArgsWithoutLocalDir(t *testing.T) {
 	args := buildCommandArgs(
-		source.Spec{Target: "registry.example.com/example:dev_nydus_v3"},
+		source.Spec{Target: "registry.example.com/example:dev_nydus_v3", Platform: "linux/arm64"},
 		&scheduler.Addr{Addr: "tcp://buildkitd:9094"},
 	)
 

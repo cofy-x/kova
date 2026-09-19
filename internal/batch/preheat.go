@@ -188,7 +188,7 @@ func executePreheat(ctx context.Context, target string, opts Options, registryAu
 	}
 	defer pCancel()
 
-	preheatURL, err := buildPreheatURL(target)
+	preheatURL, err := buildPreheatURL(target, opts.PreheatPlainHTTPRegistries)
 	if err != nil {
 		return err
 	}
@@ -235,7 +235,7 @@ func preheatRequestBody(preheatURL string, username string, password string, ins
 	}
 }
 
-func buildPreheatURL(target string) (string, error) {
+func buildPreheatURL(target string, plainHTTPRegistries []string) (string, error) {
 	trimmed := strings.TrimSpace(target)
 	if trimmed == "" {
 		return "", fmt.Errorf("preheat target is empty")
@@ -274,10 +274,15 @@ func buildPreheatURL(target string) (string, error) {
 		return "", fmt.Errorf("preheat target %q is not a valid image reference", target)
 	}
 
-	return fmt.Sprintf("%s://%s/v2/%s/manifests/%s", preheatRegistryScheme(registry), registry, repo, reference), nil
+	return fmt.Sprintf("%s://%s/v2/%s/manifests/%s", preheatRegistryScheme(registry, plainHTTPRegistries), registry, repo, reference), nil
 }
 
-func preheatRegistryScheme(registry string) string {
+func preheatRegistryScheme(registry string, plainHTTPRegistries []string) string {
+	for _, configured := range plainHTTPRegistries {
+		if strings.EqualFold(strings.TrimSpace(configured), registry) {
+			return "http"
+		}
+	}
 	host := registry
 	if idx := strings.IndexByte(host, ':'); idx >= 0 {
 		host = host[:idx]

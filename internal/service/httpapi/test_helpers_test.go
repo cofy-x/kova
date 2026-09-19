@@ -123,7 +123,7 @@ func testConfig(root string) config.Config {
 		Namespace:             "jobs",
 		RunnerImage:           "registry.local/kova:dev",
 		RunnerImagePullPolicy: "IfNotPresent",
-		BuildkitAddr:          "tcp://kova.kova.svc:9094",
+		BuildkitPlatformAddrs: map[string]string{"linux/amd64": "tcp://kova.kova.svc:9094"},
 		JobTTL:                time.Hour,
 		AuthToken:             "token",
 		AuthMode:              serviceauth.ModeStatic,
@@ -149,13 +149,18 @@ func multipartBuildRequestWithTargets(t *testing.T, fields map[string]string, ar
 	body := map[string]any{
 		"source_uri":    "oci://registry.local/sources/test@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 		"source_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-		"targets":       archiveTargets,
+		"targets":       requestTargets(archiveTargets),
 		"concurrency":   1,
 	}
+	platform := fields["platform"]
 	for key, value := range fields {
 		switch key {
 		case "target":
-			body["targets"] = []string{value}
+			body["targets"] = requestTargets([]string{value})
+		case "platform":
+			// Applied after target replacement so request construction does not
+			// depend on randomized Go map iteration order.
+			continue
 		case "formats":
 			body["format"] = "both"
 		case "concurrency", "timeout":
@@ -189,6 +194,12 @@ func multipartBuildRequestWithTargets(t *testing.T, fields map[string]string, ar
 			body[key] = value
 		}
 	}
+	if platform != "" {
+		targets := body["targets"].([]map[string]string)
+		for index := range targets {
+			targets[index]["platform"] = platform
+		}
+	}
 	raw, err := json.Marshal(body)
 	if err != nil {
 		t.Fatal(err)
@@ -196,6 +207,14 @@ func multipartBuildRequestWithTargets(t *testing.T, fields map[string]string, ar
 	req := httptest.NewRequest(http.MethodPost, "/v1/builds", bytes.NewReader(raw))
 	req.Header.Set("Content-Type", "application/json")
 	return req
+}
+
+func requestTargets(targets []string) []map[string]string {
+	result := make([]map[string]string, 0, len(targets))
+	for _, target := range targets {
+		result = append(result, map[string]string{"target": target, "platform": "linux/amd64"})
+	}
+	return result
 }
 
 func kubeObjectKey(namespace string, name string) client.ObjectKey {

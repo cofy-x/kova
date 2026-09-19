@@ -37,7 +37,7 @@ func TestClientUsesBearerTokenAndPublicTypes(t *testing.T) {
 			}
 			_ = json.NewEncoder(w).Encode(apiv1.BuildJob{ID: "job-1", Status: apiv1.JobStatusSucceeded})
 		case "/v1/builds/job-1/results":
-			_ = json.NewEncoder(w).Encode(apiv1.BuildResults{ID: "job-1", Outputs: []apiv1.BuildOutput{{ManifestDigest: digest, ImmutableRef: "registry.example.com/team/image@" + digest}}})
+			_ = json.NewEncoder(w).Encode(apiv1.BuildResults{ID: "job-1", Outputs: []apiv1.BuildOutput{{ManifestDigest: digest, ImmutableRef: "registry.example.com/team/image@" + digest, Platform: apiv1.PlatformLinuxAMD64}}})
 		case "/v1/builds/job-1/logs":
 			_, _ = w.Write([]byte("hello\n"))
 		case "/v1/builds/job-1/cancel":

@@ -74,7 +74,7 @@ func TestBuildArchiveTargetsReturnsSortedBatchTargets(t *testing.T) {
 		if createErr != nil {
 			t.Fatal(createErr)
 		}
-		_, _ = metadata.Write([]byte(`{"target":"` + entry.target + `"}`))
+		_, _ = metadata.Write([]byte(`{"target":"` + entry.target + `","platform":"linux/amd64"}`))
 	}
 	if err := zw.Close(); err != nil {
 		t.Fatal(err)
@@ -86,7 +86,7 @@ func TestBuildArchiveTargetsReturnsSortedBatchTargets(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(targets) != 2 || targets[0] != "registry.example/a:dev" || targets[1] != "registry.example/b:dev" {
+	if len(targets) != 2 || targets[0].Target != "registry.example/a:dev" || targets[1].Target != "registry.example/b:dev" || targets[0].Platform != buildcontract.PlatformLinuxAMD64 || targets[1].Platform != buildcontract.PlatformLinuxAMD64 {
 		t.Fatalf("targets = %#v", targets)
 	}
 }
@@ -109,7 +109,7 @@ func TestBuildArchiveTargetsRejectsMoreThanContractLimit(t *testing.T) {
 		if createErr != nil {
 			t.Fatal(createErr)
 		}
-		metadata := fmt.Sprintf("{\"target\":%q}\n", fmt.Sprintf("registry.example.com/team/image-%03d:dev", index))
+		metadata := fmt.Sprintf("{\"target\":%q,\"platform\":\"linux/amd64\"}\n", fmt.Sprintf("registry.example.com/team/image-%03d:dev", index))
 		_, _ = metadataFile.Write([]byte(metadata))
 	}
 	if err := writer.Close(); err != nil {
@@ -138,11 +138,11 @@ func TestLoadBuildSpecsForFormatsExpandsBothFormatsFromImageDirs(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(imageDir, "Dockerfile"), []byte("FROM scratch\n"), 0o644); err != nil {
 		t.Fatalf("write Dockerfile: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(imageDir, "metadata.json"), []byte(`{"target":"example.com/ns/repo:tag"}`), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(imageDir, "metadata.json"), []byte(`{"target":"example.com/ns/repo:tag","platform":"linux/amd64"}`), 0o644); err != nil {
 		t.Fatalf("write metadata.json: %v", err)
 	}
 
-	specs, cleanup, err := LoadBuildSpecsForFormats(root, "", []BuildFormat{BuildFormatNydus, BuildFormatOCI}, nil)
+	specs, cleanup, err := LoadBuildSpecsForFormats(root, "", "", []BuildFormat{BuildFormatNydus, BuildFormatOCI}, nil)
 	if cleanup != nil {
 		defer cleanup()
 	}
@@ -159,6 +159,9 @@ func TestLoadBuildSpecsForFormatsExpandsBothFormatsFromImageDirs(t *testing.T) {
 			t.Fatal("expected prepared build directory")
 		}
 		got[spec.Target] = FormatIsOCI(spec.Format)
+		if spec.Platform != buildcontract.PlatformLinuxAMD64 {
+			t.Fatalf("platform = %q", spec.Platform)
+		}
 	}
 	if oci, ok := got["example.com/ns/repo:tag"]; !ok || !oci {
 		t.Fatalf("expected OCI target, got %#v", got)
@@ -174,7 +177,7 @@ func TestPrepareSingleImageDirUsesExplicitTargetWithoutMetadata(t *testing.T) {
 		t.Fatalf("write Dockerfile: %v", err)
 	}
 
-	root, cleanup, err := PrepareSingleImageDir(imageDir, "example.com/ns/app:dev", nil)
+	root, cleanup, err := PrepareSingleImageDir(imageDir, "example.com/ns/app:dev", buildcontract.PlatformLinuxAMD64, nil)
 	if cleanup != nil {
 		defer cleanup()
 	}
@@ -182,15 +185,36 @@ func TestPrepareSingleImageDirUsesExplicitTargetWithoutMetadata(t *testing.T) {
 		t.Fatalf("prepare single image dir: %v", err)
 	}
 
-	specs, cleanupSpecs, err := LoadBuildSpecsForFormats(root, "", []BuildFormat{BuildFormatOCI}, nil)
+	specs, cleanupSpecs, err := LoadBuildSpecsForFormats(root, "", "", []BuildFormat{BuildFormatOCI}, nil)
 	if cleanupSpecs != nil {
 		defer cleanupSpecs()
 	}
 	if err != nil {
 		t.Fatalf("load specs: %v", err)
 	}
-	if len(specs) != 1 || specs[0].Target != "example.com/ns/app:dev" || !FormatIsOCI(specs[0].Format) {
+	if len(specs) != 1 || specs[0].Target != "example.com/ns/app:dev" || specs[0].Platform != buildcontract.PlatformLinuxAMD64 || !FormatIsOCI(specs[0].Format) {
 		t.Fatalf("unexpected specs: %#v", specs)
+	}
+}
+
+func TestLoadBuildSpecsRejectsExplicitPlatformMismatch(t *testing.T) {
+	root := t.TempDir()
+	imageDir := filepath.Join(root, "image")
+	if err := os.Mkdir(imageDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(imageDir, "Dockerfile"), []byte("FROM scratch\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(imageDir, "metadata.json"), []byte(`{"target":"example.com/ns/app:dev","platform":"linux/amd64"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, cleanup, err := LoadBuildSpecsForFormats(root, "example.com/ns/app:dev", "linux/arm64", []BuildFormat{BuildFormatOCI}, nil)
+	if cleanup != nil {
+		defer cleanup()
+	}
+	if err == nil || !strings.Contains(err.Error(), "not requested platform") {
+		t.Fatalf("expected platform mismatch, got %v", err)
 	}
 }
 
@@ -204,7 +228,7 @@ func TestCreateSingleImageArchiveOverridesMetadataTarget(t *testing.T) {
 	}
 
 	zipPath := filepath.Join(t.TempDir(), "source.zip")
-	if err := CreateSingleImageArchive(imageDir, "example.com/ns/new:dev", zipPath); err != nil {
+	if err := CreateSingleImageArchive(imageDir, "example.com/ns/new:dev", buildcontract.PlatformLinuxAMD64, zipPath); err != nil {
 		t.Fatalf("create archive: %v", err)
 	}
 	if count, err := ValidateBuildArchive(zipPath); err != nil || count != 1 {
@@ -227,7 +251,7 @@ func TestCreateSingleImageArchiveOverridesMetadataTarget(t *testing.T) {
 		t.Fatalf("read metadata: %v", err)
 	}
 	content := string(raw)
-	if !strings.Contains(content, `"target": "example.com/ns/new:dev"`) || !strings.Contains(content, `"keep": "yes"`) {
+	if !strings.Contains(content, `"target": "example.com/ns/new:dev"`) || !strings.Contains(content, `"platform": "linux/amd64"`) || !strings.Contains(content, `"keep": "yes"`) {
 		t.Fatalf("unexpected metadata: %s", content)
 	}
 }
@@ -248,7 +272,7 @@ func TestCreateSingleImageArchivePreservesSafeSymlink(t *testing.T) {
 	}
 
 	zipPath := filepath.Join(t.TempDir(), "source.zip")
-	if err := CreateSingleImageArchive(imageDir, "example.com/ns/app:dev", zipPath); err != nil {
+	if err := CreateSingleImageArchive(imageDir, "example.com/ns/app:dev", buildcontract.PlatformLinuxAMD64, zipPath); err != nil {
 		t.Fatalf("create archive: %v", err)
 	}
 	extractDir := filepath.Join(t.TempDir(), "extract")
@@ -282,7 +306,7 @@ func TestCreateSingleImageArchiveRejectsUnsafeSymlink(t *testing.T) {
 	}
 
 	zipPath := filepath.Join(t.TempDir(), "source.zip")
-	err := CreateSingleImageArchive(imageDir, "example.com/ns/app:dev", zipPath)
+	err := CreateSingleImageArchive(imageDir, "example.com/ns/app:dev", buildcontract.PlatformLinuxAMD64, zipPath)
 	if err == nil || !strings.Contains(err.Error(), "outside the build context") {
 		t.Fatalf("expected unsafe symlink error, got %v", err)
 	}
@@ -338,14 +362,14 @@ func TestCreateSingleImageArchiveIsDeterministicAcrossMtimeChanges(t *testing.T)
 	}
 	first := filepath.Join(t.TempDir(), "first.zip")
 	second := filepath.Join(t.TempDir(), "second.zip")
-	if err := CreateSingleImageArchive(imageDir, "registry.example.com/team/image:dev", first); err != nil {
+	if err := CreateSingleImageArchive(imageDir, "registry.example.com/team/image:dev", buildcontract.PlatformLinuxAMD64, first); err != nil {
 		t.Fatal(err)
 	}
 	later := time.Now().Add(24 * time.Hour)
 	if err := os.Chtimes(dockerfile, later, later); err != nil {
 		t.Fatal(err)
 	}
-	if err := CreateSingleImageArchive(imageDir, "registry.example.com/team/image:dev", second); err != nil {
+	if err := CreateSingleImageArchive(imageDir, "registry.example.com/team/image:dev", buildcontract.PlatformLinuxAMD64, second); err != nil {
 		t.Fatal(err)
 	}
 	firstBytes, err := os.ReadFile(first)

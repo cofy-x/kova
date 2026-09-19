@@ -288,13 +288,12 @@ components:
           pattern: "^sha256:[a-f0-9]{64}$"
         targets:
           type: array
+          description: Bounded logical targets. Target values must be unique, must not use the reserved _nydus_v3 suffix, and order is not significant for idempotency.
           minItems: 1
           maxItems: 100
           uniqueItems: true
           items:
-            type: string
-            maxLength: 512
-            pattern: "^[^\\s@]+:[^\\s@/]+$"
+            $ref: "#/components/schemas/TargetSpec"
         format:
           type: string
           enum: [oci, nydus, both]
@@ -337,6 +336,20 @@ components:
           type: string
         build_date:
           type: string
+    TargetSpec:
+      type: object
+      description: One tagged push destination and its canonical single output platform.
+      additionalProperties: false
+      required: [target, platform]
+      properties:
+        target:
+          type: string
+          maxLength: 512
+          pattern: "^[^\\s@]+:[^\\s@/]+$"
+        platform:
+          type: string
+          description: Requested BuildKit worker platform; free-form labels and implicit node architecture are not accepted.
+          enum: [linux/amd64, linux/arm64]
     ReadyStatus:
       type: object
       additionalProperties: false
@@ -359,7 +372,7 @@ components:
           type: string
         failure_code:
           type: string
-          enum: [invalid_source, invalid_targets, runner_unavailable, build_submission_failed, result_verification_failed, build_failed, cancelled]
+          enum: [invalid_source, invalid_targets, worker_platform_unavailable, runner_unavailable, build_submission_failed, result_verification_failed, build_failed, cancelled]
         created_at:
           type: string
           format: date-time
@@ -390,7 +403,7 @@ components:
     BuildOutput:
       type: object
       additionalProperties: false
-      required: [format, image, manifest_digest, immutable_ref]
+      required: [format, image, manifest_digest, immutable_ref, platform]
       properties:
         format:
           type: string
@@ -399,10 +412,15 @@ components:
           type: string
         manifest_digest:
           type: string
+          description: Digest of the verified single-platform manifest, never a mutable tag lookup result.
           pattern: "^sha256:[a-f0-9]{64}$"
         immutable_ref:
           type: string
           pattern: "^.+@sha256:[a-f0-9]{64}$"
+        platform:
+          type: string
+          description: Platform read from the digest-pinned output image configuration and verified against the request.
+          enum: [linux/amd64, linux/arm64]
     BuildResults:
       type: object
       additionalProperties: false

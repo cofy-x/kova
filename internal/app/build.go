@@ -16,6 +16,7 @@ func buildCLICommand() *cli.Command {
 		Usage: "submit a batch image build to the selected runner",
 		Flags: []cli.Flag{
 			&cli.StringFlag{Name: "target", Usage: "override a single-directory target or exactly filter a batch metadata target"},
+			&cli.StringFlag{Name: "platform", Usage: "target platform (linux/amd64 or linux/arm64); required with --target"},
 			&cli.StringSliceFlag{Name: "var", Usage: "replace occurrences of $KEY or ${KEY} in Dockerfile and metadata.json before build; repeatable, format KEY=value"},
 			&cli.IntFlag{Name: "concurrency", Value: 1, Usage: "total number of concurrent buildctl invocations across all buildkitd addresses"},
 			&cli.BoolFlag{Name: "fail-fast", Usage: "stop immediately after the first buildctl failure"},

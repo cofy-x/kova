@@ -114,11 +114,25 @@ func TestPreheatOptionsFromQueryAllowsExplicitInsecureRegistry(t *testing.T) {
 	opts, err := preheatOptionsFromQuery(url.Values{
 		"dragonfly-scheduler-addr": []string{"dragonfly:8002"},
 		"insecure-skip-verify":     []string{"true"},
+		"registry-plain-http":      []string{"kind-registry:5000"},
 	}, "/tmp/result.lmdb")
 	if err != nil {
 		t.Fatalf("expected success, got %v", err)
 	}
 	if !opts.PreheatInsecureSkipVerify {
 		t.Fatal("expected insecure registry opt-in to be enabled")
+	}
+	if len(opts.PreheatPlainHTTPRegistries) != 1 || opts.PreheatPlainHTTPRegistries[0] != "kind-registry:5000" {
+		t.Fatalf("plain HTTP registries = %#v", opts.PreheatPlainHTTPRegistries)
+	}
+}
+
+func TestPreheatOptionsRejectsPlainHTTPRegistryURL(t *testing.T) {
+	_, err := preheatOptionsFromQuery(url.Values{
+		"dragonfly-scheduler-addr": []string{"dragonfly:8002"},
+		"registry-plain-http":      []string{"http://kind-registry:5000"},
+	}, "/tmp/result.lmdb")
+	if err == nil {
+		t.Fatal("expected registry URL to be rejected")
 	}
 }
