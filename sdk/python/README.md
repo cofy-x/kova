@@ -36,3 +36,4 @@ with KovaClient(config) as kova:
 `ClientConfig.from_env()` explicitly reads `KOVA_SERVICE_URL`, `KOVA_SERVICE_TOKEN`, `KOVA_SERVICE_CA_FILE`, and `KOVA_SERVICE_INSECURE`.
 Constructing `ClientConfig` or either client never reads a user directory or process environment implicitly.
 Use a stable idempotency key if the caller may retry submission; `create_build` itself is never retried.
+The [executable Python Service SDK example](../../examples/service-sdk/README.md#python) demonstrates terminal handling and caller-owned receipt persistence with the same environment contract as the Go example.

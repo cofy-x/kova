@@ -135,7 +135,7 @@ External cancellation of an async task propagates normally.
 
 The SDK returns `immutable_ref` exactly as supplied and validated by the Service; it never reconstructs an immutable reference from the mutable tag.
 The caller owns retry policy and must persist source identity, build ID, manifest digest, and immutable reference before the terminal job TTL expires.
-The [caller-owned Python receipt example](../examples/python-service-receipt.py) demonstrates the complete source URI and digest to receipt flow. The [seed build receipt example](examples/seed-build-receipt-v1.json) shows a non-authoritative persisted shape with recipe identity, target role, platform, format, image, digest, and immutable reference. The caller owns this receipt; Kova does not provide a long-term receipt store.
+The [executable Python and Go Service SDK examples](../examples/service-sdk/README.md) demonstrate the complete source URI and digest to receipt flow with one shared environment contract. The [seed build receipt reference shape](examples/seed-build-receipt-v1.json) records recipe identity, terminal status, target role, platform, format, image, digest, and immutable reference. The caller owns this receipt; Kova does not provide a long-term receipt store.
 
 ## Go SDK
 
@@ -191,9 +191,10 @@ func main() {
 }
 ```
 
-Every network method accepts `context.Context`, and `WaitBuild` stops when that context is cancelled.
+Every network method accepts `context.Context`, and `WaitBuild` stops when that context is cancelled. It retries only retryable failures from the idempotent status endpoint and honors `Retry-After` before polling again.
 `client.Config` accepts a bearer token, kubeconfig, CA file, insecure TLS mode for controlled development, an injected `http.Client`, and an optional response-size bound.
 Responses are bounded to 64 MiB by default so a faulty endpoint cannot cause unbounded client allocation.
+The public `Version` and `Ready` probes do not attach a bearer token configured directly on the client.
 Compatibility checks are explicit; `CreateBuild` does not add a hidden `/version` request before submission.
 The SDK does not automatically retry `CreateBuild`, cancellation, or any other mutating request.
 Callers use a stable idempotency key when a submission may need to be retried safely.
@@ -206,6 +207,8 @@ The SDK is an execution-plane client, not a workflow engine.
 Terminal Kova jobs have a configured TTL and are removed after it expires.
 Before then, callers must persist the immutable source URI and digest, Kova build ID, manifest digest, and `immutable_ref` in their own durable system.
 The manifest digest and `immutable_ref` are the success facts; an image tag or transient runner log is not.
+
+The [executable Service SDK examples](../examples/service-sdk/README.md) use only `pkg/api/v1` and `pkg/client`, preserve all verified outputs in stable order, and demonstrate typed API errors, bounded waiting, terminal failure handling, and caller-owned receipt persistence.
 
 ## HTTP API
 

@@ -30,7 +30,15 @@ func (e *APIError) Error() string {
 }
 
 func (c *Client) getJSON(ctx context.Context, endpoint string, out any) error {
-	req, err := c.request(ctx, http.MethodGet, endpoint, nil)
+	return c.getJSONWithAuthentication(ctx, endpoint, out, true)
+}
+
+func (c *Client) getPublicJSON(ctx context.Context, endpoint string, out any) error {
+	return c.getJSONWithAuthentication(ctx, endpoint, out, false)
+}
+
+func (c *Client) getJSONWithAuthentication(ctx context.Context, endpoint string, out any, authenticated bool) error {
+	req, err := c.requestWithAuthentication(ctx, http.MethodGet, endpoint, nil, authenticated)
 	if err != nil {
 		return err
 	}
@@ -54,6 +62,10 @@ func (c *Client) getBytes(ctx context.Context, endpoint string) ([]byte, error) 
 }
 
 func (c *Client) request(ctx context.Context, method, endpoint string, body io.Reader) (*http.Request, error) {
+	return c.requestWithAuthentication(ctx, method, endpoint, body, true)
+}
+
+func (c *Client) requestWithAuthentication(ctx context.Context, method, endpoint string, body io.Reader, authenticated bool) (*http.Request, error) {
 	relative, err := url.Parse(endpoint)
 	if err != nil {
 		return nil, err
@@ -65,7 +77,7 @@ func (c *Client) request(ctx context.Context, method, endpoint string, body io.R
 	if err != nil {
 		return nil, err
 	}
-	if c.token != "" {
+	if authenticated && c.token != "" {
 		req.Header.Set("Authorization", "Bearer "+c.token)
 	}
 	return req, nil

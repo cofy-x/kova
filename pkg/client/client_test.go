@@ -19,7 +19,11 @@ import (
 func TestClientUsesBearerTokenAndPublicTypes(t *testing.T) {
 	digest := "sha256:" + strings.Repeat("a", 64)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/version" && r.URL.Path != "/readyz" && r.Header.Get("Authorization") != "Bearer secret" {
+		if r.URL.Path == "/version" || r.URL.Path == "/readyz" {
+			if r.Header.Get("Authorization") != "" {
+				t.Errorf("public endpoint %s received bearer credentials", r.URL.Path)
+			}
+		} else if r.Header.Get("Authorization") != "Bearer secret" {
 			writeTestError(w, http.StatusUnauthorized, apiv1.ErrorCodeUnauthenticated, false)
 			return
 		}
@@ -166,6 +170,29 @@ func TestWaitBuildRespectsContextCancellation(t *testing.T) {
 	_, err = client.WaitBuild(ctx, "job-1", time.Second)
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("WaitBuild error=%v", err)
+	}
+}
+
+func TestWaitBuildRespectsRetryAfterForRetryableStatusError(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		w.Header().Set("Retry-After", "7")
+		writeTestError(w, http.StatusServiceUnavailable, apiv1.ErrorCodeInternal, true)
+	}))
+	defer server.Close()
+	client, err := New(Config{BaseURL: server.URL, Token: "token", HTTPClient: server.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	_, err = client.WaitBuild(ctx, "job-1", time.Millisecond)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("WaitBuild error=%v", err)
+	}
+	if requests.Load() != 1 {
+		t.Fatalf("WaitBuild made %d requests before Retry-After elapsed", requests.Load())
 	}
 }
 

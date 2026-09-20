@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -114,7 +115,18 @@ func (c *Client) WaitBuild(ctx context.Context, id string, interval time.Duratio
 	for {
 		job, err := c.GetBuild(ctx, id)
 		if err != nil {
-			return apiv1.BuildJob{}, err
+			var apiErr *APIError
+			if !errors.As(err, &apiErr) || !apiErr.Retryable {
+				return apiv1.BuildJob{}, err
+			}
+			delay := interval
+			if apiErr.RetryAfter > 0 {
+				delay = apiErr.RetryAfter
+			}
+			if err := waitForPoll(ctx, delay); err != nil {
+				return apiv1.BuildJob{}, err
+			}
+			continue
 		}
 		switch job.Status {
 		case apiv1.JobStatusSucceeded:
@@ -122,12 +134,19 @@ func (c *Client) WaitBuild(ctx context.Context, id string, interval time.Duratio
 		case apiv1.JobStatusFailed, apiv1.JobStatusCancelled:
 			return job, fmt.Errorf("job %s ended with status %s: %s", job.ID, job.Status, job.Error)
 		}
-		timer := time.NewTimer(interval)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return apiv1.BuildJob{}, ctx.Err()
-		case <-timer.C:
+		if err := waitForPoll(ctx, interval); err != nil {
+			return apiv1.BuildJob{}, err
 		}
+	}
+}
+
+func waitForPoll(ctx context.Context, delay time.Duration) error {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
 	}
 }

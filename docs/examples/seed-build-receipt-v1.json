@@ -5,6 +5,8 @@
   "source_digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
   "kova_build_id": "build-example",
   "kova_version": "vX.Y.Z",
+  "idempotency_key": "build-example",
+  "status": "succeeded",
   "outputs": [
     {
       "role": "task",
