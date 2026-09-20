@@ -25,9 +25,9 @@ cleanup() {
 trap cleanup EXIT
 
 uv sync --python "${python_version}" --directory "${sdk_dir}" --locked
-uv run --python "${python_version}" --directory "${sdk_dir}" --locked ruff check . "${repo_root}/examples/python-service-receipt.py" "${repo_root}/scripts/ci/check-python-package.py"
-uv run --python "${python_version}" --directory "${sdk_dir}" --locked ruff format --check . "${repo_root}/examples/python-service-receipt.py" "${repo_root}/scripts/ci/check-python-package.py"
-uv run --python "${python_version}" --directory "${sdk_dir}" --locked mypy src/kova_client "${repo_root}/examples/python-service-receipt.py"
+uv run --python "${python_version}" --directory "${sdk_dir}" --locked ruff check . "${repo_root}/examples/service-sdk/python/main.py" "${repo_root}/scripts/ci/check-python-package.py" "${repo_root}/scripts/ci/test-sdk-examples.py"
+uv run --python "${python_version}" --directory "${sdk_dir}" --locked ruff format --check . "${repo_root}/examples/service-sdk/python/main.py" "${repo_root}/scripts/ci/check-python-package.py" "${repo_root}/scripts/ci/test-sdk-examples.py"
+uv run --python "${python_version}" --directory "${sdk_dir}" --locked mypy src/kova_client "${repo_root}/examples/service-sdk/python/main.py"
 uv run --python "${python_version}" --directory "${sdk_dir}" --locked pytest
 uv run --python "${python_version}" --directory "${sdk_dir}" --locked python -m build --outdir "${output_dir}"
 uv run --python "${python_version}" --directory "${sdk_dir}" --locked python "${repo_root}/scripts/ci/check-python-package.py" "${output_dir}"
