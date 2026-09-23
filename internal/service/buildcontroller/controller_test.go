@@ -413,6 +413,62 @@ func TestReconcilerDeleteCleansPodAndFinalizer(t *testing.T) {
 	}
 }
 
+func TestTerminalBuildDeletesRunnerButRetainsResultForTTL(t *testing.T) {
+	now := metav1.Now()
+	build := &kovav1.KovaBuild{
+		ObjectMeta: metav1.ObjectMeta{Name: "completed", Namespace: "jobs"},
+		Status: kovav1.KovaBuildStatus{
+			Phase: kovav1.PhaseSucceeded, RunnerPodName: "kova-job-completed",
+			FinishedAt: &now, Outputs: []kovav1.BuildOutput{{
+				Format: "oci", Image: "registry.example.com/team/a:dev",
+				ManifestDigest: "sha256:" + strings.Repeat("a", 64),
+			}},
+		},
+	}
+	kube := &fakeKube{}
+	reconciler := KovaBuildReconciler{Kube: kube, Cfg: config.Config{JobTTL: time.Hour}}
+	result, err := reconciler.reconcileTerminal(context.Background(), build)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(kube.deleted) != 1 || kube.deleted[0] != "jobs/kova-job-completed" {
+		t.Fatalf("deleted pods = %#v", kube.deleted)
+	}
+	if result.RequeueAfter <= 0 || build.Status.Phase != kovav1.PhaseSucceeded || len(build.Status.Outputs) != 1 {
+		t.Fatalf("terminal result was not retained: result=%#v status=%#v", result, build.Status)
+	}
+}
+
+func TestTerminalBuildDeletesRunnerEvenWithoutTTL(t *testing.T) {
+	build := &kovav1.KovaBuild{
+		ObjectMeta: metav1.ObjectMeta{Name: "completed", Namespace: "jobs"},
+		Status: kovav1.KovaBuildStatus{
+			Phase: kovav1.PhaseSucceeded, RunnerPodName: "kova-job-completed",
+		},
+	}
+	kube := &fakeKube{}
+	reconciler := KovaBuildReconciler{Kube: kube}
+	if _, err := reconciler.reconcileTerminal(context.Background(), build); err != nil {
+		t.Fatal(err)
+	}
+	if len(kube.deleted) != 1 || kube.deleted[0] != "jobs/kova-job-completed" {
+		t.Fatalf("deleted pods = %#v", kube.deleted)
+	}
+}
+
+func TestTerminalBuildRetriesRunnerDeleteFailure(t *testing.T) {
+	build := &kovav1.KovaBuild{
+		ObjectMeta: metav1.ObjectMeta{Name: "completed", Namespace: "jobs"},
+		Status: kovav1.KovaBuildStatus{
+			Phase: kovav1.PhaseSucceeded, RunnerPodName: "kova-job-completed",
+		},
+	}
+	reconciler := KovaBuildReconciler{Kube: &fakeKube{deleteErr: errors.New("delete failed")}}
+	if _, err := reconciler.reconcileTerminal(context.Background(), build); err == nil {
+		t.Fatal("expected runner cleanup error to retry reconciliation")
+	}
+}
+
 func TestReconcilerDeleteKeepsFinalizerWhenPodDeleteFails(t *testing.T) {
 	scheme := testScheme(t)
 	client := crfake.NewClientBuilder().

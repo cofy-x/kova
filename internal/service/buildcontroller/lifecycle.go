@@ -181,6 +181,14 @@ func (r *KovaBuildReconciler) pollBuild(ctx context.Context, build *kovav1.KovaB
 }
 
 func (r *KovaBuildReconciler) reconcileTerminal(ctx context.Context, build *kovav1.KovaBuild) (ctrl.Result, error) {
+	// The terminal status and verified outputs live on the KovaBuild until JobTTL.
+	// Keeping its runner Pod for the same duration would consume scheduler Pod
+	// capacity long after the build has released its active worker slot.
+	if build.Status.RunnerPodName != "" {
+		if err := r.Kube.DeletePod(ctx, build.Namespace, build.Status.RunnerPodName); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
 	if build.Status.FinishedAt == nil || r.Cfg.JobTTL <= 0 {
 		return ctrl.Result{}, nil
 	}
