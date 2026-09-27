@@ -16,7 +16,9 @@ kubectl() {
       [[ "${5}" == *'pollFailureSince.type'* && "${5}" == *'pollFailureSince.format'* && \
         "${5}" == *'pollFailureCount.type'* && "${5}" == *'pollFailureCount.format'* ]] || return 2
       if [[ "${5}" == *'verificationStartedAt.type'* ]]; then
-        [[ "${5}" == *'verificationResults.maxItems'* && "${5}" == *'phase.enum'* ]] || return 2
+        [[ "${5}" == *'verificationResults.maxItems'* && \
+          "${5}" == *'phase.enum[*]}{@}'* && \
+          "${5}" == *'state.enum[*]}{@}'* ]] || return 2
       else
         [[ "${5}" != *'phase.enum'* ]] || return 2
       fi
