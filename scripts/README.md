@@ -19,6 +19,10 @@ the categorized paths below.
   live KovaBuild CRD is Established and its retry status fields have the expected schema.
 - `deployment/test-verify-kovabuild-crd.sh`: exercise the upgrade gate against
   new, old, incompatible, and unavailable mock CRDs without a cluster.
+- `deployment/probe-kovabuild-status.sh`: prove retry status fields are pruned
+  by a legacy CRD and retained by the current CRD using a temporary namespace.
+- `deployment/test-probe-kovabuild-status.sh`: exercise the probe and its
+  namespace cleanup against a mock Kubernetes API.
 
 ## CI
 
@@ -75,6 +79,8 @@ the categorized paths below.
   reuses a caller-owned cluster without deleting it.
 - `e2e/e2e.sh`: run the basic local OCI build smoke.
 - `e2e/e2e-service.sh`: run the service daemon HTTP build smoke.
+- `e2e/e2e-crd-upgrade.sh`: migrate from the pinned public pre-retry CRD in
+  an isolated Kind cluster, check live status pruning/persistence, then run the Service smoke.
 - `e2e/e2e-concurrent.sh`: run concurrent local builds.
 - `e2e/e2e-dragonfly-nydus.sh`: run local Dragonfly/Nydus validation.
 - `e2e/e2e-runtime.sh`: run OCI and Nydus runtime validation.

@@ -66,6 +66,8 @@ An older schema can prune the retry window from status and prevent bounded recov
 The optional `BASELINE_CHART` path in `scripts/e2e/e2e-service.sh` exercises this
 order with an older chart before upgrading to the current controller; run
 `./scripts/deployment/test-verify-kovabuild-crd.sh` for a cluster-free gate test.
+For a live, isolated old-CRD-to-new-controller smoke, see
+[CRD upgrade testing](../testing.md#crd-upgrade-smoke).
 
 Replace `vX.Y.Z` with an exact tag from the
 [GitHub release page](https://github.com/cofy-x/kova/releases). Keep the same

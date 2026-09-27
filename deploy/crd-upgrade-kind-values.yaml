@@ -1,0 +1,49 @@
+images:
+  controller:
+    repository: localhost:5003/kova
+    tag: controller-crd-upgrade
+    pullPolicy: IfNotPresent
+  runner:
+    repository: localhost:5003/kova
+    tag: runner-crd-upgrade
+    pullPolicy: IfNotPresent
+  worker:
+    repository: localhost:5003/kova
+    tag: worker-crd-upgrade
+    pullPolicy: IfNotPresent
+
+networkPolicy:
+  worker:
+    enabled: false
+
+observability:
+  enabled: false
+
+deployment:
+  replicas: 1
+
+worker:
+  resources:
+    limits:
+      ephemeral-storage: 8Gi
+    requests:
+      ephemeral-storage: 1Gi
+  volumes:
+    - name: run-buildkit
+      emptyDir: {}
+    - name: lib-buildkit
+      emptyDir:
+        sizeLimit: 8Gi
+  volumeMounts:
+    - name: run-buildkit
+      mountPath: /run/user/1000
+    - name: lib-buildkit
+      mountPath: /home/user/.local/share/buildkit
+    - name: buildkit-config
+      mountPath: /etc/buildkit
+
+buildkitdConfig: |
+  debug = false
+
+  [registry."kind-registry-crd-upgrade:5000"]
+    http = true

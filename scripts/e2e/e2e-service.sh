@@ -29,6 +29,7 @@ BASELINE_CHART=${BASELINE_CHART:-}
 BASELINE_CONTROLLER_IMAGE=${BASELINE_CONTROLLER_IMAGE:-}
 BASELINE_RUNNER_IMAGE=${BASELINE_RUNNER_IMAGE:-}
 BASELINE_WORKER_IMAGE=${BASELINE_WORKER_IMAGE:-}
+REQUIRE_LEGACY_CRD=${REQUIRE_LEGACY_CRD:-false}
 KOVA_PLATFORM=$(kova_platform)
 
 require_cmd curl
@@ -36,6 +37,15 @@ require_cmd docker
 require_cmd helm
 require_cmd jq
 require_cmd kubectl
+
+case ${REQUIRE_LEGACY_CRD} in
+  true|false) ;;
+  *) echo "error: REQUIRE_LEGACY_CRD must be true or false" >&2; exit 2 ;;
+esac
+if [[ "${REQUIRE_LEGACY_CRD}" == true && -z "${BASELINE_CHART}" ]]; then
+  echo 'error: REQUIRE_LEGACY_CRD requires BASELINE_CHART' >&2
+  exit 2
+fi
 
 if [[ "${E2E_SERVICE_BUILD_CLI}" == "true" ]]; then
   make -C "${ROOT}" kova
@@ -57,8 +67,15 @@ if [[ -n "${BASELINE_CHART}" ]]; then
     CONTROLLER_IMAGE=${BASELINE_CONTROLLER_IMAGE} \
     RUNNER_IMAGE=${BASELINE_RUNNER_IMAGE} \
     WORKER_IMAGE=${BASELINE_WORKER_IMAGE} \
+    KIND_LOAD_IMAGES=false \
     VERIFY_RETRY_CRD_SCHEMA=false \
     "${ROOT}/scripts/kind/deploy-kind.sh"
+  if [[ "${REQUIRE_LEGACY_CRD}" == true ]]; then
+    KUBECONFIG="${ROOT}/${KIND_KUBECONFIG}" \
+      "${ROOT}/scripts/deployment/verify-kovabuild-crd.sh" --expect-legacy
+    KUBECONFIG="${ROOT}/${KIND_KUBECONFIG}" \
+      "${ROOT}/scripts/deployment/probe-kovabuild-status.sh" --expect-pruned
+  fi
   baseline_revision=$(helm history "${RELEASE_NAME}" \
     --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" \
     --namespace "${NAMESPACE}" -o json | jq -r 'last.revision')
@@ -66,6 +83,10 @@ if [[ -n "${BASELINE_CHART}" ]]; then
     kubectl --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" apply -f -
   KUBECONFIG="${ROOT}/${KIND_KUBECONFIG}" \
     "${ROOT}/scripts/deployment/verify-kovabuild-crd.sh"
+  if [[ "${REQUIRE_LEGACY_CRD}" == true ]]; then
+    KUBECONFIG="${ROOT}/${KIND_KUBECONFIG}" \
+      "${ROOT}/scripts/deployment/probe-kovabuild-status.sh" --expect-persisted
+  fi
 else
   "${ROOT}/scripts/kind/deploy-kind.sh"
 fi

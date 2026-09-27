@@ -24,8 +24,8 @@ kubectl() {
 export -f kubectl
 
 assert_pass() {
-  local label=$1 schema=$2 output
-  if ! output=$(MOCK_SCHEMA="${schema}" KUBECTL=kubectl "${CHECK}" 2>&1); then
+  local label=$1 schema=$2 mode=$3 output
+  if ! output=$(MOCK_SCHEMA="${schema}" KUBECTL=kubectl "${CHECK}" "${mode}" 2>&1); then
     echo "error: ${label} unexpectedly failed: ${output}" >&2
     exit 1
   fi
@@ -44,11 +44,17 @@ assert_blocked() {
   fi
 }
 
-assert_pass 'new CRD schema' 'string|date-time|integer|int32'
+assert_pass 'new CRD schema' 'string|date-time|integer|int32' current
+assert_pass 'legacy CRD schema' '|||' --expect-legacy
 assert_blocked 'old CRD schema' '|||' 0 0
 assert_blocked 'wrong retry timestamp format' 'string||integer|int32' 0 0
 assert_blocked 'wrong retry count type' 'string|date-time|string|int32' 0 0
 assert_blocked 'CRD not Established' 'string|date-time|integer|int32' 1 0
 assert_blocked 'CRD read failed' 'string|date-time|integer|int32' 0 1
+if output=$(MOCK_SCHEMA='string|date-time|integer|int32' KUBECTL=kubectl \
+  "${CHECK}" --expect-legacy 2>&1); then
+  echo "error: new CRD unexpectedly passed legacy check: ${output}" >&2
+  exit 1
+fi
 
-echo 'CRD upgrade gate: new schema accepted; old/incompatible/unavailable CRD blocked'
+echo 'CRD upgrade gate: current and legacy schemas distinguished; incompatible/unavailable CRD blocked'
