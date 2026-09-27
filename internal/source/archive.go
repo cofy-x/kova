@@ -3,6 +3,7 @@ package source
 import (
 	"archive/zip"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -154,13 +155,25 @@ func validateArchiveContents(files []*zip.File, maxExpandedBytes uint64) error {
 		if file.FileInfo().IsDir() {
 			continue
 		}
+		cleaned, err := ValidateBuildArchivePath(file.Name)
+		if err != nil {
+			return err
+		}
+		remaining := maxExpandedBytes - expanded
+		fileLimit, tooLarge := requiredBuildFileLimit(cleaned)
+		if fileLimit > 0 && fileLimit < remaining {
+			remaining = fileLimit
+		}
 		reader, err := file.Open()
 		if err != nil {
 			return fmt.Errorf("source archive member %q: %w", file.Name, err)
 		}
-		n, copyErr := copyExpanded(io.Discard, reader, maxExpandedBytes-expanded)
+		n, copyErr := copyExpanded(io.Discard, reader, remaining)
 		closeErr := reader.Close()
 		if copyErr != nil {
+			if errors.Is(copyErr, ErrExpandedTooLarge) && fileLimit > 0 && remaining == fileLimit {
+				return fmt.Errorf("source archive member %q: %w", file.Name, tooLarge)
+			}
 			return fmt.Errorf("source archive member %q: %w", file.Name, copyErr)
 		}
 		if closeErr != nil {
@@ -180,9 +193,35 @@ func checkArchiveHeaders(files []*zip.File, budget archiveBudget) error {
 		if file.UncompressedSize64 > budget.expandedBytes-expanded {
 			return ErrExpandedTooLarge
 		}
+		cleaned, err := ValidateBuildArchivePath(file.Name)
+		if err != nil {
+			return err
+		}
+		fileLimit, tooLarge := requiredBuildFileLimit(cleaned)
+		if fileLimit > 0 && !file.FileInfo().Mode().IsRegular() {
+			return fmt.Errorf("source archive member %q must be a regular file", file.Name)
+		}
+		if fileLimit > 0 && file.UncompressedSize64 > fileLimit {
+			return fmt.Errorf("source archive member %q: %w", file.Name, tooLarge)
+		}
 		expanded += file.UncompressedSize64
 	}
 	return nil
+}
+
+func requiredBuildFileLimit(cleaned string) (uint64, error) {
+	parts := strings.Split(cleaned, "/")
+	if len(parts) != 2 {
+		return 0, nil
+	}
+	switch parts[1] {
+	case "Dockerfile":
+		return uint64(MaxDockerfileBytes), ErrDockerfileTooLarge
+	case "metadata.json":
+		return maxArchiveMetadataBytes, ErrMetadataTooLarge
+	default:
+		return 0, nil
+	}
 }
 
 func BuildArchiveTargets(zipPath string) ([]buildcontract.TargetSpec, error) {
@@ -404,10 +443,17 @@ func extractZipWithBudget(zipPath, dest string, budget archiveBudget) error {
 			return err
 		}
 		remaining := budget.expandedBytes - expanded
+		fileLimit, tooLarge := requiredBuildFileLimit(cleaned)
+		if fileLimit > 0 && fileLimit < remaining {
+			remaining = fileLimit
+		}
 		n, copyErr := copyExpanded(out, rc, remaining)
 		closeReadErr := rc.Close()
 		closeWriteErr := out.Close()
 		if copyErr != nil {
+			if errors.Is(copyErr, ErrExpandedTooLarge) && fileLimit > 0 && remaining == fileLimit {
+				return fmt.Errorf("source archive member %q: %w", f.Name, tooLarge)
+			}
 			return copyErr
 		}
 		if closeReadErr != nil {

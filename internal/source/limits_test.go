@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"testing"
 )
 
@@ -81,6 +82,51 @@ func TestArchiveBudgetsRejectCompressedBytesAndEntries(t *testing.T) {
 				t.Fatalf("rejected archive left destination: %v", err)
 			}
 		})
+	}
+}
+
+func TestCompressedOversizedDockerfileRejectedBeforeExtraction(t *testing.T) {
+	archive := writeBudgetTestArchive(t, map[string][]byte{
+		"image/Dockerfile":    bytes.Repeat([]byte("A"), int(MaxDockerfileBytes)+1),
+		"image/metadata.json": []byte(`{"target":"registry.example.com/team/app:dev","platform":"linux/amd64"}`),
+	})
+	info, err := os.Stat(archive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Size() > 1<<16 {
+		t.Fatalf("test requires a highly compressed archive, got %d bytes", info.Size())
+	}
+	if _, err := ValidateBuildArchive(archive); !errors.Is(err, ErrDockerfileTooLarge) {
+		t.Fatalf("validation error = %v, want Dockerfile limit", err)
+	}
+	dest := filepath.Join(t.TempDir(), "extracted")
+	if err := ExtractZip(archive, dest); !errors.Is(err, ErrDockerfileTooLarge) {
+		t.Fatalf("extraction error = %v, want Dockerfile limit", err)
+	}
+	if _, err := os.Stat(dest); !os.IsNotExist(err) {
+		t.Fatalf("rejected archive left destination: %v", err)
+	}
+}
+
+func TestBuildVariableExpansionStaysWithinDockerfileLimit(t *testing.T) {
+	dockerfile := filepath.Join(t.TempDir(), "Dockerfile")
+	raw := []byte("FROM scratch\n" + strings.Repeat("# ${KOVA_VALUE}\n", 1024))
+	if err := os.WriteFile(dockerfile, raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := replaceBuildVariablesInFile(dockerfile, map[string]string{"KOVA_VALUE": strings.Repeat("x", 2048)}); !errors.Is(err, ErrDockerfileTooLarge) {
+		t.Fatalf("substitution error = %v, want Dockerfile limit", err)
+	}
+	after, err := os.ReadFile(dockerfile)
+	if err != nil || !bytes.Equal(after, raw) {
+		t.Fatalf("rejected substitution modified Dockerfile: %v", err)
+	}
+	if err := os.WriteFile(dockerfile, bytes.Repeat([]byte("A"), int(MaxDockerfileBytes)+1), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := replaceBuildVariablesInFile(dockerfile, nil); !errors.Is(err, ErrDockerfileTooLarge) {
+		t.Fatalf("zero-variable read error = %v, want Dockerfile limit", err)
 	}
 }
 

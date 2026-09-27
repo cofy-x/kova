@@ -208,7 +208,7 @@ func executePreheat(ctx context.Context, target string, opts Options, registryAu
 
 	cmd := exec.CommandContext(pCtx, "grpcurl", args...)
 	cmd.Stdin = bytes.NewReader(reqJSON)
-	var outputBuf bytes.Buffer
+	var outputBuf boundedTailBuffer
 	if opts.Verbose {
 		cmd.Stdout = io.MultiWriter(os.Stdout, &outputBuf)
 		cmd.Stderr = io.MultiWriter(os.Stderr, &outputBuf)

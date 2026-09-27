@@ -1,7 +1,6 @@
 package batch
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -62,7 +61,7 @@ func executeBuild(ctx context.Context, spec source.Spec, addr *scheduler.Addr, o
 	}
 	defer buildCancel()
 
-	var outputBuf bytes.Buffer
+	var outputBuf boundedTailBuffer
 	digest, err := runBuildCommands(buildCtx, spec, addr, opts, &outputBuf)
 	buildErr = err
 	finishedAt := time.Now()
@@ -79,13 +78,13 @@ func executeBuild(ctx context.Context, spec source.Spec, addr *scheduler.Addr, o
 	}
 
 	if err != nil {
-		entry.Logs = outputBuf.String()
+		output := outputBuf.String()
+		entry.Logs = output
 		entry.Reason = err.Error()
 		op.SetResult(observability.ResultError)
 		op.SetErrorClass("build_command_failed")
 
-		output := strings.ToLower(outputBuf.String())
-		if strings.Contains(output, "connection refused") {
+		if outputBuf.ContainsConnectionRefused() {
 			logging.Infof("Detected OOM-style failure for %s, cooling down %s for %s",
 				spec.Target, addr.Addr, addr.Cooldown)
 			addr.SetCooldown()
@@ -95,7 +94,7 @@ func executeBuild(ctx context.Context, spec source.Spec, addr *scheduler.Addr, o
 	return entry
 }
 
-func runBuildCommands(ctx context.Context, spec source.Spec, addr *scheduler.Addr, opts Options, outputBuf *bytes.Buffer) (string, error) {
+func runBuildCommands(ctx context.Context, spec source.Spec, addr *scheduler.Addr, opts Options, outputBuf io.Writer) (string, error) {
 	if source.FormatIsOCI(spec.Format) {
 		return runBuildctl(ctx, spec, addr, opts, outputBuf)
 	}
@@ -116,7 +115,7 @@ func runBuildCommands(ctx context.Context, spec source.Spec, addr *scheduler.Add
 	return runNydusify(ctx, sourceRef, spec.Target, opts, outputBuf)
 }
 
-func runNydusify(ctx context.Context, sourceRef, target string, opts Options, outputBuf *bytes.Buffer) (string, error) {
+func runNydusify(ctx context.Context, sourceRef, target string, opts Options, outputBuf io.Writer) (string, error) {
 	metadata, err := os.CreateTemp("", "kova-nydusify-metadata-*.json")
 	if err != nil {
 		return "", fmt.Errorf("create Nydusify metadata file: %w", err)
@@ -143,7 +142,7 @@ func runNydusify(ctx context.Context, sourceRef, target string, opts Options, ou
 	return validatePushedDigest(pushed.Digest, "Nydusify")
 }
 
-func runBuildctl(ctx context.Context, spec source.Spec, addr *scheduler.Addr, opts Options, outputBuf *bytes.Buffer) (string, error) {
+func runBuildctl(ctx context.Context, spec source.Spec, addr *scheduler.Addr, opts Options, outputBuf io.Writer) (string, error) {
 	metadata, err := os.CreateTemp("", "kova-buildctl-metadata-*.json")
 	if err != nil {
 		return "", fmt.Errorf("create BuildKit metadata file: %w", err)
@@ -178,7 +177,7 @@ func validatePushedDigest(value, tool string) (string, error) {
 	return hash.String(), nil
 }
 
-func runCommand(ctx context.Context, verbose bool, outputBuf *bytes.Buffer, name string, args ...string) error {
+func runCommand(ctx context.Context, verbose bool, outputBuf io.Writer, name string, args ...string) error {
 	cmd := exec.CommandContext(ctx, name, args...)
 	if verbose {
 		cmd.Stdout = io.MultiWriter(os.Stdout, outputBuf)

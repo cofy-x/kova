@@ -166,6 +166,7 @@ func (s *daemonServer) runBuildAsync(buildCtx context.Context, zipPath string, q
 	}
 	logging.Infof("Async build extracted zip to %s", daemonImageDir)
 	opts.ImageDirs = daemonImageDir
+	opts.ImageDirsAlreadyIsolated = true
 
 	logging.Infof("Async build entering batch.RunBuild")
 	if err := s.backend.runBuild(opts); err != nil {

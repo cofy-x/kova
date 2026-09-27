@@ -3,7 +3,9 @@ package source
 import (
 	"bytes"
 	"fmt"
+	"io"
 	"os"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -15,7 +17,7 @@ var (
 )
 
 func replaceBuildVariablesInFile(path string, buildVars map[string]string) error {
-	raw, err := os.ReadFile(path)
+	raw, err := readBoundedBuildFile(path)
 	if err != nil {
 		return err
 	}
@@ -35,16 +37,33 @@ func replaceBuildVariablesInFile(path string, buildVars map[string]string) error
 }
 
 func replaceBuildVariables(raw []byte, path string, buildVars map[string]string) ([]byte, error) {
+	limit, tooLarge := buildFileLimit(path)
+	if int64(len(raw)) > limit {
+		return nil, tooLarge
+	}
 	if len(buildVars) == 0 {
 		return raw, nil
 	}
 
 	content := string(raw)
-	for key, value := range buildVars {
+	keys := make([]string, 0, len(buildVars))
+	for key := range buildVars {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		value := buildVars[key]
 		dollarToken := "$" + key
 		braceToken := "${" + key + "}"
-		content = strings.ReplaceAll(content, braceToken, value)
-		content = strings.ReplaceAll(content, dollarToken, value)
+		var err error
+		content, err = replaceAllBounded(content, braceToken, value, limit, tooLarge)
+		if err != nil {
+			return nil, err
+		}
+		content, err = replaceAllBounded(content, dollarToken, value, limit, tooLarge)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	unresolved := findUnresolvedBuildVariables(content)
@@ -62,6 +81,40 @@ func replaceBuildVariables(raw []byte, path string, buildVars map[string]string)
 	}
 
 	return []byte(content), nil
+}
+
+func buildFileLimit(path string) (int64, error) {
+	if filepath.Base(path) == "Dockerfile" {
+		return MaxDockerfileBytes, ErrDockerfileTooLarge
+	}
+	return maxArchiveMetadataBytes, ErrMetadataTooLarge
+}
+
+func readBoundedBuildFile(path string) ([]byte, error) {
+	limit, tooLarge := buildFileLimit(path)
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	raw, err := io.ReadAll(io.LimitReader(file, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(raw)) > limit {
+		return nil, tooLarge
+	}
+	return raw, nil
+}
+
+func replaceAllBounded(content, token, value string, limit int64, tooLarge error) (string, error) {
+	if len(value) > len(token) {
+		growth := int64(len(value) - len(token))
+		if int64(strings.Count(content, token)) > (limit-int64(len(content)))/growth {
+			return "", tooLarge
+		}
+	}
+	return strings.ReplaceAll(content, token, value), nil
 }
 
 func ParseBuildVariables(items []string) (map[string]string, error) {

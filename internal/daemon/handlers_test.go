@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -89,6 +90,9 @@ func TestHandleBuildPostRunsAsyncBuild(t *testing.T) {
 	case opts := <-buildCalled:
 		if opts.ImageDirs != daemonImageDir {
 			t.Fatalf("unexpected image dir %q", opts.ImageDirs)
+		}
+		if !opts.ImageDirsAlreadyIsolated {
+			t.Fatal("runner extraction must use the single-use, in-place source path")
 		}
 		if opts.BuildFormat != "oci" {
 			t.Fatalf("expected OCI build format, got %q", opts.BuildFormat)
@@ -182,6 +186,58 @@ func TestHandleBuildPostDeduplicatesSameRequestWhileRunningAndAfterCompletion(t 
 	}
 	if builds.Load() != 1 {
 		t.Fatalf("build runs = %d, want 1", builds.Load())
+	}
+}
+
+func TestHandleBuildPostDoesNotReusePartiallySubstitutedSourceOnRetry(t *testing.T) {
+	ownedRoot := t.TempDir()
+	imageDir := filepath.Join(ownedRoot, "image")
+	if err := os.Mkdir(imageDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(imageDir, "Dockerfile"), []byte("FROM scratch\n# ${KOVA_VALUE}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(imageDir, "metadata.json"), []byte(`{"target":"${KOVA_MISSING}","platform":"linux/amd64"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var builds atomic.Int32
+	srv := testDaemonServer(serverBackend{
+		validateBuildArchive: func(string) (int, error) { return 1, nil },
+		extractZip:           func(string, string) error { return nil },
+		runBuild: func(opts batch.Options) error {
+			builds.Add(1)
+			if !opts.ImageDirsAlreadyIsolated {
+				return errors.New("expected isolated runner source")
+			}
+			_, _, err := source.LoadBuildSpecsForFormatsInPlace(ownedRoot, "", "", []source.BuildFormat{source.BuildFormatOCI}, map[string]string{"KOVA_VALUE": "ready"})
+			return err
+		},
+	})
+	e := echo.New()
+	path := "/api/v1/build?request-id=partial-source-error"
+	first := performEchoRequest(t, e, http.MethodPost, path, "zip-body", srv.handleBuildPost)
+	if first.Code != http.StatusAccepted {
+		t.Fatalf("first response=%d body=%s", first.Code, first.Body.String())
+	}
+	state := waitForState(t, srv, "failed")
+	if !strings.Contains(state.Error, "KOVA_MISSING") {
+		t.Fatalf("build did not fail during partial source substitution: %#v", state)
+	}
+	dockerfile, err := os.ReadFile(filepath.Join(imageDir, "Dockerfile"))
+	if err != nil || !strings.Contains(string(dockerfile), "# ready") {
+		t.Fatalf("test did not reach partial substitution: %q, %v", dockerfile, err)
+	}
+	retry := performEchoRequest(t, e, http.MethodPost, path, "zip-body", srv.handleBuildPost)
+	if retry.Code != http.StatusOK || decodeDaemonState(t, retry).Status != "failed" {
+		t.Fatalf("same-ID retry=%d body=%s", retry.Code, retry.Body.String())
+	}
+	other := performEchoRequest(t, e, http.MethodPost, "/api/v1/build?request-id=different-build", "zip-body", srv.handleBuildPost)
+	if other.Code != http.StatusConflict {
+		t.Fatalf("different-ID retry=%d body=%s", other.Code, other.Body.String())
+	}
+	if got := builds.Load(); got != 1 {
+		t.Fatalf("partially substituted source ran %d times", got)
 	}
 }
 

@@ -213,7 +213,7 @@ func writeImageMetadata(metaPath, target, platform string) error {
 func imageMetadataWithTarget(metaPath, target, platform string) ([]byte, error) {
 	target = strings.TrimSpace(target)
 	if target == "" {
-		raw, err := os.ReadFile(metaPath)
+		raw, err := readBoundedBuildFile(metaPath)
 		if err != nil {
 			return nil, fmt.Errorf("read %s: %w", metaPath, err)
 		}
@@ -221,7 +221,7 @@ func imageMetadataWithTarget(metaPath, target, platform string) ([]byte, error) 
 	}
 
 	values := map[string]any{}
-	raw, err := os.ReadFile(metaPath)
+	raw, err := readBoundedBuildFile(metaPath)
 	if err == nil && len(bytes.TrimSpace(raw)) > 0 {
 		if err := json.Unmarshal(raw, &values); err != nil {
 			return nil, fmt.Errorf("invalid %s: %w", metaPath, err)

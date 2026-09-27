@@ -35,6 +35,7 @@ kova source push \
 Kova also accepts an immutable HTTPS archive URL without user information, query credentials, or fragments when the caller supplies the expected SHA-256 content digest.
 OCI bundle retention and garbage collection belong to the registry or caller.
 The source contract permits at most 512 MiB of exact zip bytes, 2 GiB of total expanded ZIP member bytes, and 100,000 ZIP entries.
+Top-level `Dockerfile` and `metadata.json` files must be regular files and are each limited to 1 MiB, including the result of build-variable substitution.
 These fixed limits apply to local source inspection and push, HTTPS and OCI fetches, runner uploads, and extraction.
 Kova counts bytes while reading and extracting as well as checking ZIP headers; a rejected source is reported as `InvalidSource` during source inspection or fetch, before any image push.
 
@@ -93,6 +94,8 @@ kova job cancel <job-id>
 ```
 
 Logs are available only while the runner Pod is active.
+Per-target command output retained for failure diagnostics is the latest 1 MiB, with a truncation marker when earlier output was discarded; verbose streaming is unchanged.
+The runner's ephemeral failure-log file is capped at 256 MiB and is not a durable log archive, so callers must capture logs they need to retain.
 The results endpoint returns the source identity and verified image outputs; it does not return an object-store URI.
 
 ## Python SDK

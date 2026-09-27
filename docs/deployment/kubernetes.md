@@ -182,7 +182,10 @@ Kova reads immutable source bundles and pushes results through OCI registries.
 It does not require an object store, shared filesystem, or RWX PVC.
 Each runner materializes a digest-verified source into job-local `emptyDir` storage.
 The source volume has a 4 GiB default and minimum `sizeLimit`; it also backs runner `/tmp`, where the uploaded zip copy and extracted context live.
-The source contract caps the zip at 512 MiB, total extracted members at 2 GiB, and ZIP entries at 100,000, leaving volume space for the source copy, runner state, and logs.
+The immutable source archive and its runner upload copy each use at most 512 MiB; the extracted job-local tree uses at most 2 GiB and is prepared in place, not copied again.
+The runner retains at most 256 MiB of ephemeral failure logs, leaving about 768 MiB of the default source-volume budget for result state, command metadata, and filesystem overhead at the source limits.
+Top-level `Dockerfile` and `metadata.json` files are each limited to 1 MiB before and after variable substitution; captured command output is limited to the latest 1 MiB per target.
+Nydus conversion and unusually large build-tool scratch files can need more headroom; measure their peak usage and raise both the source volume and runner ephemeral-storage request/limit together for such workloads.
 Each runner defaults to 5 GiB ephemeral storage and 2 GiB memory limits; its source fetch init container defaults to 1 GiB ephemeral storage and 1 GiB memory limits.
 Their memory and ephemeral-storage requests equal their limits, so scheduling reserves the full per-job capacity.
 Set `serviceDaemon.runnerResources`, `serviceDaemon.sourceFetchResources`, and `serviceDaemon.sourceVolumeSizeLimit` for the runner node pool, keeping the runner ephemeral storage limit above the source volume limit.

@@ -57,6 +57,37 @@ func prepareBuildImageDirs(imageDirs string, buildVars map[string]string) (strin
 	return preparedRoot, nil
 }
 
+// prepareBuildImageDirsInPlace is used only after an immutable source archive
+// has been extracted into a private, single-use runner directory. It must not
+// be used for caller-owned image directories, which need copy-on-prepare.
+func prepareBuildImageDirsInPlace(imageDirs string, buildVars map[string]string) error {
+	entries, err := os.ReadDir(imageDirs)
+	if err != nil {
+		return fmt.Errorf("read image-dirs: %w", err)
+	}
+	if len(entries) == 0 {
+		return fmt.Errorf("image-dirs %s does not contain any image directories", imageDirs)
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			return fmt.Errorf("image-dirs %s must contain only directories, found %s", imageDirs, entry.Name())
+		}
+		if err := validateSourceImageDir(filepath.Join(imageDirs, entry.Name())); err != nil {
+			return err
+		}
+	}
+	for _, entry := range entries {
+		dir := filepath.Join(imageDirs, entry.Name())
+		if err := replaceBuildVariablesInFile(filepath.Join(dir, "Dockerfile"), buildVars); err != nil {
+			return err
+		}
+		if err := replaceBuildVariablesInFile(filepath.Join(dir, "metadata.json"), buildVars); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func validateSourceImageDir(dir string) error {
 	if err := requireRegularFile(filepath.Join(dir, "Dockerfile")); err != nil {
 		return fmt.Errorf("%s: %w", dir, err)
@@ -68,7 +99,7 @@ func validateSourceImageDir(dir string) error {
 }
 
 func requireRegularFile(path string) error {
-	info, err := os.Stat(path)
+	info, err := os.Lstat(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return fmt.Errorf("missing required file %s", filepath.Base(path))
@@ -77,6 +108,10 @@ func requireRegularFile(path string) error {
 	}
 	if !info.Mode().IsRegular() {
 		return fmt.Errorf("required file %s must be a regular file", filepath.Base(path))
+	}
+	limit, tooLarge := buildFileLimit(path)
+	if info.Size() > limit {
+		return tooLarge
 	}
 	return nil
 }

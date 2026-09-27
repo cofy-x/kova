@@ -13,7 +13,10 @@ import (
 	"sync"
 )
 
-var maxFailureLogFileSize int64 = 1 << 30
+// Runner failure logs are ephemeral diagnostics, not a durable log archive.
+// Leave headroom in the default 4Gi source volume for both archive copies,
+// the expanded source tree, result state, and active command metadata.
+var maxFailureLogFileSize int64 = 256 << 20
 
 const truncatedFailureLogSuffix = "\n...[truncated to fit logs file limit]\n"
 

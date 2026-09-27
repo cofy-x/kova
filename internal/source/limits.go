@@ -7,15 +7,18 @@ import (
 )
 
 const (
-	MaxArchiveBytes   int64  = 512 << 20
-	MaxExpandedBytes  uint64 = 2 << 30
-	MaxArchiveEntries        = 100_000
+	MaxArchiveBytes    int64  = 512 << 20
+	MaxExpandedBytes   uint64 = 2 << 30
+	MaxArchiveEntries         = 100_000
+	MaxDockerfileBytes int64  = 1 << 20
 )
 
 var (
-	ErrArchiveTooLarge  = errors.New("source archive exceeds 512 MiB compressed size limit")
-	ErrExpandedTooLarge = errors.New("source archive exceeds 2 GiB expanded size limit")
-	ErrTooManyEntries   = errors.New("source archive exceeds 100000 entry limit")
+	ErrArchiveTooLarge    = errors.New("source archive exceeds 512 MiB compressed size limit")
+	ErrExpandedTooLarge   = errors.New("source archive exceeds 2 GiB expanded size limit")
+	ErrTooManyEntries     = errors.New("source archive exceeds 100000 entry limit")
+	ErrDockerfileTooLarge = errors.New("Dockerfile exceeds 1 MiB limit")
+	ErrMetadataTooLarge   = errors.New("metadata.json exceeds 1 MiB limit")
 )
 
 // CopyArchive enforces the compressed-byte budget on the bytes actually read.
