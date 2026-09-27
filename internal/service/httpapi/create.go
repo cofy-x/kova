@@ -67,6 +67,12 @@ func (s *Server) handleCreateBuild(c echo.Context) error {
 			Build:     request.Options, IdempotencyKey: request.IdempotencyKey,
 		},
 	}
+	// Reserve itself validates the queue ledger. Check the independent active
+	// ledger before committing a queue intent so a corrupt controller ledger
+	// cannot cause a newly accepted build to stall without a runner.
+	if err := s.checkActiveAdmissionLedger(c.Request().Context()); err != nil {
+		return serviceUnavailable(c, err)
+	}
 	store := s.queueStore()
 	intent, fresh, err := store.Reserve(c.Request().Context(), &build)
 	if err != nil {
@@ -78,7 +84,7 @@ func (s *Server) handleCreateBuild(c echo.Context) error {
 		case errors.Is(err, queueadmission.ErrConflict):
 			return conflict(c, "idempotency key is already used with different build parameters")
 		default:
-			return internalError(c, err)
+			return serviceUnavailable(c, err)
 		}
 	}
 	if !fresh {

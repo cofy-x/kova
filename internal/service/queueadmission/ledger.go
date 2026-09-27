@@ -119,6 +119,14 @@ func (s Store) read(ctx context.Context) (*corev1.ConfigMap, state, error) {
 	return &cm, result, nil
 }
 
+// CheckReady validates the durable ledger without creating or repairing it.
+// A missing ledger after startup may have held an unknown Create intent, so a
+// request path must not silently replace it with an empty one.
+func (s Store) CheckReady(ctx context.Context) error {
+	_, _, err := s.read(ctx)
+	return err
+}
+
 func (s Store) initialize(ctx context.Context) error {
 	// A missing ledger is only safe to initialize in an empty runner namespace.
 	// Rolling upgrades must drain old builds and move to a fresh namespace.
@@ -229,15 +237,6 @@ func (s Store) Reserve(ctx context.Context, build *kovav1.KovaBuild) (Intent, bo
 			return Intent{}, false, err
 		}
 		cm, current, err := s.read(ctx)
-		if apierrors.IsNotFound(err) {
-			if err := s.initialize(ctx); err != nil && !apierrors.IsAlreadyExists(err) {
-				if apierrors.IsTooManyRequests(err) {
-					return Intent{}, false, ErrBusy
-				}
-				return Intent{}, false, err
-			}
-			continue
-		}
 		if err != nil {
 			return Intent{}, false, err
 		}
@@ -285,9 +284,6 @@ func (s Store) Reserve(ctx context.Context, build *kovav1.KovaBuild) (Intent, bo
 
 func (s Store) Lookup(ctx context.Context, id string) (Intent, bool, error) {
 	_, current, err := s.read(ctx)
-	if apierrors.IsNotFound(err) {
-		return Intent{}, false, nil
-	}
 	if err != nil {
 		return Intent{}, false, err
 	}
@@ -303,6 +299,9 @@ func (s Store) VerifyForBuild(ctx context.Context, build *kovav1.KovaBuild) erro
 		return nil // Direct/admin CRs are outside the HTTP queue quota.
 	}
 	entry, found, err := s.Lookup(ctx, build.Name)
+	if apierrors.IsNotFound(err) {
+		return fmt.Errorf("%w: queue ledger %s is absent for KovaBuild %s/%s", ErrDrift, s.key(), build.Namespace, build.Name)
+	}
 	if err != nil {
 		return err
 	}

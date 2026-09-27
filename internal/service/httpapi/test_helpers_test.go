@@ -106,6 +106,11 @@ func newTestServer(t *testing.T, kube *fakeKube) *Server {
 
 func newTestServerWithRoot(t *testing.T, kube *fakeKube, root string) *Server {
 	t.Helper()
+	return newTestServerWithConfig(t, kube, testConfig(root))
+}
+
+func newTestServerWithConfig(t *testing.T, kube *fakeKube, cfg config.Config) *Server {
+	t.Helper()
 	scheme := runtime.NewScheme()
 	if err := kovav1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
@@ -118,7 +123,11 @@ func newTestServerWithRoot(t *testing.T, kube *fakeKube, root string) *Server {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return NewServer(testConfig(root), kube, client, client, authenticator, serviceauth.AllowAllAuthorizer{})
+	srv := NewServer(cfg, kube, client, client, authenticator, serviceauth.AllowAllAuthorizer{})
+	if err := srv.initializeAdmission(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	return srv
 }
 
 func testConfig(root string) config.Config {
@@ -135,6 +144,9 @@ func testConfig(root string) config.Config {
 		PollInterval:              time.Millisecond,
 		MaxQueuedJobs:             1000,
 		MaxQueuedJobsPerRequester: 100,
+		MaxActiveJobs:             20,
+		MaxActiveJobsPerRequester: 4,
+		WorkerSlots:               20,
 	}
 }
 

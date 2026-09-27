@@ -16,7 +16,9 @@ Only the controller ServiceAccount writes actual `KovaBuild` resources, so calle
 The chart creates unbound `kova-service-submitter` and `kova-service-admin` Roles; each environment owns their RoleBindings.
 
 `/healthz` is unauthenticated liveness.
-`/readyz` verifies Kubernetes API access.
+`/readyz` directly verifies Kubernetes API access to `KovaBuild` plus both admission ConfigMaps, including their schema and this replica's capacity limits.
+The Service initializes both ledgers before opening its HTTP listener; if a ledger is missing, malformed, or configured differently later, readiness returns 503 without silently repairing it.
+New submissions also check the active ledger immediately before queue reservation, and the reservation validates the queue ledger; existing build queries remain available during an admission outage.
 `/version` reports Service API and build provenance without credentials.
 
 ## Immutable Sources

@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"time"
 
@@ -10,12 +11,14 @@ import (
 	"github.com/cofy-x/kova/internal/logging"
 	"github.com/cofy-x/kova/internal/observability"
 	serviceauth "github.com/cofy-x/kova/internal/service/auth"
+	"github.com/cofy-x/kova/internal/service/buildcontroller"
 	"github.com/cofy-x/kova/internal/service/config"
 	"github.com/cofy-x/kova/internal/service/queueadmission"
 	"github.com/cofy-x/kova/internal/version"
 	apiv1 "github.com/cofy-x/kova/pkg/api/v1"
 
 	"github.com/labstack/echo/v4"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -65,7 +68,7 @@ func (s *Server) queueStore() queueadmission.Store {
 }
 
 func (s *Server) Start(ctx context.Context) error {
-	if err := s.queueStore().EnsureInitialized(ctx); err != nil {
+	if err := s.initializeAdmission(ctx); err != nil {
 		return err
 	}
 	e := s.routes()
@@ -81,6 +84,47 @@ func (s *Server) Start(ctx context.Context) error {
 		return err
 	}
 	return nil
+}
+
+func (s *Server) initializeAdmission(ctx context.Context) error {
+	queue := s.queueStore()
+	if err := queue.CheckReady(ctx); err != nil {
+		if !apierrors.IsNotFound(err) {
+			return err
+		}
+		// The active ledger is a durable marker that this namespace has run
+		// the new Service before. Recreating a missing queue ledger there could
+		// erase an unknown CR Create intent even when no CR is visible yet.
+		activeErr := buildcontroller.CheckAdmissionLedger(ctx, s.reader, s.cfg.Namespace, s.cfg)
+		if activeErr == nil {
+			// A concurrent replica may have completed first-start initialization
+			// between our two direct reads.
+			if err := queue.CheckReady(ctx); err != nil {
+				return fmt.Errorf("queue admission ledger is absent while active admission ledger exists: %w", err)
+			}
+		} else if apierrors.IsNotFound(activeErr) {
+			if err := queue.EnsureInitialized(ctx); err != nil {
+				return err
+			}
+		} else {
+			return activeErr
+		}
+	}
+	if err := buildcontroller.EnsureAdmissionLedger(ctx, s.client, s.reader, s.cfg.Namespace, s.cfg); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *Server) checkAdmissionLedgers(ctx context.Context) error {
+	if err := s.queueStore().CheckReady(ctx); err != nil {
+		return err
+	}
+	return s.checkActiveAdmissionLedger(ctx)
+}
+
+func (s *Server) checkActiveAdmissionLedger(ctx context.Context) error {
+	return buildcontroller.CheckAdmissionLedger(ctx, s.reader, s.cfg.Namespace, s.cfg)
 }
 
 func (s *Server) routes() *echo.Echo {
@@ -100,6 +144,9 @@ func (s *Server) routes() *echo.Echo {
 	e.GET("/readyz", func(c echo.Context) error {
 		var builds kovav1.KovaBuildList
 		if err := s.reader.List(c.Request().Context(), &builds, client.InNamespace(s.cfg.Namespace), client.Limit(1)); err != nil {
+			return serviceUnavailable(c, err)
+		}
+		if err := s.checkAdmissionLedgers(c.Request().Context()); err != nil {
 			return serviceUnavailable(c, err)
 		}
 		return c.JSON(http.StatusOK, apiv1.ReadyStatus{Status: "ready"})

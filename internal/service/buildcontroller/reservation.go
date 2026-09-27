@@ -10,6 +10,7 @@ import (
 	"time"
 
 	kovav1 "github.com/cofy-x/kova/internal/apis/kova/v1alpha1"
+	"github.com/cofy-x/kova/internal/service/config"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -123,6 +124,28 @@ func (r *KovaBuildReconciler) readReservations(ctx context.Context, namespace st
 		return &cm, state, nil
 	}
 	return nil, reservationState{}, fmt.Errorf("active admission ledger is busy initializing in %s", namespace)
+}
+
+// EnsureAdmissionLedger initializes the active ledger before the HTTP listener
+// opens. Subsequent readiness checks are deliberately read-only.
+func EnsureAdmissionLedger(ctx context.Context, writer client.Client, reader client.Reader, namespace string, cfg config.Config) error {
+	r := &KovaBuildReconciler{Client: writer, APIReader: reader, Cfg: cfg}
+	_, _, err := r.readReservations(ctx, namespace)
+	return err
+}
+
+// CheckAdmissionLedger validates the authoritative active ledger and this
+// replica's limits without creating a replacement for missing state.
+func CheckAdmissionLedger(ctx context.Context, reader client.Reader, namespace string, cfg config.Config) error {
+	var cm corev1.ConfigMap
+	if err := reader.Get(ctx, client.ObjectKey{Namespace: namespace, Name: reservationConfigMap}, &cm); err != nil {
+		return err
+	}
+	state, err := decodeReservations(&cm)
+	if err != nil {
+		return err
+	}
+	return (&KovaBuildReconciler{Cfg: cfg}).validateReservationLimits(state)
 }
 
 func decodeReservations(cm *corev1.ConfigMap) (reservationState, error) {

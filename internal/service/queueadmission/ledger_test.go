@@ -30,7 +30,11 @@ func testStore(t *testing.T, global, requester int) (Store, client.Client) {
 		t.Fatal(err)
 	}
 	base := crfake.NewClientBuilder().WithScheme(scheme).Build()
-	return Store{Client: base, Reader: base, Namespace: "jobs", GlobalLimit: global, RequesterLimit: requester}, base
+	store := Store{Client: base, Reader: base, Namespace: "jobs", GlobalLimit: global, RequesterLimit: requester}
+	if err := store.EnsureInitialized(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	return store, base
 }
 
 func testBuild(id, requester string) *kovav1.KovaBuild {
@@ -180,7 +184,7 @@ func TestQueueLedgerFailsClosedOnLimitDriftAndOldBuilds(t *testing.T) {
 	}
 }
 
-func TestInitializationRereadsLedgerWhenAnotherReplicaCreatedBuild(t *testing.T) {
+func TestMissingLedgerReadDoesNotReinitializeDuringAdmission(t *testing.T) {
 	store, base := testStore(t, 2, 2)
 	first := testBuild("first", "alice")
 	intent, fresh, err := store.Reserve(context.Background(), first)
@@ -193,8 +197,11 @@ func TestInitializationRereadsLedgerWhenAnotherReplicaCreatedBuild(t *testing.T)
 	}
 	staleFirstGet := store
 	staleFirstGet.Reader = &initiallyMissingLedgerReader{Reader: base}
-	if _, fresh, err := staleFirstGet.Reserve(context.Background(), testBuild("second", "bob")); err != nil || !fresh {
-		t.Fatalf("another replica's CR was mistaken for legacy state: fresh=%t err=%v", fresh, err)
+	if _, fresh, err := staleFirstGet.Reserve(context.Background(), testBuild("second", "bob")); !apierrors.IsNotFound(err) || fresh {
+		t.Fatalf("missing direct ledger read reinitialized during admission: fresh=%t err=%v", fresh, err)
+	}
+	if _, fresh, err := store.Reserve(context.Background(), testBuild("second", "bob")); err != nil || !fresh {
+		t.Fatalf("retry against existing ledger failed: fresh=%t err=%v", fresh, err)
 	}
 }
 

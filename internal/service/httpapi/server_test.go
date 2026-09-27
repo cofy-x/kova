@@ -161,8 +161,9 @@ func TestCreateBuildCreatesCRFromImmutableSource(t *testing.T) {
 }
 
 func TestCreateBuildRejectsRequesterQueueOverflow(t *testing.T) {
-	srv := newTestServer(t, &fakeKube{})
-	srv.cfg.MaxQueuedJobsPerRequester = 1
+	cfg := testConfig(t.TempDir())
+	cfg.MaxQueuedJobsPerRequester = 1
+	srv := newTestServerWithConfig(t, &fakeKube{}, cfg)
 	req := multipartBuildRequest(t, map[string]string{"format": "oci", "target": "registry.local/example:dev"})
 	req.Header.Set("Authorization", "Bearer token")
 	first := httptest.NewRecorder()
@@ -474,6 +475,9 @@ func TestCreateBuildIdempotencyUsesStrongReaderAfterAlreadyExists(t *testing.T) 
 		t.Fatal(err)
 	}
 	srv := NewServer(testConfig(root), &fakeKube{}, cached, strong, authenticator, serviceauth.AllowAllAuthorizer{})
+	if err := srv.initializeAdmission(context.Background()); err != nil {
+		t.Fatal(err)
+	}
 	fields := map[string]string{
 		"formats":         "oci,nydus",
 		"target":          "registry.local/tasksets/demo:payload",

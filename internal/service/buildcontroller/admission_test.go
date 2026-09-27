@@ -448,6 +448,51 @@ func admissionConfig() config.Config {
 	}
 }
 
+type countingStatusClient struct {
+	client.Client
+	writes int
+}
+
+type countingStatusWriter struct {
+	client.SubResourceWriter
+	parent *countingStatusClient
+}
+
+func (c *countingStatusClient) Status() client.SubResourceWriter {
+	return &countingStatusWriter{SubResourceWriter: c.Client.Status(), parent: c}
+}
+
+func (w *countingStatusWriter) Update(ctx context.Context, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+	w.parent.writes++
+	return w.SubResourceWriter.Update(ctx, obj, opts...)
+}
+
+func TestUnchangedCapacityWaitDoesNotRewriteBuildStatus(t *testing.T) {
+	a := queuedBuild("a", "alice", 1, 1)
+	b := queuedBuild("b", "bob", 2, 1)
+	base := crfake.NewClientBuilder().WithScheme(testScheme(t)).WithStatusSubresource(&kovav1.KovaBuild{}).WithObjects(a, b).Build()
+	cfg := admissionConfig()
+	cfg.MaxActiveJobs, cfg.WorkerSlots = 1, 1
+	counted := &countingStatusClient{Client: base}
+	r := KovaBuildReconciler{Client: counted, APIReader: base, Cfg: cfg}
+	if decision, err := r.admission(context.Background(), a); err != nil || !decision.Admitted {
+		t.Fatalf("blocker admission = %#v, err=%v", decision, err)
+	}
+	request := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "jobs", Name: "b"}}
+	if _, err := r.Reconcile(context.Background(), request); err != nil {
+		t.Fatal(err)
+	}
+	if counted.writes != 1 {
+		t.Fatalf("first capacity wait status writes = %d", counted.writes)
+	}
+	if _, err := r.Reconcile(context.Background(), request); err != nil {
+		t.Fatal(err)
+	}
+	if counted.writes != 1 {
+		t.Fatalf("unchanged capacity wait rewrote status: %d", counted.writes)
+	}
+}
+
 func TestQueueIntentReleasesOnlyAfterActiveGrant(t *testing.T) {
 	scheme := testScheme(t)
 	base := crfake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&kovav1.KovaBuild{}).Build()
@@ -455,6 +500,9 @@ func TestQueueIntentReleasesOnlyAfterActiveGrant(t *testing.T) {
 	cfg.MaxActiveJobs, cfg.WorkerSlots = 1, 1
 	cfg.MaxQueuedJobs, cfg.MaxQueuedJobsPerRequester = 1, 1
 	store := queueadmission.Store{Client: base, Reader: base, Namespace: "jobs", GlobalLimit: 1, RequesterLimit: 1}
+	if err := store.EnsureInitialized(context.Background()); err != nil {
+		t.Fatal(err)
+	}
 	build := queuedBuild("a", "alice", 1, 1)
 	intent, fresh, err := store.Reserve(context.Background(), build)
 	if err != nil || !fresh {
@@ -513,6 +561,9 @@ func TestFailedQueueReleaseOvercountsUntilControllerRestart(t *testing.T) {
 	cfg.MaxActiveJobs, cfg.WorkerSlots = 1, 1
 	cfg.MaxQueuedJobs, cfg.MaxQueuedJobsPerRequester = 1, 1
 	store := queueadmission.Store{Client: base, Reader: base, Namespace: "jobs", GlobalLimit: 1, RequesterLimit: 1}
+	if err := store.EnsureInitialized(context.Background()); err != nil {
+		t.Fatal(err)
+	}
 	build := queuedBuild("a", "alice", 1, 1)
 	intent, _, err := store.Reserve(context.Background(), build)
 	if err != nil {
@@ -574,6 +625,9 @@ func TestTerminalAndDeletionReleaseQueuedIntentAfterPodCheck(t *testing.T) {
 			scheme := testScheme(t)
 			base := crfake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&kovav1.KovaBuild{}).Build()
 			store := queueadmission.Store{Client: base, Reader: base, Namespace: "jobs", GlobalLimit: 1, RequesterLimit: 1}
+			if err := store.EnsureInitialized(context.Background()); err != nil {
+				t.Fatal(err)
+			}
 			build := queuedBuild("a", "alice", 1, 1)
 			intent, _, err := store.Reserve(context.Background(), build)
 			if err != nil {

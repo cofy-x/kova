@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"time"
 
 	kovav1 "github.com/cofy-x/kova/internal/apis/kova/v1alpha1"
@@ -53,12 +54,15 @@ func (r *KovaBuildReconciler) startBuild(ctx context.Context, build *kovav1.Kova
 	}
 	if !decision.Admitted {
 		capacityWaits.Add(ctx, 1)
+		previousStatus := build.Status.DeepCopy()
 		build.Status.Phase = kovav1.PhaseQueued
 		apiMeta.RemoveStatusCondition(&build.Status.Conditions, admissionRecoveryCondition)
 		setPhaseCondition(build, kovav1.PhaseQueued, "WaitingForCapacity", decision.Message)
 		build.Status.ObservedGeneration = build.Generation
-		if err := r.Status().Update(ctx, build); err != nil {
-			return ctrl.Result{}, err
+		if !reflect.DeepEqual(previousStatus, &build.Status) {
+			if err := r.Status().Update(ctx, build); err != nil {
+				return ctrl.Result{}, err
+			}
 		}
 		return ctrl.Result{RequeueAfter: r.Cfg.PollInterval}, nil
 	}

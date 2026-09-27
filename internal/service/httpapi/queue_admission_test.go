@@ -106,6 +106,9 @@ func dualQueueServers(t *testing.T, global, per int, usernames [2]string, writer
 		}
 		servers[i] = NewServer(cfg, &fakeKube{}, writer, reader, authenticator, serviceauth.AllowAllAuthorizer{})
 	}
+	if err := servers[0].initializeAdmission(context.Background()); err != nil {
+		t.Fatal(err)
+	}
 	return servers, base
 }
 
