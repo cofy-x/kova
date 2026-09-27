@@ -98,7 +98,7 @@ cleanup() {
   if [[ -n ${port_forward_a} ]]; then kill "${port_forward_a}" 2>/dev/null || true; wait "${port_forward_a}" 2>/dev/null || true; fi
   if [[ -n ${port_forward_b} ]]; then kill "${port_forward_b}" 2>/dev/null || true; wait "${port_forward_b}" 2>/dev/null || true; fi
   if [[ ${success} == true && ${exit_code} == 0 ]]; then
-    rm -r -- "${work_dir}"
+    note "PASS: run-scoped request and response receipts preserved at ${work_dir}"
   else
     note "FAILED: preserving evidence in ${work_dir}; test-owned CRs were NOT automatically deleted"
     note "known test-owned IDs: ${created_ids[*]:-none}; run ID: ${run_id}"
