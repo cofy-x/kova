@@ -7,6 +7,7 @@ import json
 import tempfile
 import unittest
 import zipfile
+from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -68,6 +69,42 @@ def failed_build() -> dict:
     }
 
 
+def public_receipts(build: dict) -> tuple[dict, dict]:
+    build["metadata"] = {"name": "idem-" + "c" * 20}
+    build["spec"] = {
+        "source": {
+            "uri": "oci://kind-registry:5000/kova-sources/example@sha256:" + "d" * 64,
+            "digest": "sha256:" + "e" * 64,
+        },
+        "idempotencyKey": "partial-41-test",
+    }
+    job = {
+        "id": build["metadata"]["name"],
+        "status": "failed",
+        "failure_code": "build_failed",
+        "source_uri": build["spec"]["source"]["uri"],
+        "source_digest": build["spec"]["source"]["digest"],
+        "idempotency_key": build["spec"]["idempotencyKey"],
+    }
+    results = {
+        "id": job["id"],
+        "source_uri": job["source_uri"],
+        "source_digest": job["source_digest"],
+        "idempotency_key": job["idempotency_key"],
+        "outputs": [
+            {
+                "format": item["format"],
+                "image": item["image"],
+                "platform": item["platform"],
+                "manifest_digest": item["manifestDigest"],
+                "immutable_ref": item["image"].rsplit(":", 1)[0] + "@" + item["manifestDigest"],
+            }
+            for item in build["status"]["outputs"]
+        ],
+    }
+    return job, results
+
+
 class PartialOutputSafetyTest(unittest.TestCase):
     def test_archive_is_two_target_with_later_buildkit_fault(self) -> None:
         first = "kind-registry:5000/kova-examples/partial-41-20260927t000000z-deadbeef-a:dev"
@@ -117,6 +154,105 @@ class PartialOutputSafetyTest(unittest.TestCase):
         build["status"]["verificationResults"][2]["pushedDigest"] = "sha256:" + "c" * 64
         with self.assertRaises(acceptance.AcceptanceError):
             acceptance.verify_failed_receipt(build, first, second)
+
+    def test_copy_missing_export_requires_fixture_source_path_diagnostic(self) -> None:
+        build = failed_build()
+        second = build["status"]["verificationResults"][2]["image"]
+        failed = {
+            "target": second.replace(":dev", ":dev_nydus_v3"),
+            "success": False,
+            "reason": "exit status 1",
+            "logs": 'COPY missing /must-not-exist\nfailed to solve: "/missing": not found\n',
+        }
+        proof = acceptance.verify_copy_missing_export(json.dumps(failed) + "\n", second)
+        self.assertEqual(proof["target"], failed["target"])
+        self.assertEqual(proof["source_path"], "/missing")
+        self.assertEqual(
+            acceptance.verify_copy_missing_export(
+                json.dumps({**failed, "logs": "BuildKit diagnostic: /missing"}) + "\n", second
+            )["source_path"],
+            "/missing",
+        )
+        self.assertIsNone(acceptance.verify_copy_missing_export("", second))
+
+        for drift in (
+            {"target": "kind-registry:5000/unrelated:dev_nydus_v3"},
+            {"logs": "COPY missing /must-not-exist\nnetwork timeout\n"},
+            {"success": True},
+            {"manifest_digest": "sha256:" + "f" * 64},
+            {"reason": ""},
+        ):
+            with self.subTest(drift=drift):
+                with self.assertRaises(acceptance.AcceptanceError):
+                    acceptance.verify_copy_missing_export(
+                        json.dumps({**failed, **drift}) + "\n", second
+                    )
+
+    def test_copy_failure_capture_is_bound_to_runner_uid(self) -> None:
+        build = failed_build()
+        second = build["status"]["verificationResults"][2]["image"]
+        raw = (
+            json.dumps(
+                {
+                    "target": second.replace(":dev", ":dev_nydus_v3"),
+                    "success": False,
+                    "reason": "exit status 1",
+                    "logs": 'failed to solve: "/missing": not found\n',
+                }
+            )
+            + "\n"
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            with patch.object(acceptance, "kctl", return_value=raw) as exec_command:
+                with patch.object(
+                    acceptance, "kjson", return_value={"metadata": {"uid": "runner-uid"}}
+                ):
+                    self.assertTrue(
+                        acceptance.capture_copy_failure(
+                            directory, "kova-job-idem-" + "a" * 20, "runner-uid", second
+                        )
+                    )
+            query = exec_command.call_args.args[-1]
+            self.assertIn("with-fail=true", query)
+            self.assertIn("target=kind-registry%3A5000%2F", query)
+            self.assertEqual((directory / "runner-failure-export.jsonl").read_text(), raw)
+            self.assertEqual(
+                json.loads((directory / "copy-missing-proof.json").read_text())["runner_pod_uid"],
+                "runner-uid",
+            )
+            with patch.object(acceptance, "kctl", return_value=raw):
+                with patch.object(acceptance, "kjson", return_value={"metadata": {"uid": "other"}}):
+                    with self.assertRaises(acceptance.AcceptanceError):
+                        acceptance.capture_copy_failure(
+                            directory, "kova-job-idem-" + "a" * 20, "runner-uid", second
+                        )
+
+    def test_public_partial_fields_match_durable_receipts(self) -> None:
+        build = failed_build()
+        job, results = public_receipts(build)
+        digests = {item["image"]: item["manifestDigest"] for item in build["status"]["outputs"]}
+        acceptance.verify_public_partial(job, results, build, digests)
+        for side, field, value in (
+            ("job", "id", "idem-" + "f" * 20),
+            ("job", "source_digest", "sha256:" + "f" * 64),
+            ("job", "idempotency_key", "wrong"),
+            ("results", "id", "idem-" + "f" * 20),
+            ("results", "source_digest", "sha256:" + "f" * 64),
+            ("results", "source_uri", "oci://wrong"),
+            ("output", "format", "oci"),
+            ("output", "platform", "linux/arm64"),
+            ("output", "immutable_ref", "kind-registry:5000/wrong@sha256:" + "a" * 64),
+            ("output", "manifest_digest", "sha256:" + "f" * 64),
+        ):
+            with self.subTest(side=side, field=field):
+                observed_job, observed_results = deepcopy(job), deepcopy(results)
+                selected = observed_job if side == "job" else observed_results
+                if side == "output":
+                    selected = observed_results["outputs"][1]
+                selected[field] = value
+                with self.assertRaises(acceptance.AcceptanceError):
+                    acceptance.verify_public_partial(observed_job, observed_results, build, digests)
 
     def test_absence_requires_404_not_registry_error(self) -> None:
         with patch.object(acceptance, "registry_request", return_value=(503, {})):

@@ -256,9 +256,20 @@ PARTIAL_OUTPUT_EXPECTED_REVISION="$REV" PARTIAL_OUTPUT_MODE=run \
   make e2e-service-partial-output
 ```
 
-The fixture ZIP has two top-level image directories with valid `{target,platform}` metadata. `a-pass` is lexically first and completes both OCI and Nydus with `concurrency=1`; `z-fail` has a deliberately missing Dockerfile `COPY` source, which fails only during BuildKit execution. The only accepted result is final `Failed/BuildFailed`, with two first-target `status.outputs` whose manifest digests equal their durable runner `pushedDigest` receipts and the exact registry tags; the later target must have failed verification results and no tags. A 20-minute overall deadline, five-minute failed-verification window, host memory/disk and node pressure/Pod guards, and runtime-image checks stop abnormal runs. This tests the ordinary partial-failure path; controller fault tests separately cover transient registry/export errors, leader restart, and terminal status-write ambiguity.
+The fixture ZIP has two top-level image directories with valid `{target,platform}` metadata.
+`a-pass` is lexically first and completes both OCI and Nydus with `concurrency=1`; `z-fail` has a deliberately missing Dockerfile `COPY` source, which fails only during BuildKit execution.
+The script reads the exact runner Pod's bounded, structured failure export and requires its failed second Nydus target to diagnose the fixture-owned `/missing` source path; it does not match BuildKit's changeable English error wording.
+If that path is absent, the Pod or export disappears before capture, or the diagnostic format changes, the acceptance fails closed and retains evidence for manual review rather than attributing an unrelated failure to the fixture.
+The only accepted result is final `Failed/BuildFailed`, with two first-target `status.outputs` whose manifest digests equal their durable runner `pushedDigest` receipts and the exact registry tags; the later target must have failed verification results and no tags.
+The public job/results must agree with durable source identity, idempotency key, output format, platform, manifest digest, and immutable reference.
+A 20-minute overall deadline, five-minute failed-verification window, host memory/disk and node pressure/Pod guards, and runtime-image checks stop abnormal runs.
+This tests the ordinary partial-failure path; controller fault tests separately cover transient registry/export errors, leader restart, and terminal status-write ambiguity.
 
-Private evidence is saved under `.work/partial-output/<run-id>/`: the source archive and digest, run-scoped tag names, projected status/runner/node/ledger samples, bounded runner log excerpts, public job/results, registry digest comparisons, and exact CR deletion receipt. Unknown objects are recorded by name/UID only, and an exact token reflected in a response blocks its write. On success the script deletes only its own KovaBuild using an API-server UID precondition; on an abnormal nonterminal result it attempts the same exact stop and reports if that cannot be proven. All source/output tags, the registry, Kind cluster, and receipts remain for review. Never use repository-wide or digest-wide registry deletion to clean these tags; review exact run receipts first.
+Private evidence is saved under `.work/partial-output/<run-id>/`: the source archive and digest, run-scoped tag names, projected status/runner/node/ledger samples, bounded runner log excerpts and failure export with its `/missing` proof, public job/results, registry digest comparisons, and exact CR deletion receipt.
+Unknown objects are recorded by name/UID only, and an exact token reflected in a response blocks its write.
+On success the script deletes only its own KovaBuild using an API-server UID precondition; on an abnormal nonterminal result it attempts the same exact stop and reports if that cannot be proven.
+All source/output tags, the registry, Kind cluster, and receipts remain for review.
+Never use repository-wide or digest-wide registry deletion to clean these tags; review exact run receipts first.
 
 ## CRD Upgrade Smoke
 

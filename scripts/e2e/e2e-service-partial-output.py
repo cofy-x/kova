@@ -23,6 +23,7 @@ import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode
 from urllib.request import ProxyHandler, Request, build_opener
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -38,6 +39,7 @@ REGISTRY_IMAGE = (
 )
 IMAGE_REPOSITORY = "localhost:5002/kova"
 RUN_DEADLINE_SECONDS = 20 * 60
+MAX_RUNNER_EXPORT_BYTES = 2 * 1024 * 1024 + 4096
 MIN_MEMORY_KIB = 8 * 1024 * 1024
 MIN_DISK_KIB = 20 * 1024 * 1024
 MIN_NODE_MEMORY_BYTES = 2 * 1024**3
@@ -797,6 +799,98 @@ def capture_runner(
     return True, pod["metadata"]["uid"]
 
 
+def verify_copy_missing_export(raw: str, second: str) -> dict | None:
+    """Attribute the second target's failure to this fixture's missing COPY source.
+
+    The exact /missing path is fixture-owned evidence from BuildKit's failure,
+    not a match on BuildKit's version-dependent error prose. An export without
+    the second result is still in progress; any completed ambiguous result
+    fails closed.
+    """
+    if len(raw.encode()) > MAX_RUNNER_EXPORT_BYTES:
+        fail("runner failure export exceeded its bounded evidence size")
+    try:
+        entries = [json.loads(line) for line in raw.splitlines() if line.strip()]
+    except ValueError:
+        fail("runner failure export was not valid JSONL")
+    if any(not isinstance(item, dict) for item in entries):
+        fail("runner failure export contained a non-object entry")
+    target = second.replace(":dev", ":dev_nydus_v3")
+    if not entries:
+        return None
+    if len(entries) != 1 or entries[0].get("target") != target:
+        fail("runner failure export was not scoped to the exact second Nydus target")
+    entry = entries[0]
+    logs = entry.get("logs", "")
+    if (
+        entry.get("success") is not False
+        or entry.get("manifest_digest")
+        or not isinstance(entry.get("reason"), str)
+        or not entry["reason"]
+        or not isinstance(logs, str)
+        or not logs
+    ):
+        fail("intentional failure target lacks a failed BuildKit result")
+    # The source archive has COPY missing /must-not-exist and no file named
+    # missing. A bare `COPY missing ...` progress line cannot satisfy /missing.
+    # If a BuildKit release omits the source path from its diagnostic, this
+    # acceptance must stop for manual review rather than infer causality.
+    path_lines = [
+        line
+        for line in logs.splitlines()
+        if re.search(r"(?<![A-Za-z0-9_])/missing(?![A-Za-z0-9_/-])", line)
+    ]
+    if not path_lines:
+        fail("runner failed, but the fixture-owned /missing COPY source was not diagnosed")
+    return {
+        "target": target,
+        "success": False,
+        "source_path": "/missing",
+        "reason_sha256": sha256(entry["reason"].encode()),
+        "diagnostic_line_sha256": sha256(path_lines[-1].encode()),
+        "export_sha256": sha256(raw.encode()),
+    }
+
+
+def capture_copy_failure(run_dir: Path, runner_name: str, runner_uid: str, second: str) -> bool:
+    target = second.replace(":dev", ":dev_nydus_v3")
+    query = urlencode({"with-fail": "true", "target": target})
+    try:
+        raw = kctl(
+            "-n",
+            NAMESPACE,
+            "exec",
+            f"pod/{runner_name}",
+            "-c",
+            "runner",
+            "--",
+            "kovad",
+            "transport",
+            "--method",
+            "POST",
+            "--path",
+            "/api/v1/export",
+            "--query",
+            query,
+            timeout=30,
+        )
+    except AcceptanceError as error:
+        # A new runner may not yet have opened its result store. Retry while
+        # the exact Pod exists; a terminal build without proof fails closed.
+        save_text(run_dir / "runner-failure-export-unavailable.txt", f"{error}\n")
+        return False
+    proof = verify_copy_missing_export(raw, second)
+    if proof is None:
+        return False
+    observed = kjson("-n", NAMESPACE, "get", "pod", runner_name, "-o", "json")
+    if observed["metadata"]["uid"] != runner_uid:
+        fail("runner Pod changed during failure-export capture")
+    proof["runner_pod_uid"] = runner_uid
+    save_text(run_dir / "runner-failure-export.jsonl", raw)
+    save_json(run_dir / "copy-missing-proof.json", proof)
+    return True
+
+
 def start_port_forward(
     run_dir: Path, resource: str, remote_port: int
 ) -> tuple[subprocess.Popen, int, object]:
@@ -949,6 +1043,57 @@ def verify_failed_receipt(build: dict, first: str, second: str) -> dict[str, str
         if indexed[key].get("state") != "failed" or indexed[key].get("pushedDigest"):
             fail("later intentional failure unexpectedly pushed an output")
     return digests
+
+
+def verify_public_partial(
+    public_job: dict, public_results: dict, build: dict, digests: dict[str, str]
+) -> None:
+    spec, status = build["spec"], build["status"]
+    source = spec["source"]
+    job_id = build["metadata"]["name"]
+    idempotency_key = spec["idempotencyKey"]
+    if (
+        public_job.get("id") != job_id
+        or public_job.get("status") != "failed"
+        or public_job.get("failure_code") != "build_failed"
+        or public_job.get("source_uri") != source["uri"]
+        or public_job.get("source_digest") != source["digest"]
+        or public_job.get("idempotency_key") != idempotency_key
+        or public_results.get("id") != job_id
+        or public_results.get("source_uri") != source["uri"]
+        or public_results.get("source_digest") != source["digest"]
+        or public_results.get("idempotency_key") != idempotency_key
+    ):
+        fail("public job/results identity or source differs from the durable failed build")
+    expected = {
+        (
+            item["format"],
+            item["image"],
+            item["platform"],
+            item["manifestDigest"],
+            item["image"].rsplit(":", 1)[0] + "@" + item["manifestDigest"],
+        )
+        for item in status["outputs"]
+    }
+    outputs = public_results.get("outputs")
+    if not isinstance(outputs, list) or len(outputs) != len(expected):
+        fail("public partial output count differs from durable receipts")
+    actual = {
+        (
+            item["format"],
+            item["image"],
+            item["platform"],
+            item["manifest_digest"],
+            item["immutable_ref"],
+        )
+        for item in outputs
+    }
+    if (
+        len(actual) != len(outputs)
+        or actual != expected
+        or {item["image"]: item["manifest_digest"] for item in outputs} != digests
+    ):
+        fail("public partial output fields differ from exact durable receipts")
 
 
 def api_delete_with_uid(port: int, job_id: str, uid: str) -> dict:
@@ -1106,6 +1251,7 @@ def run_acceptance(revision: str, facts: dict) -> None:
     passed = False
     runner_runtime_seen = False
     runner_pod_uid = ""
+    copy_failure_proven = False
     try:
         safe_snapshot(run_dir, "before")
         for repository, tag in (
@@ -1210,11 +1356,7 @@ def run_acceptance(revision: str, facts: dict) -> None:
             if phase in ("Succeeded", "Cancelled"):
                 save_json(run_dir / "unexpected-terminal.json", project_build(current))
                 fail(f"runner failure was incorrectly projected as {phase}")
-            if phase == "Failed":
-                save_json(run_dir / "terminal-build.json", project_build(current))
-                terminal = True
-                break
-            if phase not in ("", "Queued", "Starting", "Running", "FailedVerifying"):
+            if phase not in ("", "Queued", "Starting", "Running", "FailedVerifying", "Failed"):
                 fail(f"unexpected controller phase {phase}")
             runner_name = current.get("status", {}).get("runnerPodName", "")
             if runner_name:
@@ -1229,6 +1371,18 @@ def run_acceptance(revision: str, facts: dict) -> None:
                     fail("runner Pod UID changed during one build")
                 runner_pod_uid = observed_pod_uid or runner_pod_uid
                 runner_runtime_seen = observed_runtime or runner_runtime_seen
+                if (
+                    observed_runtime
+                    and not copy_failure_proven
+                    and phase in ("Running", "FailedVerifying", "Failed")
+                ):
+                    copy_failure_proven = capture_copy_failure(
+                        run_dir, runner_name, runner_pod_uid, second
+                    )
+            if phase == "Failed":
+                save_json(run_dir / "terminal-build.json", project_build(current))
+                terminal = True
+                break
             if time.monotonic() - last_guard >= 5:
                 if check_kind_identity() != facts["kubeconfig_sha256"]:
                     fail("Kind identity changed during the build")
@@ -1278,6 +1432,8 @@ def run_acceptance(revision: str, facts: dict) -> None:
             fail("no terminal KovaBuild receipt")
         if not runner_runtime_seen:
             fail("runner Pod runtime image identity was never proven")
+        if not copy_failure_proven:
+            fail("intentional BuildKit COPY /missing failure was not proven from the exact runner")
         digests = verify_failed_receipt(current, first, second)
         for image, digest in digests.items():
             repository, tag = image.removeprefix(f"{REGISTRY_CLUSTER}/").split(":", 1)
@@ -1315,17 +1471,7 @@ def run_acceptance(revision: str, facts: dict) -> None:
         )
         save_json(run_dir / "public-job.json", public_job)
         save_json(run_dir / "public-results.json", public_results)
-        if (
-            public_job.get("status") != "failed"
-            or public_job.get("failure_code") != "build_failed"
-            or len(public_results.get("outputs", [])) != 2
-            or {
-                (item["image"], item["manifest_digest"])
-                for item in public_results.get("outputs", [])
-            }
-            != set(digests.items())
-        ):
-            fail("public API misprojected the failed build or partial exact receipts")
+        verify_public_partial(public_job, public_results, current, digests)
         safe_snapshot(run_dir, "terminal", job_id, uid)
         exact_cleanup(
             run_dir, job_id, uid, source_uri, source_digest, targets, facts["kubeconfig_sha256"]
