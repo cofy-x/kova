@@ -42,6 +42,9 @@ KUBECONFIG = ROOT / ".kind" / f"{CLUSTER}.kubeconfig"
 STAGES = (100, 500, 1000)
 POLL_SECONDS = 5
 STEADY_SECONDS = 30
+QUIET_SAMPLE_SECONDS = POLL_SECONDS
+QUIET_MIN_SECONDS = 300
+QUIET_MAX_SECONDS = 600
 PORT = 18086
 API_PROXY_PORT = 18087
 HOST_LOCK = Path("/data/forge-artifacts/kova-deep-queue.run.lock")
@@ -77,6 +80,18 @@ def note(message: str) -> None:
 
 def now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds")  # noqa: UP017 (Python 3.10)
+
+
+def quiet_seconds() -> int:
+    raw = os.environ.get("DEEP_QUEUE_E2E_QUIET_SECONDS", "0")
+    if re.fullmatch(r"0|[1-9][0-9]*", raw) is None:
+        fail("DEEP_QUEUE_E2E_QUIET_SECONDS must be 0 or a decimal duration")
+    seconds = int(raw)
+    if seconds != 0 and not (
+        QUIET_MIN_SECONDS <= seconds <= QUIET_MAX_SECONDS and seconds % 30 == 0
+    ):
+        fail("DEEP_QUEUE_E2E_QUIET_SECONDS must be 0 or a 30s multiple from 300 to 600")
+    return seconds
 
 
 def command(argv: list[str], *, input_text: str | None = None, timeout: int = 20) -> str:
@@ -1065,6 +1080,7 @@ def preflight() -> dict:
     fingerprint = exact_kind_identity()
     nodes = good_nodes(kjson("get", "nodes", "-o", "json"))
     deployment = kjson("-n", NAMESPACE, "get", "deployment", f"{RELEASE}-service", "-o", "json")
+    quiet_duration = quiet_seconds()
     principal, platform = single_service_args(deployment)
     pods = service_pods()
     helm_status = json.loads(
@@ -1213,6 +1229,7 @@ def preflight() -> dict:
         "kova_commit": kova_commit,
         "principal": principal,
         "platform": platform,
+        "quiet_seconds": quiet_duration,
         "docker_root": str(docker_root),
         "pods": pods,
     }
@@ -1535,6 +1552,102 @@ def run_status(run_dir: Path, identity: dict) -> None:
     )
 
 
+def observe_long_quiet(
+    pre: dict,
+    run_dir: Path,
+    expected_ids: dict[str, str],
+    expected_uids: dict[str, str],
+    blocker_id: str,
+    blocker_uid: str,
+    overall_deadline: float,
+) -> dict:
+    duration = pre["quiet_seconds"]
+    if duration == 0:
+        return {"status": "disabled", "seconds": 0}
+    if time.monotonic() + duration + CLEANUP_DEADLINE_SECONDS >= overall_deadline:
+        fail("long quiet observation lacks the full bounded cleanup reserve")
+    quiet_dir = run_dir / "stage-1000-quiet"
+    quiet_dir.mkdir()
+    summaries = []
+    window_seconds = duration // 3
+    for window in ("early", "middle", "late"):
+        window_dir = quiet_dir / window
+        window_dir.mkdir()
+        api_guard_before = api_metrics()
+        api_guard_at = time.monotonic()
+        samples = 0
+
+        def guard() -> None:
+            nonlocal api_guard_before, api_guard_at, samples
+            if time.monotonic() >= overall_deadline:
+                fail("long quiet observation exceeded the one-hour run deadline")
+            observe_blocked_runtime(
+                expected_ids,
+                blocker_id,
+                blocker_uid,
+                pre["pods"],
+                window_dir,
+                Path(pre["docker_root"]),
+            )
+            api_guard_before, api_guard_at = guard_api(
+                window_dir, api_guard_before, api_guard_at, force=True
+            )
+            samples += 1
+
+        guard()
+        before_api = api_metrics()
+        save_json(window_dir / "api-before.json", before_api)
+        measured_start = time.monotonic()
+        for _ in range(window_seconds // QUIET_SAMPLE_SECONDS):
+            time.sleep(QUIET_SAMPLE_SECONDS)
+            guard()
+        after_api = api_metrics()
+        measured_seconds = time.monotonic() - measured_start
+        save_json(window_dir / "api-after.json", after_api)
+        wait_queue_state(
+            expected_ids,
+            blocker_id,
+            blocker_uid,
+            window_dir,
+            time.monotonic() + 1,
+            expected_uids=expected_uids,
+        )
+        summary = {
+            "window": window,
+            "timestamp": now(),
+            "planned_seconds": window_seconds,
+            "measured_seconds": measured_seconds,
+            "api": metric_delta(before_api, after_api, measured_seconds),
+            "reconcile": {"availability": "unavailable: not collected by this benchmark"},
+            "resource_peaks": resource_peaks(window_dir),
+            "observer": {
+                "guard_samples": samples,
+                "sample_interval_seconds": QUIET_SAMPLE_SECONDS,
+                "api_total_includes_benchmark_probes_and_kubernetes_system_traffic": True,
+                "api_total_is_not_kova_attributable": True,
+            },
+        }
+        save_json(window_dir / "summary.json", summary)
+        summaries.append(summary)
+        note(
+            f"1000 quiet {window} PASS: {summary['api']['total_qps']:.1f} API/s; "
+            f"reconcile {summary['reconcile']['availability']}"
+        )
+    result = {
+        "status": "passed",
+        "seconds": duration,
+        "measured_seconds": sum(item["measured_seconds"] for item in summaries),
+        "windows": summaries,
+        "interpretation": (
+            "Three sequential measured windows after the original 30s stage; API counters "
+            "include this benchmark's probes and Kubernetes system traffic, and cannot "
+            "alone establish Kova-attributed idle QPS or a production SLA."
+        ),
+    }
+    save_json(quiet_dir / "summary.json", result)
+    return result
+
+
 def live(pre: dict, token: str) -> Path:
     run_id = (
         "deep-queue-"
@@ -1552,6 +1665,7 @@ def live(pre: dict, token: str) -> Path:
             "started_at": now(),
             "stages": STAGES,
             "steady_seconds": STEADY_SECONDS,
+            "quiet_seconds": pre["quiet_seconds"],
             "poll_seconds": POLL_SECONDS,
             "limits": {
                 "service_cpu_nano": SERVICE_CPU_MAX_NANO,
@@ -1829,6 +1943,16 @@ def live(pre: dict, token: str) -> Path:
             )
             previous = target
 
+        quiet_result = observe_long_quiet(
+            pre,
+            run_dir,
+            expected_ids,
+            expected_uids,
+            blocker_id,
+            blocker_uid,
+            overall_deadline,
+        )
+
         # Cleanup is exact-ID only. Unknown outcomes or any stage failure keep
         # all CRs and ledgers for operator evidence instead of guessing.
         cleanup_dir = run_dir / "cleanup"
@@ -1985,6 +2109,11 @@ def live(pre: dict, token: str) -> Path:
                 "status": "passed",
                 "completed_at": now(),
                 "stages": STAGES,
+                "long_quiet": {
+                    "status": quiet_result["status"],
+                    "seconds": quiet_result["seconds"],
+                    "measured_seconds": quiet_result.get("measured_seconds"),
+                },
                 "exact_cr_cleanup": True,
                 "emergency_stop": "not-needed",
                 "original_service_pods_deleted": False,

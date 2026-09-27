@@ -6,6 +6,7 @@ import hashlib
 import importlib.util
 import io
 import json
+import os
 import socketserver
 import tarfile
 import tempfile
@@ -138,6 +139,61 @@ def preflight_fact(value: dict) -> dict:
 
 
 class DeepQueueSafetyTest(unittest.TestCase):
+    def test_long_quiet_duration_is_explicit_and_bounded(self) -> None:
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(BENCH.quiet_seconds(), 0)
+        for valid in ("0", "300", "330", "600"):
+            with patch.dict(os.environ, {"DEEP_QUEUE_E2E_QUIET_SECONDS": valid}):
+                self.assertEqual(BENCH.quiet_seconds(), int(valid))
+        for invalid in ("", "00", "299", "301", "601", "-300", "300.0", "999999"):
+            with patch.dict(os.environ, {"DEEP_QUEUE_E2E_QUIET_SECONDS": invalid}):
+                with self.assertRaises(BENCH.BenchError):
+                    BENCH.quiet_seconds()
+
+    def test_long_quiet_retains_api_failure_gate(self) -> None:
+        with self.assertRaises(BENCH.BenchError):
+            BENCH.metric_delta({}, {"GET||configmaps|429": 1.0}, 100.0)
+        with self.assertRaises(BENCH.BenchError):
+            BENCH.metric_delta({}, {"GET||configmaps|200": 120_001.0}, 100.0)
+
+    def test_long_quiet_emits_three_guarded_windows(self) -> None:
+        pre = {
+            "quiet_seconds": 300,
+            "pods": [],
+            "docker_root": "/",
+        }
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.object(BENCH.time, "sleep"),
+            patch.object(BENCH, "api_metrics", return_value={"GET||configmaps|200": 7.0}),
+            patch.object(BENCH, "observe_blocked_runtime"),
+            patch.object(
+                BENCH, "guard_api", side_effect=lambda _path, before, _at, **_kw: (before, 1.0)
+            ),
+            patch.object(BENCH, "resource_peaks", return_value={"service_cpu_nano_max": 1}),
+            patch.object(BENCH, "wait_queue_state"),
+        ):
+            root = Path(directory)
+            result = BENCH.observe_long_quiet(
+                pre, root, {}, {}, "blocker", UID, BENCH.time.monotonic() + 2000
+            )
+            self.assertEqual(result["status"], "passed")
+            self.assertGreater(result["measured_seconds"], 0)
+            self.assertEqual(
+                [item["window"] for item in result["windows"]], ["early", "middle", "late"]
+            )
+            self.assertTrue(
+                all(
+                    item["reconcile"]["availability"]
+                    == "unavailable: not collected by this benchmark"
+                    for item in result["windows"]
+                )
+            )
+            self.assertTrue(
+                all(item["observer"]["guard_samples"] == 21 for item in result["windows"])
+            )
+            self.assertTrue((root / "stage-1000-quiet" / "summary.json").is_file())
+
     def test_pod_image_id_can_be_exact_cri_repo_digest_or_config_digest(self) -> None:
         reference = "localhost:5002/kova:controller-dev"
         config_digest = "sha256:" + "a" * 64
