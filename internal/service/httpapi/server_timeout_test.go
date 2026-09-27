@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -27,15 +28,25 @@ func TestServiceHTTPTimeoutsConfigured(t *testing.T) {
 
 func TestServiceHTTPClosesSlowIncompleteHeaders(t *testing.T) {
 	httpSrv := newTestServer(t, &fakeKube{}).httpServer()
-	httpSrv.ReadHeaderTimeout = 150 * time.Millisecond
-	httpSrv.ReadTimeout = time.Second
+	httpSrv.ReadHeaderTimeout = 2 * time.Second
+	httpSrv.ReadTimeout = 3 * time.Second
 	addr := serveServiceTCP(t, httpSrv)
 	conn := dialServiceTCP(t, addr)
 	defer conn.Close()
 	if _, err := io.WriteString(conn, "GET /healthz HTTP/1.1\r\nHost: localhost\r\nX-Stalled: "); err != nil {
 		t.Fatal(err)
 	}
-	if err := conn.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+	stalledAt := time.Now()
+	for attempt := 0; attempt < 3; attempt++ {
+		assertServiceResponsiveWhileStalled(t, addr)
+		if elapsed := time.Since(stalledAt); elapsed >= httpSrv.ReadHeaderTimeout {
+			t.Fatalf("healthy requests completed after slow header deadline (%s)", elapsed)
+		}
+		if attempt < 2 {
+			time.Sleep(200 * time.Millisecond)
+		}
+	}
+	if err := conn.SetReadDeadline(time.Now().Add(3 * time.Second)); err != nil {
 		t.Fatal(err)
 	}
 	reader := bufio.NewReader(conn)
@@ -60,16 +71,23 @@ func TestServiceHTTPClosesTrickledBodyWithoutAdmittingBuild(t *testing.T) {
 	srv := newTestServer(t, &fakeKube{})
 	httpSrv := srv.httpServer()
 	httpSrv.ReadHeaderTimeout = time.Second
-	httpSrv.ReadTimeout = 300 * time.Millisecond
+	httpSrv.ReadTimeout = 2 * time.Second
 	addr := serveServiceTCP(t, httpSrv)
 	conn := dialServiceTCP(t, addr)
 	defer conn.Close()
 	if _, err := io.WriteString(conn, "POST /v1/builds HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer token\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n "); err != nil {
 		t.Fatal(err)
 	}
+	stalledAt := time.Now()
 	// Progress every 50 ms, but never complete the declared body. A total
 	// read deadline must still expire; an idle-only deadline would not.
-	for attempt := 0; attempt < 10; attempt++ {
+	for attempt := 0; attempt < 50; attempt++ {
+		if attempt == 0 || attempt == 8 || attempt == 16 {
+			assertServiceResponsiveWhileStalled(t, addr)
+			if elapsed := time.Since(stalledAt); elapsed >= httpSrv.ReadTimeout {
+				t.Fatalf("healthy requests completed after slow body deadline (%s)", elapsed)
+			}
+		}
 		time.Sleep(50 * time.Millisecond)
 		if _, err := io.WriteString(conn, " "); err != nil {
 			break
@@ -90,6 +108,34 @@ func TestServiceHTTPClosesTrickledBodyWithoutAdmittingBuild(t *testing.T) {
 	}
 	if len(builds.Items) != 0 {
 		t.Fatalf("incomplete request admitted %d builds", len(builds.Items))
+	}
+}
+
+func assertServiceResponsiveWhileStalled(t *testing.T, addr string) {
+	t.Helper()
+	transport := &http.Transport{}
+	defer transport.CloseIdleConnections()
+	client := &http.Client{Transport: transport, Timeout: 500 * time.Millisecond}
+	for _, path := range []string{"/readyz", "/v1/builds?limit=1"} {
+		request, err := http.NewRequest(http.MethodGet, "http://"+addr+path, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.HasPrefix(path, "/v1/") {
+			request.Header.Set("Authorization", "Bearer token")
+		}
+		response, err := client.Do(request)
+		if err != nil {
+			t.Fatalf("%s unavailable while another connection is stalled: %v", path, err)
+		}
+		body, readErr := io.ReadAll(io.LimitReader(response.Body, 4096))
+		closeErr := response.Body.Close()
+		if readErr != nil || closeErr != nil {
+			t.Fatalf("%s response read=%v close=%v", path, readErr, closeErr)
+		}
+		if response.StatusCode != http.StatusOK {
+			t.Fatalf("%s status=%d while another connection is stalled: %s", path, response.StatusCode, body)
+		}
 	}
 }
 
