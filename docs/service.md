@@ -71,6 +71,9 @@ Digest-only destinations and free-form platform labels are rejected.
 The `_nydus_v3` tag suffix is reserved for Kova's derived Nydus output and is rejected on logical targets, preventing OCI and Nydus concrete output collisions.
 With `format=both`, status can contain at most 200 concrete outputs.
 Requested concurrency is between 1 and 100 and cannot exceed the logical target count.
+The unique-target check applies within one request; Kova cannot reserve a mutable registry tag against another build or an external writer.
+Callers should use a distinct output tag per logical build and retain pushed manifests and blobs long enough for verification and downstream pulls.
+If a competing writer moves a tag and the registry removes this build's digest, Kova retries the exact digest only until its bounded verification deadline, then fails without substituting the new tag's image.
 
 After a source is fetched and digest-verified, the controller inspects its metadata in the runner Pod.
 The normalized source `(target, platform)` set must exactly match `spec.targets` before the build request is sent to BuildKit.
