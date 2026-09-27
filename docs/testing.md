@@ -55,6 +55,7 @@ and environment policy in the consuming workspace rather than this repository.
 | `make e2e-service-admission-deep-queue` | Read-only preflight by default; live mode holds one unschedulable blocker, grows a real API-server-backed queue through 100, 500, and 1000 CRs, records independent HTTP/API/resource receipts, and performs exact-ID cleanup only after every stage passes. | The only Kind cluster must be `kova-deep-queue`, with two ready Service replicas, empty ledgers/workloads, active=1, queued global/requester=1000, and `never=true` runner selector. |
 | `make e2e-service-partial-output` | Read-only preflight by default; live mode executes a real two-target OCI+Nydus runner build whose later target fails in BuildKit, then checks final `Failed` and the first target's exact digest-pinned partial receipts. | Existing empty `kova-partial-output-41` Kind on `wayne-hk-kvm`; run-scoped source/output tags and private receipts under `.work/partial-output/`. |
 | `make e2e-source-capacity` | Read-only preflight by default; live mode publishes one 128 MiB incompressible immutable source, builds one OCI output, verifies its digest and host pull, and samples Kind node/runner state. Preserves run-scoped receipts and tags; never deletes the cluster or registry content. | Existing empty, dedicated `kova-source-capacity` Kind quickstart cluster and localhost registry |
+| `make e2e-source-oci-oversize` | Read-only preflight by default; live mode streams one exact 512 MiB + 1 byte sparse ZIP as an immutable OCI source, submits one public Service build, and requires an `InvalidSource` size-limit failure with no output tag. | Existing empty, dedicated `kova-source-capacity` Kind quickstart cluster and localhost registry |
 | `make e2e-service` | RBAC isolation, immutable OCI source publication, pre-build target-and-platform contract failure, platform-scoped worker dispatch, safe caller retry, verified output platform and manifest digest, ephemeral logs, TTL cleanup, and host pull. | `examples/simple`, `.work/result-service.jsonl` |
 | `make e2e-crd-upgrade` | Isolated pre-retry CRD to current CRD/controller migration, including live status pruning/persistence, a quiescence gate, and an injected old Starting runner that must fail before POST. | Public `v0.1.0-rc.9` chart and role images, dedicated Kind cluster and registry |
 | `make e2e-release KOVA_VERSION=vX.Y.Z` | Downloads and verifies the exact public CLI and OCI chart, pulls matching public role images, then runs the immutable-source Service lifecycle in a clean kind cluster. | GitHub release files, public OCI packages, `.work/result-released.jsonl` |
@@ -349,7 +350,25 @@ SOURCE_PRESSURE_E2E_MODE=run \
 
 It requires 20 GiB workspace/Docker disk, 2 GiB temporary disk, and 8 GiB memory headroom, then expects four malformed or oversized archives to be rejected before publication with each exact run tag absent.
 Run it in a persistent session; HUP/INT/TERM fail the campaign and retain its private `.work/source-pressure-rejection/<run-id>/` evidence.
-Passing these two tests does not establish kubelet eviction behavior or oversized-source failure during Service-side immutable fetch, so those gates remain separate.
+The Service-side oversized immutable source test reuses the same dedicated Kind, image identity preflight, and exact UID cleanup guard.
+It publishes a valid sparse ZIP through the local registry API in 1 MiB streaming chunks, bypassing only the Kova client's pre-publication size check so the runner's OCI fetch limit is exercised.
+Its source is exactly 512 MiB + 1 byte; the source tag and all receipts remain available for inspection.
+Run it only after the earlier source-capacity test has finished and all KovaBuilds, runner Pods, and admission ledgers are empty:
+
+```bash
+make e2e-source-oci-oversize
+SOURCE_OCI_OVERSIZE_MODE=run \
+  SOURCE_OCI_OVERSIZE_ACK=kova-source-capacity/kova/kova-sources/source-capacity \
+  make e2e-source-oci-oversize
+```
+
+The live mode requires at least 20 GiB free workspace and Docker disk, 2 GiB free temporary disk, and 8 GiB available memory.
+It refuses existing source and output tags for its unique run ID and retains the sparse local ZIP, OCI manifest and blob digests, Service and KovaBuild receipts, bounded `source-fetch` logs, runner and two-node samples, registry tag headers, and exact UID stop receipt under `.work/source-oci-oversize/<run-id>/`.
+Expected success means the public Service reports `invalid_source`, the terminal KovaBuild reason is `InvalidSource`, the captured init log identifies the 512 MiB compressed limit, no target tag appears, and the exact CR UID, runner, and ledgers are cleared.
+The Service intentionally exposes a generic public error string; the precise size diagnostic comes from the bounded init log, and kubelet's termination message is only supplementary evidence.
+If any check fails, the script attempts the existing full-contract UID-precondition stop and preserves evidence; a timed-out submission with no observed CR remains uncertain and requires inspection before another run.
+The test does not delete registry blobs or tags, Kind, deployment images, or unrelated workloads.
+Passing this case and the source-pressure client rejection cases does not establish kubelet eviction behavior; that is a separate gate.
 
 ## Isolated Partial-Output Receipt Acceptance (#41)
 
