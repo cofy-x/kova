@@ -33,7 +33,9 @@ role tags and the registry mapping described in the
 ## Cluster Installation
 
 Install an exact public OCI chart and add an environment-owned values file when
-the defaults need to change:
+the defaults need to change. For an existing Service release crossing the
+runner protocol boundary, complete the [drain procedure](#cross-version-service-upgrade)
+before running this installation sequence:
 
 ```bash
 export KOVA_VERSION=vX.Y.Z
@@ -43,9 +45,9 @@ helm show crds oci://ghcr.io/cofy-x/charts/kova \
 ./scripts/deployment/verify-kovabuild-crd.sh
 ```
 
-Run the gate from the matching Kova checkout, using the same `KUBECONFIG` as
-the Helm upgrade. Proceed only if it exits zero; it blocks when the CRD is not
-Established, cannot be read, or lacks the `v1alpha1` status fields with
+Run the CRD gate from the matching Kova checkout, using the same `KUBECONFIG` as
+the Helm upgrade. It blocks when the CRD is not Established, cannot be read,
+or lacks the `v1alpha1` status fields with
 `pollFailureSince: string/date-time` and `pollFailureCount: integer/int32`.
 Then upgrade the controller:
 
@@ -57,6 +59,56 @@ helm upgrade --install kova oci://ghcr.io/cofy-x/charts/kova \
   --set-string worker.platform=linux/amd64 \
   -f <environment-values.yaml>
 ```
+
+### Cross-Version Service Upgrade
+
+This drain is mandatory when crossing from `v0.1.0-rc.9` to a controller that
+requires idempotent runner submission and immutable result digests. Do not
+upgrade while old Starting, Running, or otherwise nonterminal builds remain:
+the old runner rejects the new `request-id` query and does not export the
+digest required for result verification. The new controller detects an idle
+runner that does not advertise `idempotent-build-request-v1` and fails its
+KovaBuild with `RunnerProtocolIncompatible` before POST, but that fail-closed
+safety net does not make an in-flight cross-version build safe to migrate.
+An old already-running runner can still be observed without resubmission;
+its result is subject to the new controller's verification contract and may
+fail. Investigate and resolve unexpected old builds rather than bypassing the
+drain gate or deleting their status to make it pass.
+
+Freeze all Service submitters first. While the old controller is still running,
+wait for all KovaBuilds to reach a terminal phase and for its runner Pods to be
+deleted. Then scale the old Service Deployment to zero, wait until all old
+Service Pods are gone, and run the drain gate. Keep submitters frozen and the
+old controller stopped while applying and verifying the new CRD; run the drain
+gate again immediately before upgrading the chart. After the new Service
+rollout is ready, resume submitters.
+
+```bash
+export NAMESPACE=kova RUNNER_NAMESPACE=kova RELEASE_NAME=kova
+# Inspect until there are no nonterminal builds and no runner Pods.
+kubectl -n "${RUNNER_NAMESPACE}" get kovabuilds,pods
+kubectl -n "${NAMESPACE}" scale deployment/kova-service --replicas=0
+kubectl -n "${NAMESPACE}" rollout status deployment/kova-service
+./scripts/deployment/verify-kovabuild-drained.sh
+
+# Apply and verify the CRD as shown above while the old Service remains stopped.
+./scripts/deployment/verify-kovabuild-crd.sh
+./scripts/deployment/verify-kovabuild-drained.sh
+# Now run the helm upgrade shown above, then:
+kubectl -n "${NAMESPACE}" rollout status deployment/kova-service
+```
+
+Run the drain gate from the matching checkout and `KUBECONFIG`; it takes
+`NAMESPACE`, `RUNNER_NAMESPACE` (when `serviceDaemon.runnerNamespace` differs),
+and `RELEASE_NAME`, all defaulting to `kova`. It blocks on any nonterminal or
+unknown-phase KovaBuild, any runner Pod, any Service Pod, a Service Deployment
+with replicas, or an unreadable Kubernetes response. It is a point-in-time
+check, not a submission lock. The Helm upgrade should set the new Service
+replica count to the intended positive value; the old scale-down must not be
+carried into its values. If a separate operator or autoscaler can restart the
+old Service, suspend that controller for this maintenance window as well.
+The example deployment name assumes the chart's default fullname; adjust it
+when the release uses `fullnameOverride`.
 
 Apply the CRD for every selected release before the Helm upgrade. Helm creates
 objects from `crds/` during initial installation but does not upgrade them.

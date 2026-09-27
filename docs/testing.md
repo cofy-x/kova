@@ -49,7 +49,7 @@ and environment policy in the consuming workspace rather than this repository.
 | `make e2e` | Low-level zip-stream OCI build, push, export, and host pull. | `examples/simple`, `.work/result.jsonl` |
 | `make e2e-helm-quickstart` | Packages the chart, installs it into an ephemeral minimal kind cluster, runs the authenticated Service workflow, and deletes the cluster on exit. Set `KEEP_KIND_CLUSTER=true` to retain a cluster created by the test, or `REUSE_KIND_CLUSTER=true` to explicitly use a caller-owned cluster that the test will not delete. | Helm archive, `examples/simple`, `.work/result-service.jsonl` |
 | `make e2e-service` | RBAC isolation, immutable OCI source publication, pre-build target-and-platform contract failure, platform-scoped worker dispatch, safe caller retry, verified output platform and manifest digest, ephemeral logs, TTL cleanup, and host pull. | `examples/simple`, `.work/result-service.jsonl` |
-| `make e2e-crd-upgrade` | Isolated pre-retry CRD to current CRD/controller migration, including live status pruning and persistence checks before the Service lifecycle. | Public `v0.1.0-rc.9` chart and role images, dedicated Kind cluster and registry |
+| `make e2e-crd-upgrade` | Isolated pre-retry CRD to current CRD/controller migration, including live status pruning/persistence, a quiescence gate, and an injected old Starting runner that must fail before POST. | Public `v0.1.0-rc.9` chart and role images, dedicated Kind cluster and registry |
 | `make e2e-release KOVA_VERSION=vX.Y.Z` | Downloads and verifies the exact public CLI and OCI chart, pulls matching public role images, then runs the immutable-source Service lifecycle in a clean kind cluster. | GitHub release files, public OCI packages, `.work/result-released.jsonl` |
 | `make e2e-concurrent` | Multi-image OCI build with worker distribution checks. | generated concurrent examples, `.work/result-concurrent.jsonl` |
 | `make e2e-dragonfly-nydus` | Nydus conversion, export, Dragonfly preheat, and Pod startup. | `examples/nydus-smoke`, `.work/result-nydus.jsonl` |
@@ -76,8 +76,14 @@ controller starts only after the CRD and status round-trip checks pass.
 
 The smoke installs the old chart, verifies that Kubernetes prunes both retry
 status fields in an isolated probe namespace, applies the current CRD, waits
-for Established, proves those fields now persist through `/status`, and only
-then upgrades the controller and runs the authenticated Service E2E.
+for Established, proves those fields now persist through `/status`, and checks
+that the old release is drained before upgrading. It then deliberately injects
+an old `Starting` KovaBuild with a ready `v0.1.0-rc.9` runner and confirms that
+the drain gate blocks it. This isolated negative fixture bypasses the gate to
+verify that the new controller fails it with `RunnerProtocolIncompatible`
+before issuing a build POST. The test removes that fixture before running the
+authenticated Service E2E with current images. Production upgrades must never
+bypass the drain gate; see the [upgrade runbook](deployment/kubernetes.md#cross-version-service-upgrade).
 The baseline rollout and Service E2E use the existing `BASELINE_CHART` path.
 
 It owns only Kind cluster `kova-crd-upgrade`, registry container
@@ -99,8 +105,9 @@ The built `bin/kova` binary and candidate/result images may remain in the host
 Docker image cache. The script does not run `make clean` or remove other Kind
 clusters, registries, or host images.
 
-Cluster-free gate tests are `./scripts/deployment/test-verify-kovabuild-crd.sh`
-and `./scripts/deployment/test-probe-kovabuild-status.sh`.
+Cluster-free gate tests are `./scripts/deployment/test-verify-kovabuild-crd.sh`,
+`./scripts/deployment/test-verify-kovabuild-drained.sh`, and
+`./scripts/deployment/test-probe-kovabuild-status.sh`.
 
 ## Runtime Smoke
 

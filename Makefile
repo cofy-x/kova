@@ -206,6 +206,10 @@ helm-template:
 		--set serviceDaemon.enabled=true \
 		--set serviceDaemon.authentication.mode=unsafe-none >/dev/null
 	helm template $(RELEASE_NAME) ./charts/kova \
+		--set serviceDaemon.enabled=true \
+		--set serviceDaemon.replicas=0 \
+		--set serviceDaemon.authentication.mode=unsafe-none >/dev/null
+	helm template $(RELEASE_NAME) ./charts/kova \
 		--set-string worker.platform=linux/arm64 >/dev/null
 	helm template $(RELEASE_NAME) ./charts/kova \
 		--set serviceDaemon.enabled=true \

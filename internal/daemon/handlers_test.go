@@ -55,6 +55,18 @@ func waitForState(t *testing.T, srv *daemonServer, status string) daemonState {
 	return daemonState{}
 }
 
+func TestBuildStatusAdvertisesIdempotentRequestCapability(t *testing.T) {
+	srv := testDaemonServer(serverBackend{})
+	rec := performEchoRequest(t, echo.New(), http.MethodGet, "/api/v1/build/status", "", srv.handleBuildStatus)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status response=%d body=%s", rec.Code, rec.Body.String())
+	}
+	state := decodeDaemonState(t, rec)
+	if state.Status != "idle" || len(state.Capabilities) != 1 || state.Capabilities[0] != "idempotent-build-request-v1" {
+		t.Fatalf("status response=%#v", state)
+	}
+}
+
 func TestHandleBuildPostRunsAsyncBuild(t *testing.T) {
 	buildCalled := make(chan batch.Options, 1)
 	srv := testDaemonServer(serverBackend{

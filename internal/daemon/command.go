@@ -22,9 +22,10 @@ const (
 )
 
 type daemonState struct {
-	Status    string `json:"status"`
-	Error     string `json:"error,omitempty"`
-	RequestID string `json:"requestId,omitempty"`
+	Status       string   `json:"status"`
+	Error        string   `json:"error,omitempty"`
+	RequestID    string   `json:"requestId,omitempty"`
+	Capabilities []string `json:"capabilities,omitempty"`
 }
 
 type serverBackend struct {

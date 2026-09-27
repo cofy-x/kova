@@ -75,6 +75,8 @@ if [[ -n "${BASELINE_CHART}" ]]; then
       "${ROOT}/scripts/deployment/verify-kovabuild-crd.sh" --expect-legacy
     KUBECONFIG="${ROOT}/${KIND_KUBECONFIG}" \
       "${ROOT}/scripts/deployment/probe-kovabuild-status.sh" --expect-pruned
+    KUBECONFIG="${ROOT}/${KIND_KUBECONFIG}" NAMESPACE="${NAMESPACE}" RELEASE_NAME="${RELEASE_NAME}" \
+      "${ROOT}/scripts/deployment/verify-kovabuild-drained.sh"
   fi
   baseline_revision=$(helm history "${RELEASE_NAME}" \
     --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" \
@@ -96,6 +98,52 @@ kubectl --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" -n "${NAMESPACE}" \
 kubectl --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" -n "${NAMESPACE}" \
   delete pod -l 'app.kubernetes.io/name=kova-runner' --ignore-not-found || true
 
+legacy_upgrade_probe=legacy-starting-upgrade-probe
+legacy_upgrade_pod=kova-job-${legacy_upgrade_probe}
+if [[ "${REQUIRE_LEGACY_CRD}" == true ]]; then
+  # The production drain gate must pass immediately before upgrading. This
+  # isolated test then injects a late old Starting runner to prove the new
+  # controller fails closed if an operator bypasses that gate or a race occurs.
+  KUBECONFIG="${ROOT}/${KIND_KUBECONFIG}" NAMESPACE="${NAMESPACE}" RELEASE_NAME="${RELEASE_NAME}" \
+    "${ROOT}/scripts/deployment/verify-kovabuild-drained.sh"
+  jq -n --arg namespace "${NAMESPACE}" --arg name "${legacy_upgrade_probe}" \
+    --arg target "${SERVICE_TARGET}" --arg platform "${KOVA_PLATFORM}" \
+    '{apiVersion:"kova.cofy.dev/v1alpha1",kind:"KovaBuild",metadata:{name:$name,namespace:$namespace},
+      spec:{requester:{username:"migration-e2e"},targets:[{target:$target,platform:$platform}],
+        source:{uri:"oci://registry.invalid/source@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          digest:"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+        build:{format:"oci",concurrency:1}}}' | \
+    kubectl --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" create -f - >/dev/null
+  jq -n --arg namespace "${NAMESPACE}" --arg name "${legacy_upgrade_pod}" \
+    --arg image "${BASELINE_RUNNER_IMAGE}" \
+    '{apiVersion:"v1",kind:"Pod",metadata:{name:$name,namespace:$namespace,
+        labels:{"app.kubernetes.io/name":"kova-runner"}},
+      spec:{restartPolicy:"Never",securityContext:{runAsNonRoot:true,runAsUser:65532,runAsGroup:65532},
+        containers:[{name:"runner",image:$image,imagePullPolicy:"IfNotPresent",command:["kovad","daemon"],
+          readinessProbe:{exec:{command:["/usr/bin/test","-S","/tmp/kova.sock"]},periodSeconds:1,timeoutSeconds:1}}]}}' | \
+    kubectl --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" create -f - >/dev/null
+  kubectl --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" -n "${NAMESPACE}" \
+    wait "pod/${legacy_upgrade_pod}" --for=condition=Ready --timeout=120s
+  legacy_status=$(kubectl --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" -n "${NAMESPACE}" \
+    exec "${legacy_upgrade_pod}" -- kovad transport --method GET --path /api/v1/build/status)
+  if ! jq -e '.status == "idle" and .capabilities == null' <<<"${legacy_status}" >/dev/null; then
+    echo "error: old runner is not idle without protocol capability: ${legacy_status}" >&2
+    exit 1
+  fi
+  kubectl --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" -n "${NAMESPACE}" \
+    patch kovabuild "${legacy_upgrade_probe}" --type=merge --subresource=status \
+    -p "{\"status\":{\"phase\":\"Starting\",\"runnerPodName\":\"${legacy_upgrade_pod}\",\"allocatedConcurrency\":1}}" >/dev/null
+  if gate_output=$(KUBECONFIG="${ROOT}/${KIND_KUBECONFIG}" NAMESPACE="${NAMESPACE}" RELEASE_NAME="${RELEASE_NAME}" \
+    "${ROOT}/scripts/deployment/verify-kovabuild-drained.sh" 2>&1); then
+    echo 'error: quiescence gate accepted an old Starting runner' >&2
+    exit 1
+  fi
+  if [[ "${gate_output}" != *"${legacy_upgrade_probe}:Starting"* || "${gate_output}" != *"${legacy_upgrade_pod}"* ]]; then
+    echo "error: quiescence gate did not identify the old Starting runner: ${gate_output}" >&2
+    exit 1
+  fi
+fi
+
 sync_service_auth_secret() (
   local token_file
   umask 077
@@ -109,6 +157,12 @@ sync_service_auth_secret() (
 )
 sync_service_auth_secret
 
+service_replicas=1
+if [[ "${REQUIRE_LEGACY_CRD}" == true ]]; then
+  # Keep the new controller stopped through Helm --wait so the short E2E JobTTL
+  # cannot remove the legacy fixture before its fail-closed result is checked.
+  service_replicas=0
+fi
 helm upgrade --install "${RELEASE_NAME}" "${KOVA_CHART}" \
   --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" \
   --namespace "${NAMESPACE}" --create-namespace --wait --timeout 180s \
@@ -121,6 +175,7 @@ helm upgrade --install "${RELEASE_NAME}" "${KOVA_CHART}" \
   --set-string "images.worker.tag=${WORKER_IMAGE##*:}" \
   --set-string "worker.platform=${KOVA_PLATFORM}" \
   --set serviceDaemon.enabled=true \
+  --set "serviceDaemon.replicas=${service_replicas}" \
   --set-string serviceDaemon.authentication.mode=static \
   --set-string "serviceDaemon.authentication.staticTokenSecret.name=${SERVICE_AUTH_SECRET}" \
   --set-string serviceDaemon.authentication.staticTokenSecret.key=token \
@@ -134,6 +189,34 @@ kubectl --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" -n "${NAMESPACE}" \
   --role="${RELEASE_NAME}-service-submitter" --user=kova:e2e \
   --dry-run=client -o yaml | \
   kubectl --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" apply -f - >/dev/null
+
+if [[ "${REQUIRE_LEGACY_CRD}" == true ]]; then
+  kubectl --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" -n "${NAMESPACE}" \
+    scale "deployment/${RELEASE_NAME}-service" --replicas=1 >/dev/null
+  deadline=$((SECONDS + 120))
+  while (( SECONDS < deadline )); do
+    observed=$(kubectl --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" -n "${NAMESPACE}" \
+      get kovabuild "${legacy_upgrade_probe}" -o json)
+    if jq -e '.status.phase == "Failed" and .status.reason == "RunnerProtocolIncompatible" and
+      (.status.message | contains("idempotent build submission"))' <<<"${observed}" >/dev/null; then
+      break
+    fi
+    if jq -e '.status.phase == "Succeeded" or .status.phase == "Cancelled" or
+      (.status.phase == "Failed" and .status.reason != "RunnerProtocolIncompatible")' <<<"${observed}" >/dev/null; then
+      echo "error: legacy Starting runner reached unexpected terminal state: ${observed}" >&2
+      exit 1
+    fi
+    sleep 2
+  done
+  if (( SECONDS >= deadline )); then
+    echo "error: legacy Starting runner did not fail closed: ${observed}" >&2
+    exit 1
+  fi
+  kubectl --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" -n "${NAMESPACE}" \
+    delete kovabuild "${legacy_upgrade_probe}" --wait=true --timeout=60s >/dev/null
+  kubectl --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" -n "${NAMESPACE}" \
+    wait "pod/${legacy_upgrade_pod}" --for=delete --timeout=60s >/dev/null
+fi
 kubectl --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" -n "${NAMESPACE}" \
   rollout status "deployment/${RELEASE_NAME}-service" --timeout=180s
 

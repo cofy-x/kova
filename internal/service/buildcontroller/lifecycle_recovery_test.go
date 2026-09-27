@@ -75,6 +75,71 @@ func storedLifecycleBuild(t *testing.T, c client.Client, name string) *kovav1.Ko
 	return &build
 }
 
+func TestSubmitRejectsLegacyIdleRunnerBeforePost(t *testing.T) {
+	scheme := testScheme(t)
+	build := lifecycleBuild("legacy-idle", kovav1.PhaseStarting)
+	crClient := crfake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&kovav1.KovaBuild{}).WithObjects(build, readyLifecyclePod(build.Status.RunnerPodName)).Build()
+	inspects, submits := 0, 0
+	kubeClient := &fakeKube{execFn: func(opts kube.ExecOptions) error {
+		command := strings.Join(opts.Command, " ")
+		switch {
+		case strings.Contains(command, "--method GET"):
+			_, _ = io.WriteString(opts.Stdout, `{"status":"idle"}`)
+		case strings.Contains(command, "source inspect"):
+			inspects++
+		case strings.Contains(command, "--method POST"):
+			submits++
+		}
+		return nil
+	}}
+	r := KovaBuildReconciler{Client: crClient, Scheme: scheme, Kube: kubeClient, Cfg: config.Config{PollInterval: time.Second}}
+	if _, err := r.submitWhenReady(context.Background(), build); err != nil {
+		t.Fatal(err)
+	}
+	stored := storedLifecycleBuild(t, crClient, "legacy-idle")
+	if stored.Status.Phase != kovav1.PhaseFailed || stored.Status.Reason != "RunnerProtocolIncompatible" || !strings.Contains(stored.Status.Message, "idempotent") {
+		t.Fatalf("status=%#v", stored.Status)
+	}
+	if inspects != 0 || submits != 0 {
+		t.Fatalf("legacy runner was touched after capability rejection: inspects=%d submits=%d", inspects, submits)
+	}
+}
+
+func TestSubmitObservesAlreadyRunningLegacyRunner(t *testing.T) {
+	scheme := testScheme(t)
+	build := lifecycleBuild("legacy-running", kovav1.PhaseStarting)
+	crClient := crfake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&kovav1.KovaBuild{}).WithObjects(build, readyLifecyclePod(build.Status.RunnerPodName)).Build()
+	status := "running"
+	buildPosts := 0
+	kubeClient := &fakeKube{execFn: func(opts kube.ExecOptions) error {
+		command := strings.Join(opts.Command, " ")
+		switch {
+		case strings.Contains(command, "--method GET"):
+			_, _ = fmt.Fprintf(opts.Stdout, `{"status":%q,"error":"legacy build failed"}`, status)
+		case strings.Contains(command, "--method POST") && strings.Contains(command, "--path /api/v1/build "):
+			buildPosts++
+		case strings.Contains(command, "/api/v1/export"):
+			return errors.New("legacy result unavailable")
+		}
+		return nil
+	}}
+	r := KovaBuildReconciler{Client: crClient, Scheme: scheme, Kube: kubeClient, Cfg: config.Config{PollInterval: time.Second}}
+	if _, err := r.submitWhenReady(context.Background(), build); err != nil {
+		t.Fatal(err)
+	}
+	if got := storedLifecycleBuild(t, crClient, "legacy-running").Status.Phase; got != kovav1.PhaseRunning {
+		t.Fatalf("phase after observing legacy running = %s", got)
+	}
+	status = "failed"
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "jobs", Name: "legacy-running"}}); err != nil {
+		t.Fatal(err)
+	}
+	stored := storedLifecycleBuild(t, crClient, "legacy-running")
+	if stored.Status.Phase != kovav1.PhaseFailed || stored.Status.Reason != "BuildFailed" || stored.Status.Message != "legacy build failed" || buildPosts != 0 {
+		t.Fatalf("status=%#v buildPosts=%d", stored.Status, buildPosts)
+	}
+}
+
 func TestSubmitRecoversAfterAcceptedPostAndStatusWriteFailure(t *testing.T) {
 	scheme := testScheme(t)
 	build := lifecycleBuild("ambiguous", kovav1.PhaseStarting)
@@ -90,7 +155,7 @@ func TestSubmitRecoversAfterAcceptedPostAndStatusWriteFailure(t *testing.T) {
 			_, _ = io.WriteString(opts.Stdout, `{"targets":[{"target":"registry.example/demo:dev","platform":"linux/amd64"}]}`)
 		case strings.Contains(command, "--method GET"):
 			if state == "idle" {
-				_, _ = io.WriteString(opts.Stdout, `{"status":"idle"}`)
+				_, _ = io.WriteString(opts.Stdout, `{"status":"idle","capabilities":["idempotent-build-request-v1"]}`)
 			} else {
 				_, _ = io.WriteString(opts.Stdout, `{"status":"running","requestId":"uid-ambiguous"}`)
 			}
@@ -134,7 +199,7 @@ func TestSubmitTreatsLostPostResponseAsUncertainUntilRunnerIsObserved(t *testing
 			if accepted {
 				_, _ = io.WriteString(opts.Stdout, `{"status":"running","requestId":"uid-lost-response"}`)
 			} else {
-				_, _ = io.WriteString(opts.Stdout, `{"status":"idle"}`)
+				_, _ = io.WriteString(opts.Stdout, `{"status":"idle","capabilities":["idempotent-build-request-v1"]}`)
 			}
 		case strings.Contains(command, "--method POST"):
 			submits++
@@ -165,7 +230,7 @@ func TestSubmitRetriesSourceInspectTransportFailure(t *testing.T) {
 		command := strings.Join(opts.Command, " ")
 		switch {
 		case strings.Contains(command, "--method GET"):
-			_, _ = io.WriteString(opts.Stdout, `{"status":"idle"}`)
+			_, _ = io.WriteString(opts.Stdout, `{"status":"idle","capabilities":["idempotent-build-request-v1"]}`)
 		case strings.Contains(command, "source inspect"):
 			inspects++
 			if inspects == 1 {

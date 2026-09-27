@@ -4,12 +4,24 @@ import (
 	"encoding/json"
 	"fmt"
 	"time"
+
+	"github.com/cofy-x/kova/internal/daemonclient"
 )
 
 type BuildState struct {
-	Status    string `json:"status"`
-	Error     string `json:"error,omitempty"`
-	RequestID string `json:"requestId,omitempty"`
+	Status       string   `json:"status"`
+	Error        string   `json:"error,omitempty"`
+	RequestID    string   `json:"requestId,omitempty"`
+	Capabilities []string `json:"capabilities,omitempty"`
+}
+
+func (s BuildState) SupportsIdempotentBuildRequest() bool {
+	for _, capability := range s.Capabilities {
+		if capability == daemonclient.IdempotentBuildRequestCapability {
+			return true
+		}
+	}
+	return false
 }
 
 func ParseBuildState(raw []byte) (BuildState, error) {

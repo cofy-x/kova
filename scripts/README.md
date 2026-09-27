@@ -23,6 +23,11 @@ the categorized paths below.
   by a legacy CRD and retained by the current CRD using a temporary namespace.
 - `deployment/test-probe-kovabuild-status.sh`: exercise the probe and its
   namespace cleanup against a mock Kubernetes API.
+- `deployment/verify-kovabuild-drained.sh`: require all KovaBuilds terminal,
+  no runner or Service Pods, and a stopped Service Deployment before a
+  cross-version controller upgrade; submission must remain frozen separately.
+- `deployment/test-verify-kovabuild-drained.sh`: cluster-free fail-closed
+  checks for active, unknown, unavailable, and malformed drain states.
 
 ## CI
 
@@ -80,7 +85,9 @@ the categorized paths below.
 - `e2e/e2e.sh`: run the basic local OCI build smoke.
 - `e2e/e2e-service.sh`: run the service daemon HTTP build smoke.
 - `e2e/e2e-crd-upgrade.sh`: migrate from the pinned public pre-retry CRD in
-  an isolated Kind cluster, check live status pruning/persistence, then run the Service smoke.
+  an isolated Kind cluster, check live status pruning/persistence, assert the
+  drain gate, and verify an injected old Starting runner fails closed before
+  running the Service smoke.
 - `e2e/e2e-concurrent.sh`: run concurrent local builds.
 - `e2e/e2e-dragonfly-nydus.sh`: run local Dragonfly/Nydus validation.
 - `e2e/e2e-runtime.sh`: run OCI and Nydus runtime validation.

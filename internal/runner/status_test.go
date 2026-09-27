@@ -35,11 +35,18 @@ func TestWaitDecision(t *testing.T) {
 }
 
 func TestParseBuildState(t *testing.T) {
-	state, err := ParseBuildState([]byte(`{"status":"completed"}`))
+	state, err := ParseBuildState([]byte(`{"status":"completed","capabilities":["idempotent-build-request-v1"]}`))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if state.Status != "completed" {
 		t.Fatalf("status = %q", state.Status)
+	}
+	if !state.SupportsIdempotentBuildRequest() {
+		t.Fatal("current runner capability was not recognized")
+	}
+	legacy, err := ParseBuildState([]byte(`{"status":"running"}`))
+	if err != nil || legacy.SupportsIdempotentBuildRequest() {
+		t.Fatalf("legacy state=%#v err=%v", legacy, err)
 	}
 }

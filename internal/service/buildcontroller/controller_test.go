@@ -355,7 +355,7 @@ func TestSubmitWhenReadyValidatesExactSourceTargetSetBeforeBuild(t *testing.T) {
 					return nil
 				}
 				if strings.Contains(command, "--method GET") {
-					_, _ = io.WriteString(opts.Stdout, `{"status":"idle"}`)
+					_, _ = io.WriteString(opts.Stdout, `{"status":"idle","capabilities":["idempotent-build-request-v1"]}`)
 					return nil
 				}
 				_, _ = io.WriteString(opts.Stdout, `{"status":"running"}`)

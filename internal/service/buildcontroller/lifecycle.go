@@ -136,6 +136,9 @@ func (r *KovaBuildReconciler) submitWhenReady(ctx context.Context, build *kovav1
 	if state.Status != "idle" {
 		return r.markSubmitted(ctx, build, state)
 	}
+	if !state.SupportsIdempotentBuildRequest() {
+		return ctrl.Result{}, r.finish(ctx, build, kovav1.PhaseFailed, "RunnerProtocolIncompatible", "idle runner does not advertise idempotent build submission; drain Starting jobs and replace the legacy runner before upgrading the controller")
+	}
 	if err := r.clearPollFailure(ctx, build); err != nil {
 		return ctrl.Result{}, err
 	}

@@ -8,6 +8,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/cofy-x/kova/internal/daemonclient"
 	"github.com/cofy-x/kova/internal/logging"
 	"github.com/cofy-x/kova/internal/source"
 
@@ -19,7 +20,9 @@ func (s *daemonServer) handleHealth(c echo.Context) error {
 }
 
 func (s *daemonServer) handleBuildStatus(c echo.Context) error {
-	return c.JSON(http.StatusOK, s.getBuildState())
+	state := s.getBuildState()
+	state.Capabilities = []string{daemonclient.IdempotentBuildRequestCapability}
+	return c.JSON(http.StatusOK, state)
 }
 
 func (s *daemonServer) handleBuildCancel(c echo.Context) error {

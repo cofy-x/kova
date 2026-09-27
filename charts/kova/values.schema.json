@@ -78,7 +78,7 @@
       "additionalProperties": false,
       "properties": {
         "enabled": { "type": "boolean" },
-        "replicas": { "type": "integer", "minimum": 1 },
+        "replicas": { "type": "integer", "minimum": 0 },
         "listen": { "type": "string" },
         "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
         "service": {
