@@ -354,7 +354,9 @@ submit_build() {
   local stage=$1 target=$2 key="" response submitted_job_id
   if [[ -n "${receipt_file}" ]]; then
     key="${receipt_run_id}-${stage}"
-    record_receipt_event submit_attempt "${stage}" "${target}" "${key}" </dev/null
+    if ! record_receipt_event submit_attempt "${stage}" "${target}" "${key}" </dev/null; then
+      return 1
+    fi
   fi
   if ! response=$(create_build "${target}" "${key}"); then
     # A failed POST can still have created a build. Keep the attempt and stop.

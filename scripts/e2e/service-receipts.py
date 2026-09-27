@@ -131,9 +131,12 @@ def expected(args: argparse.Namespace) -> dict:
     require(args.stage in {"negative", "positive"}, "invalid Service E2E stage")
     require(args.key == args.run_id + "-" + args.stage, "idempotency key differs from run")
     require(DIGEST.fullmatch(args.source_digest) is not None, "invalid source digest")
+    # The URI pins the OCI source manifest. source_digest is the ZIP content
+    # digest inside that manifest; the two digests are deliberately distinct.
+    manifest_digest = args.source_uri.rpartition("@")[2]
     require(args.source_uri.startswith("oci://") and args.source_uri.count("@") == 1
             and "?" not in args.source_uri and "#" not in args.source_uri
-            and args.source_uri.endswith("@" + args.source_digest),
+            and DIGEST.fullmatch(manifest_digest) is not None,
             "source is not immutable OCI")
     require(args.target != "" and len(args.target) <= 512 and "@" not in args.target
             and "://" not in args.target and "?" not in args.target and "#" not in args.target,

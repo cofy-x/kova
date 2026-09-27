@@ -15,7 +15,8 @@ from pathlib import Path
 SCRIPT = Path(__file__).resolve().parents[1] / "service-receipts.py"
 RUN_ID = "service-e2e-20260927t012345z-deadbeef"
 SOURCE_DIGEST = "sha256:" + "a" * 64
-SOURCE_URI = "oci://registry.local/source@" + SOURCE_DIGEST
+MANIFEST_DIGEST = "sha256:" + "c" * 64
+SOURCE_URI = "oci://registry.local/source@" + MANIFEST_DIGEST
 TARGET = "registry.local/demo:run-012345"
 SECRET = "private-bearer-for-test"
 
