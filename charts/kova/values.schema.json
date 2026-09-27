@@ -125,6 +125,9 @@
           "uniqueItems": true
         },
         "runnerNodeSelector": { "type": "object", "additionalProperties": { "type": ["string", "number", "boolean"] } },
+        "runnerResources": { "type": "object" },
+        "sourceFetchResources": { "type": "object" },
+        "sourceVolumeSizeLimit": { "type": "string", "minLength": 1 },
         "buildkitPlatformAddrs": {
           "type": "object",
           "propertyNames": { "enum": ["linux/amd64", "linux/arm64"] },

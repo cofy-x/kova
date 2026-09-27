@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/signal"
@@ -17,9 +18,11 @@ import (
 	"github.com/cofy-x/kova/internal/service/buildcontroller"
 	"github.com/cofy-x/kova/internal/service/config"
 	"github.com/cofy-x/kova/internal/service/httpapi"
+	"github.com/cofy-x/kova/internal/source"
 
 	"github.com/urfave/cli/v2"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/validation"
@@ -43,6 +46,9 @@ func CLICommand() *cli.Command {
 			&cli.StringFlag{Name: "runner-image-pull-policy", Value: defaults.RunnerImagePullPolicy, Usage: "runner image pull policy"},
 			&cli.StringFlag{Name: "runner-image-pull-secret", Value: defaults.ImagePullSecret, Usage: "runner image pull secret name"},
 			&cli.StringSliceFlag{Name: "runner-node-selector", Usage: "node selector for runner Pods; repeatable key=value"},
+			&cli.StringFlag{Name: "runner-resources", Usage: "JSON resource requests and limits for runner Pods"},
+			&cli.StringFlag{Name: "source-fetch-resources", Usage: "JSON resource requests and limits for source fetch init containers"},
+			&cli.StringFlag{Name: "source-volume-size-limit", Value: "4Gi", Usage: "job-local source and runner temporary volume size limit (at least 4Gi)"},
 			&cli.StringSliceFlag{Name: "registry-plain-http", EnvVars: []string{"KOVA_SERVICE_REGISTRY_PLAIN_HTTP"}, Usage: "output registry host that uses plain HTTP; repeatable and intended for development"},
 			&cli.StringSliceFlag{Name: "buildkit-platform-addr", Usage: "BuildKit worker pool as platform=address; repeatable"},
 			&cli.DurationFlag{Name: "job-ttl", Value: 2 * time.Hour, Usage: "duration to retain terminal jobs before cleanup"},
@@ -75,6 +81,21 @@ func CLICommand() *cli.Command {
 			if err != nil {
 				return err
 			}
+			runnerResources, err := parsePodResources(c.String("runner-resources"))
+			if err != nil {
+				return fmt.Errorf("--runner-resources: %w", err)
+			}
+			sourceFetchResources, err := parsePodResources(c.String("source-fetch-resources"))
+			if err != nil {
+				return fmt.Errorf("--source-fetch-resources: %w", err)
+			}
+			sourceVolumeSizeLimit, err := resource.ParseQuantity(c.String("source-volume-size-limit"))
+			if err != nil || sourceVolumeSizeLimit.Cmp(runner.DefaultSourceVolumeSizeLimit()) < 0 {
+				return fmt.Errorf("--source-volume-size-limit must be at least 4Gi")
+			}
+			if err := validateSourcePodBudget(sourceVolumeSizeLimit, runnerResources, sourceFetchResources); err != nil {
+				return err
+			}
 			restConfig, err := rest.InClusterConfig()
 			if err != nil {
 				return err
@@ -100,6 +121,9 @@ func CLICommand() *cli.Command {
 				RunnerImagePullSecret:     c.String("runner-image-pull-secret"),
 				RunnerNodeSelector:        runnerNodeSelector,
 				RunnerEnv:                 runnerObservabilityEnv(),
+				RunnerResources:           runnerResources,
+				SourceFetchResources:      sourceFetchResources,
+				SourceVolumeSizeLimit:     &sourceVolumeSizeLimit,
 				RegistryPlainHTTP:         plainHTTPRegistries,
 				BuildkitPlatformAddrs:     platformAddrs,
 				JobTTL:                    c.Duration("job-ttl"),
@@ -247,6 +271,70 @@ func parseRegistryHosts(values []string) ([]string, error) {
 		hosts = append(hosts, host)
 	}
 	return hosts, nil
+}
+
+func parsePodResources(raw string) (corev1.ResourceRequirements, error) {
+	var resources corev1.ResourceRequirements
+	if strings.TrimSpace(raw) == "" {
+		return resources, nil
+	}
+	if err := json.Unmarshal([]byte(raw), &resources); err != nil {
+		return resources, err
+	}
+	for name, quantity := range resources.Requests {
+		if quantity.Sign() <= 0 {
+			return resources, fmt.Errorf("request %s must be positive", name)
+		}
+	}
+	for name, quantity := range resources.Limits {
+		if quantity.Sign() <= 0 {
+			return resources, fmt.Errorf("limit %s must be positive", name)
+		}
+	}
+	return resources, nil
+}
+
+func validateSourcePodBudget(volumeLimit resource.Quantity, runnerResources, fetchResources corev1.ResourceRequirements) error {
+	if err := validateReservedLimits("runner", runner.DefaultRunnerResources(), runnerResources); err != nil {
+		return err
+	}
+	if err := validateReservedLimits("source fetch", runner.DefaultSourceFetchResources(), fetchResources); err != nil {
+		return err
+	}
+	runnerLimit := runner.DefaultRunnerResources().Limits[corev1.ResourceEphemeralStorage]
+	if override, ok := runnerResources.Limits[corev1.ResourceEphemeralStorage]; ok {
+		runnerLimit = override
+	}
+	minimumRunnerLimit := volumeLimit.DeepCopy()
+	minimumRunnerLimit.Add(resource.MustParse("1Gi"))
+	if runnerLimit.Cmp(minimumRunnerLimit) < 0 {
+		return fmt.Errorf("runner ephemeral-storage limit must exceed source volume size limit by at least 1Gi")
+	}
+	initLimit := runner.DefaultSourceFetchResources().Limits[corev1.ResourceEphemeralStorage]
+	if override, ok := fetchResources.Limits[corev1.ResourceEphemeralStorage]; ok {
+		initLimit = override
+	}
+	if initLimit.Cmp(*resource.NewQuantity(source.MaxArchiveBytes, resource.BinarySI)) < 0 {
+		return fmt.Errorf("source fetch ephemeral-storage limit must be at least 512Mi")
+	}
+	return nil
+}
+
+func validateReservedLimits(name string, defaults, overrides corev1.ResourceRequirements) error {
+	for _, key := range []corev1.ResourceName{corev1.ResourceMemory, corev1.ResourceEphemeralStorage} {
+		request := defaults.Requests[key]
+		if override, ok := overrides.Requests[key]; ok {
+			request = override
+		}
+		limit := defaults.Limits[key]
+		if override, ok := overrides.Limits[key]; ok {
+			limit = override
+		}
+		if request.Cmp(limit) != 0 {
+			return fmt.Errorf("%s %s request must equal its limit", name, key)
+		}
+	}
+	return nil
 }
 
 func leaderElectionNamespace(c *cli.Context, fallback string) string {

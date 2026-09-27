@@ -93,6 +93,27 @@ serviceDaemon:
   # Registry hosts that intentionally use plain HTTP. Development only.
   registryPlainHTTP: []
   runnerNodeSelector: {}
+  # These limits apply to each short-lived runner Pod, not the Service Pod.
+  runnerResources:
+    requests:
+      cpu: 100m
+      memory: 2Gi
+      ephemeral-storage: 5Gi
+    limits:
+      cpu: "4"
+      memory: 2Gi
+      ephemeral-storage: 5Gi
+  sourceFetchResources:
+    requests:
+      cpu: 50m
+      memory: 1Gi
+      ephemeral-storage: 1Gi
+    limits:
+      cpu: "2"
+      memory: 1Gi
+      ephemeral-storage: 1Gi
+  # Also contains runner /tmp, including the upload copy and extracted source.
+  sourceVolumeSizeLimit: 4Gi
   # Explicit platform-to-BuildKit worker Service mappings. Empty maps the
   # local worker.platform to this release's headless Service.
   buildkitPlatformAddrs: {}

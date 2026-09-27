@@ -19,6 +19,18 @@ const (
 	maxArchiveSymlinkTargetBytes = 4 << 10
 )
 
+type archiveBudget struct {
+	compressedBytes int64
+	expandedBytes   uint64
+	entries         int
+}
+
+var defaultArchiveBudget = archiveBudget{
+	compressedBytes: MaxArchiveBytes,
+	expandedBytes:   MaxExpandedBytes,
+	entries:         MaxArchiveEntries,
+}
+
 type buildArchiveTopLevel struct {
 	name     string
 	children map[string]struct{}
@@ -26,11 +38,24 @@ type buildArchiveTopLevel struct {
 }
 
 func ValidateBuildArchive(zipPath string) (int, error) {
+	return validateBuildArchiveWithBudget(zipPath, defaultArchiveBudget)
+}
+
+func validateBuildArchiveWithBudget(zipPath string, budget archiveBudget) (int, error) {
+	if err := checkArchiveSize(zipPath, budget.compressedBytes); err != nil {
+		return 0, err
+	}
+	if err := checkZipEntryCount(zipPath, budget.entries); err != nil {
+		return 0, err
+	}
 	r, err := zip.OpenReader(zipPath)
 	if err != nil {
 		return 0, err
 	}
 	defer r.Close()
+	if err := checkArchiveHeaders(r.File, budget); err != nil {
+		return 0, err
+	}
 
 	topLevels := make(map[string]*buildArchiveTopLevel)
 	seenPaths := make(map[string]struct{}, len(r.File))
@@ -116,8 +141,48 @@ func ValidateBuildArchive(zipPath string) (int, error) {
 	if validCount == 0 {
 		return 0, fmt.Errorf("zip archive does not contain any valid image directories")
 	}
+	if err := validateArchiveContents(r.File, budget.expandedBytes); err != nil {
+		return 0, err
+	}
 
 	return validCount, nil
+}
+
+func validateArchiveContents(files []*zip.File, maxExpandedBytes uint64) error {
+	var expanded uint64
+	for _, file := range files {
+		if file.FileInfo().IsDir() {
+			continue
+		}
+		reader, err := file.Open()
+		if err != nil {
+			return fmt.Errorf("source archive member %q: %w", file.Name, err)
+		}
+		n, copyErr := copyExpanded(io.Discard, reader, maxExpandedBytes-expanded)
+		closeErr := reader.Close()
+		if copyErr != nil {
+			return fmt.Errorf("source archive member %q: %w", file.Name, copyErr)
+		}
+		if closeErr != nil {
+			return fmt.Errorf("source archive member %q: %w", file.Name, closeErr)
+		}
+		expanded += uint64(n)
+	}
+	return nil
+}
+
+func checkArchiveHeaders(files []*zip.File, budget archiveBudget) error {
+	if len(files) > budget.entries {
+		return ErrTooManyEntries
+	}
+	var expanded uint64
+	for _, file := range files {
+		if file.UncompressedSize64 > budget.expandedBytes-expanded {
+			return ErrExpandedTooLarge
+		}
+		expanded += file.UncompressedSize64
+	}
+	return nil
 }
 
 func BuildArchiveTargets(zipPath string) ([]buildcontract.TargetSpec, error) {
@@ -235,21 +300,40 @@ func limitBuildArchiveList(values []string, limit int) []string {
 }
 
 func ExtractZip(zipPath, dest string) error {
+	return extractZipWithBudget(zipPath, dest, defaultArchiveBudget)
+}
+
+func extractZipWithBudget(zipPath, dest string, budget archiveBudget) error {
+	if err := checkArchiveSize(zipPath, budget.compressedBytes); err != nil {
+		return err
+	}
+	if err := checkZipEntryCount(zipPath, budget.entries); err != nil {
+		return err
+	}
 	r, err := zip.OpenReader(zipPath)
 	if err != nil {
 		return err
 	}
 	defer r.Close()
-
-	if err := os.MkdirAll(dest, 0o755); err != nil {
+	if err := checkArchiveHeaders(r.File, budget); err != nil {
 		return err
 	}
-	root, err := os.OpenRoot(dest)
+
+	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+		return err
+	}
+	stage, err := os.MkdirTemp(filepath.Dir(dest), ".kova-extract-*")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(stage)
+	root, err := os.OpenRoot(stage)
 	if err != nil {
 		return err
 	}
 	defer root.Close()
 
+	var expanded uint64
 	for _, f := range r.File {
 		cleaned, err := ValidateBuildArchivePath(f.Name)
 		if err != nil {
@@ -273,14 +357,25 @@ func ExtractZip(zipPath, dest string) error {
 			if err != nil {
 				return err
 			}
-			linkTarget, readErr := io.ReadAll(io.LimitReader(rc, maxArchiveSymlinkTargetBytes+1))
-			rc.Close()
+			readLimit := uint64(maxArchiveSymlinkTargetBytes + 1)
+			if remaining := budget.expandedBytes - expanded; remaining+1 < readLimit {
+				readLimit = remaining + 1
+			}
+			linkTarget, readErr := io.ReadAll(io.LimitReader(rc, int64(readLimit)))
+			closeErr := rc.Close()
 			if readErr != nil {
 				return readErr
+			}
+			if uint64(len(linkTarget)) > budget.expandedBytes-expanded {
+				return ErrExpandedTooLarge
 			}
 			if len(linkTarget) > maxArchiveSymlinkTargetBytes {
 				return fmt.Errorf("symlink %s target exceeds 4 KiB", f.Name)
 			}
+			if closeErr != nil {
+				return closeErr
+			}
+			expanded += uint64(len(linkTarget))
 			safeTarget, err := resolveArchiveSymlinkTarget(cleaned, string(linkTarget))
 			if err != nil {
 				return err
@@ -308,12 +403,28 @@ func ExtractZip(zipPath, dest string) error {
 			out.Close()
 			return err
 		}
-		_, copyErr := io.Copy(out, rc)
-		rc.Close()
-		out.Close()
+		remaining := budget.expandedBytes - expanded
+		n, copyErr := copyExpanded(out, rc, remaining)
+		closeReadErr := rc.Close()
+		closeWriteErr := out.Close()
 		if copyErr != nil {
 			return copyErr
 		}
+		if closeReadErr != nil {
+			return closeReadErr
+		}
+		if closeWriteErr != nil {
+			return closeWriteErr
+		}
+		expanded += uint64(n)
 	}
-	return nil
+	return os.Rename(stage, dest)
+}
+
+func copyExpanded(dst io.Writer, src io.Reader, remaining uint64) (int64, error) {
+	n, err := io.Copy(dst, io.LimitReader(src, int64(remaining)+1))
+	if uint64(n) > remaining {
+		return n, ErrExpandedTooLarge
+	}
+	return n, err
 }

@@ -53,6 +53,9 @@ spec:
             - --runner-image={{ include "kova.roleImage" (dict "root" . "role" "runner") }}
             - --runner-image-pull-policy={{ include "kova.roleImagePullPolicy" (dict "root" . "role" "runner") }}
             - --runner-image-pull-secret={{ $runnerRegistrySecret }}
+            - {{ printf "--runner-resources=%s" (toJson .Values.serviceDaemon.runnerResources) | quote }}
+            - {{ printf "--source-fetch-resources=%s" (toJson .Values.serviceDaemon.sourceFetchResources) | quote }}
+            - --source-volume-size-limit={{ .Values.serviceDaemon.sourceVolumeSizeLimit }}
             {{- range $key, $value := .Values.serviceDaemon.runnerNodeSelector }}
             - {{ printf "--runner-node-selector=%s=%s" $key ($value | toString) | quote }}
             {{- end }}

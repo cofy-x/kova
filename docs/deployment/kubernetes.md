@@ -95,6 +95,13 @@ a starting point for capacity and availability settings. Enable
 Kova reads immutable source bundles and pushes results through OCI registries.
 It does not require an object store, shared filesystem, or RWX PVC.
 Each runner materializes a digest-verified source into job-local `emptyDir` storage.
+The source volume has a 4 GiB default and minimum `sizeLimit`; it also backs runner `/tmp`, where the uploaded zip copy and extracted context live.
+The source contract caps the zip at 512 MiB, total extracted members at 2 GiB, and ZIP entries at 100,000, leaving volume space for the source copy, runner state, and logs.
+Each runner defaults to 5 GiB ephemeral storage and 2 GiB memory limits; its source fetch init container defaults to 1 GiB ephemeral storage and 1 GiB memory limits.
+Their memory and ephemeral-storage requests equal their limits, so scheduling reserves the full per-job capacity.
+Set `serviceDaemon.runnerResources`, `serviceDaemon.sourceFetchResources`, and `serviceDaemon.sourceVolumeSizeLimit` for the runner node pool, keeping the runner ephemeral storage limit above the source volume limit.
+Before increasing active jobs, account for the sum of runner requests and possible per-Pod limits on every eligible node; Kova does not reserve the full limit in advance.
+Kubernetes [local ephemeral storage enforcement](https://kubernetes.io/docs/concepts/storage/ephemeral-storage/) depends on kubelet accounting and node filesystem layout, so the source byte and entry limits remain enforced by Kova itself.
 Source and output retention are controlled by registry policy or the caller.
 
 ## Authentication

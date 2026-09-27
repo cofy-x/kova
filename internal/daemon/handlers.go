@@ -3,13 +3,13 @@ package daemon
 import (
 	"context"
 	"errors"
-	"io"
 	"net/http"
 	"net/url"
 	"os"
 	"time"
 
 	"github.com/cofy-x/kova/internal/logging"
+	"github.com/cofy-x/kova/internal/source"
 
 	"github.com/labstack/echo/v4"
 )
@@ -79,7 +79,12 @@ func (s *daemonServer) handleBuildPost(c echo.Context) error {
 		s.clearBuildExecution(done)
 		return c.JSON(http.StatusInternalServerError, s.getBuildState())
 	}
-	bytesWritten, err := io.Copy(tmpZip, c.Request().Body)
+	var bytesWritten int64
+	if c.Request().ContentLength > source.MaxArchiveBytes {
+		err = source.ErrArchiveTooLarge
+	} else {
+		bytesWritten, err = source.CopyArchive(tmpZip, c.Request().Body, source.MaxArchiveBytes)
+	}
 	if err != nil {
 		tmpZip.Close()
 		os.Remove(tmpZip.Name())
@@ -88,6 +93,9 @@ func (s *daemonServer) handleBuildPost(c echo.Context) error {
 		buildCancel()
 		close(done)
 		s.clearBuildExecution(done)
+		if errors.Is(err, source.ErrArchiveTooLarge) {
+			return c.JSON(http.StatusRequestEntityTooLarge, s.getBuildState())
+		}
 		return c.JSON(http.StatusInternalServerError, s.getBuildState())
 	}
 	if err := tmpZip.Close(); err != nil {

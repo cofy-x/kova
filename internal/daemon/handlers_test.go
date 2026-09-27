@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/cofy-x/kova/internal/batch"
+	"github.com/cofy-x/kova/internal/source"
 
 	"github.com/labstack/echo/v4"
 )
@@ -82,6 +83,28 @@ func TestHandleBuildPostRunsAsyncBuild(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("expected build to be called")
+	}
+}
+
+func TestHandleBuildPostRejectsOversizedArchiveAndCleansTemp(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Setenv("TMPDIR", tempDir)
+	srv := testDaemonServer(serverBackend{})
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/build", strings.NewReader("short"))
+	req.ContentLength = source.MaxArchiveBytes + 1
+	rec := httptest.NewRecorder()
+	if err := srv.handleBuildPost(e.NewContext(req, rec)); err != nil {
+		t.Fatal(err)
+	}
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want 413: %s", rec.Code, rec.Body.String())
+	}
+	if state := decodeDaemonState(t, rec); !strings.Contains(state.Error, source.ErrArchiveTooLarge.Error()) {
+		t.Fatalf("daemon error = %q", state.Error)
+	}
+	if entries, err := os.ReadDir(tempDir); err != nil || len(entries) != 0 {
+		t.Fatalf("rejected upload left temporary files: %v, %v", entries, err)
 	}
 }
 

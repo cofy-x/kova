@@ -1,6 +1,11 @@
 package config
 
-import "time"
+import (
+	"time"
+
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
+)
 
 type Config struct {
 	Listen                    string
@@ -10,6 +15,9 @@ type Config struct {
 	RunnerImagePullSecret     string
 	RunnerNodeSelector        map[string]string
 	RunnerEnv                 map[string]string
+	RunnerResources           corev1.ResourceRequirements
+	SourceFetchResources      corev1.ResourceRequirements
+	SourceVolumeSizeLimit     *resource.Quantity
 	RegistryPlainHTTP         []string
 	BuildkitPlatformAddrs     map[string]string
 	JobTTL                    time.Duration

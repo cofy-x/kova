@@ -1,11 +1,14 @@
 package service
 
 import (
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/cofy-x/kova/internal/buildcontract"
 	"github.com/cofy-x/kova/internal/service/config"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 )
 
 func TestParseNodeSelector(t *testing.T) {
@@ -86,5 +89,35 @@ func TestValidateCapacityConfigRejectsUnboundedWorkerSlots(t *testing.T) {
 	valid.WorkerSlots = 0
 	if err := validateCapacityConfig(valid); err == nil {
 		t.Fatal("expected worker-slots=0 to be rejected")
+	}
+}
+
+func TestSourcePodResourceOverridesKeepDiskBudget(t *testing.T) {
+	runnerResources, err := parsePodResources(`{"limits":{"ephemeral-storage":"6Gi","memory":"3Gi"},"requests":{"ephemeral-storage":"6Gi","memory":"3Gi"}}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateSourcePodBudget(resource.MustParse("5Gi"), runnerResources, corev1.ResourceRequirements{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateSourcePodBudget(resource.MustParse("6Gi"), runnerResources, corev1.ResourceRequirements{}); err == nil || !strings.Contains(err.Error(), "runner ephemeral-storage") {
+		t.Fatalf("expected runner disk budget rejection, got %v", err)
+	}
+	fetchResources, err := parsePodResources(`{"limits":{"ephemeral-storage":"256Mi"},"requests":{"ephemeral-storage":"256Mi"}}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateSourcePodBudget(resource.MustParse("4Gi"), corev1.ResourceRequirements{}, fetchResources); err == nil || !strings.Contains(err.Error(), "source fetch ephemeral-storage") {
+		t.Fatalf("expected fetch disk budget rejection, got %v", err)
+	}
+	if _, err := parsePodResources(`{"limits":{"memory":"0"}}`); err == nil {
+		t.Fatal("expected zero memory limit rejection")
+	}
+	underReserved, err := parsePodResources(`{"requests":{"ephemeral-storage":"4Gi"}}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateSourcePodBudget(resource.MustParse("4Gi"), underReserved, corev1.ResourceRequirements{}); err == nil || !strings.Contains(err.Error(), "request must equal its limit") {
+		t.Fatalf("expected under-reserved runner rejection, got %v", err)
 	}
 }

@@ -5,28 +5,76 @@ import (
 	"sort"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/yaml"
 )
 
 type ManifestOptions struct {
-	PodName           string
-	Namespace         string
-	Image             string
-	ImagePullPolicy   string
-	ImagePullSecret   string
-	BuildkitAddr      string
-	PprofServer       string
-	Env               map[string]string
-	Labels            map[string]string
-	Annotations       map[string]string
-	NodeSelector      map[string]string
-	SourceURI         string
-	SourceDigest      string
-	RegistryPlainHTTP []string
+	PodName               string
+	Namespace             string
+	Image                 string
+	ImagePullPolicy       string
+	ImagePullSecret       string
+	BuildkitAddr          string
+	PprofServer           string
+	Env                   map[string]string
+	Labels                map[string]string
+	Annotations           map[string]string
+	NodeSelector          map[string]string
+	SourceURI             string
+	SourceDigest          string
+	RegistryPlainHTTP     []string
+	RunnerResources       corev1.ResourceRequirements
+	SourceFetchResources  corev1.ResourceRequirements
+	SourceVolumeSizeLimit *resource.Quantity
 }
 
 const MaterializedSourcePath = "/var/lib/kova/source/source.zip"
+
+func DefaultRunnerResources() corev1.ResourceRequirements {
+	return corev1.ResourceRequirements{
+		Requests: corev1.ResourceList{
+			corev1.ResourceCPU:              resource.MustParse("100m"),
+			corev1.ResourceMemory:           resource.MustParse("2Gi"),
+			corev1.ResourceEphemeralStorage: resource.MustParse("5Gi"),
+		},
+		Limits: corev1.ResourceList{
+			corev1.ResourceCPU:              resource.MustParse("4"),
+			corev1.ResourceMemory:           resource.MustParse("2Gi"),
+			corev1.ResourceEphemeralStorage: resource.MustParse("5Gi"),
+		},
+	}
+}
+
+func DefaultSourceFetchResources() corev1.ResourceRequirements {
+	return corev1.ResourceRequirements{
+		Requests: corev1.ResourceList{
+			corev1.ResourceCPU:              resource.MustParse("50m"),
+			corev1.ResourceMemory:           resource.MustParse("1Gi"),
+			corev1.ResourceEphemeralStorage: resource.MustParse("1Gi"),
+		},
+		Limits: corev1.ResourceList{
+			corev1.ResourceCPU:              resource.MustParse("2"),
+			corev1.ResourceMemory:           resource.MustParse("1Gi"),
+			corev1.ResourceEphemeralStorage: resource.MustParse("1Gi"),
+		},
+	}
+}
+
+func DefaultSourceVolumeSizeLimit() resource.Quantity {
+	return resource.MustParse("4Gi")
+}
+
+func mergeResources(defaults, overrides corev1.ResourceRequirements) corev1.ResourceRequirements {
+	for key, value := range overrides.Requests {
+		defaults.Requests[key] = value
+	}
+	for key, value := range overrides.Limits {
+		defaults.Limits[key] = value
+	}
+	return defaults
+}
 
 func RenderPrepareManifest(opts ManifestOptions) (string, error) {
 	pod := PreparePod(opts)
@@ -64,6 +112,7 @@ func PreparePod(opts ManifestOptions) corev1.Pod {
 					Image:           opts.Image,
 					ImagePullPolicy: corev1.PullPolicy(opts.ImagePullPolicy),
 					Command:         []string{"kovad", "daemon"},
+					Resources:       mergeResources(DefaultRunnerResources(), opts.RunnerResources),
 					ReadinessProbe: &corev1.Probe{
 						ProbeHandler: corev1.ProbeHandler{Exec: &corev1.ExecAction{
 							Command: []string{"/usr/bin/test", "-S", "/tmp/kova.sock"},
@@ -108,15 +157,21 @@ func PreparePod(opts ManifestOptions) corev1.Pod {
 	}
 	if opts.SourceURI != "" {
 		mount := corev1.VolumeMount{Name: "kova-source", MountPath: "/var/lib/kova/source"}
-		pod.Spec.Containers[0].VolumeMounts = append(pod.Spec.Containers[0].VolumeMounts, mount)
+		pod.Spec.Containers[0].VolumeMounts = append(pod.Spec.Containers[0].VolumeMounts, mount,
+			corev1.VolumeMount{Name: "kova-source", MountPath: "/tmp"})
+		volumeLimit := DefaultSourceVolumeSizeLimit()
+		if opts.SourceVolumeSizeLimit != nil {
+			volumeLimit = opts.SourceVolumeSizeLimit.DeepCopy()
+		}
 		pod.Spec.Volumes = append(pod.Spec.Volumes, corev1.Volume{
 			Name:         "kova-source",
-			VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
+			VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{SizeLimit: &volumeLimit}},
 		})
 		fetch := corev1.Container{
-			Name:            "source-fetch",
-			Image:           opts.Image,
-			ImagePullPolicy: corev1.PullPolicy(opts.ImagePullPolicy),
+			Name:                     "source-fetch",
+			Image:                    opts.Image,
+			ImagePullPolicy:          corev1.PullPolicy(opts.ImagePullPolicy),
+			TerminationMessagePolicy: corev1.TerminationMessageFallbackToLogsOnError,
 			Command: []string{
 				"kovad", "source", "fetch",
 				"--uri", opts.SourceURI,
@@ -124,6 +179,7 @@ func PreparePod(opts ManifestOptions) corev1.Pod {
 				"--output", MaterializedSourcePath,
 			},
 			VolumeMounts: []corev1.VolumeMount{mount},
+			Resources:    mergeResources(DefaultSourceFetchResources(), opts.SourceFetchResources),
 			SecurityContext: &corev1.SecurityContext{
 				AllowPrivilegeEscalation: boolPointer(false),
 				RunAsNonRoot:             boolPointer(true),

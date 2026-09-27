@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/cofy-x/kova/internal/source"
 	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/google/go-containerregistry/pkg/name"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
@@ -57,7 +58,18 @@ func Validate(uri, digest string) error {
 }
 
 func Push(ctx context.Context, archivePath, destination string, plainHTTP []string) (Reference, error) {
-	raw, err := os.ReadFile(filepath.Clean(archivePath))
+	if _, err := source.ValidateBuildArchive(archivePath); err != nil {
+		return Reference{}, err
+	}
+	file, err := os.Open(filepath.Clean(archivePath))
+	if err != nil {
+		return Reference{}, err
+	}
+	defer file.Close()
+	raw, err := io.ReadAll(io.LimitReader(file, source.MaxArchiveBytes+1))
+	if len(raw) > int(source.MaxArchiveBytes) {
+		return Reference{}, source.ErrArchiveTooLarge
+	}
 	if err != nil {
 		return Reference{}, err
 	}
@@ -91,6 +103,10 @@ func Push(ctx context.Context, archivePath, destination string, plainHTTP []stri
 }
 
 func Fetch(ctx context.Context, uri, digest, output string, plainHTTP []string) error {
+	return fetchWithLimit(ctx, uri, digest, output, plainHTTP, source.MaxArchiveBytes, http.DefaultClient)
+}
+
+func fetchWithLimit(ctx context.Context, uri, digest, output string, plainHTTP []string, maxBytes int64, client *http.Client) error {
 	if err := Validate(uri, digest); err != nil {
 		return err
 	}
@@ -110,7 +126,7 @@ func Fetch(ctx context.Context, uri, digest, output string, plainHTTP []string) 
 			tmp.Close()
 			return err
 		}
-		resp, err := http.DefaultClient.Do(req)
+		resp, err := client.Do(req)
 		if err != nil {
 			tmp.Close()
 			return fmt.Errorf("fetch HTTPS source: %w", err)
@@ -120,7 +136,11 @@ func Fetch(ctx context.Context, uri, digest, output string, plainHTTP []string) 
 			tmp.Close()
 			return fmt.Errorf("fetch HTTPS source: %s", resp.Status)
 		}
-		_, err = io.Copy(writer, resp.Body)
+		if resp.ContentLength > maxBytes {
+			tmp.Close()
+			return source.ErrArchiveTooLarge
+		}
+		_, err = source.CopyArchive(writer, resp.Body, maxBytes)
 		if err != nil {
 			tmp.Close()
 			return err
@@ -151,7 +171,7 @@ func Fetch(ctx context.Context, uri, digest, output string, plainHTTP []string) 
 			tmp.Close()
 			return err
 		}
-		_, copyErr := io.Copy(writer, reader)
+		_, copyErr := source.CopyArchive(writer, reader, maxBytes)
 		closeErr := reader.Close()
 		if copyErr != nil {
 			tmp.Close()

@@ -34,6 +34,9 @@ kova source push \
 
 Kova also accepts an immutable HTTPS archive URL without user information, query credentials, or fragments when the caller supplies the expected SHA-256 content digest.
 OCI bundle retention and garbage collection belong to the registry or caller.
+The source contract permits at most 512 MiB of exact zip bytes, 2 GiB of total expanded ZIP member bytes, and 100,000 ZIP entries.
+These fixed limits apply to local source inspection and push, HTTPS and OCI fetches, runner uploads, and extraction.
+Kova counts bytes while reading and extracting as well as checking ZIP headers; a rejected source is reported as `InvalidSource` during source inspection or fetch, before any image push.
 
 Each request has 1–100 logical targets. Every target is an object containing one unique, explicitly tagged OCI push destination and exactly one supported platform: `linux/amd64` or `linux/arm64`.
 Digest-only destinations and free-form platform labels are rejected.
