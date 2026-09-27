@@ -7,3 +7,7 @@
 !internal/**
 !pkg/
 !pkg/**
+!docker/
+!docker/patches/
+!docker/patches/nydusify-v2.4.4-push-digest.patch
+!docker/patches/nydusify-push-digest_test.go.txt

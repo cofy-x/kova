@@ -31,6 +31,12 @@ printf '{"containerimage.digest":"%s"}' "$FAKE_BUILDKIT_DIGEST" > "$metadata"
 	nydusify := `#!/bin/sh
 set -eu
 printf '%s\n' "$@" > "$FAKE_NYDUS_ARGS"
+metadata=
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "--output-json" ]; then metadata=$2; shift 2; else shift; fi
+done
+test -n "$metadata"
+printf '{"target_manifest_digest":"%s"}' "$FAKE_NYDUS_DIGEST" > "$metadata"
 `
 	if err := os.WriteFile(filepath.Join(dir, "nydusify"), []byte(nydusify), 0700); err != nil {
 		t.Fatal(err)
@@ -66,8 +72,10 @@ func TestRunBuildCommandsRejectsMissingPushDigest(t *testing.T) {
 
 func TestNydusConversionPinsThisBuildsOCISource(t *testing.T) {
 	dir := installFakeBuildCommands(t)
-	want := "sha256:" + strings.Repeat("b", 64)
-	t.Setenv("FAKE_BUILDKIT_DIGEST", want)
+	ociDigest := "sha256:" + strings.Repeat("b", 64)
+	nydusDigest := "sha256:" + strings.Repeat("c", 64)
+	t.Setenv("FAKE_BUILDKIT_DIGEST", ociDigest)
+	t.Setenv("FAKE_NYDUS_DIGEST", nydusDigest)
 	argsPath := filepath.Join(dir, "nydus-args")
 	t.Setenv("FAKE_NYDUS_ARGS", argsPath)
 	var output bytes.Buffer
@@ -77,15 +85,29 @@ func TestNydusConversionPinsThisBuildsOCISource(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if digest != "" {
-		t.Fatalf("Nydusify does not report an output digest; got %q", digest)
+	if digest != nydusDigest {
+		t.Fatalf("Nydus output digest = %q, want %q", digest, nydusDigest)
 	}
 	args, err := os.ReadFile(argsPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(args), "registry.example.com/example@"+want) {
+	if !strings.Contains(string(args), "registry.example.com/example@"+ociDigest) {
 		t.Fatalf("Nydus source is not digest-pinned: %q", args)
+	}
+}
+
+func TestNydusConversionRejectsMissingPushDigest(t *testing.T) {
+	dir := installFakeBuildCommands(t)
+	t.Setenv("FAKE_BUILDKIT_DIGEST", "sha256:"+strings.Repeat("a", 64))
+	t.Setenv("FAKE_NYDUS_DIGEST", "")
+	t.Setenv("FAKE_NYDUS_ARGS", filepath.Join(dir, "nydus-args"))
+	var output bytes.Buffer
+	digest, err := runBuildCommands(context.Background(), source.Spec{
+		Target: "registry.example.com/example:dev_nydus_v3", Platform: "linux/amd64", Format: source.BuildFormatNydus,
+	}, &scheduler.Addr{Addr: "tcp://buildkitd:9094"}, Options{}, &output)
+	if err == nil || digest != "" || !strings.Contains(err.Error(), "Nydusify did not report a valid pushed manifest digest") {
+		t.Fatalf("digest=%q err=%v, want missing-digest failure", digest, err)
 	}
 }
 

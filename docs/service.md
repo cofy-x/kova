@@ -260,9 +260,9 @@ The Service removes the explicit tag, preserves registry ports and nested reposi
 Clients must not construct this reference themselves.
 Registry descriptor checks use bounded parallelism.
 Kova resolves the digest-pinned single-platform manifest, reads its image configuration, and requires its OS and architecture to match the request; it never verifies platform through the mutable tag.
-For OCI outputs, Kova records the digest returned by that build's BuildKit push and fails verification if the push metadata omits it; a later lookup of the mutable tag cannot replace that digest.
-Nydusify v2.4.4 does not return the digest of its target push, so Nydus outputs still resolve the target tag after conversion and are not safe under concurrent reuse of that tag ([tracked correctness issue](https://github.com/cofy-x/kova/issues/41)).
-Until the Nydus output path is changed, callers must use unique Nydus target tags and must not rely on a Nydus result when another writer can overwrite its tag before verification.
+For OCI outputs, Kova records the digest returned by that build's BuildKit push.
+For Nydus outputs, the source-pinned Nydusify converter records the descriptor digest after that build's target push succeeds.
+Both formats fail verification if the push metadata omits a valid digest; a later lookup of the mutable tag cannot replace that digest.
 If one of several registries fails, the job is `Failed` while already verified output digests remain in status.
 Registry pushes are not transactional and Kova does not roll them back.
 

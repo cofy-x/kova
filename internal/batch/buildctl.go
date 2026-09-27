@@ -113,7 +113,34 @@ func runBuildCommands(ctx context.Context, spec source.Spec, addr *scheduler.Add
 	// Conversion must consume this build's OCI image, even if another job
 	// overwrites the intermediate tag before nydusify starts pulling it.
 	sourceRef := ref.Context().Name() + "@" + ociDigest
-	return "", runCommand(ctx, opts.Verbose, outputBuf, "nydusify", nydusConvertArgs(sourceRef, spec.Target)...)
+	return runNydusify(ctx, sourceRef, spec.Target, opts, outputBuf)
+}
+
+func runNydusify(ctx context.Context, sourceRef, target string, opts Options, outputBuf *bytes.Buffer) (string, error) {
+	metadata, err := os.CreateTemp("", "kova-nydusify-metadata-*.json")
+	if err != nil {
+		return "", fmt.Errorf("create Nydusify metadata file: %w", err)
+	}
+	metadataPath := metadata.Name()
+	defer os.Remove(metadataPath)
+	if err := metadata.Close(); err != nil {
+		return "", fmt.Errorf("close Nydusify metadata file: %w", err)
+	}
+	args := append(nydusConvertArgs(sourceRef, target), "--output-json", metadataPath)
+	if err := runCommand(ctx, opts.Verbose, outputBuf, "nydusify", args...); err != nil {
+		return "", err
+	}
+	data, err := os.ReadFile(metadataPath)
+	if err != nil {
+		return "", fmt.Errorf("read Nydusify push metadata: %w", err)
+	}
+	var pushed struct {
+		Digest string `json:"target_manifest_digest"`
+	}
+	if err := json.Unmarshal(data, &pushed); err != nil {
+		return "", fmt.Errorf("parse Nydusify push metadata: %w", err)
+	}
+	return validatePushedDigest(pushed.Digest, "Nydusify")
 }
 
 func runBuildctl(ctx context.Context, spec source.Spec, addr *scheduler.Addr, opts Options, outputBuf *bytes.Buffer) (string, error) {
@@ -140,9 +167,13 @@ func runBuildctl(ctx context.Context, spec source.Spec, addr *scheduler.Addr, op
 	if err := json.Unmarshal(data, &pushed); err != nil {
 		return "", fmt.Errorf("parse BuildKit metadata: %w", err)
 	}
-	hash, err := v1.NewHash(pushed.Digest)
+	return validatePushedDigest(pushed.Digest, "BuildKit")
+}
+
+func validatePushedDigest(value, tool string) (string, error) {
+	hash, err := v1.NewHash(value)
 	if err != nil || hash.Algorithm != "sha256" {
-		return "", fmt.Errorf("BuildKit did not report a valid pushed manifest digest")
+		return "", fmt.Errorf("%s did not report a valid pushed manifest digest", tool)
 	}
 	return hash.String(), nil
 }

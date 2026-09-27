@@ -89,7 +89,7 @@ func TestRegistryResolverReadsPlatformFromDigestPinnedImageConfig(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	digest, platform, err := (remoteRegistryResolver{}).Resolve(context.Background(), ref.Name(), "", []string{host})
+	digest, platform, err := (remoteRegistryResolver{}).Resolve(context.Background(), ref.Name(), wantDigest.String(), []string{host})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -144,11 +144,63 @@ func TestResolveKeepsThisJobsDigestAfterConcurrentSameTagOverwrite(t *testing.T)
 	if current.Descriptor.Digest.String() != digestB {
 		t.Fatalf("tag digest = %s, want competing job's %s", current.Descriptor.Digest, digestB)
 	}
-	// The old OCI path queried the tag. Both images are linux/amd64, so it
+	// The old path queried the tag. Both images are linux/amd64, so it
 	// would have silently accepted B's digest as A's successful output.
-	legacyDigest, legacyPlatform, err := (remoteRegistryResolver{}).Resolve(context.Background(), ref.Name(), "", []string{host})
-	if err != nil || legacyDigest != digestB || legacyPlatform != "linux/amd64" {
-		t.Fatalf("legacy tag lookup: digest=%q platform=%q err=%v, want B's digest and matching platform", legacyDigest, legacyPlatform, err)
+	tagImage, err := remote.Image(ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tagConfig, err := tagImage.ConfigFile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tagConfig.OS != "linux" || tagConfig.Architecture != "amd64" {
+		t.Fatalf("competing job's platform = %s/%s, want linux/amd64", tagConfig.OS, tagConfig.Architecture)
+	}
+}
+
+func TestResolveNydusKeepsThisJobsDigestAfterConcurrentSameTagOverwrite(t *testing.T) {
+	t.Setenv("DOCKER_CONFIG", t.TempDir())
+	server := httptest.NewServer(registry.New())
+	defer server.Close()
+	host := strings.TrimPrefix(server.URL, "http://")
+	baseTarget := host + "/team/image:shared"
+	nydusTarget := baseTarget + "_nydus_v3"
+	ref, err := name.NewTag(nydusTarget, name.Insecure)
+	if err != nil {
+		t.Fatal(err)
+	}
+	imageA, digestA := imageForPlatform(t, "amd64", "nydus-job-a")
+	imageB, digestB := imageForPlatform(t, "amd64", "nydus-job-b")
+	if err := remote.Write(ref, imageA); err != nil {
+		t.Fatal(err)
+	}
+	overwrite := make(chan error, 1)
+	startOverwrite := make(chan struct{})
+	go func() {
+		<-startOverwrite
+		overwrite <- remote.Write(ref, imageB)
+	}()
+	exporter := exporterFunc(func(context.Context, *kovav1.KovaBuild, string, string) ([]byte, error) {
+		close(startOverwrite)
+		if err := <-overwrite; err != nil {
+			return nil, err
+		}
+		return []byte(fmt.Sprintf("{\"target\":%q,\"success\":true,\"manifest_digest\":%q}\n", nydusTarget, digestA)), nil
+	})
+	build := &kovav1.KovaBuild{Spec: kovav1.KovaBuildSpec{
+		Targets: targetSpecs(baseTarget), Build: kovav1.KovaBuildOptions{Format: "nydus"},
+	}}
+	results := Resolve(context.Background(), exporter, build, []string{host})
+	if len(results) != 1 || results[0].Status != "succeeded" || results[0].ManifestDigest != digestA {
+		t.Fatalf("results = %#v, want this Nydus job's digest %s", results, digestA)
+	}
+	current, err := remote.Get(ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.Descriptor.Digest.String() != digestB {
+		t.Fatalf("tag digest = %s, want competing job's %s", current.Descriptor.Digest, digestB)
 	}
 }
 
@@ -309,6 +361,24 @@ func TestResolveDoesNotVerifySuccessfulOCIEntryWithoutPushDigest(t *testing.T) {
 	}
 	if outputs := Outputs(results); len(outputs) != 1 || outputs[0].ManifestDigest != digest {
 		t.Fatalf("partial outputs = %#v", outputs)
+	}
+}
+
+func TestResolveDoesNotVerifySuccessfulNydusEntryWithoutPushDigest(t *testing.T) {
+	build := &kovav1.KovaBuild{Spec: kovav1.KovaBuildSpec{
+		Targets: targetSpecs("registry.example/a:dev"),
+		Build:   kovav1.KovaBuildOptions{Format: "nydus"},
+	}}
+	var calls atomic.Int32
+	results := resolveWithRegistry(context.Background(), exporterFunc(func(context.Context, *kovav1.KovaBuild, string, string) ([]byte, error) {
+		return []byte("{\"target\":\"registry.example/a:dev_nydus_v3\",\"success\":true}\n"), nil
+	}), registryResolverFunc(func(context.Context, string, string, []string) (string, string, error) {
+		calls.Add(1)
+		return "", "", nil
+	}), build, nil)
+	if calls.Load() != 0 || len(results) != 1 || results[0].Status != "failed" ||
+		!strings.Contains(results[0].Error, "missing the pushed manifest digest") {
+		t.Fatalf("calls=%d results=%#v", calls.Load(), results)
 	}
 }
 

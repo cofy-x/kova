@@ -1,0 +1,118 @@
+--- a/contrib/nydusify/pkg/converter/converter.go
++++ b/contrib/nydusify/pkg/converter/converter.go
+@@ -22,6 +22,8 @@
+ 	"github.com/containerd/containerd/v2/core/content"
+ 	"github.com/containerd/containerd/v2/pkg/namespaces"
+ 	"github.com/containerd/containerd/v2/plugins/content/local"
++	"github.com/distribution/reference"
++	accelcontent "github.com/goharbor/acceleration-service/pkg/content"
+ 	"github.com/goharbor/acceleration-service/pkg/converter"
+ 	"github.com/goharbor/acceleration-service/pkg/platformutil"
+ 	"github.com/opencontainers/go-digest"
+@@ -92,6 +94,24 @@
+ 
+ var defaultRemoteFunc = pkgPvd.DefaultRemote
+ 
++// pushedDigestProvider records only the descriptor whose target push actually
++// succeeded. Conversion metrics alone do not identify a particular push.
++type pushedDigestProvider struct {
++	accelcontent.Provider
++	target string
++	digest digest.Digest
++}
++
++func (p *pushedDigestProvider) Push(ctx context.Context, desc ocispec.Descriptor, ref string) error {
++	if err := p.Provider.Push(ctx, desc, ref); err != nil {
++		return err
++	}
++	if ref == p.target {
++		p.digest = desc.Digest
++	}
++	return nil
++}
++
+ func Convert(ctx context.Context, opt Opt) error {
+ 	if opt.SourceBackendType == "modelfile" {
+ 		return convertModelFile(ctx, opt)
+@@ -144,9 +164,14 @@
+ 	if opt.WithPlainHTTP {
+ 		pvd.UsePlainHTTP()
+ 	}
++	target, err := reference.ParseDockerRef(opt.Target)
++	if err != nil {
++		return errors.Wrap(err, "parse target reference")
++	}
++	pushed := &pushedDigestProvider{Provider: pvd, target: target.String()}
+ 
+ 	cvt, err := converter.New(
+-		converter.WithProvider(pvd),
++		converter.WithProvider(pushed),
+ 		converter.WithDriver("nydus", getConfig(opt)),
+ 		converter.WithPlatform(platformMC),
+ 	)
+@@ -155,10 +180,16 @@
+ 	}
+ 
+ 	metric, err := cvt.Convert(ctx, opt.Source, opt.Target, opt.CacheRef)
++	if err != nil {
++		return err
++	}
++	if err := pushed.digest.Validate(); err != nil {
++		return errors.Wrap(err, "target push did not return a manifest digest")
++	}
+ 	if opt.OutputJSON != "" {
+-		dumpMetric(metric, opt.OutputJSON)
++		return dumpMetric(metric, opt.OutputJSON, pushed.digest.String())
+ 	}
+-	return err
++	return nil
+ }
+ 
+ func convertModelFile(ctx context.Context, opt Opt) error {
+--- a/contrib/nydusify/pkg/converter/metric.go
++++ b/contrib/nydusify/pkg/converter/metric.go
+@@ -12,16 +12,19 @@
+ 	"github.com/pkg/errors"
+ )
+ 
+-func dumpMetric(metric *converter.Metric, path string) error {
++func dumpMetric(metric *converter.Metric, path, targetDigest string) error {
+ 	file, err := os.Create(path)
+ 	if err != nil {
+ 		return errors.Wrap(err, "Create file for metric")
+ 	}
+-	defer file.Close()
+ 
+ 	encoder := json.NewEncoder(file)
+-	if err := encoder.Encode(metric); err != nil {
++	if err := encoder.Encode(struct {
++		*converter.Metric
++		TargetManifestDigest string `json:"target_manifest_digest"`
++	}{Metric: metric, TargetManifestDigest: targetDigest}); err != nil {
++		file.Close()
+ 		return errors.Wrap(err, "Encode JSON from metric")
+ 	}
+-	return nil
++	return file.Close()
+ }
+--- a/contrib/nydusify/pkg/converter/config_metric_test.go
++++ b/contrib/nydusify/pkg/converter/config_metric_test.go
+@@ -57,14 +57,16 @@
+ func TestDumpMetric(t *testing.T) {
+ 	metric := &accelconverter.Metric{}
+ 	metricPath := filepath.Join(t.TempDir(), "metric.json")
++	targetDigest := "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+ 
+-	require.NoError(t, dumpMetric(metric, metricPath))
++	require.NoError(t, dumpMetric(metric, metricPath, targetDigest))
+ 
+ 	content, err := os.ReadFile(metricPath)
+ 	require.NoError(t, err)
+ 	require.Contains(t, string(content), "\"SourceImageSize\":0")
+ 	require.Contains(t, string(content), "\"TargetPushElapsed\":0")
++	require.Contains(t, string(content), "\"target_manifest_digest\":\""+targetDigest+"\"")
+ 
+-	err = dumpMetric(metric, filepath.Join(metricPath, "missing", "metric.json"))
++	err = dumpMetric(metric, filepath.Join(metricPath, "missing", "metric.json"), targetDigest)
+ 	require.ErrorContains(t, err, "Create file for metric")
+ }

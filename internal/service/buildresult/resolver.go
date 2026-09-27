@@ -30,18 +30,12 @@ type RegistryResolver interface {
 type remoteRegistryResolver struct{}
 
 func (remoteRegistryResolver) Resolve(ctx context.Context, target, pushedDigest string, plainHTTPRegistries []string) (string, string, error) {
+	if pushedDigest == "" {
+		return "", "", fmt.Errorf("build result is missing the pushed manifest digest")
+	}
 	ref, err := name.ParseReference(target, referenceOptions(target, plainHTTPRegistries)...)
 	if err != nil {
 		return "", "", err
-	}
-	if pushedDigest == "" {
-		// Nydusify v2.4.4 does not report its pushed digest. Its legacy
-		// tag lookup remains until the converter can return an exact digest.
-		descriptor, err := remote.Get(ref, remote.WithContext(ctx), remote.WithAuthFromKeychain(authn.DefaultKeychain))
-		if err != nil {
-			return "", "", fmt.Errorf("resolve pushed descriptor: %w", err)
-		}
-		pushedDigest = descriptor.Descriptor.Digest.String()
 	}
 	digestRef, err := name.NewDigest(ref.Context().Name()+"@"+pushedDigest, referenceOptions(target, plainHTTPRegistries)...)
 	if err != nil {
@@ -129,7 +123,7 @@ func resolveWithRegistry(ctx context.Context, exporter Exporter, registry Regist
 			expected[index].Status, expected[index].Error = "failed", entry.Reason
 			continue
 		}
-		if expected[index].Format == string(source.BuildFormatOCI) && entry.ManifestDigest == "" {
+		if entry.ManifestDigest == "" {
 			expected[index].Status, expected[index].Error = "failed", "build result is missing the pushed manifest digest"
 			continue
 		}

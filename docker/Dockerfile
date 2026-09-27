@@ -56,17 +56,14 @@ RUN set -eux; \
       -o /tmp/nydus.tgz; \
     echo "${nydus_sha256}  /tmp/nydus.tgz" | sha256sum -c -; \
     mkdir -p /out; \
-    tar -xzf /tmp/nydus.tgz -C /out --strip-components=1 nydus-static/nydusify nydus-static/nydus-image
+    tar -xzf /tmp/nydus.tgz -C /out --strip-components=1 nydus-static/nydus-image
 
-FROM ubuntu-base AS runtime-builder
+FROM downloader-base AS go-toolchain
 ARG GO_VERSION=1.26.8
 ARG GO_SHA256_AMD64=d0f743b33e8d8945e6b1f432edd15785c70507121d6e2a723b21285eddf8b57b
 ARG GO_SHA256_ARM64=211ffced9dcb9633a55eac6364816ec0ddd951389a740e88fa8b3337971bdda0
 ARG TARGETOS=linux
 ARG TARGETARCH
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates curl build-essential liblmdb-dev pkg-config \
-    && rm -rf /var/lib/apt/lists/*
 ARG GO_DOWNLOAD_BASE_URL=https://go.dev/dl
 RUN set -eux; \
     case "${TARGETARCH}" in \
@@ -79,6 +76,46 @@ RUN set -eux; \
       -o /tmp/go.tgz; \
     echo "${go_sha256}  /tmp/go.tgz" | sha256sum -c -; \
     tar -C /usr/local -xzf /tmp/go.tgz
+ENV GOPATH=/go
+
+FROM go-toolchain AS nydusify-builder
+ARG NYDUSIFY_SOURCE_REVISION=4e908d8c7b6db8e5cac25ecf8b8cc1113dbacccb
+ARG NYDUSIFY_SOURCE_SHA256=965888bc400bdae08ca1e26698b4ac81f43ef85ecac6092d91117feeb61558e4
+ARG NYDUSIFY_SOURCE_BASE_URL=https://codeload.github.com/dragonflyoss/nydus/tar.gz
+ARG TARGETOS=linux
+ARG TARGETARCH
+ARG GOPROXY=https://proxy.golang.org,direct
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends patch \
+    && rm -rf /var/lib/apt/lists/*
+RUN set -eux; \
+    curl -fL --retry 5 --retry-all-errors --connect-timeout 20 --max-time 600 \
+      "${NYDUSIFY_SOURCE_BASE_URL}/${NYDUSIFY_SOURCE_REVISION}" -o /tmp/nydus-source.tgz; \
+    echo "${NYDUSIFY_SOURCE_SHA256}  /tmp/nydus-source.tgz" | sha256sum -c -; \
+    mkdir -p /src; \
+    tar -xzf /tmp/nydus-source.tgz -C /src; \
+    test -f "/src/nydus-${NYDUSIFY_SOURCE_REVISION}/contrib/nydusify/go.mod"
+COPY docker/patches/nydusify-v2.4.4-push-digest.patch /tmp/nydusify-push-digest.patch
+RUN patch -p1 -d "/src/nydus-${NYDUSIFY_SOURCE_REVISION}" < /tmp/nydusify-push-digest.patch
+COPY docker/patches/nydusify-push-digest_test.go.txt /src/nydus-${NYDUSIFY_SOURCE_REVISION}/contrib/nydusify/pkg/converter/push_digest_test.go
+WORKDIR /src/nydus-${NYDUSIFY_SOURCE_REVISION}/contrib/nydusify
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    GOPROXY="${GOPROXY}" GOMAXPROCS=4 CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
+      /usr/local/go/bin/go test -p 4 ./pkg/converter -run '^(TestPushedDigestProvider|TestDumpMetric)$' -count=1 && \
+    GOPROXY="${GOPROXY}" GOMAXPROCS=4 CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
+      /usr/local/go/bin/go build -p 4 -trimpath \
+        -ldflags "-s -w -X main.revision=${NYDUSIFY_SOURCE_REVISION} -X main.gitVersion=v2.4.4+kova.1" \
+        -o /out/nydusify ./cmd/nydusify.go
+
+FROM ubuntu-base AS runtime-builder
+ARG TARGETOS=linux
+ARG TARGETARCH
+ENV GOPATH=/go
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl build-essential liblmdb-dev pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=go-toolchain /usr/local/go /usr/local/go
 WORKDIR /src
 COPY go.mod go.sum ./
 ARG GOPROXY=https://proxy.golang.org,direct
@@ -146,8 +183,9 @@ RUN apt-get update \
         --create-home --shell /usr/sbin/nologin kova
 COPY --from=buildkit-rootless /usr/bin/buildctl /usr/bin/buildctl
 COPY --from=grpcurl-downloader /out/grpcurl /usr/bin/grpcurl
-COPY --from=nydus-downloader /out/nydusify /usr/bin/nydusify
+COPY --from=nydusify-builder /out/nydusify /usr/bin/nydusify
 COPY --from=nydus-downloader /out/nydus-image /usr/bin/nydus-image
+COPY --from=nydusify-builder /src/nydus-4e908d8c7b6db8e5cac25ecf8b8cc1113dbacccb/LICENSE-APACHE /usr/share/doc/nydusify/LICENSE-APACHE
 COPY --from=runtime-builder /out/kovad /usr/bin/kovad
 ENV HOME=/home/kova
 USER 65532:65532
