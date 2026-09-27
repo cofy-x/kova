@@ -19,7 +19,6 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/empty"
 	"github.com/google/go-containerregistry/pkg/v1/mutate"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
-	"github.com/google/go-containerregistry/pkg/v1/static"
 	"github.com/google/go-containerregistry/pkg/v1/types"
 )
 
@@ -58,27 +57,35 @@ func Validate(uri, digest string) error {
 }
 
 func Push(ctx context.Context, archivePath, destination string, plainHTTP []string) (Reference, error) {
-	if _, err := source.ValidateBuildArchive(archivePath); err != nil {
-		return Reference{}, err
-	}
 	file, err := os.Open(filepath.Clean(archivePath))
 	if err != nil {
 		return Reference{}, err
 	}
 	defer file.Close()
-	raw, err := io.ReadAll(io.LimitReader(file, source.MaxArchiveBytes+1))
-	if len(raw) > int(source.MaxArchiveBytes) {
-		return Reference{}, source.ErrArchiveTooLarge
-	}
+	snapshot, err := os.CreateTemp("", ".kova-source-push-*.zip")
 	if err != nil {
 		return Reference{}, err
 	}
-	payloadHash := sha256.Sum256(raw)
+	snapshotPath := snapshot.Name()
+	defer os.Remove(snapshotPath)
+	payloadHash := sha256.New()
+	size, copyErr := source.CopyArchive(io.MultiWriter(snapshot, payloadHash), file, source.MaxArchiveBytes)
+	closeErr := snapshot.Close()
+	if copyErr != nil {
+		return Reference{}, copyErr
+	}
+	if closeErr != nil {
+		return Reference{}, closeErr
+	}
+	if _, err := source.ValidateBuildArchive(snapshotPath); err != nil {
+		return Reference{}, err
+	}
+	digest := v1.Hash{Algorithm: "sha256", Hex: hex.EncodeToString(payloadHash.Sum(nil))}
 	ref, err := name.ParseReference(strings.TrimPrefix(strings.TrimSpace(destination), "oci://"), referenceOptions(destination, plainHTTP)...)
 	if err != nil {
 		return Reference{}, fmt.Errorf("parse source destination: %w", err)
 	}
-	layer := static.NewLayer(raw, LayerMediaType)
+	layer := sourceFileLayer{path: snapshotPath, digest: digest, size: size}
 	image, err := mutate.AppendLayers(empty.Image, layer)
 	if err != nil {
 		return Reference{}, err
@@ -87,7 +94,7 @@ func Push(ctx context.Context, archivePath, destination string, plainHTTP []stri
 	image = mutate.ConfigMediaType(image, types.OCIConfigJSON)
 	image = mutate.Annotations(image, map[string]string{
 		"org.opencontainers.image.title": "kova-source.zip",
-		"dev.cofy.kova.source.digest":    fmt.Sprintf("sha256:%x", payloadHash),
+		"dev.cofy.kova.source.digest":    digest.String(),
 	}).(v1.Image)
 	if err := remote.Write(ref, image, remote.WithContext(ctx), remote.WithAuthFromKeychain(authn.DefaultKeychain)); err != nil {
 		return Reference{}, fmt.Errorf("push OCI source bundle: %w", err)
@@ -98,9 +105,25 @@ func Push(ctx context.Context, archivePath, destination string, plainHTTP []stri
 	}
 	return Reference{
 		URI:    "oci://" + ref.Context().Digest(manifestDigest.String()).Name(),
-		Digest: fmt.Sprintf("sha256:%x", payloadHash),
+		Digest: digest.String(),
 	}, nil
 }
+
+// sourceFileLayer serves the validated immutable snapshot without buffering the
+// entire source archive in the client heap. This custom layer is an already
+// compressed ZIP payload; OCI must not gzip it again.
+type sourceFileLayer struct {
+	path   string
+	digest v1.Hash
+	size   int64
+}
+
+func (l sourceFileLayer) Digest() (v1.Hash, error)             { return l.digest, nil }
+func (l sourceFileLayer) DiffID() (v1.Hash, error)             { return l.digest, nil }
+func (l sourceFileLayer) Compressed() (io.ReadCloser, error)   { return os.Open(l.path) }
+func (l sourceFileLayer) Uncompressed() (io.ReadCloser, error) { return os.Open(l.path) }
+func (l sourceFileLayer) Size() (int64, error)                 { return l.size, nil }
+func (l sourceFileLayer) MediaType() (types.MediaType, error)  { return LayerMediaType, nil }
 
 func Fetch(ctx context.Context, uri, digest, output string, plainHTTP []string) error {
 	return fetchWithLimit(ctx, uri, digest, output, plainHTTP, source.MaxArchiveBytes, http.DefaultClient)

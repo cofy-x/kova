@@ -1,6 +1,7 @@
 package sourcebundle
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"errors"
@@ -10,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/cofy-x/kova/internal/source"
@@ -44,6 +46,53 @@ func TestValidateRequiresImmutableVerifiableSource(t *testing.T) {
 	}
 	if err := Validate("https://sources.example.com/source.zip", "sha256:short"); err == nil {
 		t.Fatal("expected invalid content digest rejection")
+	}
+}
+
+func TestPushUsesImmutableSnapshotWhenOriginalChanges(t *testing.T) {
+	t.Setenv("DOCKER_CONFIG", t.TempDir())
+	imageDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(imageDir, "Dockerfile"), []byte("FROM scratch\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	archive := filepath.Join(t.TempDir(), "source.zip")
+	if err := source.CreateSingleImageArchive(imageDir, "registry.example.com/team/app:dev", "linux/amd64", archive); err != nil {
+		t.Fatal(err)
+	}
+	original, err := os.ReadFile(archive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	registryHandler := registry.New()
+	var mutateOnce sync.Once
+	var mutateErr error
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mutateOnce.Do(func() { mutateErr = os.WriteFile(archive, []byte("changed during push"), 0o600) })
+		registryHandler.ServeHTTP(w, r)
+	}))
+	defer server.Close()
+	host := strings.TrimPrefix(server.URL, "http://")
+	ref, err := Push(context.Background(), archive, host+"/team/source:test", []string{host})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mutateErr != nil {
+		t.Fatal(mutateErr)
+	}
+	wantDigest := sha256.Sum256(original)
+	if ref.Digest != fmt.Sprintf("sha256:%x", wantDigest) {
+		t.Fatalf("pushed digest = %s, want original archive digest", ref.Digest)
+	}
+	output := filepath.Join(t.TempDir(), "fetched.zip")
+	if err := Fetch(context.Background(), ref.URI, ref.Digest, output, []string{host}); err != nil {
+		t.Fatal(err)
+	}
+	fetched, err := os.ReadFile(output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(fetched, original) {
+		t.Fatal("pushed OCI layer changed with the original archive")
 	}
 }
 
