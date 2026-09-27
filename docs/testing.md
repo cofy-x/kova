@@ -51,6 +51,7 @@ and environment policy in the consuming workspace rather than this repository.
 | `make e2e-service-admission` | Read-only admission preflight by default; with `ADMISSION_E2E_MODE=run` and a test token, checks two Service Pods on an existing dedicated `kova-admission-*` Kind cluster, then sends a 40-way HTTP burst, preserves run-scoped request/response receipts, and cleans up only its exact CR IDs. Requires preinstalled active=1, global queue=3, requester queue=2, and `never=true` runner selector. | Existing dedicated Kind cluster; no install or cluster-wide cleanup |
 | `make e2e-service-admission-failover` | Read-only preflight by default; live mode replaces only the verified current Service leader Pod, then proves a successor reconciles a new queued build without duplicating the original runner or active grant. Preserves run-scoped receipts on success and failure; exact two-CR cleanup only on success. | Same empty, dedicated two-replica Kind admission cluster and caps as above |
 | `make e2e-service-admission-ledger-loss` | Read-only preflight by default; live mode deliberately deletes only the exact active admission ConfigMap in a disposable dedicated Kind cluster, then proves both Service replicas return 503 for readiness and new submissions without creating a CR. Optional exact follower Pod replacement proves startup does not silently recreate the ledger. Preserves receipts and never repairs the fault. | Same empty, dedicated two-replica Kind admission cluster and caps as above; retire cluster after live mode |
+| `make e2e-service-admission-deep-queue` | Read-only preflight by default; live mode holds one unschedulable blocker, grows a real API-server-backed queue through 100, 500, and 1000 CRs, records independent HTTP/API/resource receipts, and performs exact-ID cleanup only after every stage passes. | The only Kind cluster must be `kova-deep-queue`, with two ready Service replicas, empty ledgers/workloads, active=1, queued global/requester=1000, and `never=true` runner selector. |
 | `make e2e-source-capacity` | Read-only preflight by default; live mode publishes one 128 MiB incompressible immutable source, builds one OCI output, verifies its digest and host pull, and samples Kind node/runner state. Preserves run-scoped receipts and tags; never deletes the cluster or registry content. | Existing empty, dedicated `kova-source-capacity` Kind quickstart cluster and localhost registry |
 | `make e2e-service` | RBAC isolation, immutable OCI source publication, pre-build target-and-platform contract failure, platform-scoped worker dispatch, safe caller retry, verified output platform and manifest digest, ephemeral logs, TTL cleanup, and host pull. | `examples/simple`, `.work/result-service.jsonl` |
 | `make e2e-crd-upgrade` | Isolated pre-retry CRD to current CRD/controller migration, including live status pruning/persistence, a quiescence gate, and an injected old Starting runner that must fail before POST. | Public `v0.1.0-rc.9` chart and role images, dedicated Kind cluster and registry |
@@ -90,6 +91,40 @@ SERVICE_AUTH_TOKEN=service-e2e-token make e2e-service-admission-ledger-loss
 
 This test does not establish production availability or a safe ledger recovery procedure.
 Do not restore the deleted ConfigMap from a blank template: an apparently empty namespace cannot prove that no admission or Pod-create operation had an unknown outcome.
+
+## Deep-Queue Admission Benchmark
+
+Use only a disposable, otherwise idle Linux Kind cluster named `kova-deep-queue` with a single worker and its exact `.kind/kova-deep-queue.kubeconfig`.
+Prepare the candidate chart and two same-image Service replicas before this test, with `serviceDaemon.maxActiveJobs=1`, `maxActiveJobsPerRequester=1`, `workerSlots=1`, `maxQueuedJobs=1000`, `maxQueuedJobsPerRequester=1000`, `pollInterval=5s`, static principal `kova:e2e`, leader election, and `runnerNodeSelector.never=true`.
+These caps are a stress fixture, not recommended production defaults.
+Do not use quickstart's build/tag setup for this benchmark if preserving the existing local registry is required; the benchmark itself neither contacts the registry nor creates source/output tags.
+
+The default entrypoint reads the cluster, kubeconfig identity, ledgers, readiness, API-server request counters, and kubelet summary metrics without writing Kubernetes objects or local receipts:
+
+```bash
+make e2e-service-admission-deep-queue
+```
+
+The deliberate live run requires an exact acknowledgement and a test token:
+
+```bash
+DEEP_QUEUE_E2E_MODE=run \
+DEEP_QUEUE_E2E_ACK=kova-deep-queue/kova/kova-service \
+SERVICE_AUTH_TOKEN=service-e2e-token \
+make e2e-service-admission-deep-queue
+```
+
+Only the first, test-owned blocker may have a runner Pod object; its owner UID, `never=true` selector, `Pending` phase, absent node assignment, and single active grant are checked throughout.
+Every queued CR must remain runner-less, with a matching queue-intent nonce.
+Each stage waits for all CRs to reach `Queued`, then measures 30 seconds of API request rates by verb/resource (including the benchmark's own read-only probes), Service Pod and Kind node CPU/memory, readiness, and HTTP POST throughput/p50/p95/p99.
+The host must retain 8 GiB available memory and 20 GiB free workspace/Docker disk; each Kind node must remain Ready without pressure, below 80% allocatable CPU, and above 2 GiB available memory; each Service Pod must remain below 2 vCPU and 2 GiB working memory; measured API traffic must stay below 1200 requests/s with no 429 or 5xx.
+Missing metrics, transport errors, limits, identity drift, unrecorded CRs, ledger disagreement, or incomplete cleanup stop the benchmark immediately and preserve the cluster for inspection.
+
+Receipts are kept separately for the blocker, each 100/500/1000 stage, and exact-ID cleanup under `.work/deep-queue/<run-id>/`.
+On success, only the recorded queued CRs and blocker CR are deleted; the Kind cluster, local registry, and all registry tags remain untouched.
+On failure, no automatic CR or ledger cleanup is attempted because an uncertain HTTP Create or deletion may still be in flight.
+The existing controller does **not** expose per-reconcile latency p95/p99 to this black-box script: POST latency and queue-status convergence are separate measurements and must not be reported as reconcile latency.
+This bounded Kind profile is a design diagnostic, not production SLO or SLA evidence.
 
 ## Isolated Source-Capacity Acceptance
 
