@@ -835,6 +835,7 @@ func TestIneligibleQueuedBuildDoesNotConsumeVirtualFairShare(t *testing.T) {
 			cfg := admissionConfig()
 			cfg.MaxActiveJobs, cfg.WorkerSlots = 1, 1
 			r := KovaBuildReconciler{Client: base, APIReader: base, Scheme: scheme, Kube: &fakeKube{}, Cfg: cfg}
+			initializeAdmissionForTest(t, &r)
 			decision, err := r.admission(context.Background(), eligible)
 			if err != nil || !decision.Admitted || decision.Allocation != 1 {
 				t.Fatalf("eligible build blocked by %s queued build: decision=%#v err=%v", mode, decision, err)

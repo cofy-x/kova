@@ -150,6 +150,7 @@ func TestRegistryTimeoutUntilVerificationDeadlineFailsBeforeCleanup(t *testing.T
 	key := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: build.Namespace, Name: build.Name}}
 	mode.Store(registryTimeout)
 	firstLeader := KovaBuildReconciler{Client: crClient, Scheme: testScheme(t), Kube: kubeClient, Cfg: cfg}
+	initializeAdmissionForTest(t, &firstLeader)
 	if _, err := firstLeader.Reconcile(context.Background(), key); err != nil {
 		t.Fatal(err)
 	}
@@ -236,6 +237,7 @@ func TestTerminalWriteFailureKeepsExactReceiptAndPodUntilRestart(t *testing.T) {
 	key := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: build.Namespace, Name: build.Name}}
 	recorder := record.NewFakeRecorder(2)
 	firstLeader := KovaBuildReconciler{Client: statusClient, Scheme: testScheme(t), Kube: kubeClient, Cfg: cfg, Recorder: recorder}
+	initializeAdmissionForTest(t, &firstLeader)
 	if _, err := firstLeader.Reconcile(context.Background(), key); err == nil || !strings.Contains(err.Error(), "injected terminal status write failure") {
 		t.Fatalf("first reconcile error=%v, want injected terminal write failure", err)
 	}
