@@ -251,6 +251,10 @@ class PartialOutputSafetyTest(unittest.TestCase):
             self.assertEqual((directory / "runner-failure-export.jsonl").read_text(), raw_export)
             self.assertEqual((directory / "runner-failure-log.jsonl").read_text(), raw_log)
             self.assertEqual(
+                (directory / "runner-failure-export-observed.jsonl").read_text(), raw_export
+            )
+            self.assertEqual((directory / "runner-failure-log-observed.jsonl").read_text(), raw_log)
+            self.assertEqual(
                 json.loads((directory / "copy-missing-proof.json").read_text())["runner_pod_uid"],
                 "runner-uid",
             )
@@ -260,6 +264,24 @@ class PartialOutputSafetyTest(unittest.TestCase):
                         acceptance.capture_copy_failure(
                             directory, "kova-job-idem-" + "a" * 20, "runner-uid", second
                         )
+
+            wrong_target_log = json.dumps(
+                {
+                    "target": "other.registry.test/wrong:dev_nydus_v3",
+                    "success": False,
+                    "logs": "wrong",
+                }
+            ) + "\n"
+            with patch.object(acceptance, "kctl", side_effect=[raw_export, wrong_target_log]):
+                with self.assertRaisesRegex(
+                    acceptance.AcceptanceError, "not scoped to the exact second Nydus target"
+                ):
+                    acceptance.capture_copy_failure(
+                        directory, "kova-job-idem-" + "a" * 20, "runner-uid", second
+                    )
+            self.assertEqual(
+                (directory / "runner-failure-log-observed.jsonl").read_text(), wrong_target_log
+            )
 
     def test_copy_failure_observer_accepts_only_exact_runner_identity(self) -> None:
         runner = "kova-job-idem-" + "a" * 20

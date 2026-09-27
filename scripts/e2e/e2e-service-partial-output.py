@@ -894,6 +894,12 @@ def capture_copy_failure(run_dir: Path, runner_name: str, runner_uid: str, secon
         # the exact Pod exists; a terminal build without proof fails closed.
         save_text(run_dir / "runner-failure-export-unavailable.txt", f"{error}\n")
         return False
+    if len(raw.encode()) > MAX_RUNNER_EXPORT_BYTES:
+        fail("runner failure export exceeded its bounded evidence size")
+    # Keep the bounded observation even when it is the wrong target. A failed
+    # acceptance otherwise deletes the short-lived runner before the cause can
+    # be distinguished from a product failure.
+    save_text(run_dir / "runner-failure-export-observed.jsonl", raw)
     export_proof = verify_copy_missing_export(raw, second)
     if export_proof is None:
         return False
@@ -915,6 +921,9 @@ def capture_copy_failure(run_dir: Path, runner_name: str, runner_uid: str, secon
     except AcceptanceError as error:
         save_text(run_dir / "runner-failure-log-unavailable.txt", f"{error}\n")
         return False
+    if len(failure_log.encode()) > MAX_RUNNER_EXPORT_BYTES:
+        fail("runner failure log exceeded its bounded evidence size")
+    save_text(run_dir / "runner-failure-log-observed.jsonl", failure_log)
     log_proof = verify_copy_missing_failure_log(failure_log, second)
     if log_proof is None:
         return False
