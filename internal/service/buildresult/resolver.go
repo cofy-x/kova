@@ -8,9 +8,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
+	"syscall"
 
 	kovav1 "github.com/cofy-x/kova/internal/apis/kova/v1alpha1"
 	"github.com/cofy-x/kova/internal/buildcontract"
@@ -19,7 +21,9 @@ import (
 
 	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/google/go-containerregistry/pkg/name"
+	"github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
+	"github.com/google/go-containerregistry/pkg/v1/remote/transport"
 )
 
 type Exporter interface {
@@ -102,6 +106,24 @@ func registryResponseError(operation string, err error) error {
 	return fmt.Errorf("%s: %w", operation, err)
 }
 
+func retryableRegistryConfigFetch(err error) bool {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) ||
+		errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.ErrNoProgress) ||
+		errors.Is(err, syscall.EPIPE) || errors.Is(err, syscall.ECONNRESET) || errors.Is(err, net.ErrClosed) {
+		return true
+	}
+	var registryErr *transport.Error
+	if errors.As(err, &registryErr) {
+		// A digest-pinned manifest may reach a replicated registry before its
+		// config blob. A 404 remains pending until the overall deadline.
+		status := registryErr.StatusCode
+		return registryErr.Temporary() || status == http.StatusNotFound || status == http.StatusRequestTimeout ||
+			status == http.StatusTooManyRequests || status >= http.StatusInternalServerError || status == 499
+	}
+	var networkErr net.Error
+	return errors.As(err, &networkErr)
+}
+
 // ErrDefinitive means that retrying the same immutable pushed digest cannot
 // make the receipt valid. Transport and availability errors are retryable.
 var ErrDefinitive = errors.New("definitive result verification failure")
@@ -132,9 +154,22 @@ func (remoteRegistryResolver) Resolve(ctx context.Context, target, pushedDigest 
 	if err != nil {
 		return "", "", fmt.Errorf("%w: invalid pushed single-platform image: %w", ErrDefinitive, err)
 	}
-	config, err := image.ConfigFile()
+	// RawConfigFile may fail while fetching the blob, before the immutable
+	// content can be parsed. Keep recognized transport/availability failures
+	// retryable; checksum, size and malformed-content errors are definitive.
+	rawConfig, err := image.RawConfigFile()
 	if err != nil {
+		if retryableRegistryConfigFetch(err) {
+			return "", "", fmt.Errorf("read pushed image config: %w", err)
+		}
 		return "", "", fmt.Errorf("%w: read pushed image platform: %w", ErrDefinitive, err)
+	}
+	if int64(len(rawConfig)) > maxRegistryVerificationResponseBytes {
+		return "", "", fmt.Errorf("%w: read pushed image platform: %w", ErrDefinitive, errRegistryVerificationResponseTooLarge)
+	}
+	config, err := v1.ParseConfigFile(bytes.NewReader(rawConfig))
+	if err != nil {
+		return "", "", fmt.Errorf("%w: parse pushed image config: %w", ErrDefinitive, err)
 	}
 	platform, err := buildcontract.NormalizePlatform(config.OS + "/" + config.Architecture)
 	if err != nil {
