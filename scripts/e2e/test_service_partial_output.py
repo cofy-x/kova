@@ -150,6 +150,7 @@ class PartialOutputSafetyTest(unittest.TestCase):
     def test_pod_runtime_requires_exact_cri_repo_digest(self) -> None:
         image = "localhost:5002/kova:runner-" + "a" * 12
         digest = "localhost:5002/kova@sha256:" + "b" * 64
+        config_id = "sha256:" + "a" * 64
         pod = {
             "metadata": {"name": "kova-job-idem-" + "c" * 20, "uid": "uid"},
             "spec": {
@@ -160,16 +161,39 @@ class PartialOutputSafetyTest(unittest.TestCase):
                 "containerStatuses": [{"name": "runner", "image": image, "imageID": digest}]
             },
         }
-        inspection = {
-            "status": {"id": "sha256:" + "a" * 64, "repoTags": [image], "repoDigests": [digest]}
-        }
+        inspection = {"status": {"id": config_id, "repoTags": [image], "repoDigests": [digest]}}
         with patch.object(acceptance, "command", return_value=json.dumps(inspection)):
             self.assertEqual(
-                acceptance.runtime_image_fact(pod, "runner", image)["image_id"], digest
+                acceptance.runtime_image_fact(pod, "runner", image, config_id)["image_id"],
+                digest,
+            )
+            pod["status"]["containerStatuses"][0]["imageID"] = config_id
+            self.assertEqual(
+                acceptance.runtime_image_fact(pod, "runner", image, config_id)["image_id"],
+                config_id,
             )
             pod["status"]["containerStatuses"][0]["imageID"] = "sha256:" + "d" * 64
             with self.assertRaises(acceptance.AcceptanceError):
-                acceptance.runtime_image_fact(pod, "runner", image)
+                acceptance.runtime_image_fact(pod, "runner", image, config_id)
+            with self.assertRaises(acceptance.AcceptanceError):
+                acceptance.runtime_image_fact(pod, "runner", image, "sha256:" + "c" * 64)
+
+    def test_local_platform_config_must_match_revision(self) -> None:
+        image = "localhost:5002/kova:runner-" + "a" * 12
+        selected = {
+            "Id": "sha256:" + "c" * 64,
+            "Os": "linux",
+            "Architecture": "amd64",
+            "Config": {"Labels": {"org.opencontainers.image.revision": "a" * 12}},
+        }
+        with patch.object(acceptance, "command", return_value=json.dumps([selected])) as run:
+            self.assertEqual(acceptance.local_config_id(image, "a" * 12), selected["Id"])
+            self.assertEqual(
+                run.call_args.args[0],
+                ["docker", "image", "inspect", "--platform", "linux/amd64", image],
+            )
+            with self.assertRaises(acceptance.AcceptanceError):
+                acceptance.local_config_id(image, "b" * 12)
 
     def test_unknown_objects_are_identity_only_in_snapshot(self) -> None:
         def fake_kjson(*args: str) -> dict:

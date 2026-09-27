@@ -292,6 +292,27 @@ def exact_images(revision: str) -> dict[str, str]:
     }
 
 
+def local_config_id(image: str, revision: str) -> str:
+    # Docker may identify a multi-platform tag by its OCI index while Kind's
+    # CRI identifies the selected linux/amd64 image by its config digest.
+    inspected = json.loads(
+        command(["docker", "image", "inspect", "--platform", "linux/amd64", image])
+    )
+    if len(inspected) != 1:
+        fail(f"local candidate image is unavailable or ambiguous: {image}")
+    selected = inspected[0]
+    config_id = selected.get("Id", "")
+    if (
+        not re.fullmatch(r"sha256:[0-9a-f]{64}", config_id)
+        or selected.get("Os") != "linux"
+        or selected.get("Architecture") != "amd64"
+        or selected.get("Config", {}).get("Labels", {}).get("org.opencontainers.image.revision")
+        != revision
+    ):
+        fail(f"local linux/amd64 candidate image identity differs: {image}")
+    return config_id
+
+
 def check_deployment(name: str, image: str, container: str) -> dict:
     deployment = kjson("-n", NAMESPACE, "get", "deployment", name, "-o", "json")
     replicas = deployment["spec"].get("replicas", 1)
@@ -314,7 +335,9 @@ def check_deployment(name: str, image: str, container: str) -> dict:
     return selected[0]
 
 
-def runtime_image_fact(pod: dict, container: str, expected_image: str) -> dict:
+def runtime_image_fact(
+    pod: dict, container: str, expected_image: str, expected_config_id: str
+) -> dict:
     name = pod.get("metadata", {}).get("name", "unknown")
     node = pod.get("spec", {}).get("nodeName", "")
     if node not in (f"{CLUSTER}-control-plane", f"{CLUSTER}-worker"):
@@ -343,12 +366,15 @@ def runtime_image_fact(pod: dict, container: str, expected_image: str) -> dict:
     image_id = statuses[0]["imageID"].removeprefix("docker-pullable://")
     if (
         repo_tags != [expected_image]
-        or not re.fullmatch(r"sha256:[0-9a-f]{64}", cri.get("id", ""))
+        or cri.get("id") != expected_config_id
         or not isinstance(repo_digests, list)
-        or not repo_digests
-        or image_id not in repo_digests
+        or any(
+            not isinstance(digest, str) or not re.fullmatch(r"[^@]+@sha256:[0-9a-f]{64}", digest)
+            for digest in repo_digests
+        )
+        or (image_id != expected_config_id and image_id not in repo_digests)
     ):
-        fail(f"Pod {name} imageID is not pinned to the exact CRI image tag/repoDigests")
+        fail(f"Pod {name} imageID is not pinned to the reviewed CRI config/repoDigests")
     return {
         "pod": name,
         "uid": pod["metadata"]["uid"],
@@ -356,11 +382,14 @@ def runtime_image_fact(pod: dict, container: str, expected_image: str) -> dict:
         "image": expected_image,
         "image_id": image_id,
         "cri_id": cri["id"],
+        "local_config_id": expected_config_id,
         "cri_repo_digests": repo_digests,
     }
 
 
-def ready_role_pods(selector: str, expected_count: int, container: str, image: str) -> list[dict]:
+def ready_role_pods(
+    selector: str, expected_count: int, container: str, image: str, config_id: str
+) -> list[dict]:
     pods = kjson("-n", NAMESPACE, "get", "pods", "-l", selector, "-o", "json").get("items", [])
     if len(pods) != expected_count:
         fail(f"role selector {selector} did not return exactly {expected_count} Pods")
@@ -371,7 +400,7 @@ def ready_role_pods(selector: str, expected_count: int, container: str, image: s
             for item in pod["status"].get("conditions", [])
         ):
             fail(f"role Pod {pod['metadata']['name']} is not uniquely Ready")
-        facts.append(runtime_image_fact(pod, container, image))
+        facts.append(runtime_image_fact(pod, container, image, config_id))
     return sorted(facts, key=lambda item: item["pod"])
 
 
@@ -492,14 +521,7 @@ def preflight(revision: str) -> dict:
         fail("Service args are not the exact isolated partial-output fixture")
     if "--job-ttl=2h" not in args or "--max-build-duration=2h" not in args:
         fail("Service retention/build deadline differs from the bounded fixture")
-    for role, image in images.items():
-        inspected = json.loads(command(["docker", "image", "inspect", image]))
-        if (
-            len(inspected) != 1
-            or inspected[0]["Config"].get("Labels", {}).get("org.opencontainers.image.revision")
-            != revision
-        ):
-            fail(f"local {role} image has no matching revision label")
+    local_config_ids = {role: local_config_id(image, revision) for role, image in images.items()}
     service_replicas = kjson("-n", NAMESPACE, "get", "deployment", "kova-service", "-o", "json")[
         "spec"
     ]["replicas"]
@@ -512,12 +534,14 @@ def preflight(revision: str) -> dict:
             service_replicas,
             "kova-service",
             images["controller"],
+            local_config_ids["controller"],
         ),
         "worker": ready_role_pods(
             "app.kubernetes.io/instance=kova,app.kubernetes.io/name=kova",
             worker_replicas,
             "buildkitd",
             images["worker"],
+            local_config_ids["worker"],
         ),
     }
     crd = kjson("get", "crd", "kovabuilds.kova.cofy.dev", "-o", "json")
@@ -540,6 +564,7 @@ def preflight(revision: str) -> dict:
         "node_uids": sorted(node["metadata"]["uid"] for node in nodes),
         "registry_id": registry_id,
         "images": images,
+        "local_config_ids": local_config_ids,
         "runtime": runtime,
         "pod_headroom": pod_headroom,
     }
@@ -729,7 +754,7 @@ def safe_snapshot(run_dir: Path, stage: str, job_id: str = "", uid: str = "") ->
 
 
 def capture_runner(
-    run_dir: Path, runner_name: str, uid: str, runner_image: str
+    run_dir: Path, runner_name: str, uid: str, runner_image: str, runner_config_id: str
 ) -> tuple[bool, str]:
     if not re.fullmatch(r"kova-job-idem-[0-9a-f]{20}", runner_name):
         fail("runner Pod name is not bound to the run-scoped build ID")
@@ -766,7 +791,8 @@ def capture_runner(
     ):
         return False, pod["metadata"]["uid"]
     save_json(
-        run_dir / "runner-runtime-image.json", runtime_image_fact(pod, "runner", runner_image)
+        run_dir / "runner-runtime-image.json",
+        runtime_image_fact(pod, "runner", runner_image, runner_config_id),
     )
     return True, pod["metadata"]["uid"]
 
@@ -1066,6 +1092,7 @@ def run_acceptance(revision: str, facts: dict) -> None:
             "namespace": NAMESPACE,
             "revision": revision,
             "images": facts["images"],
+            "local_config_ids": facts["local_config_ids"],
             "targets": targets,
             "headroom": headroom,
             "kubeconfig_sha256": facts["kubeconfig_sha256"],
@@ -1192,7 +1219,11 @@ def run_acceptance(revision: str, facts: dict) -> None:
             runner_name = current.get("status", {}).get("runnerPodName", "")
             if runner_name:
                 observed_runtime, observed_pod_uid = capture_runner(
-                    run_dir, runner_name, uid, facts["images"]["runner"]
+                    run_dir,
+                    runner_name,
+                    uid,
+                    facts["images"]["runner"],
+                    facts["local_config_ids"]["runner"],
                 )
                 if runner_pod_uid and observed_pod_uid and observed_pod_uid != runner_pod_uid:
                     fail("runner Pod UID changed during one build")
@@ -1215,6 +1246,7 @@ def run_acceptance(revision: str, facts: dict) -> None:
                         len(facts["runtime"]["service"]),
                         "kova-service",
                         facts["images"]["controller"],
+                        facts["local_config_ids"]["controller"],
                     )
                     != facts["runtime"]["service"]
                 ):
@@ -1225,6 +1257,7 @@ def run_acceptance(revision: str, facts: dict) -> None:
                         len(facts["runtime"]["worker"]),
                         "buildkitd",
                         facts["images"]["worker"],
+                        facts["local_config_ids"]["worker"],
                     )
                     != facts["runtime"]["worker"]
                 ):
