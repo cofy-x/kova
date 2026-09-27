@@ -108,6 +108,8 @@
         "jobTTL": { "type": "string" },
         "wait": { "type": "string" },
         "pollInterval": { "type": "string" },
+        "pollRetryWindow": { "type": "string" },
+        "maxBuildDuration": { "type": "string" },
         "maxActiveJobs": { "type": "integer", "minimum": 1 },
         "maxActiveJobsPerRequester": { "type": "integer", "minimum": 1 },
         "maxQueuedJobsPerRequester": { "type": "integer", "minimum": 1 },

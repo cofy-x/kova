@@ -2,6 +2,7 @@ package buildcontroller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
 
@@ -53,6 +55,13 @@ func (r *KovaBuildReconciler) startBuild(ctx context.Context, build *kovav1.Kova
 			"kova.cofy.dev/build-id": build.Name,
 		},
 	})
+	if r.Cfg.MaxBuildDuration > 0 {
+		seconds := int64(r.Cfg.MaxBuildDuration / time.Second)
+		if r.Cfg.MaxBuildDuration%time.Second != 0 {
+			seconds++
+		}
+		pod.Spec.ActiveDeadlineSeconds = &seconds
+	}
 	if err := ctrl.SetControllerReference(build, &pod, r.Scheme); err != nil {
 		return ctrl.Result{}, r.finish(ctx, build, kovav1.PhaseFailed, "RunnerCreateFailed", err.Error())
 	}
@@ -89,8 +98,11 @@ func (r *KovaBuildReconciler) cancelBuild(ctx context.Context, build *kovav1.Kov
 }
 
 func (r *KovaBuildReconciler) submitWhenReady(ctx context.Context, build *kovav1.KovaBuild) (ctrl.Result, error) {
+	if expired, result, err := r.expireActiveBuild(ctx, build); expired {
+		return result, err
+	}
 	var pod corev1.Pod
-	if err := r.Get(ctx, types.NamespacedName{Namespace: build.Namespace, Name: build.Status.RunnerPodName}, &pod); err != nil {
+	if err := r.getRunnerPod(ctx, build, &pod); err != nil {
 		if apierrors.IsNotFound(err) {
 			return ctrl.Result{}, r.finish(ctx, build, kovav1.PhaseFailed, "RunnerUnavailable", "runner Pod disappeared before the build was submitted")
 		}
@@ -106,9 +118,22 @@ func (r *KovaBuildReconciler) submitWhenReady(ctx context.Context, build *kovav1
 		if build.Status.StartedAt != nil && r.Cfg.WaitTimeout > 0 && time.Since(build.Status.StartedAt.Time) >= r.Cfg.WaitTimeout {
 			return ctrl.Result{}, r.finish(ctx, build, kovav1.PhaseFailed, "RunnerUnavailable", fmt.Sprintf("runner Pod did not become ready within %s", r.Cfg.WaitTimeout))
 		}
-		return ctrl.Result{RequeueAfter: time.Second}, nil
+		return ctrl.Result{RequeueAfter: r.activeRequeueAfter(build, time.Second)}, nil
 	}
 	client := runnerexec.Client{Kube: r.Kube, BuildkitPlatformAddrs: r.Cfg.BuildkitPlatformAddrs}
+	state, err := client.BuildStatus(ctx, build)
+	if err != nil {
+		if errors.Is(err, runnerexec.ErrInvalidBuildStatus) {
+			return ctrl.Result{}, r.finish(ctx, build, kovav1.PhaseFailed, "RunnerProtocolError", err.Error())
+		}
+		return r.retryStatusObservation(ctx, build, err)
+	}
+	if state.Status != "idle" {
+		return r.markSubmitted(ctx, build, state)
+	}
+	if err := r.clearPollFailure(ctx, build); err != nil {
+		return ctrl.Result{}, err
+	}
 	sourceTargets, err := client.SourceTargets(ctx, build, sourcePath(build))
 	if err != nil {
 		return ctrl.Result{}, r.finish(ctx, build, kovav1.PhaseFailed, "InvalidSource", err.Error())
@@ -117,16 +142,41 @@ func (r *KovaBuildReconciler) submitWhenReady(ctx context.Context, build *kovav1
 		return ctrl.Result{}, r.finish(ctx, build, kovav1.PhaseFailed, "InvalidTargets", "source targets do not exactly match requested targets")
 	}
 	if err := client.SubmitBuild(ctx, build, sourcePath(build)); err != nil {
-		return ctrl.Result{}, r.finish(ctx, build, kovav1.PhaseFailed, "BuildSubmissionFailed", err.Error())
+		// The POST can be accepted even when exec loses its response. The
+		// runner's request ID makes the next submission safe if observation
+		// is also unavailable.
+		state, statusErr := client.BuildStatus(ctx, build)
+		if statusErr != nil {
+			if errors.Is(statusErr, runnerexec.ErrInvalidBuildStatus) {
+				return ctrl.Result{}, r.finish(ctx, build, kovav1.PhaseFailed, "RunnerProtocolError", statusErr.Error())
+			}
+			return r.retryStatusObservation(ctx, build, statusErr)
+		}
+		if state.Status == "idle" {
+			return ctrl.Result{RequeueAfter: r.activeRequeueAfter(build, time.Second)}, nil
+		}
+		return r.markSubmitted(ctx, build, state)
+	}
+	return r.markSubmitted(ctx, build, runner.BuildState{Status: "running"})
+}
+
+func (r *KovaBuildReconciler) markSubmitted(ctx context.Context, build *kovav1.KovaBuild, state runner.BuildState) (ctrl.Result, error) {
+	if state.RequestID != "" && state.RequestID != runnerexec.RequestID(build) {
+		return ctrl.Result{}, r.finish(ctx, build, kovav1.PhaseFailed, "RunnerProtocolError", "runner reported a different build request")
+	}
+	if _, _, err := runner.WaitDecision(state.Status); err != nil {
+		return ctrl.Result{}, r.finish(ctx, build, kovav1.PhaseFailed, "RunnerProtocolError", err.Error())
 	}
 	build.Status.Phase = kovav1.PhaseRunning
 	build.Status.ObservedGeneration = build.Generation
 	build.Status.Message = ""
+	build.Status.PollFailureSince = nil
+	build.Status.PollFailureCount = 0
 	setPhaseCondition(build, kovav1.PhaseRunning, "BuildSubmitted", "build was submitted to the runner")
 	if err := r.Status().Update(ctx, build); err != nil {
 		return ctrl.Result{}, err
 	}
-	return ctrl.Result{RequeueAfter: r.Cfg.PollInterval}, nil
+	return ctrl.Result{RequeueAfter: r.activeRequeueAfter(build, r.Cfg.PollInterval)}, nil
 }
 
 func sourceFetchFailure(pod *corev1.Pod) (string, bool) {
@@ -147,18 +197,32 @@ func sourceFetchFailure(pod *corev1.Pod) (string, bool) {
 }
 
 func (r *KovaBuildReconciler) pollBuild(ctx context.Context, build *kovav1.KovaBuild) (ctrl.Result, error) {
+	if expired, result, err := r.expireActiveBuild(ctx, build); expired {
+		return result, err
+	}
 	client := runnerexec.Client{Kube: r.Kube, BuildkitPlatformAddrs: r.Cfg.BuildkitPlatformAddrs}
 	state, err := client.BuildStatus(ctx, build)
 	if err != nil {
-		return ctrl.Result{}, r.finish(ctx, build, kovav1.PhaseFailed, "RunnerUnavailable", err.Error())
+		if errors.Is(err, runnerexec.ErrInvalidBuildStatus) {
+			return ctrl.Result{}, r.finish(ctx, build, kovav1.PhaseFailed, "RunnerProtocolError", err.Error())
+		}
+		return r.retryStatusObservation(ctx, build, err)
+	}
+	if state.RequestID != "" && state.RequestID != runnerexec.RequestID(build) {
+		return ctrl.Result{}, r.finish(ctx, build, kovav1.PhaseFailed, "RunnerProtocolError", "runner reported a different build request")
 	}
 	done, success, err := runner.WaitDecision(state.Status)
 	if err != nil {
 		return ctrl.Result{}, r.finish(ctx, build, kovav1.PhaseFailed, "RunnerProtocolError", err.Error())
 	}
 	if !done {
-		return ctrl.Result{RequeueAfter: r.Cfg.PollInterval}, nil
+		if err := r.clearPollFailure(ctx, build); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{RequeueAfter: r.activeRequeueAfter(build, r.Cfg.PollInterval)}, nil
 	}
+	build.Status.PollFailureSince = nil
+	build.Status.PollFailureCount = 0
 	if success {
 		build.Status.Phase = kovav1.PhaseSucceeded
 	} else if state.Status == "cancelled" {
@@ -178,6 +242,90 @@ func (r *KovaBuildReconciler) pollBuild(ctx context.Context, build *kovav1.KovaB
 		return ctrl.Result{}, r.finish(ctx, build, kovav1.PhaseCancelled, "Cancelled", state.Error)
 	}
 	return ctrl.Result{}, r.finish(ctx, build, kovav1.PhaseFailed, "BuildFailed", state.Error)
+}
+
+func (r *KovaBuildReconciler) clearPollFailure(ctx context.Context, build *kovav1.KovaBuild) error {
+	if build.Status.PollFailureSince == nil && build.Status.PollFailureCount == 0 {
+		return nil
+	}
+	build.Status.PollFailureSince = nil
+	build.Status.PollFailureCount = 0
+	return r.Status().Update(ctx, build)
+}
+
+func (r *KovaBuildReconciler) retryStatusObservation(ctx context.Context, build *kovav1.KovaBuild, observationErr error) (ctrl.Result, error) {
+	var pod corev1.Pod
+	err := r.getRunnerPod(ctx, build, &pod)
+	if apierrors.IsNotFound(err) {
+		return ctrl.Result{}, r.finish(ctx, build, kovav1.PhaseFailed, "RunnerUnavailable", "runner Pod disappeared while build status was unavailable")
+	}
+	if err == nil && (pod.Status.Phase == corev1.PodFailed || pod.Status.Phase == corev1.PodSucceeded) {
+		return ctrl.Result{}, r.finish(ctx, build, kovav1.PhaseFailed, "RunnerUnavailable", fmt.Sprintf("runner Pod terminated while build status was unavailable: %s", pod.Status.Phase))
+	}
+	now := metav1.Now()
+	if build.Status.PollFailureSince == nil {
+		build.Status.PollFailureSince = &now
+	}
+	if r.Cfg.PollRetryWindow > 0 && time.Since(build.Status.PollFailureSince.Time) >= r.Cfg.PollRetryWindow {
+		if err := r.Kube.DeletePod(ctx, build.Namespace, build.Status.RunnerPodName); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{}, r.finish(ctx, build, kovav1.PhaseFailed, "RunnerUnavailable", fmt.Sprintf("runner status unavailable for %s: %v", r.Cfg.PollRetryWindow, observationErr))
+	}
+	if build.Status.PollFailureCount < 5 {
+		build.Status.PollFailureCount++
+	}
+	if err := r.Status().Update(ctx, build); err != nil {
+		return ctrl.Result{}, err
+	}
+	delay := time.Second << (build.Status.PollFailureCount - 1)
+	if delay > 10*time.Second {
+		delay = 10 * time.Second
+	}
+	if r.Cfg.PollRetryWindow > 0 {
+		remaining := time.Until(build.Status.PollFailureSince.Add(r.Cfg.PollRetryWindow))
+		if remaining < delay {
+			delay = max(remaining, time.Millisecond)
+		}
+	}
+	return ctrl.Result{RequeueAfter: r.activeRequeueAfter(build, delay)}, nil
+}
+
+func (r *KovaBuildReconciler) getRunnerPod(ctx context.Context, build *kovav1.KovaBuild, pod *corev1.Pod) error {
+	reader := client.Reader(r.Client)
+	if r.APIReader != nil {
+		reader = r.APIReader
+	}
+	return reader.Get(ctx, types.NamespacedName{Namespace: build.Namespace, Name: build.Status.RunnerPodName}, pod)
+}
+
+func (r *KovaBuildReconciler) activeRequeueAfter(build *kovav1.KovaBuild, delay time.Duration) time.Duration {
+	if delay <= 0 {
+		delay = time.Second
+	}
+	if r.Cfg.MaxBuildDuration <= 0 || build.Status.StartedAt == nil {
+		return delay
+	}
+	remaining := time.Until(build.Status.StartedAt.Add(r.Cfg.MaxBuildDuration))
+	if remaining < delay {
+		return max(remaining, time.Millisecond)
+	}
+	return delay
+}
+
+func (r *KovaBuildReconciler) expireActiveBuild(ctx context.Context, build *kovav1.KovaBuild) (bool, ctrl.Result, error) {
+	if r.Cfg.MaxBuildDuration <= 0 || build.Status.StartedAt == nil || time.Since(build.Status.StartedAt.Time) < r.Cfg.MaxBuildDuration {
+		return false, ctrl.Result{}, nil
+	}
+	if build.Status.RunnerPodName != "" {
+		cancelCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		_ = (runnerexec.Client{Kube: r.Kube}).CancelBuild(cancelCtx, build)
+		cancel()
+		if err := r.Kube.DeletePod(ctx, build.Namespace, build.Status.RunnerPodName); err != nil {
+			return true, ctrl.Result{}, err
+		}
+	}
+	return true, ctrl.Result{}, r.finish(ctx, build, kovav1.PhaseFailed, "BuildTimedOut", fmt.Sprintf("build exceeded the service maximum duration of %s", r.Cfg.MaxBuildDuration))
 }
 
 func (r *KovaBuildReconciler) reconcileTerminal(ctx context.Context, build *kovav1.KovaBuild) (ctrl.Result, error) {

@@ -307,10 +307,17 @@ serviceDaemon:
   maxQueuedJobsPerRequester: 100
   workerSlots: 40
   controllerConcurrency: 4
+  pollRetryWindow: 1m
+  maxBuildDuration: 2h
 
 worker:
   platform: linux/amd64
 ```
+
+The Service retries temporary runner status errors with backoff while checking the runner Pod, for at most `pollRetryWindow`.
+`maxBuildDuration` is the Service-owned limit from runner admission through completion; it applies even when a request sets the per-target `timeout` to `0`.
+At the limit the controller cancels the runner, deletes its Pod, and reports a failed build so its active slot can be reused.
+The runner Pod also has a Kubernetes active deadline, which stops a hung build if the controller is temporarily unavailable.
 
 Registry credentials are the only storage credentials needed by Kova.
 The same Docker config can authorize source pulls, output pushes, and controller-side manifest verification:

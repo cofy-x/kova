@@ -106,6 +106,8 @@ func publicBuildError(reason string) string {
 		return "one or more build results could not be verified"
 	case "Cancelled":
 		return "build was cancelled"
+	case "BuildTimedOut":
+		return "build exceeded the service maximum duration"
 	default:
 		return "build execution failed"
 	}

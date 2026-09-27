@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -106,6 +107,47 @@ func TestHandleBuildPostRejectsConcurrentBuild(t *testing.T) {
 	}
 	close(block)
 	waitForState(t, srv, "completed")
+}
+
+func TestHandleBuildPostDeduplicatesSameRequestWhileRunningAndAfterCompletion(t *testing.T) {
+	block := make(chan struct{})
+	var builds atomic.Int32
+	srv := testDaemonServer(serverBackend{
+		validateBuildArchive: func(string) (int, error) { return 1, nil },
+		extractZip:           func(string, string) error { return nil },
+		runBuild: func(batch.Options) error {
+			builds.Add(1)
+			<-block
+			return nil
+		},
+	})
+	e := echo.New()
+	path := "/api/v1/build?request-id=build-uid"
+	first := performEchoRequest(t, e, http.MethodPost, path, "zip-body", srv.handleBuildPost)
+	if first.Code != http.StatusAccepted {
+		t.Fatalf("first response=%d body=%s", first.Code, first.Body.String())
+	}
+	duplicate := performEchoRequest(t, e, http.MethodPost, path, "zip-body", srv.handleBuildPost)
+	if duplicate.Code != http.StatusOK || decodeDaemonState(t, duplicate).RequestID != "build-uid" {
+		t.Fatalf("duplicate response=%d body=%s", duplicate.Code, duplicate.Body.String())
+	}
+	other := performEchoRequest(t, e, http.MethodPost, "/api/v1/build?request-id=other-uid", "zip-body", srv.handleBuildPost)
+	if other.Code != http.StatusConflict {
+		t.Fatalf("different request response=%d body=%s", other.Code, other.Body.String())
+	}
+	close(block)
+	waitForState(t, srv, "completed")
+	terminalDuplicate := performEchoRequest(t, e, http.MethodPost, path, "zip-body", srv.handleBuildPost)
+	if terminalDuplicate.Code != http.StatusOK || decodeDaemonState(t, terminalDuplicate).Status != "completed" {
+		t.Fatalf("terminal duplicate response=%d body=%s", terminalDuplicate.Code, terminalDuplicate.Body.String())
+	}
+	lateOther := performEchoRequest(t, e, http.MethodPost, "/api/v1/build?request-id=other-uid", "zip-body", srv.handleBuildPost)
+	if lateOther.Code != http.StatusConflict {
+		t.Fatalf("different request after completion=%d body=%s", lateOther.Code, lateOther.Body.String())
+	}
+	if builds.Load() != 1 {
+		t.Fatalf("build runs = %d, want 1", builds.Load())
+	}
 }
 
 func TestHandleBuildCancelCancelsRunningBuild(t *testing.T) {

@@ -5,10 +5,11 @@ import (
 	"testing"
 
 	kovav1 "github.com/cofy-x/kova/internal/apis/kova/v1alpha1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 func TestBuildQueryUsesSortedExplicitPlatformPools(t *testing.T) {
-	raw := BuildQuery(&kovav1.KovaBuild{Spec: kovav1.KovaBuildSpec{Build: kovav1.KovaBuildOptions{Format: "oci", Concurrency: 2}}}, map[string]string{
+	raw := BuildQuery(&kovav1.KovaBuild{ObjectMeta: metav1.ObjectMeta{UID: "build-uid"}, Spec: kovav1.KovaBuildSpec{Build: kovav1.KovaBuildOptions{Format: "oci", Concurrency: 2}}}, map[string]string{
 		"linux/arm64": "tcp://arm64.example:9094",
 		"linux/amd64": "tcp://amd64.example:9094",
 	})
@@ -23,5 +24,8 @@ func TestBuildQueryUsesSortedExplicitPlatformPools(t *testing.T) {
 	}
 	if values.Get("addrs") != "" {
 		t.Fatalf("unexpected unscoped BuildKit address: %q", values.Get("addrs"))
+	}
+	if values.Get("request-id") != "build-uid" {
+		t.Fatalf("request ID = %q", values.Get("request-id"))
 	}
 }

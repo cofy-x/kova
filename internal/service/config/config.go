@@ -18,6 +18,8 @@ type Config struct {
 	AuthStaticPrincipal       string
 	WaitTimeout               time.Duration
 	PollInterval              time.Duration
+	PollRetryWindow           time.Duration
+	MaxBuildDuration          time.Duration
 	MaxActiveJobs             int
 	MaxActiveJobsPerRequester int
 	MaxQueuedJobsPerRequester int

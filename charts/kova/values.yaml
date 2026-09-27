@@ -77,6 +77,8 @@ serviceDaemon:
   jobTTL: 2h
   wait: 3m
   pollInterval: 5s
+  pollRetryWindow: 1m
+  maxBuildDuration: 2h
   maxActiveJobs: 20
   maxActiveJobsPerRequester: 4
   maxQueuedJobsPerRequester: 100

@@ -121,9 +121,11 @@ type KovaBuildStatus struct {
 	// +kubebuilder:validation:MaxLength=128
 	Reason string `json:"reason,omitempty"`
 	// +kubebuilder:validation:MaxLength=2048
-	Message    string       `json:"message,omitempty"`
-	StartedAt  *metav1.Time `json:"startedAt,omitempty"`
-	FinishedAt *metav1.Time `json:"finishedAt,omitempty"`
+	Message          string       `json:"message,omitempty"`
+	StartedAt        *metav1.Time `json:"startedAt,omitempty"`
+	FinishedAt       *metav1.Time `json:"finishedAt,omitempty"`
+	PollFailureSince *metav1.Time `json:"pollFailureSince,omitempty"`
+	PollFailureCount int32        `json:"pollFailureCount,omitempty"`
 	// +kubebuilder:validation:MaxItems=200
 	Outputs []BuildOutput `json:"outputs,omitempty"`
 	// +listType=map

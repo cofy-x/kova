@@ -243,6 +243,12 @@ spec:
                 - Failed
                 - Cancelled
                 type: string
+              pollFailureCount:
+                format: int32
+                type: integer
+              pollFailureSince:
+                format: date-time
+                type: string
               reason:
                 maxLength: 128
                 type: string

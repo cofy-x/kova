@@ -117,6 +117,7 @@ func TestReconcilerCreatesRunnerWithImmutableSourceFetcher(t *testing.T) {
 			BuildkitPlatformAddrs: map[string]string{"linux/amd64": "tcp://kova.kova.svc:9094"},
 			RegistryPlainHTTP:     []string{"registry.local"},
 			JobTTL:                time.Hour,
+			MaxBuildDuration:      time.Hour,
 			PollInterval:          time.Millisecond,
 			RunnerNodeSelector:    map[string]string{"kova.cofy.io/source-node": "true"},
 		},
@@ -148,6 +149,9 @@ func TestReconcilerCreatesRunnerWithImmutableSourceFetcher(t *testing.T) {
 	}
 	if len(pod.Spec.Volumes) == 0 || pod.Spec.Volumes[0].EmptyDir == nil {
 		t.Fatalf("unexpected volumes: %#v", pod.Spec.Volumes)
+	}
+	if pod.Spec.ActiveDeadlineSeconds == nil || *pod.Spec.ActiveDeadlineSeconds != 3600 {
+		t.Fatalf("runner active deadline = %v", pod.Spec.ActiveDeadlineSeconds)
 	}
 	if len(pod.Spec.Containers[0].VolumeMounts) == 0 || pod.Spec.Containers[0].VolumeMounts[0].MountPath != "/var/lib/kova/source" {
 		t.Fatalf("unexpected mounts: %#v", pod.Spec.Containers[0].VolumeMounts)
@@ -349,6 +353,10 @@ func TestSubmitWhenReadyValidatesExactSourceTargetSetBeforeBuild(t *testing.T) {
 					_, _ = io.WriteString(opts.Stdout, tt.inspection)
 					return nil
 				}
+				if strings.Contains(command, "--method GET") {
+					_, _ = io.WriteString(opts.Stdout, `{"status":"idle"}`)
+					return nil
+				}
 				_, _ = io.WriteString(opts.Stdout, `{"status":"running"}`)
 				return nil
 			}
@@ -362,7 +370,7 @@ func TestSubmitWhenReadyValidatesExactSourceTargetSetBeforeBuild(t *testing.T) {
 			}
 			buildCalled := false
 			for _, command := range kubeClient.execCalls {
-				if strings.Contains(strings.Join(command, " "), " transport ") {
+				if strings.Contains(strings.Join(command, " "), "--method POST") {
 					buildCalled = true
 				}
 			}

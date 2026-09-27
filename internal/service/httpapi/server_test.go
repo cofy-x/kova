@@ -567,6 +567,7 @@ func TestPublicBuildFailureContract(t *testing.T) {
 		"BuildSubmissionFailed":    apiv1.BuildFailureSubmissionFailed,
 		"ResultVerificationFailed": apiv1.BuildFailureVerificationFailed,
 		"BuildFailed":              apiv1.BuildFailureExecutionFailed,
+		"BuildTimedOut":            apiv1.BuildFailureExecutionFailed,
 		"Cancelled":                apiv1.BuildFailureCancelled,
 	} {
 		if got := publicBuildFailureCode(reason); got != want {

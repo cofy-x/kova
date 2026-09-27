@@ -51,6 +51,8 @@ func CLICommand() *cli.Command {
 			&cli.StringFlag{Name: "auth-static-principal", Value: "kova:static", EnvVars: []string{"KOVA_SERVICE_AUTH_STATIC_PRINCIPAL"}, Usage: "Kubernetes username represented by the static token"},
 			&cli.DurationFlag{Name: "wait", Value: 3 * time.Minute, Usage: "timeout for runner Pod readiness"},
 			&cli.DurationFlag{Name: "poll-interval", Value: 5 * time.Second, Usage: "build status polling interval"},
+			&cli.DurationFlag{Name: "poll-retry-window", Value: time.Minute, Usage: "maximum time to retry runner status errors while the Pod remains available"},
+			&cli.DurationFlag{Name: "max-build-duration", Value: 2 * time.Hour, Usage: "maximum time from runner admission to terminal build status"},
 			&cli.IntFlag{Name: "max-active-jobs", Value: 20, Usage: "maximum concurrently active service jobs"},
 			&cli.IntFlag{Name: "max-active-jobs-per-requester", Value: 4, Usage: "maximum concurrently active jobs for one authenticated requester"},
 			&cli.IntFlag{Name: "max-queued-jobs-per-requester", Value: 100, Usage: "maximum queued jobs for one authenticated requester"},
@@ -106,6 +108,8 @@ func CLICommand() *cli.Command {
 				AuthStaticPrincipal:       strings.TrimSpace(c.String("auth-static-principal")),
 				WaitTimeout:               c.Duration("wait"),
 				PollInterval:              c.Duration("poll-interval"),
+				PollRetryWindow:           c.Duration("poll-retry-window"),
+				MaxBuildDuration:          c.Duration("max-build-duration"),
 				MaxActiveJobs:             c.Int("max-active-jobs"),
 				MaxActiveJobsPerRequester: c.Int("max-active-jobs-per-requester"),
 				MaxQueuedJobsPerRequester: c.Int("max-queued-jobs-per-requester"),
@@ -138,11 +142,12 @@ func CLICommand() *cli.Command {
 				return err
 			}
 			if err := (&buildcontroller.KovaBuildReconciler{
-				Client:   mgr.GetClient(),
-				Scheme:   mgr.GetScheme(),
-				Kube:     kubeClient,
-				Cfg:      cfg,
-				Recorder: mgr.GetEventRecorderFor("kova-service"),
+				Client:    mgr.GetClient(),
+				APIReader: mgr.GetAPIReader(),
+				Scheme:    mgr.GetScheme(),
+				Kube:      kubeClient,
+				Cfg:       cfg,
+				Recorder:  mgr.GetEventRecorderFor("kova-service"),
 			}).SetupWithManager(mgr); err != nil {
 				return err
 			}
@@ -157,6 +162,12 @@ func CLICommand() *cli.Command {
 }
 
 func validateCapacityConfig(cfg config.Config) error {
+	if cfg.PollRetryWindow <= 0 {
+		return fmt.Errorf("poll-retry-window must be positive")
+	}
+	if cfg.MaxBuildDuration <= 0 {
+		return fmt.Errorf("max-build-duration must be positive")
+	}
 	if cfg.MaxActiveJobs < 1 {
 		return fmt.Errorf("max-active-jobs must be at least 1")
 	}

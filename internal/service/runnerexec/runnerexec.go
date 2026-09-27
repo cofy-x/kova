@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
 	"sort"
@@ -21,6 +22,8 @@ type Client struct {
 	Kube                  kube.API
 	BuildkitPlatformAddrs map[string]string
 }
+
+var ErrInvalidBuildStatus = errors.New("invalid runner build status")
 
 func (c Client) SourceTargets(ctx context.Context, build *kovav1.KovaBuild, sourcePath string) ([]buildcontract.TargetSpec, error) {
 	var stdout, stderr bytes.Buffer
@@ -73,7 +76,7 @@ func (c Client) BuildStatus(ctx context.Context, build *kovav1.KovaBuild) (runne
 	}
 	state, err := runner.ParseBuildState(stdout.Bytes())
 	if err != nil {
-		return runner.BuildState{}, fmt.Errorf("parse build status: %w", err)
+		return runner.BuildState{}, fmt.Errorf("%w: %v", ErrInvalidBuildStatus, err)
 	}
 	return state, nil
 }
@@ -105,6 +108,7 @@ func (c Client) Post(ctx context.Context, build *kovav1.KovaBuild, path string, 
 
 func BuildQuery(build *kovav1.KovaBuild, platformAddrs map[string]string) string {
 	values := url.Values{}
+	values.Set("request-id", RequestID(build))
 	platforms := make([]string, 0, len(platformAddrs))
 	for platform := range platformAddrs {
 		platforms = append(platforms, platform)
@@ -136,6 +140,13 @@ func BuildQuery(build *kovav1.KovaBuild, platformAddrs map[string]string) string
 		values.Add("var", value)
 	}
 	return values.Encode()
+}
+
+func RequestID(build *kovav1.KovaBuild) string {
+	if build.UID != "" {
+		return string(build.UID)
+	}
+	return build.Namespace + "/" + build.Name
 }
 
 func ExecError(action string, stderr []byte, err error) error {

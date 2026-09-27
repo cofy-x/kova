@@ -30,10 +30,11 @@ var (
 
 type KovaBuildReconciler struct {
 	client.Client
-	Scheme   *runtime.Scheme
-	Kube     kube.API
-	Cfg      config.Config
-	Recorder record.EventRecorder
+	APIReader client.Reader
+	Scheme    *runtime.Scheme
+	Kube      kube.API
+	Cfg       config.Config
+	Recorder  record.EventRecorder
 
 	admissionMu sync.Mutex
 }

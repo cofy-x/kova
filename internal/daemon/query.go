@@ -98,7 +98,7 @@ func queryDurationStrict(q url.Values, key string, def time.Duration, min time.D
 }
 
 func buildOptionsFromQuery(q url.Values, defaultAddrs string, resultDB string, logsFile string) (batch.Options, error) {
-	if err := validateQueryKeys(q, "addrs", "platform-addr", "platform", "concurrency", "fail-fast", "format", "oom-cooldown", "timeout", "verbose", "target", "var"); err != nil {
+	if err := validateQueryKeys(q, "addrs", "platform-addr", "platform", "concurrency", "fail-fast", "format", "oom-cooldown", "request-id", "timeout", "verbose", "target", "var"); err != nil {
 		return batch.Options{}, err
 	}
 	addrsValue, ok, err := queryValue(q, "addrs")

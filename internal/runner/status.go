@@ -7,8 +7,9 @@ import (
 )
 
 type BuildState struct {
-	Status string `json:"status"`
-	Error  string `json:"error,omitempty"`
+	Status    string `json:"status"`
+	Error     string `json:"error,omitempty"`
+	RequestID string `json:"requestId,omitempty"`
 }
 
 func ParseBuildState(raw []byte) (BuildState, error) {

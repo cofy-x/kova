@@ -37,13 +37,30 @@ func (s *daemonServer) handleBuildCancel(c echo.Context) error {
 func (s *daemonServer) handleBuildPost(c echo.Context) error {
 	logging.ResetCommandStartTime(time.Now())
 
+	if len(c.QueryParams()["request-id"]) > 1 {
+		return c.JSON(http.StatusBadRequest, daemonState{Status: "error", Error: "request-id must be specified at most once"})
+	}
+	requestID := c.QueryParam("request-id")
+	if len(requestID) > 128 {
+		return c.JSON(http.StatusBadRequest, daemonState{Status: "error", Error: "request-id is too long"})
+	}
 	s.mu.Lock()
+	if requestID != "" && requestID == s.buildRequestID {
+		state := s.build
+		s.mu.Unlock()
+		return c.JSON(http.StatusOK, state)
+	}
+	if s.buildRequestID != "" {
+		s.mu.Unlock()
+		return c.JSON(http.StatusConflict, daemonState{Status: "error", Error: "runner belongs to another build"})
+	}
 	if buildActive(s.build.Status) {
 		s.mu.Unlock()
 		logging.Errorf("Rejected build request: another build is already running")
 		return c.JSON(http.StatusConflict, daemonState{Status: "error", Error: "a build is already running"})
 	}
-	s.build = daemonState{Status: "running"}
+	s.buildRequestID = requestID
+	s.build = daemonState{Status: "running", RequestID: requestID}
 	done := make(chan struct{})
 	buildCtx, buildCancel := context.WithCancel(context.Background())
 	s.buildCancel = buildCancel
@@ -108,7 +125,7 @@ func (s *daemonServer) handleBuildPost(c echo.Context) error {
 
 	logging.Infof("Build request accepted for async processing: zip=%s", tmpZip.Name())
 	go s.runBuildAsync(buildCtx, tmpZip.Name(), q, done)
-	return c.JSON(http.StatusAccepted, daemonState{Status: "running"})
+	return c.JSON(http.StatusAccepted, s.getBuildState())
 }
 
 func (s *daemonServer) runBuildAsync(buildCtx context.Context, zipPath string, q url.Values, done chan struct{}) {
@@ -215,6 +232,7 @@ func (s *daemonServer) handlePreheat(c echo.Context) error {
 
 func (s *daemonServer) setBuildState(st daemonState) {
 	s.mu.Lock()
+	st.RequestID = s.buildRequestID
 	s.build = st
 	s.mu.Unlock()
 	if st.Error != "" {
@@ -246,7 +264,7 @@ func (s *daemonServer) cancelActiveBuild(reason string) (chan struct{}, bool) {
 		return s.buildDone, false
 	}
 	s.buildCancel()
-	s.build = daemonState{Status: "cancelling", Error: reason}
+	s.build = daemonState{Status: "cancelling", Error: reason, RequestID: s.buildRequestID}
 	return s.buildDone, true
 }
 

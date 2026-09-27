@@ -167,6 +167,10 @@ func (in *KovaBuildStatus) DeepCopyInto(out *KovaBuildStatus) {
 		in, out := &in.FinishedAt, &out.FinishedAt
 		*out = (*in).DeepCopy()
 	}
+	if in.PollFailureSince != nil {
+		in, out := &in.PollFailureSince, &out.PollFailureSince
+		*out = (*in).DeepCopy()
+	}
 	if in.Outputs != nil {
 		in, out := &in.Outputs, &out.Outputs
 		*out = make([]BuildOutput, len(*in))

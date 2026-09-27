@@ -2,6 +2,7 @@ package service
 
 import (
 	"testing"
+	"time"
 
 	"github.com/cofy-x/kova/internal/buildcontract"
 	"github.com/cofy-x/kova/internal/service/config"
@@ -67,9 +68,20 @@ func TestValidateCapacityConfigRejectsUnboundedWorkerSlots(t *testing.T) {
 	valid := config.Config{
 		MaxActiveJobs: 20, MaxActiveJobsPerRequester: 4, MaxQueuedJobsPerRequester: 100,
 		WorkerSlots: 20, ControllerConcurrency: buildcontract.DefaultControllerConcurrency,
+		PollRetryWindow: time.Minute, MaxBuildDuration: time.Hour,
 	}
 	if err := validateCapacityConfig(valid); err != nil {
 		t.Fatal(err)
+	}
+	withoutRetryWindow := valid
+	withoutRetryWindow.PollRetryWindow = 0
+	if err := validateCapacityConfig(withoutRetryWindow); err == nil {
+		t.Fatal("expected poll-retry-window=0 to be rejected")
+	}
+	withoutBuildLimit := valid
+	withoutBuildLimit.MaxBuildDuration = 0
+	if err := validateCapacityConfig(withoutBuildLimit); err == nil {
+		t.Fatal("expected max-build-duration=0 to be rejected")
 	}
 	valid.WorkerSlots = 0
 	if err := validateCapacityConfig(valid); err == nil {

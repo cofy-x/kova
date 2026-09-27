@@ -20,6 +20,8 @@ func (r *KovaBuildReconciler) finish(ctx context.Context, build *kovav1.KovaBuil
 	build.Status.Reason = truncate(reason, 128)
 	build.Status.Message = truncate(message, 2048)
 	build.Status.FinishedAt = &now
+	build.Status.PollFailureSince = nil
+	build.Status.PollFailureCount = 0
 	setPhaseCondition(build, phase, build.Status.Reason, build.Status.Message)
 	if r.Recorder != nil {
 		eventType := corev1.EventTypeNormal
