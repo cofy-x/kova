@@ -474,6 +474,207 @@ func initializeAdmissionForTest(t *testing.T, r *KovaBuildReconciler) {
 	}
 }
 
+func completeAndReleaseAdmissionForTest(t *testing.T, r *KovaBuildReconciler, writer client.Client, name string) {
+	t.Helper()
+	ctx := context.Background()
+	var build kovav1.KovaBuild
+	if err := writer.Get(ctx, client.ObjectKey{Namespace: "jobs", Name: name}, &build); err != nil {
+		t.Fatal(err)
+	}
+	build.Status.Phase = kovav1.PhaseSucceeded
+	if err := writer.Status().Update(ctx, &build); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.fenceReservation(ctx, &build); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.releaseReservation(ctx, &build); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSequentialSingleSlotAdmissionRotatesDurablyAcrossLeaders(t *testing.T) {
+	ctx := context.Background()
+	first := queuedBuild("alice-1", "alice", 1, 1)
+	second := queuedBuild("alice-2", "alice", 2, 1)
+	other := queuedBuild("bob-1", "bob", 3, 1)
+	base := crfake.NewClientBuilder().WithScheme(testScheme(t)).WithStatusSubresource(&kovav1.KovaBuild{}).
+		WithObjects(first, second, other).Build()
+	cfg := admissionConfig()
+	cfg.MaxActiveJobs, cfg.WorkerSlots = 1, 1
+	oldLeader := KovaBuildReconciler{Client: base, APIReader: base, Cfg: cfg}
+	initializeAdmissionForTest(t, &oldLeader)
+	if decision, err := oldLeader.admission(ctx, first); err != nil || !decision.Admitted {
+		t.Fatalf("first Alice grant = %#v, %v", decision, err)
+	}
+	if decision, err := oldLeader.admission(ctx, other); err != nil || decision.Admitted {
+		t.Fatalf("Bob unexpectedly granted before Alice release = %#v, %v", decision, err)
+	}
+	_, waiting, err := oldLeader.readReservations(ctx, "jobs")
+	if err != nil || waiting.LastGrantedRequesterHash != queueadmission.HashRequester("alice") {
+		t.Fatalf("waiting attempt changed cursor = %q, %v", waiting.LastGrantedRequesterHash, err)
+	}
+	completeAndReleaseAdmissionForTest(t, &oldLeader, base, first.Name)
+
+	// A replacement reconciler reads the cursor from the ledger. The oldest
+	// remaining CR belongs to Alice, but Bob must receive the next free slot.
+	newLeader := KovaBuildReconciler{Client: base, APIReader: base, Cfg: cfg}
+	if decision, err := newLeader.admission(ctx, other); err != nil || !decision.Admitted {
+		t.Fatalf("Bob grant after Alice release = %#v, %v", decision, err)
+	}
+	if decision, err := newLeader.admission(ctx, second); err != nil || decision.Admitted {
+		t.Fatalf("second Alice grant before Bob release = %#v, %v", decision, err)
+	}
+	completeAndReleaseAdmissionForTest(t, &newLeader, base, other.Name)
+	if decision, err := oldLeader.admission(ctx, second); err != nil || !decision.Admitted {
+		t.Fatalf("second Alice grant after Bob release = %#v, %v", decision, err)
+	}
+	_, state, err := oldLeader.readReservations(ctx, "jobs")
+	if err != nil || state.LastGrantedRequesterHash != queueadmission.HashRequester("alice") {
+		t.Fatalf("durable cursor = %q, %v", state.LastGrantedRequesterHash, err)
+	}
+}
+
+func TestAdmissionCursorDoesNotSkipLessServedRequesterAfterOutOfOrderGrant(t *testing.T) {
+	first := queuedBuild("alice-1", "alice", 1, 1)
+	other := queuedBuild("bob-1", "bob", 2, 1)
+	third := queuedBuild("charlie-1", "charlie", 3, 1)
+	moreBob := queuedBuild("bob-2", "bob", 4, 1)
+	active := map[string]activeReservation{
+		reservationKey(other): {BuildName: other.Name, Requester: "bob", Slots: 1},
+	}
+	builds := []kovav1.KovaBuild{*first, *other, *third, *moreBob}
+	cursor := queueadmission.HashRequester("bob")
+	if decision := decideAdmission(first, builds, active, 2, 2, 2, cursor); !decision.Admitted {
+		t.Fatalf("Alice lost remaining capacity after Bob granted out of order: %#v", decision)
+	}
+	if decision := decideAdmission(third, builds, active, 2, 2, 2, cursor); decision.Admitted {
+		t.Fatalf("Charlie jumped ahead of less-served, older Alice: %#v", decision)
+	}
+}
+
+func TestAdmissionCursorFallsBackWhenRequesterDisappearsAndNewOneArrives(t *testing.T) {
+	ctx := context.Background()
+	first := queuedBuild("alice-1", "alice", 1, 1)
+	other := queuedBuild("bob-1", "bob", 2, 1)
+	base := crfake.NewClientBuilder().WithScheme(testScheme(t)).WithStatusSubresource(&kovav1.KovaBuild{}).
+		WithObjects(first, other).Build()
+	cfg := admissionConfig()
+	cfg.MaxActiveJobs, cfg.WorkerSlots = 1, 1
+	r := KovaBuildReconciler{Client: base, APIReader: base, Cfg: cfg}
+	initializeAdmissionForTest(t, &r)
+	if decision, err := r.admission(ctx, first); err != nil || !decision.Admitted {
+		t.Fatalf("Alice grant = %#v, %v", decision, err)
+	}
+	completeAndReleaseAdmissionForTest(t, &r, base, first.Name)
+	newcomer := queuedBuild("charlie-1", "charlie", 3, 1)
+	if err := base.Create(ctx, newcomer); err != nil {
+		t.Fatal(err)
+	}
+	if decision, err := r.admission(ctx, other); err != nil || !decision.Admitted {
+		t.Fatalf("oldest remaining Bob grant = %#v, %v", decision, err)
+	}
+	completeAndReleaseAdmissionForTest(t, &r, base, other.Name)
+	returning := queuedBuild("alice-2", "alice", 4, 1)
+	if err := base.Create(ctx, returning); err != nil {
+		t.Fatal(err)
+	}
+	if decision, err := r.admission(ctx, newcomer); err != nil || !decision.Admitted {
+		t.Fatalf("Charlie grant before returning Alice = %#v, %v", decision, err)
+	}
+}
+
+func TestAdmissionCursorSkipsCancelledAndDeletingQueueHeads(t *testing.T) {
+	ctx := context.Background()
+	first := queuedBuild("alice-1", "alice", 1, 1)
+	cancelled := queuedBuild("alice-2", "alice", 2, 1)
+	cancelled.Annotations = map[string]string{kovav1.CancellationRequestedAnnotation: "requested"}
+	deleting := queuedBuild("bob-1", "bob", 3, 1)
+	deletingAt := metav1.NewTime(time.Unix(5, 0))
+	deleting.DeletionTimestamp = &deletingAt
+	eligible := queuedBuild("charlie-1", "charlie", 4, 1)
+	base := crfake.NewClientBuilder().WithScheme(testScheme(t)).WithStatusSubresource(&kovav1.KovaBuild{}).
+		WithObjects(first, cancelled, deleting, eligible).Build()
+	cfg := admissionConfig()
+	cfg.MaxActiveJobs, cfg.WorkerSlots = 1, 1
+	r := KovaBuildReconciler{Client: base, APIReader: base, Cfg: cfg}
+	initializeAdmissionForTest(t, &r)
+	if decision, err := r.admission(ctx, first); err != nil || !decision.Admitted {
+		t.Fatalf("first grant = %#v, %v", decision, err)
+	}
+	completeAndReleaseAdmissionForTest(t, &r, base, first.Name)
+	if decision, err := r.admission(ctx, eligible); err != nil || !decision.Admitted {
+		t.Fatalf("eligible grant past cancelled/deleting heads = %#v, %v", decision, err)
+	}
+}
+
+func TestAdmissionCursorUpdatesOnlyWithCommittedCASGrant(t *testing.T) {
+	ctx := context.Background()
+	first := queuedBuild("alice-1", "alice", 1, 1)
+	other := queuedBuild("bob-1", "bob", 2, 1)
+	base := crfake.NewClientBuilder().WithScheme(testScheme(t)).WithStatusSubresource(&kovav1.KovaBuild{}).
+		WithObjects(first, other).Build()
+	cfg := admissionConfig()
+	cfg.MaxActiveJobs, cfg.WorkerSlots = 2, 2
+	fast := KovaBuildReconciler{Client: base, APIReader: base, Cfg: cfg}
+	initializeAdmissionForTest(t, &fast)
+	paused := &pausedActiveGrantUpdate{Client: base, entered: make(chan struct{}), release: make(chan struct{})}
+	releasePaused := sync.OnceFunc(func() { close(paused.release) })
+	defer releasePaused()
+	slow := KovaBuildReconciler{Client: paused, APIReader: base, Cfg: cfg}
+	result := make(chan error, 1)
+	go func() {
+		decision, err := slow.admission(ctx, first)
+		if err == nil && !decision.Admitted {
+			err = fmt.Errorf("Alice was not granted after CAS retry")
+		}
+		result <- err
+	}()
+	select {
+	case <-paused.entered:
+	case err := <-result:
+		t.Fatalf("slow grant exited before CAS pause: %v", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("slow grant did not reach CAS update")
+	}
+	if decision, err := fast.admission(ctx, other); err != nil || !decision.Admitted {
+		t.Fatalf("concurrent Bob grant = %#v, %v", decision, err)
+	}
+	_, before, err := fast.readReservations(ctx, "jobs")
+	if err != nil || before.LastGrantedRequesterHash != queueadmission.HashRequester("bob") || len(before.Active) != 1 {
+		t.Fatalf("cursor before paused CAS resumed = %#v, %v", before, err)
+	}
+	releasePaused()
+	select {
+	case err := <-result:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("slow grant did not retry after CAS conflict")
+	}
+	_, after, err := fast.readReservations(ctx, "jobs")
+	if err != nil || after.LastGrantedRequesterHash != queueadmission.HashRequester("alice") || len(after.Active) != 2 {
+		t.Fatalf("cursor and grants after CAS retry = %#v, %v", after, err)
+	}
+}
+
+func TestAdmissionCursorAcceptsLegacyLedgerAndRejectsMalformedValue(t *testing.T) {
+	legacy := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: reservationConfigMap, Namespace: "jobs"},
+		Data:       map[string]string{reservationDataKey: `{"version":1,"maxJobs":1,"maxPerRequester":1,"workerSlots":1,"active":{}}`},
+	}
+	state, err := decodeReservations(legacy)
+	if err != nil || state.LastGrantedRequesterHash != "" {
+		t.Fatalf("legacy ledger cursor = %q, %v", state.LastGrantedRequesterHash, err)
+	}
+	corrupt := legacy.DeepCopy()
+	corrupt.Data[reservationDataKey] = `{"version":1,"maxJobs":1,"maxPerRequester":1,"workerSlots":1,"lastGrantedRequesterHash":"not-a-hash","active":{}}`
+	if _, err := decodeReservations(corrupt); err == nil {
+		t.Fatal("malformed durable cursor did not fail closed")
+	}
+}
+
 func TestMissingActiveLedgerAfterStartupFailsClosed(t *testing.T) {
 	for _, mode := range []string{"admit", "fence", "terminal", "delete"} {
 		t.Run(mode, func(t *testing.T) {
@@ -914,7 +1115,7 @@ func TestSaturatedAdmissionMatchesFullDecision(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			active := map[string]activeReservation{"blocker": {BuildName: "blocker", Requester: tc.requester, Slots: 1}}
 			fast, saturated := saturatedAdmission(candidate, active, tc.maxJobs, tc.maxRequesterJobs, tc.workerSlots)
-			full := decideAdmission(candidate, []kovav1.KovaBuild{*candidate}, active, tc.maxJobs, tc.maxRequesterJobs, tc.workerSlots)
+			full := decideAdmission(candidate, []kovav1.KovaBuild{*candidate}, active, tc.maxJobs, tc.maxRequesterJobs, tc.workerSlots, "")
 			if !saturated || fast != full || fast.Message != tc.wantMessage {
 				t.Fatalf("fast=%#v saturated=%t full=%#v", fast, saturated, full)
 			}

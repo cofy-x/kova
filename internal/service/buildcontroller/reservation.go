@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	kovav1 "github.com/cofy-x/kova/internal/apis/kova/v1alpha1"
@@ -36,12 +37,13 @@ type activeReservation struct {
 }
 
 type reservationState struct {
-	Version         int                          `json:"version"`
-	Fence           uint64                       `json:"fence"`
-	MaxJobs         int                          `json:"maxJobs"`
-	MaxPerRequester int                          `json:"maxPerRequester"`
-	WorkerSlots     int                          `json:"workerSlots"`
-	Active          map[string]activeReservation `json:"active"`
+	Version                  int                          `json:"version"`
+	Fence                    uint64                       `json:"fence"`
+	MaxJobs                  int                          `json:"maxJobs"`
+	MaxPerRequester          int                          `json:"maxPerRequester"`
+	WorkerSlots              int                          `json:"workerSlots"`
+	LastGrantedRequesterHash string                       `json:"lastGrantedRequesterHash,omitempty"`
+	Active                   map[string]activeReservation `json:"active"`
 }
 
 var errAdmissionClosed = errors.New("KovaBuild is no longer eligible for runner admission")
@@ -174,6 +176,14 @@ func decodeReservations(cm *corev1.ConfigMap) (reservationState, error) {
 	}
 	if state.Version != 1 || state.Active == nil || state.MaxJobs < 0 || state.MaxPerRequester < 0 || state.WorkerSlots < 0 {
 		return reservationState{}, fmt.Errorf("admission ledger %s/%s has an unsupported state", cm.Namespace, cm.Name)
+	}
+	if cursor := state.LastGrantedRequesterHash; cursor != "" {
+		if len(cursor) != 64 || cursor != strings.ToLower(cursor) {
+			return reservationState{}, fmt.Errorf("admission ledger %s/%s has an invalid requester cursor", cm.Namespace, cm.Name)
+		}
+		if _, err := hex.DecodeString(cursor); err != nil {
+			return reservationState{}, fmt.Errorf("admission ledger %s/%s has an invalid requester cursor", cm.Namespace, cm.Name)
+		}
 	}
 	for key, entry := range state.Active {
 		if key == "" || entry.BuildName == "" || entry.Requester == "" || entry.Slots < 1 {

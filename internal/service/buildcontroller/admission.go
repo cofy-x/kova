@@ -6,6 +6,7 @@ import (
 	"sort"
 
 	kovav1 "github.com/cofy-x/kova/internal/apis/kova/v1alpha1"
+	"github.com/cofy-x/kova/internal/service/queueadmission"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -60,11 +61,15 @@ func (r *KovaBuildReconciler) admission(ctx context.Context, build *kovav1.KovaB
 			}
 			return admissionDecision{Admitted: true, Allocation: existing.Slots}, nil
 		}
-		decision := decideAdmission(build, builds.Items, reservations.Active, r.Cfg.MaxActiveJobs, r.Cfg.MaxActiveJobsPerRequester, r.Cfg.WorkerSlots)
+		decision := decideAdmission(build, builds.Items, reservations.Active, r.Cfg.MaxActiveJobs, r.Cfg.MaxActiveJobsPerRequester, r.Cfg.WorkerSlots, reservations.LastGrantedRequesterHash)
 		if !decision.Admitted {
 			return decision, nil
 		}
 		reservations.Active[key] = activeReservation{BuildName: build.Name, Requester: requesterKey(build), Slots: decision.Allocation}
+		// The next requester must be chosen from the last committed grant, not
+		// from a process-local cursor that disappears on leader handoff. The
+		// cursor and grant share one resourceVersion CAS.
+		reservations.LastGrantedRequesterHash = queueadmission.HashRequester(requesterKey(build))
 		if err := r.writeReservations(ctx, cm, reservations); err != nil {
 			if apierrors.IsConflict(err) || apierrors.IsAlreadyExists(err) {
 				if err := waitReservationCAS(ctx, retry); err != nil {
@@ -101,7 +106,7 @@ func saturatedAdmission(build *kovav1.KovaBuild, active map[string]activeReserva
 	return admissionDecision{}, false
 }
 
-func decideAdmission(build *kovav1.KovaBuild, builds []kovav1.KovaBuild, active map[string]activeReservation, maxJobs, maxRequesterJobs, workerSlots int) admissionDecision {
+func decideAdmission(build *kovav1.KovaBuild, builds []kovav1.KovaBuild, active map[string]activeReservation, maxJobs, maxRequesterJobs, workerSlots int, lastGrantedRequesterHash string) admissionDecision {
 	activeByRequester := map[string]int{}
 	usedSlots := 0
 	for _, reservation := range active {
@@ -134,7 +139,7 @@ func decideAdmission(build *kovav1.KovaBuild, builds []kovav1.KovaBuild, active 
 			return admissionDecision{Message: "waiting for worker capacity"}
 		}
 	}
-	for _, candidate := range fairQueue(queued) {
+	for _, candidate := range fairQueue(queued, activeByRequester, lastGrantedRequesterHash) {
 		requester := requesterKey(candidate)
 		if maxRequesterJobs > 0 && activeByRequester[requester] >= maxRequesterJobs {
 			continue
@@ -158,7 +163,7 @@ func decideAdmission(build *kovav1.KovaBuild, builds []kovav1.KovaBuild, active 
 	return admissionDecision{Message: "waiting for fair-share capacity"}
 }
 
-func fairQueue(builds []*kovav1.KovaBuild) []*kovav1.KovaBuild {
+func fairQueue(builds []*kovav1.KovaBuild, activeByRequester map[string]int, lastGrantedRequesterHash string) []*kovav1.KovaBuild {
 	groups := map[string][]*kovav1.KovaBuild{}
 	for _, build := range builds {
 		key := requesterKey(build)
@@ -172,6 +177,9 @@ func fairQueue(builds []*kovav1.KovaBuild) []*kovav1.KovaBuild {
 		requesters = append(requesters, requester)
 	}
 	sort.Slice(requesters, func(i, j int) bool {
+		if activeByRequester[requesters[i]] != activeByRequester[requesters[j]] {
+			return activeByRequester[requesters[i]] < activeByRequester[requesters[j]]
+		}
 		left, right := groups[requesters[i]][0], groups[requesters[j]][0]
 		if buildLess(left, right) {
 			return true
@@ -181,6 +189,26 @@ func fairQueue(builds []*kovav1.KovaBuild) []*kovav1.KovaBuild {
 		}
 		return requesters[i] < requesters[j]
 	})
+	// Prefer requesters with fewer current grants, then their oldest queued
+	// jobs. Within the cursor's equal-grant tier, rotate after its last durable
+	// grant. Without this rotation, a single released slot always goes back to
+	// the oldest requester's backlog. Never rotate a more-served requester in
+	// front of a less-served one after concurrent out-of-order grants.
+	for i, requester := range requesters {
+		if queueadmission.HashRequester(requester) == lastGrantedRequesterHash {
+			start, end := i, i+1
+			for start > 0 && activeByRequester[requesters[start-1]] == activeByRequester[requester] {
+				start--
+			}
+			for end < len(requesters) && activeByRequester[requesters[end]] == activeByRequester[requester] {
+				end++
+			}
+			rotated := append([]string{}, requesters[i+1:end]...)
+			rotated = append(rotated, requesters[start:i+1]...)
+			copy(requesters[start:end], rotated)
+			break
+		}
+	}
 	ordered := make([]*kovav1.KovaBuild, 0, len(builds))
 	for round := 0; len(ordered) < len(builds); round++ {
 		for _, requester := range requesters {
