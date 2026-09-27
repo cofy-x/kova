@@ -172,7 +172,7 @@ worker:
     minFreeSpaceGB: 2
 ```
 
-The chart rejects a reserved budget at or above the maximum and a maximum above 80% of the configured `lib-buildkit` `emptyDir.sizeLimit` or worker ephemeral-storage limit when those limits are present.
+The chart requires exactly one bounded `lib-buildkit` `emptyDir` volume and an explicit worker ephemeral-storage limit. It rejects a reserved budget at or above the maximum and a maximum above 80% of either limit.
 For this check, cache volume and ephemeral-storage quantities use integer `Mi`, `Gi`, or `Ti` values.
 Keep additional space for in-flight build references, the writable container layer, logs, and filesystem metadata; BuildKit GC can reclaim only eligible unused records and is not a hard disk or memory limit.
 Set worker CPU and memory requests/limits and admission slots from measured build costs and node headroom, rather than treating the GC budget as a substitute for resource isolation.
