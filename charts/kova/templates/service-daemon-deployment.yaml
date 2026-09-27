@@ -5,6 +5,12 @@
 {{- if lt (int .Values.serviceDaemon.kubeClientBurst) (int .Values.serviceDaemon.kubeClientQPS) }}
 {{- fail "serviceDaemon.kubeClientBurst must be at least serviceDaemon.kubeClientQPS" }}
 {{- end }}
+{{- if ne .Values.serviceDaemon.metricsBindAddress "0" }}
+{{- $metricsPort := int (last (splitList ":" .Values.serviceDaemon.metricsBindAddress)) }}
+{{- if or (lt $metricsPort 1) (gt $metricsPort 65535) (eq $metricsPort (int (last (splitList ":" .Values.serviceDaemon.listen)))) }}
+{{- fail "serviceDaemon.metricsBindAddress must use a valid port distinct from serviceDaemon.listen" }}
+{{- end }}
+{{- end }}
 {{- $name := printf "%s-service" (include "kova.fullname" .) | trunc 63 | trimSuffix "-" }}
 {{- $selectorName := printf "%s-service" (include "kova.name" .) | trunc 63 | trimSuffix "-" }}
 {{- $saName := default "default" .Values.serviceDaemon.serviceAccount.name }}
