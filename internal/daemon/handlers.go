@@ -164,6 +164,13 @@ func (s *daemonServer) runBuildAsync(buildCtx context.Context, zipPath string, q
 		s.setBuildState(daemonState{Status: "failed", Error: "extract zip: " + err.Error()})
 		return
 	}
+	// The immutable source.zip remains mounted separately for provenance. The
+	// HTTP upload copy is no longer needed once extraction has succeeded.
+	if err := os.Remove(zipPath); err != nil && !os.IsNotExist(err) {
+		logging.Errorf("Async build: release upload copy %s failed: %v", zipPath, err)
+		s.setBuildState(daemonState{Status: "failed", Error: "release upload copy: " + err.Error()})
+		return
+	}
 	logging.Infof("Async build extracted zip to %s", daemonImageDir)
 	opts.ImageDirs = daemonImageDir
 	opts.ImageDirsAlreadyIsolated = true

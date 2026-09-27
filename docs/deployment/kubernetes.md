@@ -183,6 +183,7 @@ It does not require an object store, shared filesystem, or RWX PVC.
 Each runner materializes a digest-verified source into job-local `emptyDir` storage.
 The source volume has a 4 GiB default and minimum `sizeLimit`; it also backs runner `/tmp`, where the uploaded zip copy and extracted context live.
 The immutable source archive and its runner upload copy each use at most 512 MiB; the extracted job-local tree uses at most 2 GiB and is prepared in place, not copied again.
+The upload copy is removed before BuildKit starts, so the three large inputs overlap only during extraction.
 The runner retains at most 256 MiB of ephemeral failure logs, leaving about 768 MiB of the default source-volume budget for result state, command metadata, and filesystem overhead at the source limits.
 Top-level `Dockerfile` and `metadata.json` files are each limited to 1 MiB before and after variable substitution; captured command output is limited to the latest 1 MiB per target.
 Nydus conversion and unusually large build-tool scratch files can need more headroom; measure their peak usage and raise both the source volume and runner ephemeral-storage request/limit together for such workloads.

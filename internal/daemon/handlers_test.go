@@ -69,11 +69,16 @@ func TestBuildStatusAdvertisesIdempotentRequestCapability(t *testing.T) {
 }
 
 func TestHandleBuildPostRunsAsyncBuild(t *testing.T) {
+	uploadDir := t.TempDir()
+	t.Setenv("TMPDIR", uploadDir)
 	buildCalled := make(chan batch.Options, 1)
+	var uploadReleased atomic.Bool
 	srv := testDaemonServer(serverBackend{
 		validateBuildArchive: func(string) (int, error) { return 1, nil },
 		extractZip:           func(string, string) error { return nil },
 		runBuild: func(opts batch.Options) error {
+			entries, err := os.ReadDir(uploadDir)
+			uploadReleased.Store(err == nil && len(entries) == 0)
 			buildCalled <- opts
 			return nil
 		},
@@ -85,6 +90,9 @@ func TestHandleBuildPostRunsAsyncBuild(t *testing.T) {
 		t.Fatalf("expected accepted, got %d body=%s", rec.Code, rec.Body.String())
 	}
 	waitForState(t, srv, "completed")
+	if !uploadReleased.Load() {
+		t.Fatal("runner kept the redundant uploaded ZIP through the build")
+	}
 
 	select {
 	case opts := <-buildCalled:
