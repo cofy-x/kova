@@ -21,6 +21,14 @@ The Service initializes both ledgers before opening its HTTP listener; if a ledg
 New submissions also check the active ledger immediately before queue reservation, and the reservation validates the queue ledger; existing build queries remain available during an admission outage.
 `/version` reports Service API and build provenance without credentials.
 
+The Service listener gives a connection 5 seconds to finish HTTP headers and 30 seconds total to read a request, including its body; an idle keep-alive connection closes after 60 seconds.
+The 1 MiB create-body limit still applies independently.
+These are transport safeguards, not build or controller deadlines.
+An incomplete request may be closed or receive an unstructured HTTP 408 before it reaches the API error handler.
+An incomplete JSON create body cannot reserve queue capacity.
+The Service intentionally has no absolute `WriteTimeout`: handlers may wait for Kubernetes operations after a mutation has begun, and cutting off the response at a fixed wall-clock time would make an accepted build indistinguishable from a failed submission.
+Callers should set their own response deadline, use a stable idempotency key, and reconcile any uncertain submission by its build ID instead of issuing a new logical request.
+
 ## Immutable Sources
 
 The preferred source is an OCI bundle published with `kova source push`.
@@ -284,7 +292,7 @@ Workloads above 100 logical targets must be split by the caller into several bou
 
 ## Error Contract
 
-All Service API failures use a structured response:
+Once a request reaches an API handler, Service API failures use a structured response; connection-level read timeouts may instead close the socket or return an unstructured HTTP 408:
 
 ```json
 {

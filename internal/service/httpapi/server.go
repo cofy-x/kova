@@ -41,6 +41,12 @@ var (
 	buildCancels = observability.Int64Counter("kova.service.job.cancellations", "Accepted job cancellations")
 )
 
+const (
+	serviceReadHeaderTimeout = 5 * time.Second
+	serviceReadTimeout       = 30 * time.Second
+	serviceIdleTimeout       = time.Minute
+)
+
 func NewServer(cfg config.Config, kube kubeAPI, crClient client.Client, crReader client.Reader, authenticator serviceauth.Authenticator, authorizer serviceauth.Authorizer) *Server {
 	if cfg.Listen == "" {
 		cfg.Listen = ":8080"
@@ -71,8 +77,7 @@ func (s *Server) Start(ctx context.Context) error {
 	if err := s.initializeAdmission(ctx); err != nil {
 		return err
 	}
-	e := s.routes()
-	httpSrv := &http.Server{Addr: s.cfg.Listen, Handler: e}
+	httpSrv := s.httpServer()
 	go func() {
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -84,6 +89,20 @@ func (s *Server) Start(ctx context.Context) error {
 		return err
 	}
 	return nil
+}
+
+func (s *Server) httpServer() *http.Server {
+	return &http.Server{
+		Addr:              s.cfg.Listen,
+		Handler:           s.routes(),
+		ReadHeaderTimeout: serviceReadHeaderTimeout,
+		ReadTimeout:       serviceReadTimeout,
+		IdleTimeout:       serviceIdleTimeout,
+		// A write deadline would also cover potentially slow Kubernetes calls
+		// after a mutation has begun. Until those operations have a separate
+		// bounded response contract, do not turn an accepted build into an
+		// indistinguishable transport timeout here.
+	}
 }
 
 func (s *Server) initializeAdmission(ctx context.Context) error {
