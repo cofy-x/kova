@@ -228,8 +228,10 @@ func validateCapacityConfig(cfg config.Config) error {
 	if cfg.WorkerSlots < 1 {
 		return fmt.Errorf("worker-slots must be at least 1")
 	}
-	if cfg.ControllerConcurrency < 1 || cfg.ControllerConcurrency > buildcontract.MaxControllerConcurrency {
-		return fmt.Errorf("controller-concurrency must be between 1 and %d", buildcontract.MaxControllerConcurrency)
+	// Result verification can block one reconciler until its bounded I/O
+	// attempt ends. Keep another worker available for cancellation and cleanup.
+	if cfg.ControllerConcurrency < 2 || cfg.ControllerConcurrency > buildcontract.MaxControllerConcurrency {
+		return fmt.Errorf("controller-concurrency must be between 2 and %d", buildcontract.MaxControllerConcurrency)
 	}
 	return nil
 }

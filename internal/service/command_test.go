@@ -97,6 +97,11 @@ func TestValidateCapacityConfigRejectsUnboundedWorkerSlots(t *testing.T) {
 	if err := validateCapacityConfig(tooShortVerificationWindow); err == nil {
 		t.Fatal("expected verification-window shorter than attempt timeout to be rejected")
 	}
+	singleReconciler := valid
+	singleReconciler.ControllerConcurrency = 1
+	if err := validateCapacityConfig(singleReconciler); err == nil || !strings.Contains(err.Error(), "between 2") {
+		t.Fatalf("expected controller-concurrency=1 to be rejected, got %v", err)
+	}
 	valid.WorkerSlots = 0
 	if err := validateCapacityConfig(valid); err == nil {
 		t.Fatal("expected worker-slots=0 to be rejected")

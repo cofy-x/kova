@@ -333,6 +333,7 @@ At the limit the controller cancels the runner, deletes its Pod, and reports a f
 The runner Pod also has a Kubernetes active deadline, which stops a hung build if the controller is temporarily unavailable.
 When the controller reconciles after the deadline, it first makes a bounded status check; a reachable terminal runner state is processed and verified, while an active or unobservable runner is timed out.
 The separate verification window starts when a completed runner is durably observed. If it expires, pending outputs fail with `result_verification_failed`; verified digests remain available as partial results. Adjust the window for registry consistency and the number of concrete outputs, not to extend build execution.
+Keep `controllerConcurrency` at 2 or more: one reconciler may wait for a bounded registry verification attempt while another must remain available for cancellation and terminal Pod cleanup. Older one-worker configurations must be raised before upgrading.
 
 Registry credentials are the only storage credentials needed by Kova.
 The same Docker config can authorize source pulls, output pushes, and controller-side manifest verification:
