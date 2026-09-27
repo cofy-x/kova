@@ -1294,7 +1294,7 @@ def run_acceptance(revision: str, facts: dict) -> None:
     PRIVATE_TOKEN = token
     headroom = host_guard()
     os.umask(0o077)
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dt%H%M%sz")  # noqa: UP017 (Python 3.10)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dt%H%M%Sz")  # noqa: UP017 (Python 3.10)
     run_id = f"partial-41-{stamp}-{secrets.token_hex(4)}"
     run_dir = ROOT / ".work" / "partial-output" / run_id
     run_dir.mkdir(parents=True, mode=0o700, exist_ok=False)

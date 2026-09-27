@@ -83,7 +83,7 @@ fi
 
 mkdir -p "${evidence_root}"
 work_dir=$(mktemp -d "${evidence_root}/verification-45.XXXXXX")
-run_id=$(date -u +%Y%m%dt%H%M%sz)-$(openssl rand -hex 4)
+run_id=$(date -u +%Y%m%dt%H%M%Sz)-$(openssl rand -hex 4)
 first_id="verification-503-${run_id}"
 second_id="verification-timeout-${run_id}"
 target="${proxy_host}/${repository}:${tag}"

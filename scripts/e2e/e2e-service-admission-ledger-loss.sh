@@ -99,7 +99,7 @@ fi
 [[ -n ${token} ]] || die "SERVICE_AUTH_TOKEN is required in live mode"
 
 work_dir=$(mktemp -d "${TMPDIR:-/tmp}/kova-admission-ledger-loss.XXXXXX")
-run_id=$(date -u +%Y%m%dt%H%M%sz)-$(openssl rand -hex 4)
+run_id=$(date -u +%Y%m%dt%H%M%Sz)-$(openssl rand -hex 4)
 printf 'run_id=%s\ncluster=%s\nnamespace=%s\nrelease=%s\nactive_ledger_uid=%s\nqueue_ledger_uid=%s\npod_a=%s\npod_b=%s\n' \
   "${run_id}" "${cluster}" "${namespace}" "${release}" "${active_uid}" "${queue_uid}" "${pod_a}" "${pod_b}" >"${work_dir}/identities.txt"
 forward_a=

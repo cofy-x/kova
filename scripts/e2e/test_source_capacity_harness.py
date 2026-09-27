@@ -117,6 +117,15 @@ class BoundedLogTests(unittest.TestCase):
 
 
 class ShellSafetyTests(unittest.TestCase):
+    def test_run_ids_use_utc_seconds_not_epoch_seconds(self) -> None:
+        for script in DIRECTORY.glob("e2e-*"):
+            if script.suffix not in {".sh", ".py"}:
+                continue
+            source = script.read_text()
+            self.assertNotIn("%Y%m%dt%H%M%sz", source, script.name)
+        for script in ("e2e-source-capacity.sh", "e2e-source-pressure-rejection.sh"):
+            self.assertIn("%Y%m%dt%H%M%Sz", (DIRECTORY / script).read_text())
+
     def test_live_token_is_read_from_exact_disposable_secret(self) -> None:
         source = (DIRECTORY / "e2e-source-capacity.sh").read_text()
         self.assertIn("get secret kova-e2e-token -o json", source)

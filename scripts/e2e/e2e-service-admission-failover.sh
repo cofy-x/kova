@@ -149,7 +149,7 @@ platform=$(jq -r '[.spec.template.spec.containers[] | select(.name == "kova-serv
 principal=$(jq -r '[.spec.template.spec.containers[] | select(.name == "kova-service") | .args[] | select(startswith("--auth-static-principal=")) | sub("^--auth-static-principal="; "")] | first // empty' <<<"${deployment}")
 [[ -n ${principal} && ( ${platform} == linux/amd64 || ${platform} == linux/arm64 ) ]] || die "cannot determine the test principal and platform"
 work_dir=$(mktemp -d "${TMPDIR:-/tmp}/kova-admission-failover.XXXXXX")
-run_id=$(date -u +%Y%m%dt%H%M%sz)-$(openssl rand -hex 4)
+run_id=$(date -u +%Y%m%dt%H%M%Sz)-$(openssl rand -hex 4)
 source_digest=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 source_uri="oci://kind-registry:5000/kova-sources/failover-${run_id}@${source_digest}"
 target="kind-registry:5000/kova-admission/failover-${run_id}:dev"

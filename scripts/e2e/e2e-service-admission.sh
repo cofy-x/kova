@@ -78,7 +78,7 @@ fi
 [[ -n ${token} ]] || die "SERVICE_AUTH_TOKEN is required in live mode"
 
 work_dir=$(mktemp -d "${TMPDIR:-/tmp}/kova-admission-e2e.XXXXXX")
-run_id=$(date -u +%Y%m%dt%H%M%sz)-$(openssl rand -hex 4)
+run_id=$(date -u +%Y%m%dt%H%M%Sz)-$(openssl rand -hex 4)
 source_digest=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 source_uri="oci://kind-registry:5000/kova-sources/admission-${run_id}@${source_digest}"
 target="kind-registry:5000/kova-admission/probe-${run_id}:dev"

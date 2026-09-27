@@ -119,7 +119,7 @@ fi
 
 umask 077
 mkdir -p -- "${root}/.work/source-pressure-rejection"
-run_id="source-pressure-$(date -u +%Y%m%dt%H%M%sz)-$(openssl rand -hex 4)"
+run_id="source-pressure-$(date -u +%Y%m%dt%H%M%Sz)-$(openssl rand -hex 4)"
 run_dir=${root}/.work/source-pressure-rejection/${run_id}
 mkdir -- "${run_dir}"
 mkdir -- "${run_dir}/tmp"

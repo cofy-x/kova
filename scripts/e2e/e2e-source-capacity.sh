@@ -187,7 +187,7 @@ docker_free_kib=$(df -Pk "${docker_root}" | awk 'NR == 2 {print $4}')
 
 umask 077
 mkdir -p "${root}/.work/source-capacity"
-run_id="source-capacity-$(date -u +%Y%m%dt%H%M%sz)-$(openssl rand -hex 4)"
+run_id="source-capacity-$(date -u +%Y%m%dt%H%M%Sz)-$(openssl rand -hex 4)"
 run_dir=${root}/.work/source-capacity/${run_id}
 mkdir -- "${run_dir}" || die "run directory already exists"
 mkdir -- "${run_dir}/source"

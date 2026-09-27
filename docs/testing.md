@@ -238,7 +238,7 @@ tags; the quickstart will build and load the named role images:
 
 ```bash
 REV=$(git rev-parse --short=12 HEAD)
-SETUP_RUN=source-capacity-setup-$(date -u +%Y%m%dt%H%M%sz)
+SETUP_RUN=source-capacity-setup-$(date -u +%Y%m%dt%H%M%Sz)
 QUICKSTART_KIND_CLUSTER=kova-source-capacity KEEP_KIND_CLUSTER=true \
   CONTROLLER_IMAGE="localhost:5002/kova:controller-$REV" \
   RUNNER_IMAGE="localhost:5002/kova:runner-$REV" \
@@ -294,7 +294,7 @@ Prepare a disposable two-node quickstart with reviewed candidate images, `SERVIC
 
 ```bash
 REV=$(git rev-parse --short=12 HEAD)
-SETUP_RUN=partial-41-setup-$(date -u +%Y%m%dt%H%M%sz)
+SETUP_RUN=partial-41-setup-$(date -u +%Y%m%dt%H%M%Sz)
 QUICKSTART_KIND_CLUSTER=kova-partial-output-41 KEEP_KIND_CLUSTER=true \
   CONTROLLER_IMAGE="localhost:5002/kova:controller-$REV" \
   RUNNER_IMAGE="localhost:5002/kova:runner-$REV" \
