@@ -72,6 +72,21 @@ def test_target_platform_is_not_a_free_form_label() -> None:
         TargetSpec(target="registry.example.com/team/image:dev", platform="linux/s390x")  # type: ignore[arg-type]
 
 
+def test_job_preserves_unknown_future_failure_code() -> None:
+    base = {
+        "id": "job-1",
+        "status": "failed",
+        "created_at": "2026-09-27T00:00:00Z",
+        "requester": "test-user",
+    }
+    assert BuildJob.from_dict({**base, "failure_code": "invalid_source"}).failure_code is BuildFailureCode.INVALID_SOURCE
+    assert BuildJob.from_dict({**base, "failure_code": "future_source_fault"}).failure_code == "future_source_fault"
+    with pytest.raises(TypeError, match="failure_code must be a string"):
+        BuildJob.from_dict({**base, "failure_code": 42})
+    with pytest.raises(ValueError, match="failure_code must not be empty"):
+        BuildJob.from_dict({**base, "failure_code": ""})
+
+
 def _field_names(model: type[object]) -> set[str]:
     names = {field.name for field in fields(model)}
     if model is JobList:

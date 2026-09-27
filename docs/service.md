@@ -52,6 +52,7 @@ Kova counts bytes while reading and extracting as well as checking ZIP headers; 
 The Service reports `invalid_source` only when source validation has proven that the reference or content violates the source contract, including size, layer type, or digest checks.
 Source fetch registry/network failures return `source_unavailable`; source-fetch out-of-memory or full disk, and Pod eviction before build submission, return `resource_exhausted`.
 An unclassified source-fetch init failure is treated as `source_unavailable`, not as proof that the immutable input is invalid.
+The post-fetch source inspection uses the same explicit invalid-source and resource-exhaustion exit codes. Its other process failures return `source_unavailable`; malformed inspection output is a runner protocol failure, not an invalid-source verdict.
 Callers should inspect their own retry policy for those transient or resource failures; Kova never retries a build automatically.
 `kova source push` uses a bounded immutable temporary file rather than buffering the source ZIP in client memory; the client host needs up to 512 MiB of temporary disk headroom per concurrent push.
 
@@ -156,6 +157,8 @@ External cancellation of an async task propagates normally.
 `KovaAPIError` exposes `status_code`, stable `code`, safe `message`, `retryable`, and `retry_after` as a `datetime.timedelta` when supplied.
 
 The SDK returns `immutable_ref` exactly as supplied and validated by the Service; it never reconstructs an immutable reference from the mutable tag.
+Known terminal failure codes are `BuildFailureCode` enum values; a future unknown code is preserved as a nonempty string so status polling and receipt capture continue.
+Older Python SDK releases reject unknown failure codes while parsing jobs. Upgrade all Python clients to a release with this tolerant decoder before deploying a Service version that can emit `source_unavailable` or `resource_exhausted`; keep the older Service until that client rollout is complete.
 The caller owns retry policy and must persist source identity, build ID, manifest digest, and immutable reference before the terminal job TTL expires.
 The [executable Python and Go Service SDK examples](../examples/service-sdk/README.md) demonstrate the complete source URI and digest to receipt flow with one shared environment contract. The [seed build receipt reference shape](examples/seed-build-receipt-v1.json) records recipe identity, terminal status, target role, platform, format, image, digest, and immutable reference. The caller owns this receipt; Kova does not provide a long-term receipt store.
 

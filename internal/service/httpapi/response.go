@@ -83,9 +83,9 @@ func publicBuildFailureCode(reason string) apiv1.BuildFailureCode {
 	switch reason {
 	case "InvalidSource":
 		return apiv1.BuildFailureInvalidSource
-	case "SourceFetchUnavailable":
+	case "SourceFetchUnavailable", "SourceInspectUnavailable":
 		return apiv1.BuildFailureSourceUnavailable
-	case "SourceFetchResourceExhausted", "RunnerResourceExhausted":
+	case "SourceFetchResourceExhausted", "SourceInspectResourceExhausted", "RunnerResourceExhausted":
 		return apiv1.BuildFailureResourceExhausted
 	case "InvalidTargets":
 		return apiv1.BuildFailureInvalidTargets
@@ -127,9 +127,9 @@ func publicBuildError(reason string) string {
 	switch reason {
 	case "InvalidSource":
 		return "immutable source validation failed"
-	case "SourceFetchUnavailable":
-		return "immutable source could not be fetched"
-	case "SourceFetchResourceExhausted", "RunnerResourceExhausted":
+	case "SourceFetchUnavailable", "SourceInspectUnavailable":
+		return "immutable source could not be fetched or inspected"
+	case "SourceFetchResourceExhausted", "SourceInspectResourceExhausted", "RunnerResourceExhausted":
 		return "build runner exhausted its resources"
 	case "InvalidTargets":
 		return "source targets do not exactly match requested targets"

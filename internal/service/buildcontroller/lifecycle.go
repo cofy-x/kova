@@ -253,13 +253,19 @@ func (r *KovaBuildReconciler) submitWhenReady(ctx context.Context, build *kovav1
 	defer cancelOperation()
 	sourceTargets, err := client.SourceTargets(operationCtx, build, sourcePath(build))
 	if err != nil {
-		if errors.Is(err, runnerexec.ErrRunnerResponseTooLarge) {
+		if errors.Is(err, runnerexec.ErrRunnerResponseTooLarge) || errors.Is(err, runnerexec.ErrSourceInspectProtocol) {
 			return ctrl.Result{}, r.finish(ctx, build, kovav1.PhaseFailed, "RunnerProtocolError", err.Error())
 		}
 		if errors.Is(err, runnerexec.ErrSourceInspectTransport) {
 			return r.retryStatusObservation(ctx, build, err)
 		}
-		return ctrl.Result{}, r.finish(ctx, build, kovav1.PhaseFailed, "InvalidSource", err.Error())
+		if errors.Is(err, runnerexec.ErrSourceInspectInvalid) {
+			return ctrl.Result{}, r.finish(ctx, build, kovav1.PhaseFailed, "InvalidSource", err.Error())
+		}
+		if errors.Is(err, runnerexec.ErrSourceInspectResourceExhausted) {
+			return ctrl.Result{}, r.finish(ctx, build, kovav1.PhaseFailed, "SourceInspectResourceExhausted", err.Error())
+		}
+		return ctrl.Result{}, r.finish(ctx, build, kovav1.PhaseFailed, "SourceInspectUnavailable", err.Error())
 	}
 	if !buildcontract.EqualTargetSpecSets(contractTargets(build.Spec.Targets), sourceTargets) {
 		return ctrl.Result{}, r.finish(ctx, build, kovav1.PhaseFailed, "InvalidTargets", "source targets do not exactly match requested targets")

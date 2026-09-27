@@ -128,7 +128,7 @@ class BuildJob:
     created_at: datetime
     requester: str
     error: str | None = None
-    failure_code: BuildFailureCode | None = None
+    failure_code: BuildFailureCode | str | None = None
     started_at: datetime | None = None
     finished_at: datetime | None = None
     expires_at: datetime | None = None
@@ -151,14 +151,13 @@ class BuildJob:
     @classmethod
     def from_dict(cls, value: JSON) -> BuildJob:
         _require_fields(value, {"id", "status", "created_at", "requester"}, _BUILD_JOB_FIELDS)
-        failure = value.get("failure_code")
         return cls(
             id=_string(value, "id"),
             status=JobStatus(_string(value, "status")),
             created_at=_datetime(value, "created_at"),
             requester=_string(value, "requester"),
             error=_optional_string(value, "error"),
-            failure_code=BuildFailureCode(failure) if failure is not None else None,
+            failure_code=_failure_code(value),
             started_at=_optional_datetime(value, "started_at"),
             finished_at=_optional_datetime(value, "finished_at"),
             expires_at=_optional_datetime(value, "expires_at"),
@@ -280,6 +279,22 @@ _BUILD_JOB_FIELDS = {
     "verification_succeeded",
     "verification_failed",
 }
+
+
+def _failure_code(value: JSON) -> BuildFailureCode | str | None:
+    raw = value.get("failure_code")
+    if raw is None:
+        return None
+    if not isinstance(raw, str):
+        raise TypeError("failure_code must be a string")
+    if not raw:
+        raise ValueError("failure_code must not be empty")
+    try:
+        return BuildFailureCode(raw)
+    except ValueError:
+        return raw
+
+
 _DIGEST = re.compile(r"^sha256:[a-f0-9]{64}$")
 _IMMUTABLE_REFERENCE = re.compile(r"^.+@sha256:[a-f0-9]{64}$")
 

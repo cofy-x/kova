@@ -3,6 +3,7 @@ package source
 import (
 	"archive/zip"
 	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -52,8 +53,15 @@ func TestValidateBuildArchiveRejectsRootFile(t *testing.T) {
 	}
 
 	_, err = ValidateBuildArchive(zipPath)
-	if err == nil || !strings.Contains(err.Error(), "root file") {
+	if !errors.Is(err, ErrInvalidBuildArchive) || !strings.Contains(err.Error(), "root file") {
 		t.Fatalf("expected root file validation error, got %v", err)
+	}
+}
+
+func TestBuildArchiveTargetsDoesNotMarkFilesystemFailureAsInvalid(t *testing.T) {
+	_, err := BuildArchiveTargets(filepath.Join(t.TempDir(), "missing.zip"))
+	if !errors.Is(err, os.ErrNotExist) || errors.Is(err, ErrInvalidBuildArchive) {
+		t.Fatalf("missing archive classification = %v", err)
 	}
 }
 

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -18,6 +19,20 @@ func TestSourceFetchCommandPreservesInvalidSourceExitCode(t *testing.T) {
 	})
 	if err == nil || sourcecmd.ExitCode(err) != 20 {
 		t.Fatalf("source-fetch error=%v exit=%d, want classified invalid source", err, sourcecmd.ExitCode(err))
+	}
+}
+
+func TestSourceInspectCommandUsesArchiveValidationExitCode(t *testing.T) {
+	archive := filepath.Join(t.TempDir(), "invalid.zip")
+	if err := os.WriteFile(archive, []byte("not a ZIP"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := newCLIApp().Run([]string{"kovad", "source", "inspect", "--input", archive}); err == nil || sourcecmd.ExitCode(err) != 20 {
+		t.Fatalf("invalid archive exit = %v", err)
+	}
+	missing := filepath.Join(t.TempDir(), "missing.zip")
+	if err := newCLIApp().Run([]string{"kovad", "source", "inspect", "--input", missing}); err == nil || sourcecmd.ExitCode(err) != 1 {
+		t.Fatalf("missing archive exit = %v", err)
 	}
 }
 

@@ -10,7 +10,9 @@ import (
 
 	kovav1 "github.com/cofy-x/kova/internal/apis/kova/v1alpha1"
 	"github.com/cofy-x/kova/internal/kube"
+	"github.com/cofy-x/kova/internal/sourcebundle"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	utilexec "k8s.io/client-go/util/exec"
 )
 
 type fakeExecKube struct {
@@ -84,6 +86,31 @@ func TestRunnerCommandsRejectOversizedStdoutWhenExecIgnoresWriterError(t *testin
 	}
 	if _, err := client.Post(context.Background(), build, "export", ""); !errors.Is(err, ErrExportTooLarge) {
 		t.Fatalf("export error = %v", err)
+	}
+}
+
+func TestSourceTargetsClassifiesOnlyExplicitInspectExitCodes(t *testing.T) {
+	build := &kovav1.KovaBuild{ObjectMeta: metav1.ObjectMeta{Namespace: "jobs", Name: "example"}, Status: kovav1.KovaBuildStatus{RunnerPodName: "runner"}}
+	for _, tc := range []struct {
+		name      string
+		exitCode  int
+		wantError error
+	}{
+		{name: "invalid archive", exitCode: sourcebundle.FetchExitCodeInvalidSource, wantError: ErrSourceInspectInvalid},
+		{name: "disk full", exitCode: sourcebundle.FetchExitCodeResourceExhausted, wantError: ErrSourceInspectResourceExhausted},
+		{name: "unclassified exit", exitCode: 1, wantError: ErrSourceInspectUnavailable},
+		{name: "possible signal", exitCode: 137, wantError: ErrSourceInspectUnavailable},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client := Client{Kube: fakeExecKube{exec: func(options kube.ExecOptions) error {
+				_, _ = io.WriteString(options.Stderr, "inspect failed")
+				return utilexec.CodeExitError{Err: errors.New("process exited"), Code: tc.exitCode}
+			}}}
+			_, err := client.SourceTargets(context.Background(), build, "/source")
+			if !errors.Is(err, tc.wantError) || errors.Is(err, ErrSourceInspectTransport) {
+				t.Fatalf("exit code %d classified as %v", tc.exitCode, err)
+			}
+		})
 	}
 }
 

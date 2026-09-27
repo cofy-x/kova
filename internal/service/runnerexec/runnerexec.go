@@ -17,6 +17,7 @@ import (
 	"github.com/cofy-x/kova/internal/daemonclient"
 	"github.com/cofy-x/kova/internal/kube"
 	"github.com/cofy-x/kova/internal/runner"
+	"github.com/cofy-x/kova/internal/sourcebundle"
 	utilexec "k8s.io/client-go/util/exec"
 )
 
@@ -27,6 +28,10 @@ type Client struct {
 
 var ErrInvalidBuildStatus = errors.New("invalid runner build status")
 var ErrSourceInspectTransport = errors.New("source inspect transport failed")
+var ErrSourceInspectInvalid = errors.New("source inspect rejected invalid archive")
+var ErrSourceInspectResourceExhausted = errors.New("source inspect exhausted runner resources")
+var ErrSourceInspectUnavailable = errors.New("source inspect command failed")
+var ErrSourceInspectProtocol = errors.New("source inspect returned invalid response")
 var ErrExportTooLarge = errors.New("runner export exceeds 1 MiB limit")
 var ErrRunnerResponseTooLarge = errors.New("runner response exceeds 1 MiB limit")
 
@@ -97,7 +102,14 @@ func (c Client) SourceTargets(ctx context.Context, build *kovav1.KovaBuild, sour
 		wrapped := ExecError("inspect source contract", stderr.Diagnostic(), err)
 		var exitErr utilexec.ExitError
 		if errors.As(err, &exitErr) && exitErr.Exited() {
-			return nil, wrapped
+			switch exitErr.ExitStatus() {
+			case sourcebundle.FetchExitCodeInvalidSource:
+				return nil, fmt.Errorf("%w: %w", ErrSourceInspectInvalid, wrapped)
+			case sourcebundle.FetchExitCodeResourceExhausted:
+				return nil, fmt.Errorf("%w: %w", ErrSourceInspectResourceExhausted, wrapped)
+			default:
+				return nil, fmt.Errorf("%w: %w", ErrSourceInspectUnavailable, wrapped)
+			}
 		}
 		return nil, fmt.Errorf("%w: %w", ErrSourceInspectTransport, wrapped)
 	}
@@ -105,7 +117,7 @@ func (c Client) SourceTargets(ctx context.Context, build *kovav1.KovaBuild, sour
 		Targets []buildcontract.TargetSpec `json:"targets"`
 	}
 	if err := json.Unmarshal(stdout.Bytes(), &contract); err != nil {
-		return nil, fmt.Errorf("parse source contract: %w", err)
+		return nil, fmt.Errorf("%w: %w", ErrSourceInspectProtocol, err)
 	}
 	return contract.Targets, nil
 }

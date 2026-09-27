@@ -39,7 +39,31 @@ type buildArchiveTopLevel struct {
 }
 
 func ValidateBuildArchive(zipPath string) (int, error) {
-	return validateBuildArchiveWithBudget(zipPath, defaultArchiveBudget)
+	count, err := validateBuildArchiveWithBudget(zipPath, defaultArchiveBudget)
+	return count, classifyBuildArchiveError(err)
+}
+
+func invalidBuildArchive(err error) error {
+	if errors.Is(err, ErrInvalidBuildArchive) {
+		return err
+	}
+	return fmt.Errorf("%w: %w", ErrInvalidBuildArchive, err)
+}
+
+func classifyBuildArchiveError(err error) error {
+	if err == nil {
+		return nil
+	}
+	for _, known := range []error{
+		ErrInvalidBuildArchive, ErrArchiveTooLarge, ErrExpandedTooLarge,
+		ErrTooManyEntries, ErrDockerfileTooLarge, ErrMetadataTooLarge,
+		zip.ErrFormat, zip.ErrChecksum, zip.ErrAlgorithm,
+	} {
+		if errors.Is(err, known) {
+			return invalidBuildArchive(err)
+		}
+	}
+	return err
 }
 
 func validateBuildArchiveWithBudget(zipPath string, budget archiveBudget) (int, error) {
@@ -69,7 +93,7 @@ func validateBuildArchiveWithBudget(zipPath string, budget archiveBudget) (int, 
 			continue
 		}
 		if _, exists := seenPaths[cleaned]; exists {
-			return 0, fmt.Errorf("zip contains duplicate path %q", cleaned)
+			return 0, invalidBuildArchive(fmt.Errorf("zip contains duplicate path %q", cleaned))
 		}
 		seenPaths[cleaned] = struct{}{}
 
@@ -95,7 +119,7 @@ func validateBuildArchiveWithBudget(zipPath string, budget archiveBudget) (int, 
 	}
 
 	if len(topLevels) == 0 {
-		return 0, fmt.Errorf("zip archive is empty or does not contain any image directories")
+		return 0, invalidBuildArchive(errors.New("zip archive is empty or does not contain any image directories"))
 	}
 
 	var validCount int
@@ -134,13 +158,13 @@ func validateBuildArchiveWithBudget(zipPath string, budget archiveBudget) (int, 
 	}
 
 	if len(rootFiles) > 0 {
-		return 0, fmt.Errorf("zip root must contain only image directories, found root file entries: %s", strings.Join(limitBuildArchiveList(rootFiles, 5), ", "))
+		return 0, invalidBuildArchive(fmt.Errorf("zip root must contain only image directories, found root file entries: %s", strings.Join(limitBuildArchiveList(rootFiles, 5), ", ")))
 	}
 	if len(invalidDirs) > 0 {
-		return 0, fmt.Errorf("zip root must directly contain image directories with Dockerfile and metadata.json; invalid top-level directories: %s", strings.Join(limitBuildArchiveList(invalidDirs, 5), "; "))
+		return 0, invalidBuildArchive(fmt.Errorf("zip root must directly contain image directories with Dockerfile and metadata.json; invalid top-level directories: %s", strings.Join(limitBuildArchiveList(invalidDirs, 5), "; ")))
 	}
 	if validCount == 0 {
-		return 0, fmt.Errorf("zip archive does not contain any valid image directories")
+		return 0, invalidBuildArchive(errors.New("zip archive does not contain any valid image directories"))
 	}
 	if err := validateArchiveContents(r.File, budget.expandedBytes); err != nil {
 		return 0, err
@@ -205,7 +229,7 @@ func checkArchiveHeaders(files []*zip.File, budget archiveBudget) error {
 		}
 		fileLimit, tooLarge := requiredBuildFileLimit(cleaned)
 		if fileLimit > 0 && !file.FileInfo().Mode().IsRegular() {
-			return fmt.Errorf("source archive member %q must be a regular file", file.Name)
+			return invalidBuildArchive(fmt.Errorf("source archive member %q must be a regular file", file.Name))
 		}
 		if fileLimit > 0 && file.UncompressedSize64 > fileLimit {
 			return fmt.Errorf("source archive member %q: %w", file.Name, tooLarge)
@@ -215,7 +239,7 @@ func checkArchiveHeaders(files []*zip.File, budget archiveBudget) error {
 	for i, cleaned := range cleanedPaths {
 		for parent := path.Dir(cleaned); parent != "."; parent = path.Dir(parent) {
 			if _, ok := symlinks[parent]; ok {
-				return fmt.Errorf("source archive member %q has symlink parent %q", files[i].Name, parent)
+				return invalidBuildArchive(fmt.Errorf("source archive member %q has symlink parent %q", files[i].Name, parent))
 			}
 		}
 	}
@@ -244,7 +268,7 @@ func BuildArchiveTargets(zipPath string) ([]buildcontract.TargetSpec, error) {
 	}
 	r, err := zip.OpenReader(zipPath)
 	if err != nil {
-		return nil, err
+		return nil, classifyBuildArchiveError(err)
 	}
 	defer r.Close()
 	targetsByDirectory := make(map[string]buildcontract.TargetSpec, count)
@@ -259,40 +283,40 @@ func BuildArchiveTargets(zipPath string) ([]buildcontract.TargetSpec, error) {
 			continue
 		}
 		if file.UncompressedSize64 > maxArchiveMetadataBytes {
-			return nil, fmt.Errorf("%s exceeds 1 MiB", cleaned)
+			return nil, invalidBuildArchive(fmt.Errorf("%s exceeds 1 MiB", cleaned))
 		}
 		reader, err := file.Open()
 		if err != nil {
-			return nil, err
+			return nil, classifyBuildArchiveError(err)
 		}
 		raw, readErr := io.ReadAll(io.LimitReader(reader, maxArchiveMetadataBytes+1))
 		closeErr := reader.Close()
 		if readErr != nil {
-			return nil, readErr
+			return nil, classifyBuildArchiveError(readErr)
 		}
 		if closeErr != nil {
-			return nil, closeErr
+			return nil, classifyBuildArchiveError(closeErr)
 		}
 		var metadata ImageMetadata
 		if err := json.Unmarshal(raw, &metadata); err != nil {
-			return nil, fmt.Errorf("invalid %s: %w", cleaned, err)
+			return nil, invalidBuildArchive(fmt.Errorf("invalid %s: %w", cleaned, err))
 		}
 		target, err := buildcontract.NormalizeLogicalTarget(metadata.Target)
 		if err != nil {
-			return nil, fmt.Errorf("invalid target in %s: %w", cleaned, err)
+			return nil, invalidBuildArchive(fmt.Errorf("invalid target in %s: %w", cleaned, err))
 		}
 		platform, err := buildcontract.NormalizePlatform(metadata.Platform)
 		if err != nil {
-			return nil, fmt.Errorf("invalid platform in %s: %w", cleaned, err)
+			return nil, invalidBuildArchive(fmt.Errorf("invalid platform in %s: %w", cleaned, err))
 		}
 		if previous, exists := directoriesByTarget[target]; exists {
-			return nil, fmt.Errorf("image directories %q and %q use duplicate target %q", previous, parts[0], target)
+			return nil, invalidBuildArchive(fmt.Errorf("image directories %q and %q use duplicate target %q", previous, parts[0], target))
 		}
 		targetsByDirectory[parts[0]] = buildcontract.TargetSpec{Target: target, Platform: platform}
 		directoriesByTarget[target] = parts[0]
 	}
 	if len(targetsByDirectory) != count {
-		return nil, fmt.Errorf("expected %d metadata targets, found %d", count, len(targetsByDirectory))
+		return nil, invalidBuildArchive(fmt.Errorf("expected %d metadata targets, found %d", count, len(targetsByDirectory)))
 	}
 	directories := make([]string, 0, len(targetsByDirectory))
 	for directory := range targetsByDirectory {
@@ -303,7 +327,15 @@ func BuildArchiveTargets(zipPath string) ([]buildcontract.TargetSpec, error) {
 	for _, directory := range directories {
 		targets = append(targets, targetsByDirectory[directory])
 	}
-	return buildcontract.NormalizeTargetSpecs(targets)
+	normalized, err := buildcontract.NormalizeTargetSpecs(targets)
+	return normalized, classifyTargetSpecError(err)
+}
+
+func classifyTargetSpecError(err error) error {
+	if err == nil {
+		return nil
+	}
+	return invalidBuildArchive(err)
 }
 
 func ValidateBuildArchivePath(name string) (string, error) {
@@ -312,14 +344,14 @@ func ValidateBuildArchivePath(name string) (string, error) {
 		return "", nil
 	}
 	if strings.HasPrefix(normalized, "/") {
-		return "", fmt.Errorf("zip contains absolute path %q", name)
+		return "", invalidBuildArchive(fmt.Errorf("zip contains absolute path %q", name))
 	}
 	cleaned := path.Clean(normalized)
 	if cleaned == "." {
 		return "", nil
 	}
 	if cleaned == ".." || strings.HasPrefix(cleaned, "../") {
-		return "", fmt.Errorf("zip contains invalid path %q", name)
+		return "", invalidBuildArchive(fmt.Errorf("zip contains invalid path %q", name))
 	}
 	return cleaned, nil
 }

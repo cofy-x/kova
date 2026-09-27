@@ -361,7 +361,10 @@ func TestSubmitWhenReadyValidatesExactSourceTargetSetBeforeBuild(t *testing.T) {
 		{name: "missing", inspection: `{"targets":[]}`, wantReason: "InvalidTargets"},
 		{name: "different", inspection: `{"targets":[{"target":"registry.example/b:dev","platform":"linux/amd64"}]}`, wantReason: "InvalidTargets"},
 		{name: "different-platform", inspection: `{"targets":[{"target":"registry.example/a:dev","platform":"linux/arm64"},{"target":"registry.example/b:dev","platform":"linux/amd64"}]}`, wantReason: "InvalidTargets"},
-		{name: "duplicate", inspectionErr: utilexec.CodeExitError{Err: errors.New("duplicate target"), Code: 1}, wantReason: "InvalidSource"},
+		{name: "duplicate", inspectionErr: utilexec.CodeExitError{Err: errors.New("duplicate target"), Code: sourcebundle.FetchExitCodeInvalidSource}, wantReason: "InvalidSource"},
+		{name: "inspect disk full", inspectionErr: utilexec.CodeExitError{Err: errors.New("no space left on device"), Code: sourcebundle.FetchExitCodeResourceExhausted}, wantReason: "SourceInspectResourceExhausted"},
+		{name: "inspect process fault", inspectionErr: utilexec.CodeExitError{Err: errors.New("process fault"), Code: 1}, wantReason: "SourceInspectUnavailable"},
+		{name: "malformed inspect response", inspection: `not-json`, wantReason: "RunnerProtocolError"},
 		{name: "oversized-runner-response", inspection: strings.Repeat("x", (1<<20)+1), wantReason: "RunnerProtocolError"},
 		{name: "same-set-different-order", inspection: `{"targets":[{"target":"registry.example/b:dev","platform":"linux/amd64"},{"target":"registry.example/a:dev","platform":"linux/amd64"}]}`, wantBuild: true},
 	}
