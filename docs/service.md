@@ -38,8 +38,10 @@ Kova also accepts an immutable HTTPS archive URL without user information, query
 OCI bundle retention and garbage collection belong to the registry or caller.
 The source contract permits at most 512 MiB of exact zip bytes, 2 GiB of total expanded ZIP member bytes, and 100,000 ZIP entries.
 Top-level `Dockerfile` and `metadata.json` files must be regular files and are each limited to 1 MiB, including the result of build-variable substitution.
+Standalone symlinks may point within their image context, but archive members nested below a symlink path are rejected to prevent extraction aliases from bypassing path-specific limits.
 These fixed limits apply to local source inspection and push, HTTPS and OCI fetches, runner uploads, and extraction.
 Kova counts bytes while reading and extracting as well as checking ZIP headers; a rejected source is reported as `InvalidSource` during source inspection or fetch, before any image push.
+`kova source push` uses a bounded immutable temporary file rather than buffering the source ZIP in client memory; the client host needs up to 512 MiB of temporary disk headroom per concurrent push.
 
 Each request has 1–100 logical targets. Every target is an object containing one unique, explicitly tagged OCI push destination and exactly one supported platform: `linux/amd64` or `linux/arm64`.
 Digest-only destinations and free-form platform labels are rejected.
