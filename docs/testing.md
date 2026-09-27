@@ -115,6 +115,8 @@ make e2e-service-admission-failover
 ```
 
 The opt-in path reads the bearer only from the dedicated Kind Secret into short-lived process memory; it ignores any inherited `SERVICE_AUTH_TOKEN` and never puts the bearer in a command argument or receipt.
+Before each opt-in write, it verifies the dedicated kubeconfig bytes exactly match `kind get kubeconfig` for the sole live Kind cluster; the test-only Secret UID, Deployment template, Lease UID/holder, both ledger UIDs, Service/runner Pod UIDs, and CR UIDs are pinned at their respective gates.
+Opt-in snapshots project KovaBuild, Service Deployment, and Pod identity/status fields instead of writing arbitrary unexpected workload specs; the old #44 default receipt shape is unchanged.
 The default #44 live path still accepts its original `SERVICE_AUTH_TOKEN` input, but passes it to curl via stdin configuration rather than curl arguments.
 Both paths create a fresh fake source URI and no registry tag; the unschedulable `never=true` runner never executes a build.
 The opt-in path deletes the verified leader Pod using an atomic UID precondition, proves handoff and stable queue retention, then deletes only the exact blocker CR with an atomic UID precondition.

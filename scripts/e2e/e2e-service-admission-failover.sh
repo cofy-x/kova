@@ -103,6 +103,10 @@ if [[ ${promotion} == true ]]; then
   jq -e --arg holder "${initial_holder}" '.spec.holderIdentity == $holder' <<<"${initial_lease}" >/dev/null ||
     die "promotion fixture Lease changed during preflight"
   require_cmd sha256sum
+  kubeconfig_sha=$(sha256sum "${kubeconfig}" | awk '{print $1}')
+  live_kind_sha=$(kind get kubeconfig --name "${cluster}" | sha256sum | awk '{print $1}')
+  [[ ${kubeconfig_sha} == "${live_kind_sha}" ]] ||
+    die "promotion fixture kubeconfig bytes differ from this live Kind cluster"
   deployment_template=$(jq -cS '.spec.template' <<<"${deployment}")
   pod_a_uid=$(jq -er --arg name "${pod_a}" '.items[] | select(.metadata.name == $name) | .metadata.uid' <<<"${pods}")
   pod_b_uid=$(jq -er --arg name "${pod_b}" '.items[] | select(.metadata.name == $name) | .metadata.uid' <<<"${pods}")
@@ -158,9 +162,9 @@ printf 'run_id=%s\nblocker_key=%s\nblocker_id=%s\nchallenger_key=%s\nchallenger_
   "${run_id}" "${blocker_key}" "${blocker_id}" "${challenger_key}" "${challenger_id}" >"${work_dir}/identities.txt"
 printf '%s\n' "${initial_holder}" >"${work_dir}/initial-leader.txt"
 if [[ ${promotion} == true ]]; then
-  kubeconfig_sha=$(sha256sum "${kubeconfig}" | awk '{print $1}')
-  printf 'cluster=%s\nnamespace=%s\ndeployment_uid=%s\nkubeconfig_sha256=%s\nnode_uids=%s\nsecret_uid=%s\n' \
-    "${cluster}" "${namespace}" "${deployment_uid}" "${kubeconfig_sha}" "${node_uids}" "${secret_uid}" \
+  printf 'cluster=%s\nnamespace=%s\ndeployment_uid=%s\nkubeconfig_sha256=%s\nlive_kind_sha256=%s\nnode_uids=%s\nsecret_uid=%s\n' \
+    "${cluster}" "${namespace}" "${deployment_uid}" "${kubeconfig_sha}" "${live_kind_sha}" \
+    "${node_uids}" "${secret_uid}" \
     >"${work_dir}/promotion-identity.txt"
 fi
 
@@ -168,11 +172,50 @@ forward_pid=
 success=false
 snapshot() {
   local name=$1
-  kctl --request-timeout=5s -n "${namespace}" get deployment "${release}-service" -o json >"${work_dir}/${name}-deployment.json" 2>"${work_dir}/${name}-deployment.err" || true
-  kctl --request-timeout=5s -n "${namespace}" get pods -l "${selector}" -o json >"${work_dir}/${name}-service-pods.json" 2>"${work_dir}/${name}-service-pods.err" || true
+  if [[ ${promotion} == true ]]; then
+    kctl --request-timeout=5s -n "${namespace}" get deployment "${release}-service" -o json \
+      2>"${work_dir}/${name}-deployment.err" |
+      jq '{name:.metadata.name,uid:.metadata.uid,generation:.metadata.generation,
+        replicas:.spec.replicas,readyReplicas:.status.readyReplicas,
+        updatedReplicas:.status.updatedReplicas,observedGeneration:.status.observedGeneration}' \
+      >"${work_dir}/${name}-deployment.json" || true
+    kctl --request-timeout=5s -n "${namespace}" get pods -l "${selector}" -o json \
+      2>"${work_dir}/${name}-service-pods.err" |
+      jq '{items:[.items[] | {name:.metadata.name,uid:.metadata.uid,
+        ownerReferences:[.metadata.ownerReferences[]? | {name,uid,kind,controller}],
+        deleting:.metadata.deletionTimestamp,phase:.status.phase,
+        ready:[.status.conditions[]? | select(.type == "Ready") | .status],
+        images:[.status.containerStatuses[]? | {name,imageID}]}]}' \
+      >"${work_dir}/${name}-service-pods.json" || true
+  else
+    kctl --request-timeout=5s -n "${namespace}" get deployment "${release}-service" -o json >"${work_dir}/${name}-deployment.json" 2>"${work_dir}/${name}-deployment.err" || true
+    kctl --request-timeout=5s -n "${namespace}" get pods -l "${selector}" -o json >"${work_dir}/${name}-service-pods.json" 2>"${work_dir}/${name}-service-pods.err" || true
+  fi
   kctl --request-timeout=5s -n "${leader_ns}" get lease "${lease_name}" -o json >"${work_dir}/${name}-lease.json" 2>"${work_dir}/${name}-lease.err" || true
-  kctl --request-timeout=5s -n "${namespace}" get kovabuilds -o json >"${work_dir}/${name}-builds.json" 2>"${work_dir}/${name}-builds.err" || true
-  kctl --request-timeout=5s -n "${namespace}" get pods -l app.kubernetes.io/name=kova-runner -o json >"${work_dir}/${name}-runners.json" 2>"${work_dir}/${name}-runners.err" || true
+  if [[ ${promotion} == true ]]; then
+    # Unknown concurrent CR specs might contain private caller data. Keep
+    # only identity/phase and whether each object belongs to this run.
+    kctl --request-timeout=5s -n "${namespace}" get kovabuilds -o json \
+      2>"${work_dir}/${name}-builds.err" |
+      jq --arg blocker "${blocker_id}" --arg challenger "${challenger_id}" \
+        '{items:[.items[] | {name:.metadata.name,uid:.metadata.uid,phase:(.status.phase // ""),
+          known_run_id:(.metadata.name == $blocker or .metadata.name == $challenger)}]}' \
+      >"${work_dir}/${name}-builds.json" || true
+  else
+    kctl --request-timeout=5s -n "${namespace}" get kovabuilds -o json >"${work_dir}/${name}-builds.json" 2>"${work_dir}/${name}-builds.err" || true
+  fi
+  if [[ ${promotion} == true ]]; then
+    kctl --request-timeout=5s -n "${namespace}" get pods -l app.kubernetes.io/name=kova-runner -o json \
+      2>"${work_dir}/${name}-runners.err" |
+      jq '{items:[.items[] | {name:.metadata.name,uid:.metadata.uid,
+        ownerReferences:[.metadata.ownerReferences[]? | {name,uid,kind,controller}],
+        createAttempt:.metadata.annotations["kova.cofy.dev/create-attempt"],
+        deleting:.metadata.deletionTimestamp,phase:.status.phase,
+        never:.spec.nodeSelector.never,nodeName:.spec.nodeName}]}' \
+      >"${work_dir}/${name}-runners.json" || true
+  else
+    kctl --request-timeout=5s -n "${namespace}" get pods -l app.kubernetes.io/name=kova-runner -o json >"${work_dir}/${name}-runners.json" 2>"${work_dir}/${name}-runners.err" || true
+  fi
   kctl --request-timeout=5s -n "${namespace}" get configmap kova-service-admission -o json >"${work_dir}/${name}-active.json" 2>"${work_dir}/${name}-active.err" || true
   kctl --request-timeout=5s -n "${namespace}" get configmap kova-service-queue-admission -o json >"${work_dir}/${name}-queue.json" 2>"${work_dir}/${name}-queue.err" || true
 }

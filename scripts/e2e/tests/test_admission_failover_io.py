@@ -255,6 +255,14 @@ class FailoverIOTest(unittest.TestCase):
         with patch.object(IO.subprocess, "run", return_value=two):
             with self.assertRaises(IO.SafetyError):
                 IO.assert_exact_kind(self.kubeconfig, "kova-admission-pump", actual)
+        context = subprocess.CompletedProcess([], 0, "kind-kova-admission-pump\n", "")
+        live = subprocess.CompletedProcess([], 0, self.kubeconfig.read_bytes(), b"")
+        with patch.object(IO.subprocess, "run", side_effect=[one, context, live]):
+            IO.assert_exact_kind(self.kubeconfig, "kova-admission-pump", actual)
+        forged = subprocess.CompletedProcess([], 0, b"wrong credentials", b"")
+        with patch.object(IO.subprocess, "run", side_effect=[one, context, forged]):
+            with self.assertRaises(IO.SafetyError):
+                IO.assert_exact_kind(self.kubeconfig, "kova-admission-pump", actual)
 
     def test_shell_default_is_check_and_promotion_is_opt_in(self) -> None:
         subprocess.run(["bash", "-n", str(SHELL)], check=True)
@@ -265,6 +273,8 @@ class FailoverIOTest(unittest.TestCase):
         self.assertIn('uid_delete kovabuilds "${challenger_id}" "${challenger_uid}"', source)
         self.assertNotIn('-H "Authorization: Bearer ${token}"', source)
         self.assertIn("--request-timeout=15s", source)
+        self.assertIn("live_kind_sha256=%s", source)
+        self.assertIn("known_run_id:(.metadata.name == $blocker or .metadata.name == $challenger)", source)
 
 
 if __name__ == "__main__":

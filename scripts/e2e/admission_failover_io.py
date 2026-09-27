@@ -138,7 +138,7 @@ def post_build(args: argparse.Namespace) -> None:
 
 
 def assert_exact_kind(kubeconfig: Path, cluster: str, expected_sha: str) -> None:
-    if hashlib.sha256(kubeconfig.read_bytes()).hexdigest() != expected_sha:
+    if kubeconfig.stat().st_size > MAX_RESPONSE or hashlib.sha256(kubeconfig.read_bytes()).hexdigest() != expected_sha:
         raise SafetyError("dedicated kubeconfig bytes changed")
     clusters = subprocess.run(
         ["kind", "get", "clusters"], capture_output=True, text=True, check=False, timeout=15
@@ -154,6 +154,15 @@ def assert_exact_kind(kubeconfig: Path, cluster: str, expected_sha: str) -> None
     )
     if context.returncode or context.stdout.strip() != f"kind-{cluster}":
         raise SafetyError("dedicated kubeconfig context changed")
+    live = subprocess.run(
+        ["kind", "get", "kubeconfig", "--name", cluster],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        check=False,
+        timeout=15,
+    )
+    if live.returncode or len(live.stdout) > MAX_RESPONSE or hashlib.sha256(live.stdout).hexdigest() != expected_sha:
+        raise SafetyError("dedicated kubeconfig differs from the live Kind credentials/server")
 
 
 def uid_delete(args: argparse.Namespace) -> None:
