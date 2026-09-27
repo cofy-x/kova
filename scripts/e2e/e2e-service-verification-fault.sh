@@ -272,6 +272,18 @@ jq -e '.spec.replicas == 2 and .status.readyReplicas == 2' <<<"$(kctl -n "${name
 snapshot after-helm-restore
 kctl -n "${namespace}" delete service "${proxy_name}" --wait=true --timeout=60s >"${work_dir}/proxy-service-delete.txt"
 kctl -n "${namespace}" delete deployment "${proxy_name}" --wait=true --timeout=60s >"${work_dir}/proxy-deployment-delete.txt"
+# Deployment deletion can return before the owned Pod has actually gone.
+# Removing its ConfigMap while that Pod still runs would leave a partial test
+# environment even if the Service Deployment is healthy.
+kubectl --kubeconfig "${kubeconfig}" --request-timeout=125s -n "${namespace}" \
+  wait --for=delete pod -l kova.cofy.dev/e2e=verification-fault-proxy --timeout=120s >"${work_dir}/proxy-pod-delete.txt"
 kctl -n "${namespace}" delete configmap "${proxy_name}" --wait=true --timeout=60s >"${work_dir}/proxy-configmap-delete.txt"
+jq -e '.items | length == 2 and all(.[]; any(.status.conditions[]?; .type == "Ready" and .status == "True"))' \
+  <<<"$(kctl get nodes -o json)" >/dev/null || die "Kind nodes are not 2/2 Ready after cleanup"
+jq -e '.items | length == 0' <<<"$(kctl get kovabuilds --all-namespaces -o json)" >/dev/null || die "a KovaBuild appeared after cleanup"
+jq -e '.items | length == 0' <<<"$(kctl get pods --all-namespaces -l app.kubernetes.io/name=kova-runner -o json)" >/dev/null || die "a runner Pod appeared after cleanup"
+jq -e '.data["reservations.json"] | fromjson | .active == {}' <<<"$(kctl -n "${namespace}" get configmap kova-service-admission -o json)" >/dev/null || die "active ledger is not empty after cleanup"
+jq -e '.data["queue.json"] | fromjson | .intents == {}' <<<"$(kctl -n "${namespace}" get configmap kova-service-queue-admission -o json)" >/dev/null || die "queue ledger is not empty after cleanup"
+snapshot after-proxy-cleanup
 success=true
 note "503, bounded timeout, leader replacement, digest-pinned recovery and exact cleanup passed"
