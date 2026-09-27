@@ -579,6 +579,22 @@ def expected_spec_matches(build: dict, case: dict, account_uid: str) -> bool:
     )
 
 
+def runner_controller_uid(pod: dict) -> str:
+    owners = [
+        owner
+        for owner in pod.get("metadata", {}).get("ownerReferences", [])
+        if owner.get("controller") is True
+    ]
+    require(
+        len(owners) == 1
+        and owners[0].get("kind") == "KovaBuild"
+        and isinstance(owners[0].get("uid"), str)
+        and UID.fullmatch(owners[0]["uid"]) is not None,
+        "runner Pod has no unique KovaBuild controller owner",
+    )
+    return owners[0]["uid"]
+
+
 def validate_observation(
     builds: list[dict], pods: list[dict], active: dict, queue: dict, state: dict
 ) -> dict:
@@ -689,15 +705,8 @@ def validate_observation(
             "unknown runner Pod appeared",
         )
         require(label not in observed_pods, "duplicate runner Pod appeared")
-        owners = [
-            owner
-            for owner in metadata.get("ownerReferences", [])
-            if owner.get("controller") is True
-        ]
         require(
-            len(owners) == 1
-            and owners[0].get("kind") == "KovaBuild"
-            and owners[0].get("uid") == accepted[label],
+            runner_controller_uid(pod) == accepted[label],
             "runner Pod owner changed",
         )
         nonce = metadata.get("annotations", {}).get("kova.cofy.dev/create-attempt", "")
@@ -804,7 +813,7 @@ def projection(observation: dict) -> dict:
             label: {
                 "name": pod["metadata"]["name"],
                 "uid": pod["metadata"]["uid"],
-                "owner_uid": pod["metadata"]["ownerReferences"][0]["uid"],
+                "owner_uid": runner_controller_uid(pod),
                 "create_attempt": pod["metadata"]
                 .get("annotations", {})
                 .get("kova.cofy.dev/create-attempt"),

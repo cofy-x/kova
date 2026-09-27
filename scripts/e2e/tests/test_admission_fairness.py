@@ -245,6 +245,20 @@ class FairnessSafetyTest(unittest.TestCase):
         self.assertEqual(snapshot["active"], ["a1"])
         self.assertNotIn("Authorization", json.dumps(snapshot))
 
+    def test_runner_receipt_selects_controller_owner_regardless_of_reference_order(self) -> None:
+        run_state = state()
+        builds, pods, active, queue = observation(run_state)
+        pods[0]["metadata"]["ownerReferences"].insert(
+            0,
+            {
+                "kind": "ConfigMap",
+                "uid": "44444444-4444-4444-4444-444444444444",
+                "controller": False,
+            },
+        )
+        observed = FAIR.validate_observation(builds, pods, active, queue, run_state)
+        self.assertEqual(FAIR.projection(observed)["runners"]["a1"]["owner_uid"], BUILD_UIDS["a1"])
+
     def test_older_alice_backlog_is_proven_before_bob_arrives(self) -> None:
         run_state = state()
         builds, pods, active, queue = observation(run_state)
