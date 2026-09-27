@@ -62,18 +62,21 @@ runner='{"items":[{"metadata":{"name":"legacy-runner","labels":{"app.kubernetes.
 service='{"items":[{"metadata":{"name":"kova-service"},"spec":{"replicas":1},"status":{"readyReplicas":1}}]}'
 service_pod='{"items":[{"metadata":{"name":"kova-service-old"}}]}'
 stopped='{"items":[{"metadata":{"name":"kova-service"},"spec":{"replicas":0},"status":{"replicas":0}}]}'
+wrong_deployment='{"items":[{"metadata":{"name":"different-service"},"spec":{"replicas":0},"status":{"replicas":0}}]}'
 
-assert_gate empty "${empty}" "${empty}" "${empty}" "${empty}" '' true
-assert_gate terminal "${terminal}" "${empty}" "${empty}" "${stopped}" '' true
-assert_gate separate-runner-namespace "${terminal}" "${empty}" "${empty}" "${stopped}" '' true jobs
-assert_gate starting "${starting}" "${empty}" "${empty}" "${empty}" '' false
-assert_gate verifying "${verifying}" "${empty}" "${empty}" "${empty}" '' false
-assert_gate unknown-phase "${unknown}" "${empty}" "${empty}" "${empty}" '' false
-assert_gate runner-pod "${empty}" "${runner}" "${empty}" "${empty}" '' false
+assert_gate empty-deployment "${empty}" "${empty}" "${empty}" "${empty}" '' false
+assert_gate wrong-deployment "${empty}" "${empty}" "${empty}" "${wrong_deployment}" '' false
+assert_gate drained "${empty}" "${empty}" "${empty}" "${stopped}" '' true
+assert_gate terminal "${terminal}" "${empty}" "${empty}" "${stopped}" '' false
+assert_gate separate-runner-namespace "${empty}" "${empty}" "${empty}" "${stopped}" '' true jobs
+assert_gate starting "${starting}" "${empty}" "${empty}" "${stopped}" '' false
+assert_gate verifying "${verifying}" "${empty}" "${empty}" "${stopped}" '' false
+assert_gate unknown-phase "${unknown}" "${empty}" "${empty}" "${stopped}" '' false
+assert_gate runner-pod "${empty}" "${runner}" "${empty}" "${stopped}" '' false
 assert_gate service-pod "${empty}" "${empty}" "${service_pod}" "${stopped}" '' false
 assert_gate running-service "${empty}" "${empty}" "${empty}" "${service}" '' false
-assert_gate unreadable-builds "${empty}" "${empty}" "${empty}" "${empty}" builds false
-assert_gate unreadable-service-pods "${empty}" "${empty}" "${empty}" "${empty}" service-pods false
-assert_gate malformed-list '{}' "${empty}" "${empty}" "${empty}" '' false
+assert_gate unreadable-builds "${empty}" "${empty}" "${empty}" "${stopped}" builds false
+assert_gate unreadable-service-pods "${empty}" "${empty}" "${empty}" "${stopped}" service-pods false
+assert_gate malformed-list '{}' "${empty}" "${empty}" "${stopped}" '' false
 
-echo 'quiescence gate: drained state accepted; active, unknown, and unreadable states blocked'
+echo 'quiescence gate: empty build set and stopped named Service accepted; remaining, unknown, and unreadable states blocked'

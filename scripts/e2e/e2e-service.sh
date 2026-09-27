@@ -62,7 +62,7 @@ if [[ -n "${BASELINE_CHART}" ]]; then
     exit 2
   fi
   KOVA_CHART=${BASELINE_CHART} \
-    KIND_VALUES='' \
+    KIND_VALUES="${BASELINE_VALUES:-}" \
     WORKER_PLATFORM='' \
     CONTROLLER_IMAGE=${BASELINE_CONTROLLER_IMAGE} \
     RUNNER_IMAGE=${BASELINE_RUNNER_IMAGE} \
@@ -71,6 +71,17 @@ if [[ -n "${BASELINE_CHART}" ]]; then
     VERIFY_RETRY_CRD_SCHEMA=false \
     "${ROOT}/scripts/kind/deploy-kind.sh"
   if [[ "${REQUIRE_LEGACY_CRD}" == true ]]; then
+    kubectl --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" -n "${NAMESPACE}" \
+      scale "deployment/${RELEASE_NAME}-service" --replicas=0 >/dev/null
+    drain_deadline=$((SECONDS + 120))
+    until KUBECONFIG="${ROOT}/${KIND_KUBECONFIG}" NAMESPACE="${NAMESPACE}" RELEASE_NAME="${RELEASE_NAME}" \
+      "${ROOT}/scripts/deployment/verify-kovabuild-drained.sh"; do
+      if (( SECONDS >= drain_deadline )); then
+        echo 'error: old Service did not drain after scale-down' >&2
+        exit 1
+      fi
+      sleep 2
+    done
     KUBECONFIG="${ROOT}/${KIND_KUBECONFIG}" \
       "${ROOT}/scripts/deployment/verify-kovabuild-crd.sh" --expect-legacy
     KUBECONFIG="${ROOT}/${KIND_KUBECONFIG}" \

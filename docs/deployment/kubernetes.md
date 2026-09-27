@@ -76,8 +76,13 @@ fail. Investigate and resolve unexpected old builds rather than bypassing the
 drain gate or deleting their status to make it pass.
 
 Freeze all Service submitters first. While the old controller is still running,
-wait for all KovaBuilds to reach a terminal phase and for its runner Pods to be
-deleted. Then scale the old Service Deployment to zero, wait until all old
+wait for all KovaBuilds and their runner Pods to be removed. Preserve any
+needed terminal receipts outside Kova, then wait through the configured
+`jobTTL`; if retention is disabled, explicitly remove old terminal resources
+only after confirming the caller no longer needs them. A terminal result from
+the old controller may contain a digest read from a mutable tag, so it cannot
+be served under the new exact-push-digest guarantee. Then scale the old
+Service Deployment to zero, wait until all old
 Service Pods are gone, and run the drain gate. Keep submitters frozen and the
 old controller stopped while applying and verifying the new CRD; run the drain
 gate again immediately before upgrading the chart. After the new Service
@@ -85,7 +90,7 @@ rollout is ready, resume submitters.
 
 ```bash
 export NAMESPACE=kova RUNNER_NAMESPACE=kova RELEASE_NAME=kova
-# Inspect until there are no nonterminal builds and no runner Pods.
+# Inspect until there are no KovaBuilds (including terminal receipts) or runner Pods.
 kubectl -n "${RUNNER_NAMESPACE}" get kovabuilds,pods
 kubectl -n "${NAMESPACE}" scale deployment/kova-service --replicas=0
 kubectl -n "${NAMESPACE}" rollout status deployment/kova-service
@@ -101,15 +106,18 @@ kubectl -n "${NAMESPACE}" rollout status deployment/kova-service
 
 Run the drain gate from the matching checkout and `KUBECONFIG`; it takes
 `NAMESPACE`, `RUNNER_NAMESPACE` (when `serviceDaemon.runnerNamespace` differs),
-and `RELEASE_NAME`, all defaulting to `kova`. It blocks on any nonterminal or
-unknown-phase KovaBuild, any runner Pod, any Service Pod, a Service Deployment
-with replicas, or an unreadable Kubernetes response. It is a point-in-time
+and `RELEASE_NAME`, all defaulting to `kova`. Set `SERVICE_DEPLOYMENT_NAME` when
+the chart uses `fullnameOverride`; by default the expected Deployment is
+`<release>-service`. It blocks on any KovaBuild (including terminal receipts),
+any runner Pod, any Service Pod, a missing or ambiguous named Service
+Deployment, a Service Deployment with replicas, or an unreadable Kubernetes
+response. It is a point-in-time
 check, not a submission lock. The Helm upgrade should set the new Service
 replica count to the intended positive value; the old scale-down must not be
 carried into its values. If a separate operator or autoscaler can restart the
 old Service, suspend that controller for this maintenance window as well.
-The example deployment name assumes the chart's default fullname; adjust it
-when the release uses `fullnameOverride`.
+The example scale command assumes the chart's default fullname; adjust it and
+`SERVICE_DEPLOYMENT_NAME` when the release uses `fullnameOverride`.
 
 Apply the CRD for every selected release before the Helm upgrade. Helm creates
 objects from `crds/` during initial installation but does not upgrade them.

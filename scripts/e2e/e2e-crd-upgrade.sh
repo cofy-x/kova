@@ -119,6 +119,7 @@ created_resources=true
 "${ROOT}/scripts/kind/kind-load.sh"
 
 BASELINE_CHART=${BASELINE_CHART} \
+BASELINE_VALUES=${ROOT}/deploy/crd-upgrade-baseline-values.yaml \
 BASELINE_CONTROLLER_IMAGE=ghcr.io/cofy-x/kova:controller-${BASELINE_VERSION} \
 BASELINE_RUNNER_IMAGE=ghcr.io/cofy-x/kova:runner-${BASELINE_VERSION} \
 BASELINE_WORKER_IMAGE=ghcr.io/cofy-x/kova:worker-${BASELINE_VERSION} \
