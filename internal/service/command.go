@@ -26,6 +26,7 @@ import (
 	"github.com/urfave/cli/v2"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/validation"
@@ -192,8 +193,16 @@ func CLICommand() *cli.Command {
 				}
 			}
 			mgr, err := ctrl.NewManager(restConfig, ctrl.Options{
-				Scheme:                  scheme,
-				Cache:                   cache.Options{DefaultNamespaces: map[string]cache.Config{cfg.Namespace: {}}},
+				Scheme: scheme,
+				Cache: cache.Options{
+					DefaultNamespaces: map[string]cache.Config{cfg.Namespace: {}},
+					// The admission pump watches only its active ledger. A
+					// metadata.name field selector lets RBAC grant List/Watch for
+					// that named ConfigMap without opening all namespace ConfigMaps.
+					ByObject: map[ctrlclient.Object]cache.ByObject{
+						&corev1.ConfigMap{}: {Field: fields.OneTermEqualSelector("metadata.name", buildcontroller.AdmissionLedgerName)},
+					},
+				},
 				Metrics:                 metricsserver.Options{BindAddress: c.String("metrics-bind-address")},
 				LeaderElection:          c.Bool("leader-elect"),
 				LeaderElectionConfig:    leaderConfig,
@@ -203,6 +212,10 @@ func CLICommand() *cli.Command {
 			if err != nil {
 				return err
 			}
+			admissionPump := buildcontroller.NewAdmissionPump(mgr.GetAPIReader(), cfg)
+			if err := admissionPump.SetupWithManager(mgr); err != nil {
+				return err
+			}
 			if err := (&buildcontroller.KovaBuildReconciler{
 				Client:    mgr.GetClient(),
 				APIReader: mgr.GetAPIReader(),
@@ -210,7 +223,7 @@ func CLICommand() *cli.Command {
 				Kube:      controllerKubeClient,
 				Cfg:       cfg,
 				Recorder:  mgr.GetEventRecorderFor("kova-service"),
-			}).SetupWithManager(mgr); err != nil {
+			}).SetupWithManager(mgr, admissionPump.WakeEvents()); err != nil {
 				return err
 			}
 			go func() {

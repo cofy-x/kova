@@ -63,7 +63,9 @@ func (r *KovaBuildReconciler) startBuild(ctx context.Context, build *kovav1.Kova
 				return ctrl.Result{}, err
 			}
 		}
-		return ctrl.Result{RequeueAfter: r.Cfg.PollInterval}, nil
+		// Capacity changes and leader startup wake only the next eligible queued
+		// build. An unchanged queue item must not generate its own 5s API loop.
+		return ctrl.Result{}, nil
 	}
 	// The active grant is already durable. Removing its matching queued
 	// intent afterward can temporarily double-count capacity, never overbook.

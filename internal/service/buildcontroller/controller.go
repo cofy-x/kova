@@ -2,6 +2,7 @@ package buildcontroller
 
 import (
 	"context"
+	"fmt"
 	"sync"
 
 	kovav1 "github.com/cofy-x/kova/internal/apis/kova/v1alpha1"
@@ -18,6 +19,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	controllerOptions "sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/event"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
+	"sigs.k8s.io/controller-runtime/pkg/source"
 )
 
 const cleanupFinalizer = kovav1.CleanupFinalizer
@@ -105,14 +109,18 @@ func contractTargets(values []kovav1.KovaBuildTargetSpec) []buildcontract.Target
 	return targets
 }
 
-func (r *KovaBuildReconciler) SetupWithManager(mgr ctrl.Manager) error {
+func (r *KovaBuildReconciler) SetupWithManager(mgr ctrl.Manager, admissionWake <-chan event.GenericEvent) error {
 	concurrency := r.Cfg.ControllerConcurrency
 	if concurrency <= 0 {
 		concurrency = buildcontract.DefaultControllerConcurrency
 	}
+	if admissionWake == nil {
+		return fmt.Errorf("admission wake source is required for event-driven queued builds")
+	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&kovav1.KovaBuild{}).
 		Owns(&corev1.Pod{}).
+		WatchesRawSource(source.Channel(admissionWake, &handler.EnqueueRequestForObject{})).
 		WithOptions(controllerOptions.Options{MaxConcurrentReconciles: concurrency}).
 		Complete(r)
 }

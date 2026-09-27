@@ -22,7 +22,8 @@ import (
 )
 
 const (
-	reservationConfigMap      = "kova-service-admission"
+	AdmissionLedgerName       = "kova-service-admission"
+	reservationConfigMap      = AdmissionLedgerName
 	reservationDataKey        = "reservations.json"
 	podCreateAttemptKey       = "kova.cofy.dev/create-attempt"
 	maxReservationCASAttempts = 16

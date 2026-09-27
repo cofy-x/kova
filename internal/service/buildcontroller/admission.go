@@ -113,17 +113,7 @@ func decideAdmission(build *kovav1.KovaBuild, builds []kovav1.KovaBuild, active 
 		activeByRequester[reservation.Requester]++
 		usedSlots += reservation.Slots
 	}
-	queued := make([]*kovav1.KovaBuild, 0, len(builds))
-	for i := range builds {
-		item := &builds[i]
-		// Deleting and cancellation-requested builds can remain Queued while
-		// cleanup is blocked. They will never receive a real grant, so they
-		// must not consume one in the virtual fair-share allocation either.
-		if item.DeletionTimestamp.IsZero() && !cancellationRequested(item) &&
-			(item.Status.Phase == "" || item.Status.Phase == kovav1.PhaseQueued) && active[reservationKey(item)].Slots == 0 {
-			queued = append(queued, item)
-		}
-	}
+	queued := queuedAdmissionCandidates(builds, active)
 	jobCapacity := len(queued)
 	if maxJobs > 0 {
 		jobCapacity = maxJobs - len(active)
@@ -161,6 +151,21 @@ func decideAdmission(build *kovav1.KovaBuild, builds []kovav1.KovaBuild, active 
 		}
 	}
 	return admissionDecision{Message: "waiting for fair-share capacity"}
+}
+
+func queuedAdmissionCandidates(builds []kovav1.KovaBuild, active map[string]activeReservation) []*kovav1.KovaBuild {
+	queued := make([]*kovav1.KovaBuild, 0, len(builds))
+	for i := range builds {
+		item := &builds[i]
+		// Deleting and cancellation-requested builds can remain Queued while
+		// cleanup is blocked. They will never receive a real grant, so they
+		// must not consume one in the virtual fair-share allocation either.
+		if item.DeletionTimestamp.IsZero() && !cancellationRequested(item) &&
+			(item.Status.Phase == "" || item.Status.Phase == kovav1.PhaseQueued) && active[reservationKey(item)].Slots == 0 {
+			queued = append(queued, item)
+		}
+	}
+	return queued
 }
 
 func fairQueue(builds []*kovav1.KovaBuild, activeByRequester map[string]int, lastGrantedRequesterHash string) []*kovav1.KovaBuild {
