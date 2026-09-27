@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import tempfile
+import threading
 import unittest
 import zipfile
 from copy import deepcopy
@@ -227,6 +228,61 @@ class PartialOutputSafetyTest(unittest.TestCase):
                         acceptance.capture_copy_failure(
                             directory, "kova-job-idem-" + "a" * 20, "runner-uid", second
                         )
+
+    def test_copy_failure_observer_accepts_only_exact_runner_identity(self) -> None:
+        runner = "kova-job-idem-" + "a" * 20
+        second = "kind-registry:5000/kova-examples/partial-41-test-z:dev"
+        pod = {
+            "metadata": {
+                "uid": "runner-uid",
+                "ownerReferences": [{"controller": True, "uid": "build-uid"}],
+            }
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            result: dict = {}
+            with patch.object(acceptance, "kctl", return_value=json.dumps(pod)):
+                with patch.object(acceptance, "capture_copy_failure", return_value=True) as capture:
+                    acceptance.watch_copy_failure(
+                        Path(temporary),
+                        runner,
+                        "runner-uid",
+                        "build-uid",
+                        second,
+                        threading.Event(),
+                        result,
+                    )
+            self.assertEqual(result, {"proven": True, "end": "exact-runner-export"})
+            capture.assert_called_once()
+            result = {}
+            with patch.object(
+                acceptance,
+                "kctl",
+                return_value=json.dumps(
+                    {"metadata": {**pod["metadata"], "uid": "replaced-runner"}}
+                ),
+            ):
+                acceptance.watch_copy_failure(
+                    Path(temporary),
+                    runner,
+                    "runner-uid",
+                    "build-uid",
+                    second,
+                    threading.Event(),
+                    result,
+                )
+            self.assertIn("runner identity changed", result["error"])
+            result = {}
+            with patch.object(acceptance, "kctl", return_value=""):
+                acceptance.watch_copy_failure(
+                    Path(temporary),
+                    runner,
+                    "runner-uid",
+                    "build-uid",
+                    second,
+                    threading.Event(),
+                    result,
+                )
+            self.assertEqual(result, {"end": "runner-pod-absent"})
 
     def test_public_partial_fields_match_durable_receipts(self) -> None:
         build = failed_build()

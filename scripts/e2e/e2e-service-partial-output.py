@@ -18,6 +18,7 @@ import signal
 import socket
 import subprocess
 import sys
+import threading
 import time
 import zipfile
 from datetime import datetime, timezone
@@ -770,6 +771,20 @@ def capture_runner(
     ):
         fail("runner Pod is not owned by the exact test KovaBuild UID")
     save_json(run_dir / "latest-runner.json", project_pod(pod))
+    if not any(
+        item.get("name") == "runner" and item.get("imageID")
+        for item in pod["status"].get("containerStatuses", [])
+    ):
+        return False, pod["metadata"]["uid"]
+    save_json(
+        run_dir / "runner-runtime-image.json",
+        runtime_image_fact(pod, "runner", runner_image, runner_config_id),
+    )
+    return True, pod["metadata"]["uid"]
+
+
+def capture_runner_logs(run_dir: Path, runner_name: str) -> None:
+    """Best-effort bounded excerpts; structured proof is captured separately."""
     for container in ("source-fetch", "runner"):
         try:
             logs = kctl(
@@ -787,16 +802,6 @@ def capture_runner(
         if len(logs.encode()) > 256 * 1024:
             fail("runner log excerpt exceeds its bounded evidence size")
         save_text(run_dir / f"runner-{container}.log", logs)
-    if not any(
-        item.get("name") == "runner" and item.get("imageID")
-        for item in pod["status"].get("containerStatuses", [])
-    ):
-        return False, pod["metadata"]["uid"]
-    save_json(
-        run_dir / "runner-runtime-image.json",
-        runtime_image_fact(pod, "runner", runner_image, runner_config_id),
-    )
-    return True, pod["metadata"]["uid"]
 
 
 def verify_copy_missing_export(raw: str, second: str) -> dict | None:
@@ -889,6 +894,45 @@ def capture_copy_failure(run_dir: Path, runner_name: str, runner_uid: str, secon
     save_text(run_dir / "runner-failure-export.jsonl", raw)
     save_json(run_dir / "copy-missing-proof.json", proof)
     return True
+
+
+def watch_copy_failure(
+    run_dir: Path,
+    runner_name: str,
+    runner_uid: str,
+    build_uid: str,
+    second: str,
+    stop: threading.Event,
+    result: dict,
+) -> None:
+    """Observe the exact runner independently of slow foreground safety snapshots.
+
+    Terminal reconciliation removes the runner Pod, so a serial two-second
+    foreground poll can miss an otherwise correct BuildKit failure. Missing
+    evidence remains an inconclusive acceptance, never a product failure.
+    """
+    try:
+        while not stop.is_set():
+            raw = kctl(
+                "-n", NAMESPACE, "get", "pod", runner_name, "--ignore-not-found", "-o", "json"
+            )
+            if not raw.strip():
+                result["end"] = "runner-pod-absent"
+                return
+            pod = json.loads(raw)
+            if pod["metadata"]["uid"] != runner_uid or not any(
+                item.get("controller") is True and item.get("uid") == build_uid
+                for item in pod["metadata"].get("ownerReferences", [])
+            ):
+                fail("runner identity changed during failure-export observation")
+            if capture_copy_failure(run_dir, runner_name, runner_uid, second):
+                result["proven"] = True
+                result["end"] = "exact-runner-export"
+                return
+            stop.wait(0.5)
+        result["end"] = "stopped"
+    except (AcceptanceError, KeyError, ValueError, IndexError) as error:
+        result["error"] = f"{type(error).__name__}: {error}"
 
 
 def start_port_forward(
@@ -1251,6 +1295,10 @@ def run_acceptance(revision: str, facts: dict) -> None:
     passed = False
     runner_runtime_seen = False
     runner_pod_uid = ""
+    runner_logs_captured = False
+    runner_watch_stop = threading.Event()
+    runner_watch_result: dict = {}
+    runner_watch: threading.Thread | None = None
     copy_failure_proven = False
     try:
         safe_snapshot(run_dir, "before")
@@ -1371,14 +1419,27 @@ def run_acceptance(revision: str, facts: dict) -> None:
                     fail("runner Pod UID changed during one build")
                 runner_pod_uid = observed_pod_uid or runner_pod_uid
                 runner_runtime_seen = observed_runtime or runner_runtime_seen
-                if (
-                    observed_runtime
-                    and not copy_failure_proven
-                    and phase in ("Running", "FailedVerifying", "Failed")
-                ):
-                    copy_failure_proven = capture_copy_failure(
-                        run_dir, runner_name, runner_pod_uid, second
+                if observed_runtime and runner_watch is None:
+                    runner_watch = threading.Thread(
+                        target=watch_copy_failure,
+                        args=(
+                            run_dir,
+                            runner_name,
+                            runner_pod_uid,
+                            uid,
+                            second,
+                            runner_watch_stop,
+                            runner_watch_result,
+                        ),
+                        name="partial-output-exact-runner-export",
+                        daemon=True,
                     )
+                    runner_watch.start()
+                if observed_runtime and not runner_logs_captured:
+                    capture_runner_logs(run_dir, runner_name)
+                    runner_logs_captured = True
+            if runner_watch_result.get("error"):
+                fail(f"exact runner export observer failed: {runner_watch_result['error']}")
             if phase == "Failed":
                 save_json(run_dir / "terminal-build.json", project_build(current))
                 terminal = True
@@ -1430,10 +1491,21 @@ def run_acceptance(revision: str, facts: dict) -> None:
             fail("bounded 20-minute runner/verification deadline expired")
         if not terminal:
             fail("no terminal KovaBuild receipt")
+        if runner_watch is not None:
+            # Give an in-flight exec a bounded chance to complete before the
+            # terminal controller removes the Pod, then stop before cleanup.
+            runner_watch.join(timeout=8)
+            runner_watch_stop.set()
+            runner_watch.join(timeout=35)
+            if runner_watch.is_alive():
+                fail("exact runner export observer did not stop within its bounded deadline")
+            if runner_watch_result.get("error"):
+                fail(f"exact runner export observer failed: {runner_watch_result['error']}")
+            copy_failure_proven = runner_watch_result.get("proven") is True
         if not runner_runtime_seen:
-            fail("runner Pod runtime image identity was never proven")
+            fail("acceptance evidence incomplete: runner Pod runtime identity was never proven")
         if not copy_failure_proven:
-            fail("intentional BuildKit COPY /missing failure was not proven from the exact runner")
+            fail("acceptance evidence incomplete: exact runner /missing export was not captured")
         digests = verify_failed_receipt(current, first, second)
         for image, digest in digests.items():
             repository, tag = image.removeprefix(f"{REGISTRY_CLUSTER}/").split(":", 1)
@@ -1480,6 +1552,11 @@ def run_acceptance(revision: str, facts: dict) -> None:
         passed = True
         note(f"PASS: failed runner retained two exact OCI/Nydus receipts; evidence at {run_dir}")
     finally:
+        runner_watch_stop.set()
+        if runner_watch is not None and runner_watch.is_alive():
+            runner_watch.join(timeout=35)
+            if runner_watch.is_alive():
+                note("exact runner export observer did not stop before emergency cleanup")
         stop_process(service_forward, service_log)
         if not passed:
             try:
