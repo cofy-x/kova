@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import importlib.util
 import io
@@ -139,6 +140,20 @@ def preflight_fact(value: dict) -> dict:
 
 
 class DeepQueueSafetyTest(unittest.TestCase):
+    def test_static_secret_rejects_newline_before_detached_run(self) -> None:
+        secret = {
+            "metadata": {"name": "kova-e2e-token", "namespace": "kova"},
+            "type": "Opaque",
+            "data": {"token": base64.b64encode((TOKEN + "\n").encode()).decode()},
+        }
+        with patch.dict(os.environ, {}, clear=True), patch.object(
+            BENCH, "kjson", return_value=secret
+        ):
+            with self.assertRaisesRegex(BENCH.BenchError, "invalid length/characters"):
+                BENCH.load_static_token()
+            secret["data"]["token"] = base64.b64encode(TOKEN.encode()).decode()
+            self.assertEqual(BENCH.load_static_token(), TOKEN)
+
     def test_long_quiet_duration_is_explicit_and_bounded(self) -> None:
         with patch.dict(os.environ, {}, clear=True):
             self.assertEqual(BENCH.quiet_seconds(), 0)

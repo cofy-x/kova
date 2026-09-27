@@ -1200,6 +1200,9 @@ def preflight() -> dict:
     # Fail closed before writing if kubelet Pod/node metrics are unavailable
     # or the host is already too busy. This read-only sample writes no file.
     resource_sample(pods, None, docker_root)
+    # Check the dedicated Secret before a detached launcher reports success;
+    # keep the credential in process memory, never in the preflight receipt.
+    load_static_token()
     return {
         "cluster": CLUSTER,
         "namespace": NAMESPACE,
@@ -2225,9 +2228,7 @@ def main() -> None:
     if mode == "check":
         preflight()
         note(f"read-only preflight passed: {CLUSTER}; 2/2 nodes; two Service Pods; empty ledgers")
-        note(
-            "no writes performed; explicit run mode needs DEEP_QUEUE_E2E_ACK and SERVICE_AUTH_TOKEN"
-        )
+        note("no writes performed; explicit run mode needs DEEP_QUEUE_E2E_ACK")
         return
     if sys.platform != "linux":
         fail("run mode requires an isolated Linux Kind host")

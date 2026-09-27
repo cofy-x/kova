@@ -327,7 +327,7 @@ It also checks the runner image is preloaded on both nodes despite never creatin
 If the runtime does not expose comparable CRI IDs/digests, preflight stops instead of assuming the cached image is current.
 No setup command above pushes to the local or cloud registry, and no HK ACK context is used.
 
-The default entrypoint reads the cluster, kubeconfig identity, ledgers, readiness, API-server request counters, and kubelet summary metrics without writing Kubernetes objects or local receipts:
+The default entrypoint reads the cluster, kubeconfig identity, ledgers, readiness, dedicated test Secret format, API-server request counters, and kubelet summary metrics without writing Kubernetes objects or local receipts. It rejects a Secret token with a trailing newline before a detached run can start, and never prints or persists the token:
 
 ```bash
 make e2e-service-admission-deep-queue
