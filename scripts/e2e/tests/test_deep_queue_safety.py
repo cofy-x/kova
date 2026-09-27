@@ -156,6 +156,23 @@ class DeepQueueSafetyTest(unittest.TestCase):
         with self.assertRaises(BENCH.BenchError):
             BENCH.metric_delta({}, {"GET||configmaps|200": 120_001.0}, 100.0)
 
+    def test_stage_and_quiet_api_receipts_keep_counts_and_add_rates(self) -> None:
+        before = {"GET||configmaps|200": 10.0, "LIST|kova.cofy.dev|kovabuilds|200": 1.0}
+        after = {"GET||configmaps|200": 30.0, "LIST|kova.cofy.dev|kovabuilds|200": 5.0}
+        result = BENCH.metric_delta(before, after, 2.0)
+        self.assertEqual(result["total_requests"], 24.0)
+        self.assertEqual(result["total_qps"], 12.0)
+        self.assertEqual(
+            result["by_verb_group_resource"],
+            {"GET||configmaps": 20.0, "LIST|kova.cofy.dev|kovabuilds": 4.0},
+        )
+        self.assertEqual(
+            result["by_verb_group_resource_qps"],
+            {"GET||configmaps": 10.0, "LIST|kova.cofy.dev|kovabuilds": 2.0},
+        )
+        with self.assertRaises(BENCH.BenchError):
+            BENCH.metric_delta(before, after, 0.0)
+
     def test_long_quiet_emits_three_guarded_windows(self) -> None:
         pre = {
             "quiet_seconds": 300,

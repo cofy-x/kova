@@ -936,6 +936,8 @@ def wait_queue_state(
 
 
 def metric_delta(before: dict[str, float], after: dict[str, float], seconds: float) -> dict:
+    if not math.isfinite(seconds) or seconds <= 0:
+        fail("API measurement window must have a positive finite duration")
     delta = {}
     for key in set(before) | set(after):
         amount = after.get(key, 0.0) - before.get(key, 0.0)
@@ -961,6 +963,9 @@ def metric_delta(before: dict[str, float], after: dict[str, float], seconds: flo
         "total_qps": total / seconds,
         "error_429_or_5xx": failures,
         "by_verb_group_resource": per_verb_resource,
+        "by_verb_group_resource_qps": {
+            label: count / seconds for label, count in per_verb_resource.items()
+        },
     }
     if failures or result["total_qps"] > API_QPS_MAX:
         fail(f"API server crossed the 429/5xx or {API_QPS_MAX} QPS safety limit")
