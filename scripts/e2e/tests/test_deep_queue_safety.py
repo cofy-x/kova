@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import io
 import json
 import socketserver
+import tarfile
 import tempfile
 import threading
 import unittest
@@ -19,6 +21,68 @@ BENCH = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(BENCH)
 TOKEN = "test-only-credential-9f732b1f"
 UID = "12345678-1234-1234-1234-123456789abc"
+
+
+def oci_archive(
+    *, extra_platform: bool = False, omit_config: bool = False, corrupt_config: bool = False
+) -> tuple[bytes, str, str]:
+    reference = "localhost:5002/kova:controller-dev"
+    revision = "824f697f0456"
+    config = json.dumps(
+        {
+            "architecture": "amd64",
+            "os": "linux",
+            "config": {"Labels": {"org.opencontainers.image.revision": revision}},
+        },
+        separators=(",", ":"),
+    ).encode()
+    config_digest = "sha256:" + hashlib.sha256(config).hexdigest()
+    manifest = json.dumps(
+        {
+            "schemaVersion": 2,
+            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "config": {
+                "mediaType": "application/vnd.oci.image.config.v1+json",
+                "digest": config_digest,
+                "size": len(config),
+            },
+            "layers": [],
+        },
+        separators=(",", ":"),
+    ).encode()
+    manifest_digest = "sha256:" + hashlib.sha256(manifest).hexdigest()
+    descriptor = {
+        "mediaType": "application/vnd.oci.image.manifest.v1+json",
+        "digest": manifest_digest,
+        "size": len(manifest),
+        "annotations": {"io.containerd.image.name": reference},
+        "platform": {"architecture": "amd64", "os": "linux"},
+    }
+    index = json.dumps(
+        {
+            "schemaVersion": 2,
+            "mediaType": "application/vnd.oci.image.index.v1+json",
+            "manifests": [descriptor, descriptor] if extra_platform else [descriptor],
+        },
+        separators=(",", ":"),
+    ).encode()
+    stream = io.BytesIO()
+    with tarfile.open(fileobj=stream, mode="w") as archive:
+        # Docker's OCI save emits blobs before index.json; config can precede manifest.
+        for name, contents in (
+            []
+            if omit_config
+            else [
+                (
+                    "blobs/sha256/" + config_digest[7:],
+                    config.replace(b"amd64", b"arm64") if corrupt_config else config,
+                )
+            ]
+        ) + [("blobs/sha256/" + manifest_digest[7:], manifest), ("index.json", index)]:
+            member = tarfile.TarInfo(name)
+            member.size = len(contents)
+            archive.addfile(member, io.BytesIO(contents))
+    return stream.getvalue(), manifest_digest, config_digest
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -74,6 +138,35 @@ def preflight_fact(value: dict) -> dict:
 
 
 class DeepQueueSafetyTest(unittest.TestCase):
+    def test_platform_config_digest_is_verified_separately_from_index_object(self) -> None:
+        archive, manifest_digest, config_digest = oci_archive()
+        object_index_digest = "sha256:" + "f" * 64
+        fact = BENCH.parse_oci_saved_image(
+            io.BytesIO(archive),
+            "localhost:5002/kova:controller-dev",
+            manifest_digest,
+            "824f697f0456",
+        )
+        self.assertEqual(fact["config_digest"], config_digest)
+        self.assertEqual(fact["platform_manifest_digest"], manifest_digest)
+        self.assertNotEqual(fact["config_digest"], object_index_digest)
+        self.assertNotEqual(fact["config_digest"], manifest_digest)
+
+    def test_oci_archive_rejects_ambiguous_or_missing_config(self) -> None:
+        for options in (
+            {"extra_platform": True},
+            {"omit_config": True},
+            {"corrupt_config": True},
+        ):
+            archive, manifest_digest, _ = oci_archive(**options)
+            with self.assertRaises(BENCH.BenchError):
+                BENCH.parse_oci_saved_image(
+                    io.BytesIO(archive),
+                    "localhost:5002/kova:controller-dev",
+                    manifest_digest,
+                    "824f697f0456",
+                )
+
     def test_direct_invocation_rejects_another_host_before_preflight(self) -> None:
         with (
             patch.object(BENCH.sys, "platform", "linux"),

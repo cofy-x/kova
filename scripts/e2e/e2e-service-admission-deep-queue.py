@@ -24,10 +24,12 @@ import signal
 import socket
 import subprocess
 import sys
+import tarfile
 import time
 from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import IO
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import ProxyHandler, Request, build_opener
@@ -51,6 +53,8 @@ DISK_FREE_MIN = 20 * 1024**3
 NODE_CPU_FRACTION_MAX = 0.80
 API_QPS_MAX = 1200
 HTTP_BODY_MAX = 1024 * 1024
+OCI_METADATA_BLOB_MAX = 2 * 1024 * 1024
+OCI_METADATA_TOTAL_MAX = 16 * 1024 * 1024
 SETTLE_DEADLINE_SECONDS = 300
 CLEANUP_DEADLINE_SECONDS = 900
 RUN_DEADLINE_SECONDS = 3600
@@ -374,6 +378,144 @@ def cpu_quantity_nano(raw: str) -> int:
     return int(raw) * 1_000_000_000
 
 
+def parse_oci_saved_image(
+    stream: IO[bytes], reference: str, manifest_digest: str, revision: str
+) -> dict:
+    """Verify a platform-filtered Docker save without buffering image layers."""
+    blobs: dict[str, bytes] = {}
+    index_bytes: bytes | None = None
+    metadata_bytes = 0
+    with tarfile.open(fileobj=stream, mode="r|*") as archive:
+        for member in archive:
+            if not member.isfile():
+                continue
+            if member.name == "index.json":
+                if index_bytes is not None or member.size > OCI_METADATA_BLOB_MAX:
+                    fail("Docker OCI archive has duplicate or oversized index metadata")
+                extracted = archive.extractfile(member)
+                if extracted is None:
+                    fail("Docker OCI archive index is unreadable")
+                index_bytes = extracted.read(OCI_METADATA_BLOB_MAX + 1)
+                if len(index_bytes) != member.size:
+                    fail("Docker OCI archive index is truncated")
+                continue
+            match = re.fullmatch(r"blobs/sha256/([0-9a-f]{64})", member.name)
+            if match is None or member.size > OCI_METADATA_BLOB_MAX:
+                continue
+            extracted = archive.extractfile(member)
+            if extracted is None:
+                fail("Docker OCI archive blob is unreadable")
+            prefix = extracted.read(min(member.size, 64))
+            # Ignore even small layer blobs; only manifest/config JSON is retained.
+            if prefix.lstrip()[:1] != b"{":
+                continue
+            metadata_bytes += member.size
+            if metadata_bytes > OCI_METADATA_TOTAL_MAX:
+                fail("Docker OCI archive has too much JSON metadata")
+            digest = "sha256:" + match.group(1)
+            if digest in blobs:
+                fail("Docker OCI archive has duplicate blob metadata")
+            data = prefix + extracted.read(OCI_METADATA_BLOB_MAX + 1 - len(prefix))
+            if len(data) != member.size or "sha256:" + hashlib.sha256(data).hexdigest() != digest:
+                fail("Docker OCI archive blob is truncated or digest-mismatched")
+            blobs[digest] = data
+    if index_bytes is None:
+        fail("Docker OCI archive has no index")
+    try:
+        index = json.loads(index_bytes)
+        descriptors = index["manifests"]
+        if (
+            index.get("schemaVersion") != 2
+            or index.get("mediaType") != "application/vnd.oci.image.index.v1+json"
+            or not isinstance(descriptors, list)
+            or len(descriptors) != 1
+        ):
+            fail("Docker OCI archive is not an unambiguous platform-filtered index")
+        descriptor = descriptors[0]
+        if (
+            descriptor.get("mediaType") != "application/vnd.oci.image.manifest.v1+json"
+            or descriptor.get("digest") != manifest_digest
+            or descriptor.get("platform") != {"architecture": "amd64", "os": "linux"}
+            or descriptor.get("annotations", {}).get("io.containerd.image.name") != reference
+        ):
+            fail("Docker OCI archive index differs from the inspected image/platform")
+        manifest_bytes = blobs[manifest_digest]
+        if descriptor.get("size") != len(manifest_bytes):
+            fail("Docker OCI archive manifest size differs from its index descriptor")
+        manifest = json.loads(manifest_bytes)
+        config_descriptor = manifest["config"]
+        config_digest = config_descriptor["digest"]
+        if (
+            manifest.get("schemaVersion") != 2
+            or manifest.get("mediaType") != "application/vnd.oci.image.manifest.v1+json"
+            or config_descriptor.get("mediaType") != "application/vnd.oci.image.config.v1+json"
+            or not isinstance(config_digest, str)
+            or not re.fullmatch(r"sha256:[0-9a-f]{64}", config_digest)
+        ):
+            fail("Docker OCI archive has malformed manifest/config descriptors")
+        config_bytes = blobs[config_digest]
+        if config_descriptor.get("size") != len(config_bytes):
+            fail("Docker OCI archive config size differs from its manifest descriptor")
+        config = json.loads(config_bytes)
+        if (
+            config.get("architecture") != "amd64"
+            or config.get("os") != "linux"
+            or config.get("config", {}).get("Labels", {}).get("org.opencontainers.image.revision")
+            != revision
+        ):
+            fail("Docker OCI archive config architecture/revision differs from inspected image")
+    except (KeyError, TypeError, AttributeError, ValueError) as error:
+        fail(f"Docker OCI archive metadata is malformed: {type(error).__name__}")
+    return {
+        "archive_index_sha256": "sha256:" + hashlib.sha256(index_bytes).hexdigest(),
+        "platform_manifest_digest": manifest_digest,
+        "config_digest": config_digest,
+    }
+
+
+def saved_image_fact(reference: str, manifest_digest: str, revision: str) -> dict:
+    try:
+        process = subprocess.Popen(
+            [
+                "timeout",
+                "--kill-after=5s",
+                "90s",
+                "docker",
+                "image",
+                "save",
+                "--platform",
+                "linux/amd64",
+                reference,
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+    except OSError as error:
+        fail(f"Docker OCI image save could not start: {type(error).__name__}")
+    try:
+        assert process.stdout is not None
+        result = parse_oci_saved_image(process.stdout, reference, manifest_digest, revision)
+    except BaseException as error:
+        if process.poll() is None:
+            process.kill()
+        process.wait(timeout=5)
+        if isinstance(error, BenchError):
+            raise
+        fail(f"Docker OCI image archive could not be parsed: {type(error).__name__}")
+    finally:
+        if process.stdout is not None:
+            process.stdout.close()
+    try:
+        exit_code = process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=5)
+        fail("Docker OCI image save did not exit after streaming")
+    if exit_code != 0:
+        fail(f"Docker OCI image save returned {exit_code}")
+    return result
+
+
 def local_image_fact(reference: str) -> dict:
     images = json.loads(command(["docker", "image", "inspect", reference], timeout=30))
     if len(images) != 1:
@@ -387,11 +529,31 @@ def local_image_fact(reference: str) -> dict:
     image_id = image.get("Id")
     if not isinstance(image_id, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", image_id):
         fail(f"local Docker image {reference} has no exact SHA-256 image ID")
+    platform_images = json.loads(
+        command(["docker", "image", "inspect", "--platform", "linux/amd64", reference], timeout=30)
+    )
+    if len(platform_images) != 1:
+        fail(f"local Docker image {reference} has no exact Linux/amd64 platform image")
+    platform_image = platform_images[0]
+    manifest_digest = platform_image.get("Id")
+    if (
+        not isinstance(manifest_digest, str)
+        or not re.fullmatch(r"sha256:[0-9a-f]{64}", manifest_digest)
+        or platform_image.get("Architecture") != "amd64"
+        or platform_image.get("Os") != "linux"
+        or (platform_image.get("Config", {}).get("Labels") or {}).get(
+            "org.opencontainers.image.revision"
+        )
+        != revision
+    ):
+        fail(f"local Docker image {reference} has a mismatched Linux/amd64 manifest")
+    saved = saved_image_fact(reference, manifest_digest, revision)
     return {
         "reference": reference,
         "image_id": image_id,
         "revision": revision,
         "architecture": image.get("Architecture"),
+        **saved,
     }
 
 
@@ -881,7 +1043,7 @@ def preflight() -> dict:
         or os.environ.get("RELEASE_NAME", RELEASE) != RELEASE
     ):
         fail("namespace/release overrides do not match the dedicated benchmark")
-    for binary in ("kind", "kubectl", "docker", "helm", "git"):
+    for binary in ("kind", "kubectl", "docker", "helm", "git", "timeout"):
         if shutil.which(binary) is None:
             fail(f"missing required command {binary}")
     kova_commit = command(["git", "-C", str(ROOT), "rev-parse", "HEAD"]).strip()
@@ -953,7 +1115,7 @@ def preflight() -> dict:
         runtime_role_images[node_name] = {}
         for role, fact in image_facts.items():
             runtime = kind_runtime_image_fact(node_name, fact["reference"])
-            if runtime["image_id"] != fact["image_id"]:
+            if runtime["image_id"] != fact["config_digest"]:
                 fail(f"Kind node {node_name} has a stale {role} image")
             runtime_role_images[node_name][role] = runtime
     worker_selector = worker["spec"]["selector"]["matchLabels"]
@@ -979,11 +1141,11 @@ def preflight() -> dict:
         fail("worker Pod is not exactly one Ready Pod")
     deployed_images = {
         "service": [
-            deployed_image_fact(pod, "kova-service", image_facts["controller"]["image_id"])
+            deployed_image_fact(pod, "kova-service", image_facts["controller"]["config_digest"])
             for pod in pods
         ],
         "worker": deployed_image_fact(
-            worker_pods[0], worker_containers[0]["name"], image_facts["worker"]["image_id"]
+            worker_pods[0], worker_containers[0]["name"], image_facts["worker"]["config_digest"]
         ),
     }
     if kjson("get", "kovabuilds", "--all-namespaces", "-o", "json")["items"]:
