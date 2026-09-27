@@ -271,8 +271,10 @@ func TestHandleBuildCancelCancelsRunningBuild(t *testing.T) {
 	if cancelRec.Code != http.StatusAccepted {
 		t.Fatalf("expected cancel accepted, got %d body=%s", cancelRec.Code, cancelRec.Body.String())
 	}
-	if state := decodeDaemonState(t, cancelRec); state.Status != "cancelling" {
-		t.Fatalf("expected cancelling response, got %#v", state)
+	if state := decodeDaemonState(t, cancelRec); (state.Status != "cancelling" && state.Status != "cancelled") || state.Error == "" {
+		// The asynchronous build can finish cancelling before the handler reads
+		// the state for its response. Both states confirm the accepted request.
+		t.Fatalf("expected cancelling or cancelled response with a reason, got %#v", state)
 	}
 	select {
 	case <-buildDone:
