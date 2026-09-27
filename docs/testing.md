@@ -194,11 +194,18 @@ This bounded Kind profile is a design diagnostic, not production SLO or SLA evid
 Run this only on an isolated Linux Kind host after other Kind tests have released their clusters, with enough local storage, and never from a Mac or against a cloud kubeconfig.
 It exercises a 128 MiB incompressible source, immutable OCI source fetch, and the private runner extraction path; the unit tests cover near-limit rejection and the absence of a second expanded-tree copy.
 It does not establish the maximum safe production payload size.
-Prepare the candidate images and isolated cluster using the ordinary quickstart, but give its setup outputs run-scoped tags:
+Prepare a **clean committed** candidate checkout and Linux CLI. Build the three
+role images from its exact 12-character Git revision, then create a fresh Kind
+quickstart (never reuse an occupied cluster). Give setup outputs run-scoped
+tags; the quickstart will build and load the named role images:
 
 ```bash
+REV=$(git rev-parse --short=12 HEAD)
 SETUP_RUN=source-capacity-setup-$(date -u +%Y%m%dt%H%M%sz)
 QUICKSTART_KIND_CLUSTER=kova-source-capacity KEEP_KIND_CLUSTER=true \
+  CONTROLLER_IMAGE="localhost:5002/kova:controller-$REV" \
+  RUNNER_IMAGE="localhost:5002/kova:runner-$REV" \
+  WORKER_IMAGE="localhost:5002/kova:worker-$REV" \
   SERVICE_TARGET="kind-registry:5000/kova-examples/source-capacity-setup:$SETUP_RUN" \
   SERVICE_PULL_TARGET="localhost:5002/kova-examples/source-capacity-setup:$SETUP_RUN" \
   SOURCE_REPOSITORY="localhost:5002/kova-sources/source-capacity-setup:$SETUP_RUN" \
@@ -206,7 +213,7 @@ QUICKSTART_KIND_CLUSTER=kova-source-capacity KEEP_KIND_CLUSTER=true \
 ```
 
 The quickstart must complete and its terminal KovaBuilds must expire before the source-capacity preflight can pass.
-The preflight verifies that the host has only the named Kind cluster, that its dedicated kubeconfig exactly matches the live Kind credentials/server, that both nodes and Kova deployments are healthy, that the registry image/port/network are exact, and that no KovaBuild or runner Pod is active.
+The preflight verifies that the host has only the named Kind cluster, that its dedicated kubeconfig exactly matches the live Kind credentials/server, that both nodes and Kova deployments are healthy, that the registry image/port/network are exact, and that no KovaBuild or runner Pod is active. It also requires a clean checkout, same-revision Linux CLI, exact role image tags and OCI revision labels, and matching local Linux/amd64 image config IDs, ready Pod image IDs, and Kind CRI image identities. The live mode repeats these identity checks after source publication and checks both `source-fetch` and `runner` containers on the exact owned runner Pod.
 It makes no cluster changes.
 
 ```bash
@@ -218,7 +225,7 @@ The live mode requires at least 20 GiB free disk, 1 GiB free temporary storage, 
 It uses the quickstart's `service-e2e-token` only through the process environment, never a command argument or evidence file.
 It rejects existing source/output tags for its random run ID, then saves the source receipt, exact job ID, terminal and result receipts, live runner log and Pod samples, node health and Docker resource samples, events, and host-pull digest under `.work/source-capacity/<run-id>/`.
 The expected outcome is one succeeded build with a verified manifest digest and a host pull of `localhost:5002/kova-examples/source-capacity:<run-id>` yielding that same digest.
-On failure it retains all evidence and any exact-run KovaBuild and registry tags for inspection; no cluster-wide or repository-wide cleanup runs.
+After a submission might have reached the Service, failure or HUP/INT/TERM triggers a supervised stop of only the deterministic run ID. The stop checks the saved Kind identity and the complete KovaBuild source, requester, target, and options contract, verifies runner ownership, then sends a Kubernetes API DELETE with an atomic CR UID precondition. It waits for the exact CR, runner, and admission ledgers to clear. It never deletes the Kind cluster or registry tags. A missing CR after a timed-out submit is **uncertain**, not proof of no write; a changed identity, foreign build/Pod, API error, or non-converged cleanup also fails closed and preserves `stop.err`, `stop-outcome.json` (when available), and all other receipts. Inspect the exact run before retrying or clearing tags; a known failed run may be retried with `python3 scripts/e2e/source-capacity-guard.py stop .work/source-capacity/<run-id>` after checking the same dedicated cluster identity. SIGKILL and host loss cannot run the trap, so the operator must inspect the exact ID before a new run.
 After evidence review, remove only the named `kova-source-capacity` Kind cluster and its kubeconfig if no longer needed; review run-scoped source/output tags before any registry cleanup.
 
 ## Isolated Partial-Output Receipt Acceptance (#41)

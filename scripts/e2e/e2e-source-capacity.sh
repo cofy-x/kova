@@ -23,27 +23,57 @@ expected_kubeconfig=
 port_forward_pid=
 sampler_pid=
 log_follower_pid=
+supervised_pid=
 run_dir=
 job_id=
+submission_possible=false
+guard=${root}/scripts/e2e/source-capacity-guard.py
 
 die() { echo "error: $*" >&2; exit 1; }
 note() { echo "source-capacity-e2e: $*" >&2; }
 kctl() { kubectl --kubeconfig "${kubeconfig}" --request-timeout=15s "$@"; }
+run_supervised() {
+  local outcome=0
+  "$@" &
+  supervised_pid=$!
+  wait "${supervised_pid}" || outcome=$?
+  supervised_pid=
+  return "${outcome}"
+}
+admission_empty() {
+  local active queue
+  active=$(kctl -n "${namespace}" get configmap kova-service-admission -o json)
+  queue=$(kctl -n "${namespace}" get configmap kova-service-queue-admission -o json)
+  jq -e '.data["reservations.json"] | fromjson | .active == {}' <<<"${active}" >/dev/null || die "active admission ledger is not empty"
+  jq -e '.data["queue.json"] | fromjson | .intents == {}' <<<"${queue}" >/dev/null || die "queue admission ledger is not empty"
+}
 
 cleanup() {
   local status=$?
   trap - EXIT
+  trap '' HUP INT TERM
+  if [[ -n ${supervised_pid} ]]; then kill "${supervised_pid}" 2>/dev/null || true; wait "${supervised_pid}" 2>/dev/null || true; fi
   if [[ -n ${sampler_pid} ]]; then kill "${sampler_pid}" 2>/dev/null || true; wait "${sampler_pid}" 2>/dev/null || true; fi
   if [[ -n ${log_follower_pid} ]]; then kill "${log_follower_pid}" 2>/dev/null || true; wait "${log_follower_pid}" 2>/dev/null || true; fi
   if [[ -n ${port_forward_pid} ]]; then kill "${port_forward_pid}" 2>/dev/null || true; wait "${port_forward_pid}" 2>/dev/null || true; fi
   if [[ -n ${expected_kubeconfig} ]]; then rm -f -- "${expected_kubeconfig}"; fi
+  if [[ ${submission_possible} == true ]]; then
+    (( status != 0 )) || status=1
+    note "submission may have created ${expected_job_id}; attempting only exact-ID/UID supervised stop"
+    if ! timeout -k 10s 5m python3 "${guard}" stop "${run_dir}" >"${run_dir}/stop.log" 2>"${run_dir}/stop.err"; then
+      note "exact stop did not prove convergence; inspect stop.err and exact run ID before another test"
+    else
+      note "exact KovaBuild stop and admission cleanup verified; registry tags and evidence retained"
+    fi
+  fi
   if [[ -n ${run_dir} ]]; then
-    note "evidence retained at ${run_dir}; run-scoped registry tags and any KovaBuild were NOT deleted"
+    note "evidence and run-scoped registry tags retained at ${run_dir}"
     if (( status != 0 )); then note "FAILED; inspect the exact run before recovery or tag cleanup"; fi
   fi
   exit "${status}"
 }
 trap cleanup EXIT
+trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
@@ -62,6 +92,7 @@ require_cmd curl
 require_cmd openssl
 require_cmd timeout
 require_cmd sha256sum
+require_cmd python3
 [[ -f ${kubeconfig} && ! -L ${kubeconfig} ]] || die "missing regular dedicated kubeconfig: ${kubeconfig}"
 [[ -x ${root}/bin/kova ]] || die "build the Linux CLI with make kova before this test"
 
@@ -105,12 +136,15 @@ jq -e --arg namespace "${namespace}" --arg registry "${cluster_registry}" '
 ' <<<"${service}" >/dev/null || die "Service is not the isolated authenticated quickstart configuration"
 jq -e '.items | length == 0' <<<"$(kctl get kovabuilds -A -o json)" >/dev/null || die "another KovaBuild exists; do not overlap tests"
 jq -e '.items | length == 0' <<<"$(kctl get pods -A -l app.kubernetes.io/name=kova-runner -o json)" >/dev/null || die "a runner Pod exists; do not overlap tests"
+admission_empty
 node_uids=$(jq -r '.items[].metadata.uid' <<<"${nodes}" | sort)
 registry_id=$(jq -r '.Id' <<<"${registry}")
 
 note "read-only preflight passed: ${cluster}, 2/2 Ready nodes, empty KovaBuild/runner set, exact local registry"
+python3 "${guard}" check >/dev/null || die "candidate checkout/CLI/image/Pod CRI identity preflight failed"
 if [[ ${mode} == check ]]; then
-  note "no cluster writes performed; set SOURCE_CAPACITY_E2E_MODE=run and SERVICE_AUTH_TOKEN to execute"
+  note "candidate revision and all role Pod/CRI identities passed; no cluster writes performed"
+  note "set SOURCE_CAPACITY_E2E_MODE=run and SERVICE_AUTH_TOKEN to execute"
   exit 0
 fi
 [[ -n ${token} ]] || die "SERVICE_AUTH_TOKEN is required in live mode"
@@ -130,6 +164,7 @@ run_id="source-capacity-$(date -u +%Y%m%dt%H%M%sz)-$(openssl rand -hex 4)"
 run_dir=${root}/.work/source-capacity/${run_id}
 mkdir -- "${run_dir}" || die "run directory already exists"
 mkdir -- "${run_dir}/source"
+python3 "${guard}" check >"${run_dir}/candidate-images.json" || die "candidate role image identity changed before live mode"
 expected_job_id=$(printf '%s\0%s' 'kova:e2e' "${run_id}" | sha256sum | awk '{print "idem-" substr($1, 1, 20)}')
 printf '%s\n' "${expected_job_id}" >"${run_dir}/expected-job-id.txt"
 source_repository="${registry_host}/kova-sources/source-capacity:${run_id}"
@@ -157,7 +192,7 @@ note "creating a bounded 128 MiB incompressible source payload in ${run_dir}"
 dd if=/dev/urandom of="${run_dir}/source/payload" bs=1M count=128 status=none
 sha256sum "${run_dir}/source/Dockerfile" "${run_dir}/source/payload" >"${run_dir}/source-sha256.txt"
 
-timeout 10m "${root}/bin/kova" source push --target "${target}" --platform linux/amd64 \
+run_supervised timeout -k 10s 10m "${root}/bin/kova" source push --target "${target}" --platform linux/amd64 \
   --repository "${source_repository}" --registry-plain-http "${registry_host}" \
   "${run_dir}/source" >"${run_dir}/source-receipt.json"
 source_uri=$(jq -r '.uri // empty' "${run_dir}/source-receipt.json")
@@ -178,9 +213,15 @@ source_uri="oci://${cluster_registry}/${source_uri#oci://"${registry_host}"/}"
 kind get kubeconfig --name "${cluster}" >"${expected_kubeconfig}"
 [[ $(identity "${kubeconfig}") == "$(identity "${expected_kubeconfig}")" ]] || die "Kind kubeconfig changed during source publication"
 [[ $(jq -r '.Id' <<<"$(docker inspect "${registry_name}" --format '{{json .}}')") == "${registry_id}" ]] || die "local registry container changed during source publication"
-[[ $(kctl get nodes -o json | jq -r '.items[].metadata.uid' | sort) == "${node_uids}" ]] || die "Kind nodes changed during source publication"
+late_nodes=$(kctl get nodes -o json)
+[[ $(jq -r '.items[].metadata.uid' <<<"${late_nodes}" | sort) == "${node_uids}" ]] || die "Kind nodes changed during source publication"
+jq -e '.items | length == 2 and all(.[];
+  ([.status.conditions[]? | select(.type == "Ready" and .status == "True")] | length) == 1 and
+  ([.status.conditions[]? | select((.type == "DiskPressure" or .type == "MemoryPressure" or .type == "PIDPressure") and .status != "False")] | length) == 0)' <<<"${late_nodes}" >/dev/null || die "Kind nodes became unhealthy during source publication"
 jq -e '.items | length == 0' <<<"$(kctl get kovabuilds -A -o json)" >/dev/null || die "another KovaBuild started while the source was prepared"
 jq -e '.items | length == 0' <<<"$(kctl get pods -A -l app.kubernetes.io/name=kova-runner -o json)" >/dev/null || die "a runner Pod started while the source was prepared"
+admission_empty
+python3 "${guard}" check "${run_dir}/candidate-images.json" >/dev/null || die "candidate role image/Pod CRI identity changed during source publication"
 
 # The dynamic local port avoids colliding with unrelated development services.
 kubectl --kubeconfig "${kubeconfig}" -n "${namespace}" port-forward --address 127.0.0.1 \
@@ -198,14 +239,23 @@ done
 curl --noproxy '*' --connect-timeout 2 --max-time 2 -fsS "http://127.0.0.1:${local_port}/healthz" >/dev/null || die "Service port-forward did not become healthy"
 base="http://127.0.0.1:${local_port}"
 
-KOVA_SERVICE_TOKEN=${token} timeout 30s "${root}/bin/kova" --service-url "${base}" \
+jq -n --arg run_id "${run_id}" --arg expected_job_id "${expected_job_id}" \
+  --arg source_uri "${source_uri}" --arg source_digest "${source_digest}" \
+  --arg source_manifest_digest "${source_manifest_digest}" --arg target "${target}" \
+  '{run_id:$run_id,expected_job_id:$expected_job_id,source_uri:$source_uri,
+   source_digest:$source_digest,source_manifest_digest:$source_manifest_digest,target:$target}' \
+  >"${run_dir}/source-contract.json"
+# From here on, a timeout/signal/non-JSON response does not prove the Service
+# did not create its deterministic ID. The EXIT trap supervises exact recovery.
+submission_possible=true
+KOVA_SERVICE_TOKEN=${token} run_supervised timeout -k 10s 30s "${root}/bin/kova" --service-url "${base}" \
   job submit --source-digest "${source_digest}" --target "${target}" \
   --platform linux/amd64 --format oci --timeout 900 --var KOVA_MARKER=capacity \
   --idempotency-key "${run_id}" "${source_uri}" >"${run_dir}/job.json"
 job_id=$(jq -r '.id // empty' "${run_dir}/job.json")
 [[ ${job_id} == "${expected_job_id}" ]] || die "Service did not return the expected idempotent build ID"
 printf '%s\n' "${job_id}" >"${run_dir}/job-id.txt"
-note "submitted ${job_id}; sampling Kind node and runner state"
+note "submitted ${job_id}; sampling Kind state and verifying runner image identities"
 
 sample() {
   local now
@@ -241,16 +291,17 @@ sampler_pid=$!
     -c runner --timestamps --pod-running-timeout=120s >"${run_dir}/runner-follow.log" 2>"${run_dir}/runner-follow.err"
 ) &
 log_follower_pid=$!
+run_supervised timeout -k 10s 4m python3 "${guard}" runner "${run_dir}" >/dev/null || die "runner source-fetch/main image identity was not proven"
 
 wait_ok=true
-KOVA_SERVICE_TOKEN=${token} timeout 21m "${root}/bin/kova" --service-url "${base}" \
+KOVA_SERVICE_TOKEN=${token} run_supervised timeout -k 10s 21m "${root}/bin/kova" --service-url "${base}" \
   job wait --timeout 20m "${job_id}" >"${run_dir}/terminal.json" 2>"${run_dir}/wait.err" || wait_ok=false
 results_ok=true
 if [[ ${wait_ok} == true ]]; then
-  KOVA_SERVICE_TOKEN=${token} timeout 30s "${root}/bin/kova" --service-url "${base}" \
+  KOVA_SERVICE_TOKEN=${token} run_supervised timeout -k 10s 30s "${root}/bin/kova" --service-url "${base}" \
     job results "${job_id}" >"${run_dir}/results.json" 2>"${run_dir}/results.err" || results_ok=false
 fi
-KOVA_SERVICE_TOKEN=${token} timeout 30s "${root}/bin/kova" --service-url "${base}" \
+KOVA_SERVICE_TOKEN=${token} run_supervised timeout -k 10s 30s "${root}/bin/kova" --service-url "${base}" \
   job logs --tail 2000 "${job_id}" >"${run_dir}/job-logs.txt" 2>"${run_dir}/job-logs.err" || true
 kctl -n "${namespace}" get kovabuild "${job_id}" -o json >"${run_dir}/kovabuild.json" 2>"${run_dir}/kovabuild.err" || true
 kctl -n "${namespace}" get pod "kova-job-${job_id}" -o json >"${run_dir}/runner-pod.json" 2>"${run_dir}/runner-pod.err" || true
@@ -283,7 +334,7 @@ curl --noproxy '*' --connect-timeout 3 --max-time 10 -fsSI \
 observed_output_digest=$(jq -r '.outputs[0].manifest_digest' "${run_dir}/results.json")
 registry_output_digest=$(awk 'tolower($1) == "docker-content-digest:" {gsub("\r", "", $2); print $2}' "${run_dir}/output-tag.headers" | tail -1)
 [[ ${registry_output_digest} == "${observed_output_digest}" ]] || die "output tag digest drifted from the verified Service result"
-timeout 5m docker pull "${pull_target}" >"${run_dir}/pull.log" 2>&1 || die "host pull of exact output tag failed"
+run_supervised timeout -k 10s 5m docker pull "${pull_target}" >"${run_dir}/pull.log" 2>&1 || die "host pull of exact output tag failed"
 docker image inspect "${pull_target}" --format '{{json .RepoDigests}}' >"${run_dir}/pull-digests.json"
 jq -e --arg suffix "@${observed_output_digest}" 'any(.[]; endswith($suffix))' "${run_dir}/pull-digests.json" >/dev/null || die "host-pulled output digest differs from the verified Service result"
 
@@ -303,6 +354,7 @@ active_ledger=$(kctl -n "${namespace}" get configmap kova-service-admission -o j
 queue_ledger=$(kctl -n "${namespace}" get configmap kova-service-queue-admission -o json)
 jq -e '.data["reservations.json"] | fromjson | (.active | length) == 0' <<<"${active_ledger}" >/dev/null || die "active admission grant remains after terminal cleanup"
 jq -e '.data["queue.json"] | fromjson | (.intents | length) == 0' <<<"${queue_ledger}" >/dev/null || die "queue admission intent remains after terminal cleanup"
+submission_possible=false
 jq -n --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg id "${job_id}" \
   --arg source "${source_digest}" --arg source_manifest "${source_manifest_digest}" \
   --arg output "${observed_output_digest}" \
