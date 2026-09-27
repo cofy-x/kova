@@ -29,6 +29,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
+	"k8s.io/client-go/util/flowcontrol"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	ctrlzap "sigs.k8s.io/controller-runtime/pkg/log/zap"
@@ -68,11 +69,16 @@ func CLICommand() *cli.Command {
 			&cli.IntFlag{Name: "max-queued-jobs-per-requester", Value: 100, Usage: "maximum queued jobs for one authenticated requester"},
 			&cli.IntFlag{Name: "worker-slots", Value: 20, Usage: "total build slots shared fairly across active jobs"},
 			&cli.IntFlag{Name: "controller-concurrency", Value: buildcontract.DefaultControllerConcurrency, Usage: "maximum concurrent KovaBuild reconciliations"},
+			&cli.IntFlag{Name: "kube-client-qps", Value: 20, Usage: "shared per-Service-Pod Kubernetes API QPS budget (1-100)"},
+			&cli.IntFlag{Name: "kube-client-burst", Value: 40, Usage: "shared per-Service-Pod Kubernetes API burst budget (at least QPS, at most 200)"},
 			&cli.BoolFlag{Name: "leader-elect", Value: true, Usage: "enable controller-runtime leader election"},
 			&cli.StringFlag{Name: "leader-election-namespace", Usage: "namespace used for controller leader election leases; defaults to --namespace"},
 		},
 		Action: func(c *cli.Context) error {
 			ctrl.SetLogger(ctrlzap.New(ctrlzap.UseDevMode(false), ctrlzap.WriteTo(os.Stderr)))
+			if err := validateKubeClientRateLimit(c.Int("kube-client-qps"), c.Int("kube-client-burst")); err != nil {
+				return err
+			}
 			runnerNodeSelector, err := parseNodeSelector(c.StringSlice("runner-node-selector"))
 			if err != nil {
 				return err
@@ -105,6 +111,10 @@ func CLICommand() *cli.Command {
 				return err
 			}
 			restConfig = singleAttemptWrites(restConfig)
+			// Lease renewal must not queue behind a saturated build-control
+			// client. Keep its small independent budget before assigning the
+			// shared hot-path limiter to the other clients.
+			leaderConfig := configureKubeClientRateLimits(restConfig, c.Int("kube-client-qps"), c.Int("kube-client-burst"))
 			kubeClient, err := kube.NewClientForConfig(restConfig)
 			if err != nil {
 				return err
@@ -167,6 +177,7 @@ func CLICommand() *cli.Command {
 				Cache:                   cache.Options{DefaultNamespaces: map[string]cache.Config{cfg.Namespace: {}}},
 				Metrics:                 metricsserver.Options{BindAddress: "0"},
 				LeaderElection:          c.Bool("leader-elect"),
+				LeaderElectionConfig:    leaderConfig,
 				LeaderElectionID:        "kova-service.kova.cofy.dev",
 				LeaderElectionNamespace: leaderElectionNamespace(c, cfg.Namespace),
 			})
@@ -192,6 +203,31 @@ func CLICommand() *cli.Command {
 			return mgr.Start(ctx)
 		},
 	}
+}
+
+func validateKubeClientRateLimit(qps, burst int) error {
+	if qps < 1 || qps > 100 {
+		return fmt.Errorf("kube-client-qps must be between 1 and 100")
+	}
+	if burst < qps || burst > 200 {
+		return fmt.Errorf("kube-client-burst must be between kube-client-qps and 200")
+	}
+	return nil
+}
+
+func configureKubeClientRateLimit(config *rest.Config, qps, burst int) {
+	config.QPS = float32(qps)
+	config.Burst = burst
+	// Reuse one limiter across kube.Client, auth clientset, and the controller
+	// manager. Separate clientsets silently multiply a per-client limit.
+	config.RateLimiter = flowcontrol.NewTokenBucketRateLimiter(config.QPS, burst)
+}
+
+func configureKubeClientRateLimits(config *rest.Config, qps, burst int) *rest.Config {
+	leaderConfig := rest.CopyConfig(config)
+	configureKubeClientRateLimit(leaderConfig, 5, 10)
+	configureKubeClientRateLimit(config, qps, burst)
+	return leaderConfig
 }
 
 func validateCapacityConfig(cfg config.Config) error {

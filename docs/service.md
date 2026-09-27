@@ -337,6 +337,8 @@ serviceDaemon:
   maxQueuedJobsPerRequester: 100
   workerSlots: 40
   controllerConcurrency: 4
+  kubeClientQPS: 20
+  kubeClientBurst: 40
   pollRetryWindow: 1m
   maxBuildDuration: 2h
   verificationAttemptTimeout: 10s
@@ -353,6 +355,9 @@ The runner Pod also has a Kubernetes active deadline, which stops a hung build i
 When the controller reconciles after the deadline, it first makes a bounded status check; a reachable terminal runner state is processed and verified, while an active or unobservable runner is timed out.
 The separate verification window starts when a completed runner is durably observed. If it expires, pending outputs fail with `result_verification_failed`; verified digests remain available as partial results. Adjust the window for registry consistency and the number of concrete outputs, not to extend build execution.
 Keep `controllerConcurrency` at 2 or more: one reconciler may wait for a bounded registry verification attempt while another must remain available for cancellation and terminal Pod cleanup. Older one-worker configurations must be raised before upgrading.
+`kubeClientQPS` and `kubeClientBurst` share one limiter among each Service Pod's build-control Kubernetes clients; the defaults are 20 QPS/40 burst per Pod, compared with client-go's implicit 5 QPS/10 burst per separate clientset.
+Leader-election leases keep a separate 5 QPS/10 burst budget so a full build queue cannot starve leadership renewal.
+Tune them only after measuring queue convergence and API-server 429/5xx rates on the target cluster, and budget across all Service replicas rather than treating the values as cluster-wide limits.
 
 Registry credentials are the only storage credentials needed by Kova.
 The same Docker config can authorize source pulls, output pushes, and controller-side manifest verification:

@@ -2,6 +2,9 @@
 {{- if not (has .Values.serviceDaemon.authentication.mode (list "tokenreview" "static" "unsafe-none")) }}
 {{- fail "serviceDaemon.authentication.mode must be tokenreview, static, or unsafe-none" }}
 {{- end }}
+{{- if lt (int .Values.serviceDaemon.kubeClientBurst) (int .Values.serviceDaemon.kubeClientQPS) }}
+{{- fail "serviceDaemon.kubeClientBurst must be at least serviceDaemon.kubeClientQPS" }}
+{{- end }}
 {{- $name := printf "%s-service" (include "kova.fullname" .) | trunc 63 | trimSuffix "-" }}
 {{- $selectorName := printf "%s-service" (include "kova.name" .) | trunc 63 | trimSuffix "-" }}
 {{- $saName := default "default" .Values.serviceDaemon.serviceAccount.name }}
@@ -84,6 +87,8 @@ spec:
             - --max-queued-jobs-per-requester={{ .Values.serviceDaemon.maxQueuedJobsPerRequester }}
             - --worker-slots={{ .Values.serviceDaemon.workerSlots }}
             - --controller-concurrency={{ .Values.serviceDaemon.controllerConcurrency }}
+            - --kube-client-qps={{ .Values.serviceDaemon.kubeClientQPS }}
+            - --kube-client-burst={{ .Values.serviceDaemon.kubeClientBurst }}
             - --leader-elect={{ .Values.serviceDaemon.leaderElect }}
             - --leader-election-namespace={{ include "kova.namespace" . }}
           ports:

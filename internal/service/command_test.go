@@ -9,6 +9,7 @@ import (
 	"github.com/cofy-x/kova/internal/service/config"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	"k8s.io/client-go/rest"
 )
 
 func TestParseNodeSelector(t *testing.T) {
@@ -105,6 +106,38 @@ func TestValidateCapacityConfigRejectsUnboundedWorkerSlots(t *testing.T) {
 	valid.WorkerSlots = 0
 	if err := validateCapacityConfig(valid); err == nil {
 		t.Fatal("expected worker-slots=0 to be rejected")
+	}
+}
+
+func TestValidateKubeClientRateLimit(t *testing.T) {
+	for _, pair := range [][2]int{{5, 10}, {20, 40}, {100, 200}} {
+		if err := validateKubeClientRateLimit(pair[0], pair[1]); err != nil {
+			t.Fatalf("qps=%d burst=%d: %v", pair[0], pair[1], err)
+		}
+	}
+	for _, pair := range [][2]int{{0, 10}, {-1, 10}, {101, 200}, {20, 19}, {20, 201}} {
+		if err := validateKubeClientRateLimit(pair[0], pair[1]); err == nil {
+			t.Fatalf("qps=%d burst=%d unexpectedly accepted", pair[0], pair[1])
+		}
+	}
+}
+
+func TestKubeClientRateLimitIsSharedAcrossConfigCopies(t *testing.T) {
+	config := &rest.Config{}
+	leader := configureKubeClientRateLimits(config, 1, 2)
+	first := rest.CopyConfig(config)
+	second := rest.CopyConfig(config)
+	if first.QPS != 1 || first.Burst != 2 || first.RateLimiter != second.RateLimiter {
+		t.Fatalf("Kubernetes client configs do not share the configured rate limiter")
+	}
+	if !first.RateLimiter.TryAccept() || !first.RateLimiter.TryAccept() || second.RateLimiter.TryAccept() {
+		t.Fatal("separate config copies did not consume the same two-token burst")
+	}
+	if leader.QPS != 5 || leader.Burst != 10 || leader.RateLimiter == first.RateLimiter {
+		t.Fatal("leader-election API traffic does not have an independent budget")
+	}
+	if !leader.RateLimiter.TryAccept() {
+		t.Fatal("a saturated build-control limiter blocked leader-election traffic")
 	}
 }
 

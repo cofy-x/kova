@@ -249,6 +249,8 @@ serviceDaemon:
   maxQueuedJobs: 1000
   maxQueuedJobsPerRequester: 100
   workerSlots: 40
+  kubeClientQPS: 20
+  kubeClientBurst: 40
 ```
 
 The controller interleaves queued jobs by requester, allocates available worker

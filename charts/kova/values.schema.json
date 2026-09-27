@@ -118,6 +118,8 @@
         "maxQueuedJobsPerRequester": { "type": "integer", "minimum": 1 },
         "workerSlots": { "type": "integer", "minimum": 1 },
         "controllerConcurrency": { "type": "integer", "minimum": 2, "maximum": 32 },
+        "kubeClientQPS": { "type": "integer", "minimum": 1, "maximum": 100 },
+        "kubeClientBurst": { "type": "integer", "minimum": 1, "maximum": 200 },
         "leaderElect": { "type": "boolean" },
         "runnerNamespace": { "type": "string" },
         "runnerImagePullSecret": { "type": "string" },
