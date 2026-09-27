@@ -100,7 +100,10 @@ A caller retry is a new request using the same immutable source contract, normal
 
 Queued builds are interleaved by authenticated requester and admitted against global, per-requester, and worker-slot limits.
 Requested concurrency is between 1 and 100 and cannot exceed the logical target count.
-Controller reconciles run concurrently, while a process-local admission lock preserves fair-share and slot accounting.
+Controller reconciles run concurrently, but a durable Kubernetes ConfigMap resourceVersion compare-and-swap ledger serializes active grants, worker-slot accounting, and the fair-share requester cursor across replicas and leader changes.
+An elected admission pump watches the active ledger and queued-build transitions, then wakes only the next eligible build; a 30-second leader-only audit recovers missed watch events and grants left between the durable CAS and runner creation.
+Queued builds persist their initial `Queued` status but do not each poll capacity every five seconds.
+Every woken build still rechecks current CRs, runner Pods, queue intent, and ledger state directly before committing a grant, and orphan or divergent state blocks admission rather than being repaired implicitly.
 Service result verification is a durable `Verifying` phase. A runner that has already failed instead enters internal `FailedVerifying`, which collects exact partial push receipts for at most five minutes and can only finish `Failed`; both phases project as public `verifying` until their final outcome. Each bounded attempt checks at most 16 concrete outputs with at most four registry requests; a separate overall deadline and persisted retry time survive controller restarts. At most two default controller reconciles do verification I/O concurrently, preserving admission progress. Completed runners are never re-submitted.
 Worker pools are keyed by canonical platform and backed by ordinary BuildKit endpoints. Kubernetes worker placement uses only the standard `kubernetes.io/os` and `kubernetes.io/arch` labels; no cloud-provider label or platform database is required.
 
