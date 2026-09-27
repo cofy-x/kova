@@ -2,15 +2,21 @@
 """Bounded, test-only registry proxy for the isolated #41 overwrite acceptance.
 
 Only two exact run-scoped output repositories are reachable. The fault blocks
-GET-by-digest verification, not blob uploads, manifest PUTs, or tag HEADs.
+GET-by-digest from the pinned Service Pod IP, not runner-side Nydusify reads,
+blob uploads, manifest PUTs, or tag HEADs.
 The backend is the dedicated disposable registry, never the shared Kind one.
 """
 
 from __future__ import annotations
 
 import http.client
+import ipaddress
+import json
 import os
 import re
+import threading
+import uuid
+from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit, urlunsplit
@@ -21,7 +27,13 @@ MODE_FILE = Path("/fault/mode")
 REPOSITORY = os.environ.get("COLLISION_REPOSITORY", "")
 FAILED_REPOSITORY = os.environ.get("COLLISION_FAILED_REPOSITORY", "")
 EXPECTED_HOST = "kova-digest-fault-proxy.kova.svc.cluster.local:5000"
+VERIFIER_POD_IP = os.environ.get("COLLISION_VERIFIER_POD_IP", "")
+VERIFIER_POD_UID = os.environ.get("COLLISION_VERIFIER_POD_UID", "")
 MAX_BODY = 16 * 1024 * 1024
+MAX_OBSERVATIONS = 256
+OBSERVATIONS: deque[dict] = deque(maxlen=MAX_OBSERVATIONS)
+OBSERVATION_LOCK = threading.Lock()
+OBSERVATION_TOTAL = 0
 HOP_HEADERS = {
     "connection",
     "content-length",
@@ -44,6 +56,22 @@ def valid_repositories() -> bool:
         and REPOSITORY[:-1] == FAILED_REPOSITORY[:-1]
         and REPOSITORY.endswith("a")
         and FAILED_REPOSITORY.endswith("z")
+    )
+
+
+def valid_verifier_identity() -> bool:
+    try:
+        ip = ipaddress.IPv4Address(VERIFIER_POD_IP)
+        uid = uuid.UUID(VERIFIER_POD_UID)
+    except (ipaddress.AddressValueError, ValueError):
+        return False
+    return (
+        ip.is_private
+        and not ip.is_loopback
+        and not ip.is_link_local
+        and not ip.is_multicast
+        and not ip.is_unspecified
+        and str(uid) == VERIFIER_POD_UID
     )
 
 
@@ -82,19 +110,59 @@ def allowed_path(path: str) -> bool:
     return False
 
 
-def blocked_digest_get(method: str, path: str, mode: str) -> bool:
+def digest_get(method: str, path: str) -> str:
     parsed = urlsplit(path)
     match = re.fullmatch(
         rf"/v2/{re.escape(REPOSITORY)}/manifests/(sha256:[0-9a-f]{{64}})",
         parsed.path,
     )
     if method != "GET" or match is None:
+        return ""
+    return match.group(1)
+
+
+def blocked_digest_get(method: str, path: str, mode: str, peer_ip: str) -> bool:
+    digest = digest_get(method, path)
+    if peer_ip != VERIFIER_POD_IP or not digest:
         return False
     if mode == "503":
         return True
     if mode.startswith("only:"):
-        return match.group(1) in mode.removeprefix("only:").split(",")
+        return digest in mode.removeprefix("only:").split(",")
     return False
+
+
+def record_digest_get(peer_ip: str, digest: str, mode: str, action: str, status: int) -> None:
+    global OBSERVATION_TOTAL
+    with OBSERVATION_LOCK:
+        OBSERVATION_TOTAL += 1
+        OBSERVATIONS.append(
+            {
+                "sequence": OBSERVATION_TOTAL,
+                "method": "GET",
+                "repository": REPOSITORY,
+                "path": f"/v2/{REPOSITORY}/manifests/{digest}",
+                "peer_ip": peer_ip,
+                "digest": digest,
+                "mode": mode,
+                "action": action,
+                "status": status,
+            }
+        )
+
+
+def observations() -> bytes:
+    with OBSERVATION_LOCK:
+        value = {
+            "repository": REPOSITORY,
+            "failed_repository": FAILED_REPOSITORY,
+            "verifier_pod_ip": VERIFIER_POD_IP,
+            "verifier_pod_uid": VERIFIER_POD_UID,
+            "total": OBSERVATION_TOTAL,
+            "overflow": OBSERVATION_TOTAL > MAX_OBSERVATIONS,
+            "events": list(OBSERVATIONS),
+        }
+    return json.dumps(value, separators=(",", ":")).encode()
 
 
 def valid_mode(mode: str) -> bool:
@@ -180,6 +248,9 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/fault/mode" and self.command == "GET":
             self.reply(200, MODE_FILE.read_bytes(), "text/plain")
             return
+        if self.path == "/fault/observations" and self.command == "GET":
+            self.reply(200, observations(), "application/json")
+            return
         if self.path == "/v2/" and self.command in ("GET", "HEAD"):
             # Kubelet's readiness probe uses the Pod IP as Host. Registry
             # traffic still requires the exact proxy DNS authority below.
@@ -192,7 +263,10 @@ class Handler(BaseHTTPRequestHandler):
             mode = MODE_FILE.read_text(encoding="ascii").strip()
             if not valid_mode(mode):
                 raise ValueError("invalid fault mode")
-            if blocked_digest_get(self.command, self.path, mode):
+            digest = digest_get(self.command, self.path)
+            peer_ip = self.client_address[0]
+            if blocked_digest_get(self.command, self.path, mode, peer_ip):
+                record_digest_get(peer_ip, digest, mode, "fault", 503)
                 self.reply(503, b"test-only digest verification fault")
                 return
             body = self.read_body()
@@ -219,6 +293,8 @@ class Handler(BaseHTTPRequestHandler):
                 for key in list(forwarded):
                     if key.lower() == "location":
                         forwarded[key] = safe_location(forwarded[key], host)
+                if digest:
+                    record_digest_get(peer_ip, digest, mode, "forwarded", response.status)
                 self.reply(response.status, payload, headers=forwarded)
             finally:
                 connection.close()
@@ -249,6 +325,6 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    if not valid_repositories():
-        raise SystemExit("exact run-scoped registry repository identities are required")
+    if not valid_repositories() or not valid_verifier_identity():
+        raise SystemExit("exact run-scoped repository and verifier Pod identities are required")
     ThreadingHTTPServer(("0.0.0.0", 5000), Handler).serve_forever()

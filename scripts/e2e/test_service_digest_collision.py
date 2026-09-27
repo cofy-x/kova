@@ -28,6 +28,11 @@ acceptance = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(acceptance)
 RUN = "digest-41-20260927t000000z-deadbeef"
 FIRST, SECOND = acceptance.expected_targets(RUN)
+REPOSITORY = f"kova-examples/{RUN}-a"
+FAILED_REPOSITORY = f"kova-examples/{RUN}-z"
+VERIFIER = acceptance.VerifierIdentity(
+    "kova-service-test", "11111111-1111-4111-8111-111111111111", "10.244.1.7", "deployment-uid"
+)
 
 
 def pending_build(*, failed: bool, prefix: str) -> dict:
@@ -131,6 +136,155 @@ class ReceiptSafetyTest(unittest.TestCase):
 
 
 class ProxyIdentityTest(unittest.TestCase):
+    def test_proxy_contract_pins_both_repositories_and_verifier_env(self) -> None:
+        identity = acceptance.ProxyIdentity(
+            "proxy-deployment-uid",
+            "proxy-service-uid",
+            "proxy-config-uid",
+            "code-sha",
+            VERIFIER,
+            REPOSITORY,
+            FAILED_REPOSITORY,
+        )
+        env = [
+            {"name": "COLLISION_REPOSITORY", "value": REPOSITORY},
+            {"name": "COLLISION_FAILED_REPOSITORY", "value": FAILED_REPOSITORY},
+            {"name": "COLLISION_VERIFIER_POD_UID", "value": VERIFIER.pod_uid},
+            {"name": "COLLISION_VERIFIER_POD_IP", "value": VERIFIER.pod_ip},
+        ]
+        container = {"name": "proxy", "image": acceptance.PROXY_IMAGE, "env": env}
+        deployment = {
+            "metadata": {"uid": identity.deployment_uid},
+            "spec": {
+                "replicas": 1,
+                "template": {
+                    "metadata": {"annotations": {"kova.cofy.dev/fault-mode-token": "initial"}},
+                    "spec": {"containers": [container]},
+                },
+            },
+        }
+        pod = {
+            "metadata": {
+                "uid": "proxy-pod-uid",
+                "ownerReferences": [
+                    {
+                        "name": "proxy-rs",
+                        "uid": "proxy-rs-uid",
+                        "kind": "ReplicaSet",
+                        "controller": True,
+                    }
+                ],
+            },
+            "spec": {"containers": [dict(container, env=[dict(item) for item in env])]},
+            "status": {
+                "containerStatuses": [
+                    {"name": "proxy", "imageID": "sha256:test", "restartCount": 0}
+                ],
+                "conditions": [{"type": "Ready", "status": "True"}],
+            },
+        }
+        replica = {
+            "metadata": {
+                "uid": "proxy-rs-uid",
+                "ownerReferences": [
+                    {"uid": identity.deployment_uid, "kind": "Deployment", "controller": True}
+                ],
+            }
+        }
+
+        def selected(*args: str) -> dict:
+            if "deployment" in args:
+                return deployment
+            if "replicaset" in args:
+                return replica
+            return {"items": [pod]}
+
+        with patch.object(acceptance.base, "kjson", side_effect=selected):
+            self.assertEqual(
+                acceptance.proxy_pod(identity, "initial")["metadata"]["uid"], "proxy-pod-uid"
+            )
+            for name in ("COLLISION_REPOSITORY", "COLLISION_FAILED_REPOSITORY"):
+                chosen = next(item for item in env if item["name"] == name)
+                original = chosen["value"]
+                chosen["value"] = "kova-examples/other"
+                with self.assertRaises(acceptance.base.AcceptanceError):
+                    acceptance.proxy_pod(identity, "initial")
+                chosen["value"] = original
+            pod["spec"]["containers"][0]["env"][3]["value"] = "10.244.1.8"
+            with self.assertRaises(acceptance.base.AcceptanceError):
+                acceptance.proxy_pod(identity, "initial")
+
+    def test_verifier_source_requires_exact_owned_pod_uid_and_unique_ip(self) -> None:
+        pod = {
+            "metadata": {
+                "name": VERIFIER.pod_name,
+                "namespace": acceptance.NAMESPACE,
+                "uid": VERIFIER.pod_uid,
+                "ownerReferences": [
+                    {
+                        "name": "service-rs",
+                        "uid": "rs-uid",
+                        "kind": "ReplicaSet",
+                        "controller": True,
+                    }
+                ],
+            },
+            "spec": {"hostNetwork": False},
+            "status": {
+                "phase": "Running",
+                "podIP": VERIFIER.pod_ip,
+                "podIPs": [{"ip": VERIFIER.pod_ip}],
+                "conditions": [{"type": "Ready", "status": "True"}],
+                "containerStatuses": [{"name": "kova-service", "restartCount": 0}],
+            },
+        }
+        deployment = {"metadata": {"name": "kova-service", "uid": VERIFIER.deployment_uid}}
+        replica = {
+            "metadata": {
+                "uid": "rs-uid",
+                "ownerReferences": [
+                    {
+                        "name": "kova-service",
+                        "uid": VERIFIER.deployment_uid,
+                        "kind": "Deployment",
+                        "controller": True,
+                    }
+                ],
+            }
+        }
+
+        def selected(*args: str) -> dict:
+            if "deployment" in args:
+                return deployment
+            if "replicaset" in args:
+                return replica
+            if "pods" in args:
+                return {"items": [pod]}
+            return pod
+
+        with patch.object(acceptance.base, "kjson", side_effect=selected):
+            service_fact = {"pod": VERIFIER.pod_name, "uid": VERIFIER.pod_uid}
+            self.assertEqual(acceptance.verifier_pod_identity(service_fact), VERIFIER)
+            pod["status"]["podIP"] = "10.244.1.8"
+            pod["status"]["podIPs"] = [{"ip": "10.244.1.8"}]
+            with self.assertRaises(acceptance.base.AcceptanceError):
+                acceptance.verifier_pod_identity(service_fact, VERIFIER)
+            pod["status"]["podIP"] = VERIFIER.pod_ip
+            pod["status"]["podIPs"] = [{"ip": VERIFIER.pod_ip}]
+            pod["metadata"]["uid"] = "22222222-2222-4222-8222-222222222222"
+            with self.assertRaises(acceptance.base.AcceptanceError):
+                acceptance.verifier_pod_identity(service_fact, VERIFIER)
+            pod["metadata"]["uid"] = VERIFIER.pod_uid
+            with patch.object(
+                acceptance.base,
+                "kjson",
+                side_effect=lambda *args: (
+                    {"items": [pod, dict(pod)]} if "pods" in args else selected(*args)
+                ),
+            ):
+                with self.assertRaises(acceptance.base.AcceptanceError):
+                    acceptance.verifier_pod_identity(service_fact, VERIFIER)
+
     def test_orphan_proxy_pod_or_replicaset_blocks_preflight(self) -> None:
         with patch.object(acceptance.base, "kctl", return_value=""):
             for orphan in ("pods", "replicasets"):
@@ -152,7 +306,13 @@ class ProxyIdentityTest(unittest.TestCase):
     def test_proxy_contract_pins_service_and_configmap(self) -> None:
         code = (HERE / "registry-digest-collision-proxy.py").read_text(encoding="utf-8")
         identity = acceptance.ProxyIdentity(
-            "deployment-uid", "service-uid", "config-uid", acceptance.base.sha256(code.encode())
+            "deployment-uid",
+            "service-uid",
+            "config-uid",
+            acceptance.base.sha256(code.encode()),
+            VERIFIER,
+            REPOSITORY,
+            FAILED_REPOSITORY,
         )
         config = {
             "metadata": {"uid": identity.config_uid},
@@ -172,11 +332,14 @@ class ProxyIdentityTest(unittest.TestCase):
 
         with (
             patch.object(acceptance.base, "kjson", side_effect=get_object),
+            patch.object(acceptance, "verifier_pod_identity", return_value=VERIFIER),
             patch.object(acceptance, "proxy_pod", return_value={"metadata": {"uid": "pod-uid"}}),
         ):
             self.assertEqual(
                 acceptance.check_proxy_contract(identity, "503")["metadata"]["uid"], "pod-uid"
             )
+            with self.assertRaises(acceptance.base.AcceptanceError):
+                acceptance.check_proxy_contract(identity._replace(proxy_pod_uid="other"), "503")
             config["data"]["proxy.py"] = "changed"
             with self.assertRaises(acceptance.base.AcceptanceError):
                 acceptance.check_proxy_contract(identity, "503")
@@ -193,7 +356,9 @@ class ProxyIdentityTest(unittest.TestCase):
         repository = f"kova-examples/{RUN}-a"
         manifest = b'{"schemaVersion":2,"config":{"digest":"sha256:example"}}'
         digest = "sha256:" + hashlib.sha256(manifest).hexdigest()
-        identity = acceptance.ProxyIdentity("deployment", "service", "config", "code")
+        identity = acceptance.ProxyIdentity(
+            "deployment", "service", "config", "code", VERIFIER, REPOSITORY, FAILED_REPOSITORY
+        )
 
         class Response:
             status = 200
@@ -208,13 +373,6 @@ class ProxyIdentityTest(unittest.TestCase):
             def read(self, _length: int) -> bytes:
                 return manifest
 
-        fault = HTTPError(
-            f"http://127.0.0.1:5000/v2/{repository}/manifests/{digest}",
-            503,
-            "test fault",
-            {},
-            io.BytesIO(b"test-only digest verification fault"),
-        )
         with (
             tempfile.TemporaryDirectory() as temporary,
             patch.object(
@@ -222,17 +380,20 @@ class ProxyIdentityTest(unittest.TestCase):
             ),
             patch.object(acceptance.base, "start_port_forward", return_value=(None, 5000, None)),
             patch.object(acceptance.base, "stop_process"),
-            patch.object(acceptance.base.HTTP, "open", side_effect=[fault, Response()]) as opened,
+            patch.object(
+                acceptance.base.HTTP, "open", side_effect=[Response(), Response()]
+            ) as opened,
         ):
             run_dir = Path(temporary)
             acceptance.probe_proxy_manifest(
-                run_dir, identity, "503", "a-fault", repository, digest, 503
+                run_dir, identity, "503", "a-forwarded", repository, digest, 200
             )
             acceptance.probe_proxy_manifest(
                 run_dir, identity, "healthy", "a-healthy", repository, digest, 200
             )
             self.assertEqual(
-                json.loads((run_dir / "proxy-probe-a-fault.json").read_text())["http_status"], 503
+                json.loads((run_dir / "proxy-probe-a-forwarded.json").read_text())["http_status"],
+                200,
             )
             self.assertEqual(
                 json.loads((run_dir / "proxy-probe-a-healthy.json").read_text())["http_status"], 200
@@ -254,7 +415,9 @@ class ProxyIdentityTest(unittest.TestCase):
             {},
             io.BytesIO(b"backend unavailable"),
         )
-        identity = acceptance.ProxyIdentity("deployment", "service", "config", "code")
+        identity = acceptance.ProxyIdentity(
+            "deployment", "service", "config", "code", VERIFIER, REPOSITORY, FAILED_REPOSITORY
+        )
         with (
             tempfile.TemporaryDirectory() as temporary,
             patch.object(
@@ -266,7 +429,7 @@ class ProxyIdentityTest(unittest.TestCase):
             self.assertRaises(acceptance.base.AcceptanceError),
         ):
             acceptance.probe_proxy_manifest(
-                Path(temporary), identity, "503", "wrong-fault", repository, digest, 503
+                Path(temporary), identity, "503", "wrong-fault", repository, digest, 200
             )
 
 
@@ -335,6 +498,8 @@ class RegistryProxyTest(unittest.TestCase):
                     {
                         "COLLISION_REPOSITORY": repository,
                         "COLLISION_FAILED_REPOSITORY": failed_repository,
+                        "COLLISION_VERIFIER_POD_UID": VERIFIER.pod_uid,
+                        "COLLISION_VERIFIER_POD_IP": VERIFIER.pod_ip,
                     },
                 ):
                     spec = importlib.util.spec_from_file_location(
@@ -347,21 +512,30 @@ class RegistryProxyTest(unittest.TestCase):
                 proxy.BACKEND_PORT = backend.server_port
                 proxy.MODE_FILE = mode_file
                 self.assertTrue(proxy.valid_repositories())
-                server = ThreadingHTTPServer(("127.0.0.1", 0), proxy.Handler)
+                self.assertTrue(proxy.valid_verifier_identity())
+
+                class PeerServer(ThreadingHTTPServer):
+                    peer_ip = "127.0.0.1"
+
+                    def finish_request(self, request: object, client_address: tuple) -> None:
+                        super().finish_request(request, (self.peer_ip, client_address[1]))
+
+                server = PeerServer(("127.0.0.1", 0), proxy.Handler)
                 thread = threading.Thread(target=server.serve_forever, daemon=True)
                 thread.start()
                 try:
 
                     def request(
-                        method: str, path: str, body: bytes = b""
+                        method: str, path: str, body: bytes = b"", *, forged_ip: str = ""
                     ) -> tuple[int, bytes, dict]:
                         conn = http.client.HTTPConnection(
                             "127.0.0.1", server.server_port, timeout=3
                         )
                         try:
-                            conn.request(
-                                method, path, body=body, headers={"Host": proxy.EXPECTED_HOST}
-                            )
+                            headers = {"Host": proxy.EXPECTED_HOST}
+                            if forged_ip:
+                                headers["X-Forwarded-For"] = forged_ip
+                            conn.request(method, path, body=body, headers=headers)
                             response = conn.getresponse()
                             return response.status, response.read(), dict(response.getheaders())
                         finally:
@@ -380,12 +554,24 @@ class RegistryProxyTest(unittest.TestCase):
                         request("PUT", f"/v2/{repository}/manifests/dev", manifest)[0], 201
                     )
                     self.assertEqual(request("HEAD", f"/v2/{repository}/manifests/dev")[0], 200)
-                    self.assertEqual(request("GET", f"/v2/{repository}/manifests/{digest}")[0], 503)
+                    self.assertEqual(
+                        request(
+                            "GET",
+                            f"/v2/{repository}/manifests/{digest}",
+                            forged_ip=VERIFIER.pod_ip,
+                        )[0],
+                        200,
+                    )
+                    server.peer_ip = VERIFIER.pod_ip
+                    status, body, _ = request("GET", f"/v2/{repository}/manifests/{digest}")
+                    self.assertEqual((status, body), (503, b"test-only digest verification fault"))
+                    server.peer_ip = "127.0.0.1"
                     self.assertEqual(request("GET", f"/v2/other/manifests/{digest}")[0], 404)
                     self.assertEqual(
                         request("DELETE", f"/v2/{repository}/manifests/{digest}")[0], 405
                     )
                     mode_file.write_text("only:" + digest + ",sha256:" + "a" * 64 + "\n")
+                    server.peer_ip = VERIFIER.pod_ip
                     self.assertEqual(request("GET", f"/v2/{repository}/manifests/{digest}")[0], 503)
                     self.assertEqual(
                         request("GET", f"/v2/{repository}/manifests/sha256:{'c' * 64}")[0],
@@ -395,6 +581,36 @@ class RegistryProxyTest(unittest.TestCase):
                     status, body, headers = request("GET", f"/v2/{repository}/manifests/{digest}")
                     self.assertEqual(
                         (status, body, headers["Docker-Content-Digest"]), (200, manifest, digest)
+                    )
+                    server.peer_ip = "127.0.0.1"
+                    status, body, _ = request("GET", "/fault/observations")
+                    self.assertEqual(status, 200)
+                    observed = json.loads(body)
+                    self.assertEqual(observed["repository"], repository)
+                    self.assertEqual(observed["failed_repository"], failed_repository)
+                    self.assertEqual(observed["verifier_pod_uid"], VERIFIER.pod_uid)
+                    self.assertEqual(observed["verifier_pod_ip"], VERIFIER.pod_ip)
+                    self.assertFalse(observed["overflow"])
+                    self.assertTrue(
+                        any(
+                            event["peer_ip"] == VERIFIER.pod_ip
+                            and event["path"] == f"/v2/{repository}/manifests/{digest}"
+                            and event["method"] == "GET"
+                            and event["repository"] == repository
+                            and event["digest"] == digest
+                            and event["action"] == "fault"
+                            and event["status"] == 503
+                            for event in observed["events"]
+                        )
+                    )
+                    self.assertTrue(
+                        any(
+                            event["peer_ip"] == "127.0.0.1"
+                            and event["digest"] == digest
+                            and event["action"] == "forwarded"
+                            and event["status"] == 200
+                            for event in observed["events"]
+                        )
                     )
                 finally:
                     server.shutdown()

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import ipaddress
 import json
 import os
 import re
@@ -19,6 +20,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -48,11 +50,22 @@ RUN_SECONDS = 20 * 60
 SHA = re.compile(r"sha256:[0-9a-f]{64}")
 
 
+class VerifierIdentity(NamedTuple):
+    pod_name: str
+    pod_uid: str
+    pod_ip: str
+    deployment_uid: str
+
+
 class ProxyIdentity(NamedTuple):
     deployment_uid: str
     service_uid: str
     config_uid: str
     code_sha256: str
+    verifier: VerifierIdentity
+    repository: str
+    failed_repository: str
+    proxy_pod_uid: str = ""
 
 
 base.CLUSTER = CLUSTER
@@ -83,6 +96,73 @@ def expected_targets(run_id: str) -> tuple[str, str]:
         f"{PROXY_HOST}/kova-examples/{run_id}-a:dev",
         f"{PROXY_HOST}/kova-examples/{run_id}-z:dev",
     )
+
+
+def verifier_pod_identity(
+    service_fact: dict, expected: VerifierIdentity | None = None
+) -> VerifierIdentity:
+    """Bind a TCP peer IP to the exact, still-owned single Service Pod UID."""
+    name, uid = service_fact.get("pod", ""), service_fact.get("uid", "")
+    if not name or not uid:
+        fail("single Service Pod identity is missing")
+    pod = base.kjson("-n", NAMESPACE, "get", "pod", name, "-o", "json")
+    deployment = base.kjson("-n", NAMESPACE, "get", "deployment", "kova-service", "-o", "json")
+    owners = [
+        item
+        for item in pod.get("metadata", {}).get("ownerReferences", [])
+        if item.get("controller") is True and item.get("kind") == "ReplicaSet"
+    ]
+    if (
+        pod.get("metadata", {}).get("name") != name
+        or pod["metadata"].get("uid") != uid
+        or pod["metadata"].get("namespace") != NAMESPACE
+        or pod["metadata"].get("deletionTimestamp")
+        or pod.get("spec", {}).get("hostNetwork", False)
+        or pod.get("status", {}).get("phase") != "Running"
+        or not any(
+            item.get("type") == "Ready" and item.get("status") == "True"
+            for item in pod["status"].get("conditions", [])
+        )
+        or len(pod["status"].get("containerStatuses", [])) != 1
+        or pod["status"]["containerStatuses"][0].get("name") != "kova-service"
+        or pod["status"]["containerStatuses"][0].get("restartCount") != 0
+        or deployment.get("metadata", {}).get("name") != "kova-service"
+        or len(owners) != 1
+    ):
+        fail("exact Service verifier Pod is not uniquely Ready and deployment-owned")
+    replica = base.kjson("-n", NAMESPACE, "get", "replicaset", owners[0]["name"], "-o", "json")
+    if replica.get("metadata", {}).get("uid") != owners[0]["uid"] or not any(
+        item.get("controller") is True
+        and item.get("kind") == "Deployment"
+        and item.get("name") == "kova-service"
+        and item.get("uid") == deployment["metadata"]["uid"]
+        for item in replica.get("metadata", {}).get("ownerReferences", [])
+    ):
+        fail("Service verifier Pod owner chain differs from the exact Deployment UID")
+    address = pod["status"].get("podIP", "")
+    try:
+        parsed = ipaddress.IPv4Address(address)
+        parsed_uid = uuid.UUID(uid)
+    except (ipaddress.AddressValueError, ValueError):
+        fail("Service verifier Pod has no exact IPv4 and UUID identity")
+    if (
+        not parsed.is_private
+        or parsed.is_loopback
+        or parsed.is_link_local
+        or parsed.is_multicast
+        or parsed.is_unspecified
+        or str(parsed_uid) != uid
+        or pod["status"].get("podIPs") != [{"ip": address}]
+    ):
+        fail("Service verifier Pod has an unsafe or ambiguous network identity")
+    pods = base.kjson("get", "pods", "-A", "-o", "json").get("items", [])
+    with_ip = [item for item in pods if item.get("status", {}).get("podIP") == address]
+    if len(with_ip) != 1 or with_ip[0]["metadata"].get("uid") != uid:
+        fail("Service verifier Pod IP is not unique across the isolated Kind cluster")
+    identity = VerifierIdentity(name, uid, address, deployment["metadata"]["uid"])
+    if expected is not None and identity != expected:
+        fail("Service verifier Pod UID, IP, or owner changed during acceptance")
+    return identity
 
 
 def assert_proxy_absent() -> None:
@@ -155,6 +235,9 @@ def check_fixture(revision: str) -> dict:
         f'[registry."{host}"]' in buildkit_config for host in (REGISTRY_CLUSTER, PROXY_HOST)
     ):
         fail("BuildKit config lacks the exact isolated backend/proxy HTTP registries")
+    if len(facts["runtime"]["service"]) != 1:
+        fail("digest fault requires exactly one Service verifier Pod")
+    facts["verifier"] = verifier_pod_identity(facts["runtime"]["service"][0])
     assert_proxy_absent()
     return facts
 
@@ -240,7 +323,9 @@ def create_object(value: dict) -> dict:
     return created
 
 
-def proxy_objects(repository: str, failed_repository: str) -> tuple[dict, dict]:
+def proxy_objects(
+    repository: str, failed_repository: str, verifier: VerifierIdentity
+) -> tuple[dict, dict]:
     deployment = {
         "apiVersion": "apps/v1",
         "kind": "Deployment",
@@ -273,6 +358,8 @@ def proxy_objects(repository: str, failed_repository: str) -> tuple[dict, dict]:
                             "env": [
                                 {"name": "COLLISION_REPOSITORY", "value": repository},
                                 {"name": "COLLISION_FAILED_REPOSITORY", "value": failed_repository},
+                                {"name": "COLLISION_VERIFIER_POD_UID", "value": verifier.pod_uid},
+                                {"name": "COLLISION_VERIFIER_POD_IP", "value": verifier.pod_ip},
                             ],
                             "ports": [{"name": "http", "containerPort": 5000}],
                             "readinessProbe": {
@@ -310,16 +397,28 @@ def proxy_objects(repository: str, failed_repository: str) -> tuple[dict, dict]:
     return deployment, service
 
 
-def proxy_pod(deployment_uid: str, mode_token: str) -> dict:
+def proxy_pod(identity: ProxyIdentity, mode_token: str) -> dict:
     deployment = base.kjson("-n", NAMESPACE, "get", "deployment", PROXY_NAME, "-o", "json")
+    expected_env = {
+        "COLLISION_REPOSITORY": identity.repository,
+        "COLLISION_FAILED_REPOSITORY": identity.failed_repository,
+        "COLLISION_VERIFIER_POD_UID": identity.verifier.pod_uid,
+        "COLLISION_VERIFIER_POD_IP": identity.verifier.pod_ip,
+    }
+    deployed_env_list = deployment["spec"]["template"]["spec"]["containers"][0].get("env", [])
+    deployed_env = {item.get("name"): item.get("value") for item in deployed_env_list}
     if (
-        deployment["metadata"]["uid"] != deployment_uid
+        deployment["metadata"]["uid"] != identity.deployment_uid
         or deployment["spec"].get("replicas") != 1
+        or len(deployment["spec"]["template"]["spec"]["containers"]) != 1
+        or deployment["spec"]["template"]["spec"]["containers"][0].get("name") != "proxy"
         or deployment["spec"]["template"]["metadata"]["annotations"].get(
             "kova.cofy.dev/fault-mode-token"
         )
         != mode_token
         or deployment["spec"]["template"]["spec"]["containers"][0].get("image") != PROXY_IMAGE
+        or len(deployed_env_list) != len(expected_env)
+        or deployed_env != expected_env
     ):
         fail("exact proxy Deployment drifted")
     pods = base.kjson(
@@ -335,11 +434,17 @@ def proxy_pod(deployment_uid: str, mode_token: str) -> dict:
     if len(pods) != 1:
         fail("proxy has other than one Pod")
     pod = pods[0]
+    pod_env_list = pod["spec"]["containers"][0].get("env", [])
+    pod_env = {item.get("name"): item.get("value") for item in pod_env_list}
     if (
         pod.get("metadata", {}).get("deletionTimestamp")
+        or len(pod["spec"]["containers"]) != 1
+        or pod["spec"]["containers"][0].get("name") != "proxy"
         or pod["spec"]["containers"][0].get("image") != PROXY_IMAGE
+        or len(pod_env_list) != len(expected_env)
+        or pod_env != expected_env
         or not any(
-            item.get("name") == "proxy" and item.get("imageID")
+            item.get("name") == "proxy" and item.get("imageID") and item.get("restartCount") == 0
             for item in pod["status"].get("containerStatuses", [])
         )
         or not any(
@@ -359,7 +464,7 @@ def proxy_pod(deployment_uid: str, mode_token: str) -> dict:
     if replica["metadata"]["uid"] != owners[0]["uid"] or not any(
         item.get("controller") is True
         and item.get("kind") == "Deployment"
-        and item.get("uid") == deployment_uid
+        and item.get("uid") == identity.deployment_uid
         for item in replica["metadata"].get("ownerReferences", [])
     ):
         fail("proxy Pod owner chain does not reach the exact Deployment UID")
@@ -367,6 +472,17 @@ def proxy_pod(deployment_uid: str, mode_token: str) -> dict:
 
 
 def check_proxy_contract(identity: ProxyIdentity, expected_mode: str) -> dict:
+    if (
+        not re.fullmatch(
+            r"kova-examples/digest-41-[0-9]{8}t[0-9]{6}z-[0-9a-f]{8}-a", identity.repository
+        )
+        or identity.failed_repository != identity.repository[:-1] + "z"
+    ):
+        fail("proxy repository identity escaped the run-scoped pair")
+    verifier_pod_identity(
+        {"pod": identity.verifier.pod_name, "uid": identity.verifier.pod_uid},
+        identity.verifier,
+    )
     config = base.kjson("-n", NAMESPACE, "get", "configmap", PROXY_NAME, "-o", "json")
     code = config.get("data", {}).get("proxy.py", "")
     if (
@@ -393,7 +509,10 @@ def check_proxy_contract(identity: ProxyIdentity, expected_mode: str) -> dict:
         )
     ):
         fail("exact proxy Service UID, selector, or port drifted")
-    return proxy_pod(identity.deployment_uid, "initial")
+    pod = proxy_pod(identity, "initial")
+    if identity.proxy_pod_uid and pod["metadata"]["uid"] != identity.proxy_pod_uid:
+        fail("exact proxy Pod UID changed during acceptance")
+    return pod
 
 
 def proxy_mode(run_dir: Path, expected: str) -> None:
@@ -414,7 +533,87 @@ def proxy_mode(run_dir: Path, expected: str) -> None:
         base.stop_process(process, stream)
 
 
-def create_proxy(run_dir: Path, repository: str, failed_repository: str) -> ProxyIdentity:
+def proxy_observations(
+    run_dir: Path, identity: ProxyIdentity, phase: str, expected_mode: str
+) -> dict:
+    if not re.fullmatch(r"[a-z0-9-]+", phase):
+        fail("invalid proxy observation phase")
+    pod_uid = check_proxy_contract(identity, expected_mode)["metadata"]["uid"]
+    process, port, stream = base.start_port_forward(run_dir, f"svc/{PROXY_NAME}", 5000)
+    try:
+        request = Request(f"http://127.0.0.1:{port}/fault/observations", method="GET")
+        try:
+            with base.HTTP.open(request, timeout=10) as response:
+                if response.status != 200:
+                    fail("exact proxy observation endpoint is unavailable")
+                payload = response.read(128 * 1024 + 1)
+        except (HTTPError, URLError, OSError) as error:
+            fail(f"proxy observations unknown: {type(error).__name__}")
+        if len(payload) > 128 * 1024:
+            fail("proxy observations exceed bounded response")
+        observed = json.loads(payload)
+        if not isinstance(observed, dict):
+            fail("proxy observations are not a JSON object")
+        events = observed.get("events", [])
+        if (
+            observed.get("repository") != identity.repository
+            or observed.get("failed_repository") != identity.failed_repository
+            or observed.get("verifier_pod_uid") != identity.verifier.pod_uid
+            or observed.get("verifier_pod_ip") != identity.verifier.pod_ip
+            or observed.get("overflow") is not False
+            or type(observed.get("total")) is not int
+            or not isinstance(events, list)
+            or observed["total"] != len(events)
+            or len(events) > 256
+        ):
+            fail("proxy observation identity or bounded history is unproven")
+        for sequence, event in enumerate(events, 1):
+            if (
+                not isinstance(event, dict)
+                or event.get("sequence") != sequence
+                or not isinstance(event.get("digest"), str)
+                or SHA.fullmatch(event.get("digest", "")) is None
+                or event.get("method") != "GET"
+                or event.get("repository") != identity.repository
+                or event.get("path") != f"/v2/{identity.repository}/manifests/{event.get('digest')}"
+                or event.get("action") not in ("fault", "forwarded")
+                or type(event.get("status")) is not int
+                or not isinstance(event.get("peer_ip"), str)
+                or not isinstance(event.get("mode"), str)
+                or (
+                    event.get("action") == "fault"
+                    and (
+                        event.get("peer_ip") != identity.verifier.pod_ip
+                        or event.get("status") != 503
+                    )
+                )
+            ):
+                fail("proxy observation event is malformed or unattributed")
+        if check_proxy_contract(identity, expected_mode)["metadata"]["uid"] != pod_uid:
+            fail("proxy Pod changed while reading verifier source observations")
+        save(run_dir, f"proxy-observations-{phase}.json", observed)
+        return observed
+    finally:
+        base.stop_process(process, stream)
+
+
+def require_digest_observation(
+    observed: dict, digest: str, peer_ip: str, mode: str, action: str, status: int
+) -> None:
+    if not any(
+        event.get("digest") == digest
+        and event.get("peer_ip") == peer_ip
+        and event.get("mode") == mode
+        and event.get("action") == action
+        and event.get("status") == status
+        for event in observed["events"]
+    ):
+        fail(f"proxy has no exact {action} {status} observation for pinned digest/source")
+
+
+def create_proxy(
+    run_dir: Path, repository: str, failed_repository: str, verifier: VerifierIdentity
+) -> ProxyIdentity:
     assert_proxy_absent()
     code_sha256 = base.sha256(
         Path(__file__).with_name("registry-digest-collision-proxy.py").read_bytes()
@@ -450,7 +649,7 @@ def create_proxy(run_dir: Path, repository: str, failed_repository: str) -> Prox
     )
     if base.sha256(config["data"]["proxy.py"].encode()) != code_sha256:
         fail("created proxy ConfigMap code differs from the reviewed local file")
-    deployment, service = proxy_objects(repository, failed_repository)
+    deployment, service = proxy_objects(repository, failed_repository, verifier)
     deployed = create_object(deployment)
     served = create_object(service)
     identity = ProxyIdentity(
@@ -458,6 +657,9 @@ def create_proxy(run_dir: Path, repository: str, failed_repository: str) -> Prox
         served["metadata"]["uid"],
         config["metadata"]["uid"],
         code_sha256,
+        verifier,
+        repository,
+        failed_repository,
     )
     save(
         run_dir,
@@ -467,6 +669,10 @@ def create_proxy(run_dir: Path, repository: str, failed_repository: str) -> Prox
             "deployment_uid": deployed["metadata"]["uid"],
             "service_uid": served["metadata"]["uid"],
             "code_sha256": code_sha256,
+            "verifier_pod_name": verifier.pod_name,
+            "verifier_pod_uid": verifier.pod_uid,
+            "verifier_pod_ip": verifier.pod_ip,
+            "verifier_deployment_uid": verifier.deployment_uid,
         },
     )
     base.kctl(
@@ -479,8 +685,19 @@ def create_proxy(run_dir: Path, repository: str, failed_repository: str) -> Prox
         timeout=190,
     )
     pod = check_proxy_contract(identity, "503")
+    identity = identity._replace(proxy_pod_uid=pod["metadata"]["uid"])
     save(run_dir, "proxy-initial-pod.json", base.project_pod(pod))
+    save(
+        run_dir,
+        "proxy-pinned-identity.json",
+        {
+            "proxy_pod_uid": identity.proxy_pod_uid,
+            "verifier_pod_uid": verifier.pod_uid,
+            "verifier_pod_ip": verifier.pod_ip,
+        },
+    )
     proxy_mode(run_dir, "503")
+    proxy_observations(run_dir, identity, "before-build", "503")
     return identity
 
 
@@ -537,7 +754,7 @@ def probe_proxy_manifest(
             repository,
         )
         or SHA.fullmatch(digest) is None
-        or expected_status not in (200, 503)
+        or expected_status != 200
     ):
         fail("proxy digest probe escaped the exact test repository or status contract")
     pod_uid = check_proxy_contract(identity, mode)["metadata"]["uid"]
@@ -562,14 +779,11 @@ def probe_proxy_manifest(
             fail(f"proxy digest GET outcome unknown: {type(error).__name__}")
         if len(body) > 4 * 1024 * 1024 or status != expected_status:
             fail(f"proxy digest GET returned HTTP {status}, expected {expected_status}")
-        if expected_status == 503:
-            if body != b"test-only digest verification fault":
-                fail("proxy digest fault was not emitted by the exact test proxy")
-        elif (
+        if (
             headers.get("Docker-Content-Digest", "") != digest
             or "sha256:" + hashlib.sha256(body).hexdigest() != digest
         ):
-            fail("proxy healthy digest response differs from its immutable manifest")
+            fail("non-verifier proxy digest response differs from its immutable manifest")
         if check_proxy_contract(identity, mode)["metadata"]["uid"] != pod_uid:
             fail("proxy Pod changed during exact digest probe")
         save(
@@ -701,6 +915,7 @@ def guard_running(facts: dict, identities: dict[str, str]) -> None:
     nodes = base.check_nodes()
     if sorted(node["metadata"]["uid"] for node in nodes) != facts["node_uids"]:
         fail("Kind node identity changed during overwrite acceptance")
+    verifier_pod_identity(facts["runtime"]["service"][0], facts["verifier"])
     base.check_pod_capacity(nodes)
     base.host_guard()
     builds = base.kjson("get", "kovabuilds", "-A", "-o", "json").get("items", [])
@@ -1098,6 +1313,7 @@ def run_acceptance(revision: str, facts: dict) -> None:
             "headroom": headroom,
             "kubeconfig_sha256": facts["kubeconfig_sha256"],
             "images": facts["images"],
+            "verifier": facts["verifier"]._asdict(),
         },
     )
     attempts: dict[str, tuple[str, str, str, list[str], str]] = {}
@@ -1118,7 +1334,8 @@ def run_acceptance(revision: str, facts: dict) -> None:
             (f"kova-sources/{run_id}-b", "dev"),
         ):
             base.manifest_digest(repository, tag, absent=True)
-        proxy_identity = create_proxy(run_dir, first_repo, failed_repo)
+        verifier_pod_identity(facts["runtime"]["service"][0], facts["verifier"])
+        proxy_identity = create_proxy(run_dir, first_repo, failed_repo, facts["verifier"])
         archive_a = base.make_archive(run_dir, first, second)
         source_a, digest_a = push_source(run_dir, "a", archive_a, run_id)
         guard_running(facts, {})
@@ -1161,6 +1378,20 @@ def run_acceptance(revision: str, facts: dict) -> None:
             fail("A Nydus tag did not initially equal its durable pushed digest")
         if len(set(pushed_a.values())) != 2:
             fail("A OCI and Nydus receipts unexpectedly share one manifest digest")
+        initial_observations = proxy_observations(run_dir, proxy_identity, "a-pending", "503")
+        for digest in pushed_a.values():
+            require_digest_observation(
+                initial_observations, digest, facts["verifier"].pod_ip, "503", "fault", 503
+            )
+        if not any(
+            event.get("digest") == pushed_a[first]
+            and event.get("peer_ip") != facts["verifier"].pod_ip
+            and event.get("mode") == "503"
+            and event.get("action") == "forwarded"
+            and event.get("status") == 200
+            for event in initial_observations["events"]
+        ):
+            fail("Nydusify's non-verifier OCI GET-by-digest was not forwarded successfully")
         for image, digest in pushed_a.items():
             probe_proxy_manifest(
                 run_dir,
@@ -1169,7 +1400,7 @@ def run_acceptance(revision: str, facts: dict) -> None:
                 "initial-a-nydus" if image.endswith("_nydus_v3") else "initial-a-oci",
                 first_repo,
                 digest,
-                503,
+                200,
             )
         only_a_mode = "only:" + ",".join(
             [pushed_a[first], pushed_a[first.replace(":dev", ":dev_nydus_v3")]]
@@ -1183,7 +1414,7 @@ def run_acceptance(revision: str, facts: dict) -> None:
                 "narrow-a-nydus" if image.endswith("_nydus_v3") else "narrow-a-oci",
                 first_repo,
                 digest,
-                503,
+                200,
             )
         if pending_digests(exact_build(*accepted["a"]), first, second) != pushed_a:
             fail("A was no longer pending after narrowing the fault to only its digests")
@@ -1203,6 +1434,18 @@ def run_acceptance(revision: str, facts: dict) -> None:
                 fail("A and B produced the same manifest; overwrite was not demonstrated")
         if pending_digests(current_a, first, second) != pushed_a:
             fail("A lost its durable pushed digests before B tag overwrite")
+        overlap_observations = proxy_observations(
+            run_dir, proxy_identity, "b-succeeded", only_a_mode
+        )
+        for digest in pushed_b.values():
+            require_digest_observation(
+                overlap_observations,
+                digest,
+                facts["verifier"].pod_ip,
+                only_a_mode,
+                "forwarded",
+                200,
+            )
         for image, digest in pushed_b.items():
             tag = "dev_nydus_v3" if image.endswith("_nydus_v3") else "dev"
             if base.manifest_digest(first_repo, tag) != digest:
@@ -1224,7 +1467,7 @@ def run_acceptance(revision: str, facts: dict) -> None:
                 "overlap-a-nydus" if image.endswith("_nydus_v3") else "overlap-a-oci",
                 first_repo,
                 digest,
-                503,
+                200,
             )
         save(
             run_dir,
@@ -1278,6 +1521,18 @@ def run_acceptance(revision: str, facts: dict) -> None:
         final_b = verify_succeeded_receipt(current_b, first)
         if final_a != pushed_a or final_b != pushed_b:
             fail("terminal output digest drifted from its build's own pending push receipt")
+        recovered_observations = proxy_observations(
+            run_dir, proxy_identity, "a-recovered", "healthy"
+        )
+        for digest in final_a.values():
+            require_digest_observation(
+                recovered_observations,
+                digest,
+                facts["verifier"].pod_ip,
+                "healthy",
+                "forwarded",
+                200,
+            )
         for digest in (*final_a.values(), *final_b.values()):
             immutable_manifest_digest(first_repo, digest)
         for image, digest in final_b.items():
