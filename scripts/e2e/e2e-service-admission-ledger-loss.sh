@@ -63,6 +63,7 @@ kind_fingerprint=$(kind get kubeconfig --name "${cluster}" | kubectl --kubeconfi
 # work would still make deleting this shared-service ledger unsafe.
 jq -e '.items | length == 0' <<<"$(kctl get kovabuilds --all-namespaces -o json)" >/dev/null || die "a KovaBuild exists elsewhere in this cluster"
 jq -e '.items | length == 0' <<<"$(kctl get pods --all-namespaces -l app.kubernetes.io/name=kova-runner -o json)" >/dev/null || die "a runner Pod exists elsewhere in this cluster"
+jq -e '.items | length == 2 and all(.[]; any(.status.conditions[]?; .type == "Ready" and .status == "True"))' <<<"$(kctl get nodes -o json)" >/dev/null || die "the dedicated Kind cluster does not have exactly two Ready nodes"
 deployment=$(kctl -n "${namespace}" get deployment "${release}-service" -o json)
 deployment_uid=$(jq -er '.metadata.uid' <<<"${deployment}")
 selector="app.kubernetes.io/instance=${release},app.kubernetes.io/component=service"
@@ -253,21 +254,39 @@ if [[ ${restart} == true ]]; then
   note "deleting only owned follower Pod ${replace} (${before_uid}) to test no silent ledger reinitialization"
   kctl -n "${namespace}" delete pod "${replace}" --wait=false >"${work_dir}/pod-delete.txt" || die "exact Service Pod deletion failed"
   deadline=$((SECONDS + 120))
-  replacement_seen=false
+  replacement_name=
   while (( SECONDS < deadline )); do
     assert_ledger_absent
     assert_no_work
     current_pods=$(kctl -n "${namespace}" get pods -l "${selector}" -o json)
-    if jq -e --arg old_a "${original_a_uid}" --arg old_b "${original_b_uid}" --arg rs "${rs_uid}" '
-      any(.items[]; .metadata.uid != $old_a and .metadata.uid != $old_b and .metadata.deletionTimestamp == null and
-        any(.metadata.ownerReferences[]?; .controller == true and .kind == "ReplicaSet" and .uid == $rs))
-    ' <<<"${current_pods}" >/dev/null; then
-      replacement_seen=true
+    replacement_name=$(jq -r --arg old_a "${original_a_uid}" --arg old_b "${original_b_uid}" --arg rs "${rs_uid}" '
+      [.items[] | select(.metadata.uid != $old_a and .metadata.uid != $old_b and .metadata.deletionTimestamp == null and
+        any(.metadata.ownerReferences[]?; .controller == true and .kind == "ReplicaSet" and .uid == $rs)) | .metadata.name] |
+      if length == 1 then .[0] else empty end
+    ' <<<"${current_pods}")
+    [[ -z ${replacement_name} ]] || break
+    sleep 2
+  done
+  [[ -n ${replacement_name} ]] || die "Deployment did not replace the exact deleted Service Pod"
+  printf 'replacement_pod=%s\n' "${replacement_name}" >>"${work_dir}/restarted-pod.txt"
+  startup_refused=false
+  deadline=$((SECONDS + 120))
+  while (( SECONDS < deadline )); do
+    assert_ledger_absent
+    assert_no_work
+    if kctl -n "${namespace}" logs "pod/${replacement_name}" -c kova-service --previous --tail=100 2>/dev/null |
+       grep -F 'active admission ledger is absent while queue admission ledger exists' >"${work_dir}/replacement-startup-refusal.txt"; then
+      startup_refused=true
+      break
+    fi
+    if kctl -n "${namespace}" logs "pod/${replacement_name}" -c kova-service --tail=100 2>/dev/null |
+       grep -F 'active admission ledger is absent while queue admission ledger exists' >"${work_dir}/replacement-startup-refusal.txt"; then
+      startup_refused=true
       break
     fi
     sleep 2
   done
-  [[ ${replacement_seen} == true ]] || die "Deployment did not replace the exact deleted Service Pod"
+  [[ ${startup_refused} == true ]] || die "replacement Pod did not report the missing-ledger startup refusal"
   sleep 10
   assert_ledger_absent
   assert_no_work
