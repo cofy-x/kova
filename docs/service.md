@@ -296,6 +296,11 @@ All Service API failures use a structured response:
 Non-administrative responses do not include raw Kubernetes, runner, Pod, registry credential, or implementation errors.
 Detailed implementation failures remain in operator-controlled logs and Kubernetes status rather than the public error response.
 
+The current per-requester queued-build check is a best-effort API backpressure signal.
+Concurrent HTTP requests, including requests handled by different replicas, can pass the check together; there is no global queued-build cap yet.
+Do not treat `maxQueuedJobsPerRequester` or a missing 429 response as a strict quota.
+The remaining design and failure cases are recorded in the [Service admission design](service-admission-design.md).
+
 ## Helm Configuration
 
 Enable the Service with TokenReview:

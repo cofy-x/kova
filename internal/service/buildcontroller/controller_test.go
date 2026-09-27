@@ -26,6 +26,7 @@ import (
 type fakeKube struct {
 	deleted   []string
 	deleteErr error
+	podClient client.Client
 	execFn    func(kube.ExecOptions) error
 	execCalls [][]string
 }
@@ -59,7 +60,21 @@ func (f *fakeKube) DeletePod(_ context.Context, namespace string, name string) e
 		return f.deleteErr
 	}
 	f.deleted = append(f.deleted, namespace+"/"+name)
+	if f.podClient != nil {
+		pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace}}
+		if err := f.podClient.Delete(context.Background(), pod); err != nil && !apierrors.IsNotFound(err) {
+			return err
+		}
+	}
 	return nil
+}
+
+func testRunnerPod(build *kovav1.KovaBuild) *corev1.Pod {
+	return &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Name: buildPodName(build.Name), Namespace: build.Namespace,
+		Labels:          map[string]string{"kova.cofy.dev/build-id": build.Name},
+		OwnerReferences: []metav1.OwnerReference{{APIVersion: kovav1.Group + "/" + kovav1.Version, Kind: "KovaBuild", Name: build.Name, UID: build.UID}},
+	}}
 }
 
 func (f *fakeKube) WritePodLogsTail(context.Context, string, string, int64, io.Writer) error {
@@ -391,16 +406,6 @@ func TestSubmitWhenReadyValidatesExactSourceTargetSetBeforeBuild(t *testing.T) {
 
 func TestReconcilerDeleteCleansPodAndFinalizer(t *testing.T) {
 	scheme := testScheme(t)
-	client := crfake.NewClientBuilder().
-		WithScheme(scheme).
-		WithStatusSubresource(&kovav1.KovaBuild{}).
-		Build()
-	kube := &fakeKube{}
-	reconciler := KovaBuildReconciler{
-		Client: client,
-		Scheme: scheme,
-		Kube:   kube,
-	}
 	build := &kovav1.KovaBuild{
 		TypeMeta: metav1.TypeMeta{APIVersion: kovav1.Group + "/" + kovav1.Version, Kind: "KovaBuild"},
 		ObjectMeta: metav1.ObjectMeta{
@@ -410,6 +415,9 @@ func TestReconcilerDeleteCleansPodAndFinalizer(t *testing.T) {
 		},
 		Status: kovav1.KovaBuildStatus{RunnerPodName: "kova-job-abc"},
 	}
+	client := crfake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&kovav1.KovaBuild{}).WithObjects(build, testRunnerPod(build)).Build()
+	kube := &fakeKube{podClient: client}
+	reconciler := KovaBuildReconciler{Client: client, Scheme: scheme, Kube: kube}
 
 	if _, err := reconciler.reconcileDelete(context.Background(), build); err != nil {
 		t.Fatal(err)
@@ -434,8 +442,9 @@ func TestTerminalBuildDeletesRunnerButRetainsResultForTTL(t *testing.T) {
 			}},
 		},
 	}
-	kube := &fakeKube{}
-	reconciler := KovaBuildReconciler{Kube: kube, Cfg: config.Config{JobTTL: time.Hour}}
+	crClient := crfake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(build, testRunnerPod(build)).Build()
+	kube := &fakeKube{podClient: crClient}
+	reconciler := KovaBuildReconciler{Client: crClient, Kube: kube, Cfg: config.Config{JobTTL: time.Hour}}
 	result, err := reconciler.reconcileTerminal(context.Background(), build)
 	if err != nil {
 		t.Fatal(err)
@@ -455,8 +464,9 @@ func TestTerminalBuildDeletesRunnerEvenWithoutTTL(t *testing.T) {
 			Phase: kovav1.PhaseSucceeded, RunnerPodName: "kova-job-completed",
 		},
 	}
-	kube := &fakeKube{}
-	reconciler := KovaBuildReconciler{Kube: kube}
+	crClient := crfake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(build, testRunnerPod(build)).Build()
+	kube := &fakeKube{podClient: crClient}
+	reconciler := KovaBuildReconciler{Client: crClient, Kube: kube}
 	if _, err := reconciler.reconcileTerminal(context.Background(), build); err != nil {
 		t.Fatal(err)
 	}
@@ -472,7 +482,8 @@ func TestTerminalBuildRetriesRunnerDeleteFailure(t *testing.T) {
 			Phase: kovav1.PhaseSucceeded, RunnerPodName: "kova-job-completed",
 		},
 	}
-	reconciler := KovaBuildReconciler{Kube: &fakeKube{deleteErr: errors.New("delete failed")}}
+	crClient := crfake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(build, testRunnerPod(build)).Build()
+	reconciler := KovaBuildReconciler{Client: crClient, Kube: &fakeKube{deleteErr: errors.New("delete failed")}}
 	if _, err := reconciler.reconcileTerminal(context.Background(), build); err == nil {
 		t.Fatal("expected runner cleanup error to retry reconciliation")
 	}
@@ -480,16 +491,6 @@ func TestTerminalBuildRetriesRunnerDeleteFailure(t *testing.T) {
 
 func TestReconcilerDeleteKeepsFinalizerWhenPodDeleteFails(t *testing.T) {
 	scheme := testScheme(t)
-	client := crfake.NewClientBuilder().
-		WithScheme(scheme).
-		WithStatusSubresource(&kovav1.KovaBuild{}).
-		Build()
-	kube := &fakeKube{deleteErr: errors.New("delete failed")}
-	reconciler := KovaBuildReconciler{
-		Client: client,
-		Scheme: scheme,
-		Kube:   kube,
-	}
 	build := &kovav1.KovaBuild{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:       "abc",
@@ -498,6 +499,9 @@ func TestReconcilerDeleteKeepsFinalizerWhenPodDeleteFails(t *testing.T) {
 		},
 		Status: kovav1.KovaBuildStatus{RunnerPodName: "kova-job-abc"},
 	}
+	client := crfake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&kovav1.KovaBuild{}).WithObjects(build, testRunnerPod(build)).Build()
+	kube := &fakeKube{deleteErr: errors.New("delete failed")}
+	reconciler := KovaBuildReconciler{Client: client, Scheme: scheme, Kube: kube}
 
 	if _, err := reconciler.reconcileDelete(context.Background(), build); err == nil {
 		t.Fatal("expected error")
@@ -587,8 +591,8 @@ func TestReconcilerProcessesCancellationRequest(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "cancel", Namespace: "jobs", Finalizers: []string{cleanupFinalizer}, Annotations: map[string]string{kovav1.CancellationRequestedAnnotation: time.Now().Format(time.RFC3339Nano)}},
 		Status:     kovav1.KovaBuildStatus{Phase: kovav1.PhaseRunning, RunnerPodName: "kova-job-cancel", AllocatedConcurrency: 2},
 	}
-	crClient := crfake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&kovav1.KovaBuild{}).WithObjects(build).Build()
-	kube := &fakeKube{}
+	crClient := crfake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&kovav1.KovaBuild{}).WithObjects(build, testRunnerPod(build)).Build()
+	kube := &fakeKube{podClient: crClient}
 	reconciler := KovaBuildReconciler{Client: crClient, Scheme: scheme, Kube: kube}
 
 	if _, err := reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "jobs", Name: "cancel"}}); err != nil {

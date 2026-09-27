@@ -27,6 +27,16 @@ func (r *KovaBuildReconciler) startBuild(ctx context.Context, build *kovav1.Kova
 	if r.Cfg.RunnerImage == "" {
 		return ctrl.Result{}, r.finish(ctx, build, kovav1.PhaseFailed, "ConfigurationInvalid", "runner image is required")
 	}
+	// Reconcile's object may be stale. A direct read also gives Status.Update
+	// the latest resourceVersion after a previous uncertain write.
+	var current kovav1.KovaBuild
+	if err := r.reader().Get(ctx, types.NamespacedName{Namespace: build.Namespace, Name: build.Name}, &current); err != nil {
+		return ctrl.Result{}, err
+	}
+	if current.UID != build.UID || !current.DeletionTimestamp.IsZero() || cancellationRequested(&current) || (current.Status.Phase != "" && current.Status.Phase != kovav1.PhaseQueued) {
+		return ctrl.Result{Requeue: true}, nil
+	}
+	build = &current
 	decision, err := r.admission(ctx, build)
 	if err != nil {
 		return ctrl.Result{}, err
@@ -70,8 +80,17 @@ func (r *KovaBuildReconciler) startBuild(ctx context.Context, build *kovav1.Kova
 	if err := ctrl.SetControllerReference(build, &pod, r.Scheme); err != nil {
 		return ctrl.Result{}, r.finish(ctx, build, kovav1.PhaseFailed, "RunnerCreateFailed", err.Error())
 	}
-	if err := r.Create(ctx, &pod); err != nil && !apierrors.IsAlreadyExists(err) {
-		return ctrl.Result{}, r.finish(ctx, build, kovav1.PhaseFailed, "RunnerCreateFailed", err.Error())
+	if err := r.Create(ctx, &pod); err != nil {
+		if !apierrors.IsAlreadyExists(err) {
+			return ctrl.Result{}, r.finish(ctx, build, kovav1.PhaseFailed, "RunnerCreateFailed", err.Error())
+		}
+		owned, getErr := r.getOwnedPod(ctx, build)
+		if getErr != nil {
+			return ctrl.Result{}, getErr
+		}
+		if !owned {
+			return ctrl.Result{}, fmt.Errorf("runner Pod %s/%s disappeared after AlreadyExists", build.Namespace, podName)
+		}
 	}
 	now := metav1.Now()
 	jobQueueLatency.RecordDuration(ctx, time.Since(build.CreationTimestamp.Time))
@@ -94,10 +113,8 @@ func (r *KovaBuildReconciler) cancelBuild(ctx context.Context, build *kovav1.Kov
 		// deleting the runner Pod is the authoritative stop operation.
 		_ = (runnerexec.Client{Kube: r.Kube, BuildkitPlatformAddrs: r.Cfg.BuildkitPlatformAddrs}).CancelBuild(ctx, build)
 	}
-	if build.Status.RunnerPodName != "" {
-		if err := r.Kube.DeletePod(ctx, build.Namespace, build.Status.RunnerPodName); err != nil {
-			return ctrl.Result{}, err
-		}
+	if err := r.deleteRunnerAndConfirm(ctx, build); err != nil {
+		return ctrl.Result{}, err
 	}
 	return ctrl.Result{}, r.finish(ctx, build, kovav1.PhaseCancelled, "Cancelled", "build was cancelled")
 }
@@ -381,10 +398,11 @@ func (r *KovaBuildReconciler) reconcileTerminal(ctx context.Context, build *kova
 	// The terminal status and verified outputs live on the KovaBuild until JobTTL.
 	// Keeping its runner Pod for the same duration would consume scheduler Pod
 	// capacity long after the build has released its active worker slot.
-	if build.Status.RunnerPodName != "" {
-		if err := r.Kube.DeletePod(ctx, build.Namespace, build.Status.RunnerPodName); err != nil {
-			return ctrl.Result{}, err
-		}
+	if err := r.deleteRunnerAndConfirm(ctx, build); err != nil {
+		return ctrl.Result{}, err
+	}
+	if err := r.releaseReservation(ctx, build); err != nil {
+		return ctrl.Result{}, err
 	}
 	if build.Status.FinishedAt == nil || r.Cfg.JobTTL <= 0 {
 		return ctrl.Result{}, nil
@@ -400,10 +418,11 @@ func (r *KovaBuildReconciler) reconcileTerminal(ctx context.Context, build *kova
 }
 
 func (r *KovaBuildReconciler) reconcileDelete(ctx context.Context, build *kovav1.KovaBuild) (ctrl.Result, error) {
-	if build.Status.RunnerPodName != "" {
-		if err := r.Kube.DeletePod(ctx, build.Namespace, build.Status.RunnerPodName); err != nil {
-			return ctrl.Result{}, err
-		}
+	if err := r.deleteRunnerAndConfirm(ctx, build); err != nil {
+		return ctrl.Result{}, err
+	}
+	if err := r.releaseReservation(ctx, build); err != nil {
+		return ctrl.Result{}, err
 	}
 	if controllerutil.RemoveFinalizer(build, cleanupFinalizer) {
 		if err := r.Update(ctx, build); err != nil && !apierrors.IsNotFound(err) {
@@ -411,4 +430,22 @@ func (r *KovaBuildReconciler) reconcileDelete(ctx context.Context, build *kovav1
 		}
 	}
 	return ctrl.Result{}, nil
+}
+
+func (r *KovaBuildReconciler) deleteRunnerAndConfirm(ctx context.Context, build *kovav1.KovaBuild) error {
+	owned, err := r.getOwnedPod(ctx, build)
+	if err != nil || !owned {
+		return err
+	}
+	if err := r.Kube.DeletePod(ctx, build.Namespace, buildPodName(build.Name)); err != nil {
+		return err
+	}
+	stillPresent, err := r.getOwnedPod(ctx, build)
+	if err != nil {
+		return err
+	}
+	if stillPresent {
+		return fmt.Errorf("runner Pod %s/%s still exists after deletion", build.Namespace, buildPodName(build.Name))
+	}
+	return nil
 }

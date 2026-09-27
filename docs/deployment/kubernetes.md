@@ -233,6 +233,13 @@ slots without leaving usable capacity idle, and records each fixed allocation
 in job status. Runners resolve the headless Service into worker Pod IPs, avoid
 busy or cooling endpoints, and refresh DNS as replicas change.
 
+Active grants now use a durable Kubernetes admission ledger before Pod creation.
+The ledger is adopted from existing build status and runner Pods on first use, and admission stops if a live runner or active build lacks a reservation.
+Do not delete `kova-service-admission` while the Service is running.
+Before rolling this version over a prior version, drain old controller instances and active runner Pods; a mixed-version rollout cannot preserve the ledger invariant.
+The queued-build check is still best effort and has no global cap.
+See the [remaining admission work](../service-admission-design.md) before relying on these values as strict high-concurrency quotas.
+
 A Service that accepts both platforms maps each platform to an explicit BuildKit Service. The additional worker pool can be a separate Helm release with its Service endpoint listed in the Service release:
 
 ```yaml

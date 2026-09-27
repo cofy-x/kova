@@ -2,10 +2,12 @@ package buildcontroller
 
 import (
 	"context"
+	"fmt"
 	"sort"
 
 	kovav1 "github.com/cofy-x/kova/internal/apis/kova/v1alpha1"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -15,44 +17,78 @@ type admissionDecision struct {
 	Message    string
 }
 
+// admission commits a durable reservation before its caller may create a Pod.
+// The ConfigMap resourceVersion serializes grants across reconciles and leaders.
 func (r *KovaBuildReconciler) admission(ctx context.Context, build *kovav1.KovaBuild) (admissionDecision, error) {
-	var builds kovav1.KovaBuildList
-	if err := r.List(ctx, &builds, client.InNamespace(build.Namespace)); err != nil {
-		return admissionDecision{}, err
+	for {
+		if err := ctx.Err(); err != nil {
+			return admissionDecision{}, err
+		}
+		cm, reservations, err := r.readReservations(ctx, build.Namespace)
+		if err != nil {
+			return admissionDecision{}, err
+		}
+		key := reservationKey(build)
+		var builds kovav1.KovaBuildList
+		if err := r.reader().List(ctx, &builds, client.InNamespace(build.Namespace)); err != nil {
+			return admissionDecision{}, err
+		}
+		if err := r.ensureNoUnreservedRunner(ctx, build.Namespace, reservations, builds.Items); err != nil {
+			return admissionDecision{}, err
+		}
+		if existing, ok := reservations.Active[key]; ok {
+			if existing.BuildName != build.Name || existing.Requester != requesterKey(build) {
+				return admissionDecision{}, fmt.Errorf("admission reservation for %s/%s does not match KovaBuild identity", build.Namespace, build.Name)
+			}
+			return admissionDecision{Admitted: true, Allocation: existing.Slots}, nil
+		}
+		decision := decideAdmission(build, builds.Items, reservations.Active, r.Cfg.MaxActiveJobs, r.Cfg.MaxActiveJobsPerRequester, r.Cfg.WorkerSlots)
+		if !decision.Admitted {
+			return decision, nil
+		}
+		reservations.Active[key] = activeReservation{BuildName: build.Name, Requester: requesterKey(build), Slots: decision.Allocation}
+		if err := r.writeReservations(ctx, cm, reservations); err != nil {
+			if apierrors.IsConflict(err) || apierrors.IsAlreadyExists(err) {
+				continue
+			}
+			return admissionDecision{}, err
+		}
+		return decision, nil
 	}
-	active := 0
-	usedSlots := 0
+}
+
+func decideAdmission(build *kovav1.KovaBuild, builds []kovav1.KovaBuild, active map[string]activeReservation, maxJobs, maxRequesterJobs, workerSlots int) admissionDecision {
 	activeByRequester := map[string]int{}
-	queued := make([]*kovav1.KovaBuild, 0, len(builds.Items))
-	for i := range builds.Items {
-		item := &builds.Items[i]
-		switch item.Status.Phase {
-		case kovav1.PhaseStarting, kovav1.PhaseRunning:
-			active++
-			activeByRequester[requesterKey(item)]++
-			usedSlots += allocatedConcurrency(item)
-		case "", kovav1.PhaseQueued:
+	usedSlots := 0
+	for _, reservation := range active {
+		activeByRequester[reservation.Requester]++
+		usedSlots += reservation.Slots
+	}
+	queued := make([]*kovav1.KovaBuild, 0, len(builds))
+	for i := range builds {
+		item := &builds[i]
+		if (item.Status.Phase == "" || item.Status.Phase == kovav1.PhaseQueued) && active[reservationKey(item)].Slots == 0 {
 			queued = append(queued, item)
 		}
 	}
 	jobCapacity := len(queued)
-	if r.Cfg.MaxActiveJobs > 0 {
-		jobCapacity = r.Cfg.MaxActiveJobs - active
+	if maxJobs > 0 {
+		jobCapacity = maxJobs - len(active)
 		if jobCapacity <= 0 {
-			return admissionDecision{Message: "waiting for an active job slot"}, nil
+			return admissionDecision{Message: "waiting for an active job slot"}
 		}
 	}
 	slotCapacity := 0
-	boundedSlots := r.Cfg.WorkerSlots > 0
+	boundedSlots := workerSlots > 0
 	if boundedSlots {
-		slotCapacity = r.Cfg.WorkerSlots - usedSlots
+		slotCapacity = workerSlots - usedSlots
 		if slotCapacity <= 0 {
-			return admissionDecision{Message: "waiting for worker capacity"}, nil
+			return admissionDecision{Message: "waiting for worker capacity"}
 		}
 	}
 	for _, candidate := range fairQueue(queued) {
 		requester := requesterKey(candidate)
-		if r.Cfg.MaxActiveJobsPerRequester > 0 && activeByRequester[requester] >= r.Cfg.MaxActiveJobsPerRequester {
+		if maxRequesterJobs > 0 && activeByRequester[requester] >= maxRequesterJobs {
 			continue
 		}
 		allocation := requestedConcurrency(candidate)
@@ -62,8 +98,8 @@ func (r *KovaBuildReconciler) admission(ctx context.Context, build *kovav1.KovaB
 		if allocation <= 0 || jobCapacity <= 0 {
 			break
 		}
-		if candidate.Name == build.Name {
-			return admissionDecision{Admitted: true, Allocation: allocation}, nil
+		if reservationKey(candidate) == reservationKey(build) {
+			return admissionDecision{Admitted: true, Allocation: allocation}
 		}
 		activeByRequester[requester]++
 		jobCapacity--
@@ -71,7 +107,7 @@ func (r *KovaBuildReconciler) admission(ctx context.Context, build *kovav1.KovaB
 			slotCapacity -= allocation
 		}
 	}
-	return admissionDecision{Message: "waiting for fair-share capacity"}, nil
+	return admissionDecision{Message: "waiting for fair-share capacity"}
 }
 
 func fairQueue(builds []*kovav1.KovaBuild) []*kovav1.KovaBuild {

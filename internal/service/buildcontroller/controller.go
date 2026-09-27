@@ -2,7 +2,6 @@ package buildcontroller
 
 import (
 	"context"
-	"sync"
 
 	kovav1 "github.com/cofy-x/kova/internal/apis/kova/v1alpha1"
 	"github.com/cofy-x/kova/internal/buildcontract"
@@ -30,13 +29,12 @@ var (
 
 type KovaBuildReconciler struct {
 	client.Client
+	Scheme   *runtime.Scheme
+	Kube     kube.API
+	Cfg      config.Config
+	Recorder record.EventRecorder
+	// APIReader bypasses the manager cache for capacity and recovery reads.
 	APIReader client.Reader
-	Scheme    *runtime.Scheme
-	Kube      kube.API
-	Cfg       config.Config
-	Recorder  record.EventRecorder
-
-	admissionMu sync.Mutex
 }
 
 func (r *KovaBuildReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -72,8 +70,6 @@ func (r *KovaBuildReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 				return ctrl.Result{}, r.finish(ctx, &build, kovav1.PhaseFailed, "WorkerPlatformUnavailable", "no BuildKit worker pool is configured for platform "+target.Platform)
 			}
 		}
-		r.admissionMu.Lock()
-		defer r.admissionMu.Unlock()
 		return r.startBuild(ctx, &build)
 	case kovav1.PhaseStarting:
 		return r.submitWhenReady(ctx, &build)
