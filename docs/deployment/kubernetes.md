@@ -158,6 +158,34 @@ The chart exposes worker resources, topology spread, disruption budget, HPA,
 node selectors, tolerations, affinity, priority class, and runtime class.
 Environment overlays should set these according to cluster policy.
 
+### Worker Cache Capacity
+
+The chart now renders the BuildKit OCI worker GC budget from `worker.cache` instead of relying on BuildKit's filesystem-sized defaults.
+The default and production starting point reserve 2 GB, target at most 8 GB of reclaimable cache, and target 2 GB of filesystem free space; the 8 GiB kind overlays use a 3 GB maximum.
+These are absolute BuildKit `GB` values, not percentages of the node filesystem or the Kubernetes `emptyDir`; BuildKit v0.31.2 reports `8GB` as about 8 GiB.
+
+```yaml
+worker:
+  cache:
+    reservedSpaceGB: 2
+    maxUsedSpaceGB: 8
+    minFreeSpaceGB: 2
+```
+
+The chart requires exactly one bounded `lib-buildkit` `emptyDir` volume and an explicit worker ephemeral-storage limit. It rejects a reserved budget at or above the maximum and a maximum above 80% of either limit.
+For this check, cache volume and ephemeral-storage quantities use integer `Mi`, `Gi`, or `Ti` values.
+Keep additional space for in-flight build references, the writable container layer, logs, and filesystem metadata; BuildKit GC can reclaim only eligible unused records and is not a hard disk or memory limit.
+Set worker CPU and memory requests/limits and admission slots from measured build costs and node headroom, rather than treating the GC budget as a substitute for resource isolation.
+
+`buildkitdConfig` remains available for non-OCI-worker settings such as registry mirrors, but must not declare `[worker.oci]` or its subtables; the chart owns that section to keep GC policy explicit.
+Existing environment overlays that set `[worker.oci]` in raw TOML must move their GC values to `worker.cache` before upgrading.
+BuildKit's [daemon configuration](https://github.com/moby/buildkit/blob/v0.31.2/docs/buildkitd.toml.md) documents these GC controls.
+
+A cache-budget change updates the worker Pod template checksum and rolls the Deployment.
+Because each worker uses Pod-scoped `emptyDir`, replacement discards that worker's cache and may temporarily increase cold-build latency.
+Before rollout, record per-worker `buildctl du`, cache directory size, cgroup `file` and `anon` memory, node memory/disk, and active builds; roll with spare capacity and verify that cache usage plateaus below the guard under sustained unique-target builds.
+Validate cache-hit latency and OCI/Nydus correctness before increasing concurrency.
+
 Worker ingress is restricted to Kova runner Pods by default. Add trusted peers
 only when another component intentionally calls BuildKit. Service ingress is
 opt-in because gateway topology differs by environment; enabling it with an

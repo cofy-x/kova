@@ -26,6 +26,10 @@ Always apply the selected release CRD before upgrading. Helm installs files in
 Each release is one explicit `worker.platform` pool (`linux/amd64` or `linux/arm64`) and uses the standard Kubernetes OS and architecture labels. A Service release can route both platforms through explicit `serviceDaemon.buildkitPlatformAddrs` mappings to two BuildKit Services. The default installs one `linux/amd64` worker. Production environments should provide an
 environment-owned values file for capacity, registry credentials,
 scheduling, and service configuration.
+Set `worker.cache` to an absolute BuildKit OCI GC budget below the worker cache
+volume and ephemeral-storage limit; see the [worker cache capacity guide](../../docs/deployment/kubernetes.md#worker-cache-capacity).
+`buildkitdConfig` is reserved for other BuildKit settings and must not define
+`[worker.oci]`, which the chart generates from `worker.cache`.
 
 `values.schema.json` rejects unknown or invalid chart values. The worker
 NetworkPolicy allows Kova runner Pods from the configured runner namespace by

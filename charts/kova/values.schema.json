@@ -164,8 +164,19 @@
     "worker": {
       "type": "object",
       "additionalProperties": false,
+      "required": ["cache"],
       "properties": {
         "platform": { "type": "string", "enum": ["linux/amd64", "linux/arm64"] },
+        "cache": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["reservedSpaceGB", "maxUsedSpaceGB", "minFreeSpaceGB"],
+          "properties": {
+            "reservedSpaceGB": { "type": "integer", "minimum": 1, "maximum": 1048576 },
+            "maxUsedSpaceGB": { "type": "integer", "minimum": 2, "maximum": 1048576 },
+            "minFreeSpaceGB": { "type": "integer", "minimum": 1, "maximum": 1048576 }
+          }
+        },
         "name": { "type": "string" },
         "args": { "type": "array", "items": { "type": "string" } },
         "portName": { "type": "string" },

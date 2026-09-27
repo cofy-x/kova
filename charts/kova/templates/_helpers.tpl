@@ -2,6 +2,32 @@
 {{- default .Chart.Name .Values.nameOverride | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
 
+{{/* Only explicit binary storage quantities are accepted for cache-budget checks. */}}
+{{- define "kova.cacheStorageBytes" -}}
+{{- $value := toString . -}}
+{{- if regexMatch `^[1-9][0-9]*Mi$` $value -}}
+{{- $number := trimSuffix "Mi" $value -}}
+{{- if gt (len $number) 10 -}}{{- fail "worker cache storage quantity must not exceed 1Pi" -}}{{- end -}}
+{{- $quantity := int64 $number -}}
+{{- if gt $quantity 1073741824 -}}{{- fail "worker cache storage quantity must not exceed 1Pi" -}}{{- end -}}
+{{- mul $quantity 1048576 -}}
+{{- else if regexMatch `^[1-9][0-9]*Gi$` $value -}}
+{{- $number := trimSuffix "Gi" $value -}}
+{{- if gt (len $number) 7 -}}{{- fail "worker cache storage quantity must not exceed 1Pi" -}}{{- end -}}
+{{- $quantity := int64 $number -}}
+{{- if gt $quantity 1048576 -}}{{- fail "worker cache storage quantity must not exceed 1Pi" -}}{{- end -}}
+{{- mul $quantity 1073741824 -}}
+{{- else if regexMatch `^[1-9][0-9]*Ti$` $value -}}
+{{- $number := trimSuffix "Ti" $value -}}
+{{- if gt (len $number) 4 -}}{{- fail "worker cache storage quantity must not exceed 1Pi" -}}{{- end -}}
+{{- $quantity := int64 $number -}}
+{{- if gt $quantity 1024 -}}{{- fail "worker cache storage quantity must not exceed 1Pi" -}}{{- end -}}
+{{- mul $quantity 1099511627776 -}}
+{{- else -}}
+{{- fail (printf "worker cache storage quantity %q must use an integer Mi, Gi, or Ti value" $value) -}}
+{{- end -}}
+{{- end -}}
+
 {{- define "kova.fullname" -}}
 {{- if .Values.fullnameOverride -}}
 {{- .Values.fullnameOverride | trunc 63 | trimSuffix "-" -}}
