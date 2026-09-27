@@ -347,7 +347,12 @@ def verify_service_image_binding(pods: list[dict], image: str, config_digest: st
     return sorted(bindings, key=lambda binding: binding["pod"])
 
 
-def fixture_identity(*, empty: bool, expected_config_digest: str | None = None) -> dict:
+def fixture_identity(
+    *,
+    empty: bool,
+    expected_config_digest: str | None = None,
+    candidate_commit: str | None = None,
+) -> dict:
     require(
         KUBECONFIG.is_file() and not KUBECONFIG.is_symlink(),
         "dedicated kubeconfig is absent or a symlink",
@@ -362,12 +367,29 @@ def fixture_identity(*, empty: bool, expected_config_digest: str | None = None) 
         kctl("config", "current-context").strip() == f"kind-{CLUSTER}",
         "wrong Kind kubeconfig context",
     )
-    head = command(["git", "-C", str(ROOT), "rev-parse", "HEAD"]).strip()
-    require(re.fullmatch(r"[0-9a-f]{40}", head) is not None, "candidate commit is unavailable")
+    checkout_head = command(["git", "-C", str(ROOT), "rev-parse", "HEAD"]).strip()
+    require(
+        re.fullmatch(r"[0-9a-f]{40}", checkout_head) is not None, "checkout commit is unavailable"
+    )
     require(
         command(["git", "-C", str(ROOT), "status", "--porcelain"]).strip() == "",
         "candidate checkout is dirty",
     )
+    head = checkout_head
+    if candidate_commit is not None:
+        require(
+            re.fullmatch(r"[0-9a-f]{40}", candidate_commit) is not None,
+            "candidate commit must be an exact full SHA",
+        )
+        require(
+            command(["git", "-C", str(ROOT), "rev-parse", f"{candidate_commit}^{{commit}}"]).strip()
+            == candidate_commit,
+            "candidate commit is not available locally",
+        )
+        command(
+            ["git", "-C", str(ROOT), "merge-base", "--is-ancestor", candidate_commit, checkout_head]
+        )
+        head = candidate_commit
     nodes = verify_nodes(kjson("get", "nodes", "-o", "json"))
     deployment = kjson("-n", NAMESPACE, "get", "deployment", f"{RELEASE}-service", "-o", "json")
     spec = deployment.get("spec", {})
@@ -541,6 +563,7 @@ def fixture_identity(*, empty: bool, expected_config_digest: str | None = None) 
         "namespace": NAMESPACE,
         "kubeconfig_sha256": kube_sha,
         "candidate_commit": head,
+        "checkout_commit": checkout_head,
         "deployment_uid": deployment["metadata"]["uid"],
         "deployment_template_sha256": stable_hash(spec["template"]),
         "service_image": expected_image,
