@@ -184,6 +184,105 @@ func TestRegistryTimeoutUntilVerificationDeadlineFailsBeforeCleanup(t *testing.T
 	}
 }
 
+func TestOverwrittenTagWithGarbageCollectedDigestFailsClosedAtDeadline(t *testing.T) {
+	t.Setenv("DOCKER_CONFIG", t.TempDir())
+	backend := registry.New()
+	var oldDigest string
+	var oldDigestReads, tagReads atomic.Int32
+	var blockOldDigest atomic.Bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if blockOldDigest.Load() && (r.Method == http.MethodGet || r.Method == http.MethodHead) {
+			switch r.URL.Path {
+			case "/v2/demo/manifests/" + oldDigest:
+				oldDigestReads.Add(1)
+				http.NotFound(w, r)
+				return
+			case "/v2/demo/manifests/shared":
+				tagReads.Add(1)
+			}
+		}
+		backend.ServeHTTP(w, r)
+	}))
+	t.Cleanup(server.Close)
+	host := strings.TrimPrefix(server.URL, "http://")
+	tag, err := name.NewTag(host+"/demo:shared", name.Insecure)
+	if err != nil {
+		t.Fatal(err)
+	}
+	imageForJob := func(job string) string {
+		config, err := empty.Image.ConfigFile()
+		if err != nil {
+			t.Fatal(err)
+		}
+		config.OS, config.Architecture = "linux", "amd64"
+		config.Config.Labels = map[string]string{"job": job}
+		image, err := mutate.ConfigFile(empty.Image, config)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := remote.Write(tag, image); err != nil {
+			t.Fatal(err)
+		}
+		digest, err := image.Digest()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return digest.String()
+	}
+	oldDigest = imageForJob("build-a")
+	newDigest := imageForJob("build-b")
+	if oldDigest == newDigest {
+		t.Fatal("two builds must have distinct pushed manifests")
+	}
+	current, err := remote.Get(tag)
+	if err != nil || current.Descriptor.Digest.String() != newDigest {
+		t.Fatalf("current tag descriptor=%v err=%v, want build B digest %s", current, err, newDigest)
+	}
+	// Model a registry that GC'd build A after B moved the shared tag. A's
+	// exact push receipt must never be replaced with B's still-valid manifest.
+	blockOldDigest.Store(true)
+	build := verifyingWithReceipt("gc-overwrite", tag.Name(), oldDigest)
+	crClient := crfake.NewClientBuilder().WithScheme(testScheme(t)).WithStatusSubresource(&kovav1.KovaBuild{}).WithObjects(build, testRunnerPod(build)).Build()
+	kubeClient := &fakeKube{podClient: crClient, execFn: func(kube.ExecOptions) error {
+		t.Fatal("persisted push receipt must not be re-exported or re-submitted")
+		return nil
+	}}
+	cfg := config.Config{RegistryPlainHTTP: []string{host}, VerificationAttemptTimeout: time.Second}
+	key := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: build.Namespace, Name: build.Name}}
+	r := KovaBuildReconciler{Client: crClient, Scheme: testScheme(t), Kube: kubeClient, Cfg: cfg}
+	initializeAdmissionForTest(t, &r)
+	if _, err := r.Reconcile(context.Background(), key); err != nil {
+		t.Fatal(err)
+	}
+	stored := storedLifecycleBuild(t, crClient, build.Name)
+	if stored.Status.Phase != kovav1.PhaseVerifying || stored.Status.VerificationResults[0].State != "pending" ||
+		stored.Status.VerificationResults[0].PushedDigest != oldDigest || len(stored.Status.Outputs) != 0 || len(kubeClient.deleted) != 0 ||
+		oldDigestReads.Load() == 0 || tagReads.Load() != 0 {
+		t.Fatalf("after GC: status=%#v deleted=%#v old-digest reads=%d tag reads=%d", stored.Status, kubeClient.deleted, oldDigestReads.Load(), tagReads.Load())
+	}
+	deadline := metav1.NewTime(time.Now().Add(-time.Second))
+	stored.Status.VerificationDeadlineAt = &deadline
+	if err := crClient.Status().Update(context.Background(), stored); err != nil {
+		t.Fatal(err)
+	}
+	newLeader := KovaBuildReconciler{Client: crClient, Scheme: testScheme(t), Kube: kubeClient, Cfg: cfg}
+	if _, err := newLeader.Reconcile(context.Background(), key); err != nil {
+		t.Fatal(err)
+	}
+	stored = storedLifecycleBuild(t, crClient, build.Name)
+	if stored.Status.Phase != kovav1.PhaseFailed || stored.Status.Reason != "ResultVerificationFailed" ||
+		stored.Status.VerificationResults[0].State != "failed" || stored.Status.VerificationResults[0].PushedDigest != oldDigest ||
+		len(stored.Status.Outputs) != 0 || len(kubeClient.deleted) != 0 || tagReads.Load() != 0 {
+		t.Fatalf("expired GC result: status=%#v deleted=%#v tag reads=%d", stored.Status, kubeClient.deleted, tagReads.Load())
+	}
+	if _, err := newLeader.Reconcile(context.Background(), key); err != nil {
+		t.Fatal(err)
+	}
+	if len(kubeClient.deleted) != 1 {
+		t.Fatalf("terminal runner cleanup deleted=%#v, want one Pod", kubeClient.deleted)
+	}
+}
+
 type failSucceededStatusClient struct {
 	client.Client
 	failures int
