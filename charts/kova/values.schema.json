@@ -177,9 +177,9 @@
           "additionalProperties": false,
           "required": ["reservedSpaceGB", "maxUsedSpaceGB", "minFreeSpaceGB"],
           "properties": {
-            "reservedSpaceGB": { "type": "integer", "minimum": 1 },
-            "maxUsedSpaceGB": { "type": "integer", "minimum": 2 },
-            "minFreeSpaceGB": { "type": "integer", "minimum": 1 }
+            "reservedSpaceGB": { "type": "integer", "minimum": 1, "maximum": 1048576 },
+            "maxUsedSpaceGB": { "type": "integer", "minimum": 2, "maximum": 1048576 },
+            "minFreeSpaceGB": { "type": "integer", "minimum": 1, "maximum": 1048576 }
           }
         },
         "name": { "type": "string" },

@@ -6,11 +6,23 @@
 {{- define "kova.cacheStorageBytes" -}}
 {{- $value := toString . -}}
 {{- if regexMatch `^[1-9][0-9]*Mi$` $value -}}
-{{- mul (int64 (trimSuffix "Mi" $value)) 1048576 -}}
+{{- $number := trimSuffix "Mi" $value -}}
+{{- if gt (len $number) 10 -}}{{- fail "worker cache storage quantity must not exceed 1Pi" -}}{{- end -}}
+{{- $quantity := int64 $number -}}
+{{- if gt $quantity 1073741824 -}}{{- fail "worker cache storage quantity must not exceed 1Pi" -}}{{- end -}}
+{{- mul $quantity 1048576 -}}
 {{- else if regexMatch `^[1-9][0-9]*Gi$` $value -}}
-{{- mul (int64 (trimSuffix "Gi" $value)) 1073741824 -}}
+{{- $number := trimSuffix "Gi" $value -}}
+{{- if gt (len $number) 7 -}}{{- fail "worker cache storage quantity must not exceed 1Pi" -}}{{- end -}}
+{{- $quantity := int64 $number -}}
+{{- if gt $quantity 1048576 -}}{{- fail "worker cache storage quantity must not exceed 1Pi" -}}{{- end -}}
+{{- mul $quantity 1073741824 -}}
 {{- else if regexMatch `^[1-9][0-9]*Ti$` $value -}}
-{{- mul (int64 (trimSuffix "Ti" $value)) 1099511627776 -}}
+{{- $number := trimSuffix "Ti" $value -}}
+{{- if gt (len $number) 4 -}}{{- fail "worker cache storage quantity must not exceed 1Pi" -}}{{- end -}}
+{{- $quantity := int64 $number -}}
+{{- if gt $quantity 1024 -}}{{- fail "worker cache storage quantity must not exceed 1Pi" -}}{{- end -}}
+{{- mul $quantity 1099511627776 -}}
 {{- else -}}
 {{- fail (printf "worker cache storage quantity %q must use an integer Mi, Gi, or Ti value" $value) -}}
 {{- end -}}
