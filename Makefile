@@ -189,6 +189,7 @@ lint-scripts:
 	fi
 
 helm-template:
+	bash scripts/chart/verify-worker-cache.sh
 	helm template $(RELEASE_NAME) ./charts/kova -f deploy/kind-values.yaml >/dev/null
 	helm template $(RELEASE_NAME) ./charts/kova -f deploy/production-values.yaml >/dev/null
 	helm template $(RELEASE_NAME) ./charts/kova \
