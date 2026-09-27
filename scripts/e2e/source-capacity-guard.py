@@ -19,6 +19,8 @@ from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import ProxyHandler, Request, build_opener
 
+from oci_platform_identity import ImageIdentityError, local_platform_image_fact
+
 ROOT = Path(__file__).resolve().parents[2]
 CLUSTER = "kova-source-capacity"
 KUBECONFIG = ROOT / ".kind" / f"{CLUSTER}.kubeconfig"
@@ -80,22 +82,10 @@ def image_for(role: str, revision: str) -> str:
 
 
 def local_config_id(image: str, revision: str) -> str:
-    inspected = json.loads(
-        command(["docker", "image", "inspect", "--platform", "linux/amd64", image])
-    )
-    if not isinstance(inspected, list) or len(inspected) != 1:
-        fail(f"candidate image is unavailable or ambiguous: {image}")
-    item = inspected[0]
-    image_id = item.get("Id", "")
-    if (
-        not re.fullmatch(SHA, image_id)
-        or item.get("Os") != "linux"
-        or item.get("Architecture") != "amd64"
-        or item.get("Config", {}).get("Labels", {}).get("org.opencontainers.image.revision")
-        != revision
-    ):
-        fail(f"local candidate image config/revision differs: {image}")
-    return image_id
+    try:
+        return local_platform_image_fact(image, revision, command)["config_digest"]
+    except ImageIdentityError as error:
+        fail(str(error))
 
 
 def check_deployment(name: str, container: str, image: str) -> tuple[int, dict]:

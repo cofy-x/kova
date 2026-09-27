@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import sys
 import tempfile
 import threading
 import unittest
@@ -14,6 +15,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 SCRIPT = Path(__file__).with_name("e2e-service-partial-output.py")
+sys.path.insert(0, str(SCRIPT.parent))
 SPEC = importlib.util.spec_from_file_location("e2e_service_partial_output", SCRIPT)
 assert SPEC and SPEC.loader
 acceptance = importlib.util.module_from_spec(SPEC)
@@ -372,19 +374,18 @@ class PartialOutputSafetyTest(unittest.TestCase):
 
     def test_local_platform_config_must_match_revision(self) -> None:
         image = "localhost:5002/kova:runner-" + "a" * 12
-        selected = {
-            "Id": "sha256:" + "c" * 64,
-            "Os": "linux",
-            "Architecture": "amd64",
-            "Config": {"Labels": {"org.opencontainers.image.revision": "a" * 12}},
-        }
-        with patch.object(acceptance, "command", return_value=json.dumps([selected])) as run:
-            self.assertEqual(acceptance.local_config_id(image, "a" * 12), selected["Id"])
+        config_id = "sha256:" + "c" * 64
+        with patch.object(
+            acceptance, "local_platform_image_fact", return_value={"config_digest": config_id}
+        ) as inspect:
+            self.assertEqual(acceptance.local_config_id(image, "a" * 12), config_id)
             self.assertEqual(
-                run.call_args.args[0],
-                ["docker", "image", "inspect", "--platform", "linux/amd64", image],
+                inspect.call_args.args, (image, "a" * 12, acceptance.command)
             )
-            with self.assertRaises(acceptance.AcceptanceError):
+        with patch.object(
+            acceptance, "local_platform_image_fact", side_effect=acceptance.ImageIdentityError("drift")
+        ):
+            with self.assertRaisesRegex(acceptance.AcceptanceError, "drift"):
                 acceptance.local_config_id(image, "b" * 12)
 
     def test_unknown_objects_are_identity_only_in_snapshot(self) -> None:

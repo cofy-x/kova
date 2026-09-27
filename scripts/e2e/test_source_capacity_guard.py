@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 SCRIPT = Path(__file__).with_name("source-capacity-guard.py")
+sys.path.insert(0, str(SCRIPT.parent))
 SPEC = importlib.util.spec_from_file_location("source_capacity_guard", SCRIPT)
 assert SPEC and SPEC.loader
 guard = importlib.util.module_from_spec(SPEC)
@@ -118,20 +120,16 @@ class ImageIdentityTests(unittest.TestCase):
                 guard.image_preflight()
 
     def test_local_config_requires_exact_oci_revision(self) -> None:
-        inspected = [
-            {
-                "Id": CONFIG,
-                "Os": "linux",
-                "Architecture": "amd64",
-                "Config": {"Labels": {"org.opencontainers.image.revision": REV}},
-            }
-        ]
-        with patch.object(guard, "command", return_value=json.dumps(inspected)):
+        with patch.object(
+            guard, "local_platform_image_fact", return_value={"config_digest": CONFIG}
+        ) as inspect:
             self.assertEqual(guard.local_config_id(IMAGE, REV), CONFIG)
-            inspected[0]["Config"]["Labels"]["org.opencontainers.image.revision"] = "old"
-            with patch.object(guard, "command", return_value=json.dumps(inspected)):
-                with self.assertRaises(guard.GuardError):
-                    guard.local_config_id(IMAGE, REV)
+            self.assertEqual(inspect.call_args.args, (IMAGE, REV, guard.command))
+        with patch.object(
+            guard, "local_platform_image_fact", side_effect=guard.ImageIdentityError("drift")
+        ):
+            with self.assertRaisesRegex(guard.GuardError, "drift"):
+                guard.local_config_id(IMAGE, REV)
 
     def test_role_pod_requires_spec_status_and_cri_config_identity(self) -> None:
         cri = {"status": {"id": CONFIG, "repoTags": [IMAGE], "repoDigests": []}}

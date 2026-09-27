@@ -27,6 +27,8 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import ProxyHandler, Request, build_opener
 
+from oci_platform_identity import ImageIdentityError, local_platform_image_fact
+
 ROOT = Path(__file__).resolve().parents[2]
 CLUSTER = "kova-partial-output-41"
 NAMESPACE = "kova"
@@ -154,7 +156,7 @@ def require_tools(mode: str) -> None:
         fail("this acceptance runs only on a dedicated Linux Kind host")
     if socket.gethostname() != "wayne-hk-kvm":
         fail("this acceptance is pinned to wayne-hk-kvm")
-    for tool in ("docker", "kind", "kubectl", "helm"):
+    for tool in ("docker", "kind", "kubectl", "helm", "timeout"):
         if shutil.which(tool) is None:
             fail(f"required tool is absent: {tool}")
     if not os.access(ROOT / "bin/kova", os.X_OK):
@@ -296,24 +298,10 @@ def exact_images(revision: str) -> dict[str, str]:
 
 
 def local_config_id(image: str, revision: str) -> str:
-    # Docker may identify a multi-platform tag by its OCI index while Kind's
-    # CRI identifies the selected linux/amd64 image by its config digest.
-    inspected = json.loads(
-        command(["docker", "image", "inspect", "--platform", "linux/amd64", image])
-    )
-    if len(inspected) != 1:
-        fail(f"local candidate image is unavailable or ambiguous: {image}")
-    selected = inspected[0]
-    config_id = selected.get("Id", "")
-    if (
-        not re.fullmatch(r"sha256:[0-9a-f]{64}", config_id)
-        or selected.get("Os") != "linux"
-        or selected.get("Architecture") != "amd64"
-        or selected.get("Config", {}).get("Labels", {}).get("org.opencontainers.image.revision")
-        != revision
-    ):
-        fail(f"local linux/amd64 candidate image identity differs: {image}")
-    return config_id
+    try:
+        return local_platform_image_fact(image, revision, command)["config_digest"]
+    except ImageIdentityError as error:
+        fail(str(error))
 
 
 def check_deployment(name: str, image: str, container: str) -> dict:
