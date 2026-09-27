@@ -50,6 +50,7 @@ and environment policy in the consuming workspace rather than this repository.
 | `make e2e-helm-quickstart` | Packages the chart, installs it into an ephemeral minimal kind cluster, runs the authenticated Service workflow, and deletes the cluster on exit. Set `KEEP_KIND_CLUSTER=true` to retain a cluster created by the test, or `REUSE_KIND_CLUSTER=true` to explicitly use a caller-owned cluster that the test will not delete. | Helm archive, `examples/simple`, `.work/result-service.jsonl` |
 | `make e2e-service-admission` | Read-only admission preflight by default; with `ADMISSION_E2E_MODE=run` and a test token, checks two Service Pods on an existing dedicated `kova-admission-*` Kind cluster, then sends a 40-way HTTP burst and cleans up only its exact CR IDs. Requires preinstalled active=1, global queue=3, requester queue=2, and `never=true` runner selector. | Existing dedicated Kind cluster; no install or cluster-wide cleanup |
 | `make e2e-service-admission-failover` | Read-only preflight by default; live mode replaces only the verified current Service leader Pod, then proves a successor reconciles a new queued build without duplicating the original runner or active grant. Preserves run-scoped receipts on success and failure; exact two-CR cleanup only on success. | Same empty, dedicated two-replica Kind admission cluster and caps as above |
+| `make e2e-source-capacity` | Read-only preflight by default; live mode publishes one 128 MiB incompressible immutable source, builds one OCI output, verifies its digest and host pull, and samples Kind node/runner state. Preserves run-scoped receipts and tags; never deletes the cluster or registry content. | Existing empty, dedicated `kova-source-capacity` Kind quickstart cluster and localhost registry |
 | `make e2e-service` | RBAC isolation, immutable OCI source publication, pre-build target-and-platform contract failure, platform-scoped worker dispatch, safe caller retry, verified output platform and manifest digest, ephemeral logs, TTL cleanup, and host pull. | `examples/simple`, `.work/result-service.jsonl` |
 | `make e2e-crd-upgrade` | Isolated pre-retry CRD to current CRD/controller migration, including live status pruning/persistence, a quiescence gate, and an injected old Starting runner that must fail before POST. | Public `v0.1.0-rc.9` chart and role images, dedicated Kind cluster and registry |
 | `make e2e-release KOVA_VERSION=vX.Y.Z` | Downloads and verifies the exact public CLI and OCI chart, pulls matching public role images, then runs the immutable-source Service lifecycle in a clean kind cluster. | GitHub release files, public OCI packages, `.work/result-released.jsonl` |
@@ -65,69 +66,34 @@ Tune the concurrent check with `EXAMPLE_COUNT`, `BUILD_CONCURRENCY`, and
 ## Isolated Source-Capacity Acceptance
 
 Run this only on an isolated Linux Kind host after other Kind tests have released their clusters, with enough local storage, and never from a Mac or against a cloud kubeconfig.
-It exercises a moderately sized source and both the immutable OCI source fetch and the private runner extraction path; the unit tests cover the near-limit rejection and absence of a second expanded-tree copy.
+It exercises a 128 MiB incompressible source, immutable OCI source fetch, and the private runner extraction path; the unit tests cover near-limit rejection and the absence of a second expanded-tree copy.
 It does not establish the maximum safe production payload size.
+Prepare the candidate images and isolated cluster using the ordinary quickstart, but give its setup outputs run-scoped tags:
 
 ```bash
-QUICKSTART_KIND_CLUSTER=kova-source-capacity KEEP_KIND_CLUSTER=true make e2e-helm-quickstart
-test "$(kubectl --kubeconfig "$PWD/.kind/kova-source-capacity.kubeconfig" config current-context)" = kind-kova-source-capacity
-test "$(kind get clusters | grep -cx kova-source-capacity)" = 1
-
-KOVA_CAPACITY_RUN=source-capacity-$(date -u +%Y%m%d%H%M%S)
-KOVA_CAPACITY_DIR=$(mktemp -d)
-printf 'FROM scratch\nCOPY payload /payload\nLABEL kova-test="${KOVA_MARKER}"\n' > "$KOVA_CAPACITY_DIR/Dockerfile"
-dd if=/dev/zero of="$KOVA_CAPACITY_DIR/payload" bs=1M count=128 status=none
-KOVA_CAPACITY_TARGET="kind-registry:5000/kova-examples/source-capacity:$KOVA_CAPACITY_RUN"
-bin/kova source push --target "$KOVA_CAPACITY_TARGET" --platform linux/amd64 \
-  --repository "localhost:5002/kova-sources/source-capacity:$KOVA_CAPACITY_RUN" \
-  --registry-plain-http localhost:5002 "$KOVA_CAPACITY_DIR" > "$KOVA_CAPACITY_DIR/source-receipt.json"
+SETUP_RUN=source-capacity-setup-$(date -u +%Y%m%dt%H%M%sz)
+QUICKSTART_KIND_CLUSTER=kova-source-capacity KEEP_KIND_CLUSTER=true \
+  SERVICE_TARGET="kind-registry:5000/kova-examples/source-capacity-setup:$SETUP_RUN" \
+  SERVICE_PULL_TARGET="localhost:5002/kova-examples/source-capacity-setup:$SETUP_RUN" \
+  SOURCE_REPOSITORY="localhost:5002/kova-sources/source-capacity-setup:$SETUP_RUN" \
+  make e2e-helm-quickstart
 ```
 
-Use the returned source digest and rewrite only its registry host from `localhost:5002` to the Kind network alias `kind-registry:5000`.
-Port-forward the dedicated cluster's `kova-service` to an unused local port, then submit one `format=oci` build with `KOVA_MARKER=capacity` and an idempotency key equal to the run ID:
+The quickstart must complete and its terminal KovaBuilds must expire before the source-capacity preflight can pass.
+The preflight verifies that the host has only the named Kind cluster, that its dedicated kubeconfig exactly matches the live Kind credentials/server, that both nodes and Kova deployments are healthy, that the registry image/port/network are exact, and that no KovaBuild or runner Pod is active.
+It makes no cluster changes.
 
 ```bash
-(
-  set -euo pipefail
-  KOVA_CAPACITY_KUBECONFIG="$PWD/.kind/kova-source-capacity.kubeconfig"
-  KOVA_CAPACITY_SOURCE_URI=$(jq -r .uri "$KOVA_CAPACITY_DIR/source-receipt.json")
-  KOVA_CAPACITY_SOURCE_DIGEST=$(jq -r .digest "$KOVA_CAPACITY_DIR/source-receipt.json")
-  test "${KOVA_CAPACITY_SOURCE_URI#oci://localhost:5002/}" != "$KOVA_CAPACITY_SOURCE_URI"
-  KOVA_CAPACITY_SOURCE_URI="oci://kind-registry:5000/${KOVA_CAPACITY_SOURCE_URI#oci://localhost:5002/}"
-  kubectl --kubeconfig "$KOVA_CAPACITY_KUBECONFIG" -n kova \
-    port-forward svc/kova-service 18090:8080 > "$KOVA_CAPACITY_DIR/port-forward.log" 2>&1 &
-  KOVA_CAPACITY_PF=$!
-  trap 'kill "$KOVA_CAPACITY_PF" 2>/dev/null || true; wait "$KOVA_CAPACITY_PF" 2>/dev/null || true' EXIT
-  sleep 3
-  KOVA_SERVICE_TOKEN=service-e2e-token bin/kova --service-url http://127.0.0.1:18090 \
-    job submit --source-digest "$KOVA_CAPACITY_SOURCE_DIGEST" \
-    --target "$KOVA_CAPACITY_TARGET" --platform linux/amd64 --format oci \
-    --var KOVA_MARKER=capacity --idempotency-key "$KOVA_CAPACITY_RUN" \
-    "$KOVA_CAPACITY_SOURCE_URI" > "$KOVA_CAPACITY_DIR/job.json"
-  KOVA_CAPACITY_JOB=$(jq -r .id "$KOVA_CAPACITY_DIR/job.json")
-  KOVA_SERVICE_TOKEN=service-e2e-token bin/kova --service-url http://127.0.0.1:18090 \
-    job wait --timeout 15m "$KOVA_CAPACITY_JOB" > "$KOVA_CAPACITY_DIR/terminal.json"
-  KOVA_SERVICE_TOKEN=service-e2e-token bin/kova --service-url http://127.0.0.1:18090 \
-    job results "$KOVA_CAPACITY_JOB" > "$KOVA_CAPACITY_DIR/results.json"
-  jq -e '.status == "succeeded"' "$KOVA_CAPACITY_DIR/terminal.json" >/dev/null
-  jq -e --arg target "$KOVA_CAPACITY_TARGET" --arg source "$KOVA_CAPACITY_SOURCE_DIGEST" \
-    '.source_digest == $source and (.outputs | length) == 1 and
-     (.outputs[0] | . as $output | $output.image == $target and
-       $output.format == "oci" and
-       ($output.immutable_ref | endswith("@" + $output.manifest_digest)))' \
-    "$KOVA_CAPACITY_DIR/results.json" >/dev/null
-  kubectl --kubeconfig "$KOVA_CAPACITY_KUBECONFIG" -n kova \
-    get pods,events -o wide > "$KOVA_CAPACITY_DIR/cluster-sample.txt"
-  docker pull "localhost:5002/kova-examples/source-capacity:$KOVA_CAPACITY_RUN" \
-    > "$KOVA_CAPACITY_DIR/pull.log" 2>&1
-)
+make e2e-source-capacity
+SOURCE_CAPACITY_E2E_MODE=run SERVICE_AUTH_TOKEN=service-e2e-token make e2e-source-capacity
 ```
 
-Save the source receipt, job ID, terminal result, runner Pod events and resource samples, and host pull result under the run directory before removing anything.
-The Service token from the quickstart is `service-e2e-token`; keep it out of receipts and command logs.
-The expected outcome is one succeeded build with a verified manifest digest and `docker pull localhost:5002/kova-examples/source-capacity:<run-id>` succeeding.
-Stop on a failed or evicted runner, unexpected registry identity, or missing receipt; inspect before any exact-run tag cleanup.
-After evidence review, delete only the named `kova-source-capacity` Kind cluster and its kubeconfig; do not use broad Docker or workspace cleanup commands.
+The live mode requires at least 20 GiB free disk, 1 GiB free temporary storage, and 8 GiB available RAM.
+It uses the quickstart's `service-e2e-token` only through the process environment, never a command argument or evidence file.
+It rejects existing source/output tags for its random run ID, then saves the source receipt, exact job ID, terminal and result receipts, live runner log and Pod samples, node health and Docker resource samples, events, and host-pull digest under `.work/source-capacity/<run-id>/`.
+The expected outcome is one succeeded build with a verified manifest digest and a host pull of `localhost:5002/kova-examples/source-capacity:<run-id>` yielding that same digest.
+On failure it retains all evidence and any exact-run KovaBuild and registry tags for inspection; no cluster-wide or repository-wide cleanup runs.
+After evidence review, remove only the named `kova-source-capacity` Kind cluster and its kubeconfig if no longer needed; review run-scoped source/output tags before any registry cleanup.
 
 ## CRD Upgrade Smoke
 
