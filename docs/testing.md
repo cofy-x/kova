@@ -56,6 +56,7 @@ and environment policy in the consuming workspace rather than this repository.
 | `make e2e-service-admission-ledger-loss` | Read-only preflight by default; live mode deliberately deletes only the exact active admission ConfigMap in a disposable dedicated Kind cluster, then proves both Service replicas return 503 for readiness and new submissions without creating a CR. Optional exact follower Pod replacement proves startup does not silently recreate the ledger. Preserves receipts and never repairs the fault. | Same empty, dedicated two-replica Kind admission cluster and caps as above; retire cluster after live mode |
 | `make e2e-service-admission-deep-queue` | Read-only preflight by default; live mode holds one unschedulable blocker, grows a real API-server-backed queue through 100, 500, and 1000 CRs, records independent HTTP/API/resource receipts, and performs exact-ID cleanup only after every stage passes. | The only Kind cluster must be `kova-deep-queue`, with two ready Service replicas, empty ledgers/workloads, active=1, queued global/requester=1000, and `never=true` runner selector. |
 | `make e2e-service-partial-output` | Read-only preflight by default; live mode executes a real two-target OCI+Nydus runner build whose later target fails in BuildKit, then checks final `Failed` and the first target's exact digest-pinned partial receipts. | Existing empty `kova-partial-output-41` Kind on `wayne-hk-kvm`; run-scoped source/output tags and private receipts under `.work/partial-output/`. |
+| `make e2e-service-digest-collision` | Read-only preflight by default; live mode holds A's two pushed OCI/Nydus digests in verification while B overwrites the same two tags, then verifies A's partial-failure and B's successful immutable receipts. | Dedicated `kova-digest-collision-41` Kind and loopback-only `kind-registry-digest-41` on port 5004; private receipts under `.work/digest-collision/`. |
 | `make e2e-source-capacity` | Read-only preflight by default; live mode publishes one 128 MiB incompressible immutable source, builds one OCI output, verifies its digest and host pull, and samples Kind node/runner state. Preserves run-scoped receipts and tags; never deletes the cluster or registry content. | Existing empty, dedicated `kova-source-capacity` Kind quickstart cluster and localhost registry |
 | `make e2e-source-oci-oversize` | Read-only preflight by default; live mode streams one exact 512 MiB + 1 byte sparse ZIP as an immutable OCI source, submits one public Service build, and requires an `InvalidSource` size-limit failure with no output tag. | Existing empty, dedicated `kova-source-capacity` Kind quickstart cluster and localhost registry |
 | `make e2e-service` | RBAC isolation, immutable OCI source publication, pre-build target-and-platform contract failure, platform-scoped worker dispatch, safe caller retry, verified output platform and manifest digest, ephemeral logs, TTL cleanup, and host pull. | `examples/simple`, `.work/result-service-service-e2e-<timestamp>-<nonce>.jsonl` |
@@ -496,6 +497,62 @@ Unknown objects are recorded by name/UID only, and an exact token reflected in a
 On success the script deletes only its own KovaBuild using an API-server UID precondition; on an abnormal nonterminal result it attempts the same exact stop and reports if that cannot be proven.
 All source/output tags, the registry, Kind cluster, and receipts remain for review.
 Never use repository-wide or digest-wide registry deletion to clean these tags; review exact run receipts first.
+
+## Isolated Same-Tag Digest Collision Acceptance (#41)
+
+This acceptance is deliberately separate from the ordinary partial-output test and from HK ACK. It runs only on `wayne-hk-kvm` after the host is free of other Kind work. Before creating the fixture, inspect running processes, Docker containers, ports and `kind get clusters`; stop if any owner or task is unclear. The test has its own `kova-digest-collision-41` Kind and `kind-registry-digest-41` container bound only to `127.0.0.1:5004`. Neither setup nor the test may use the shared `kind-registry`/`localhost:5002`, HK ACK/ACR, or Axern images.
+
+After review and authorization, build the frozen candidate's three role images with `localhost:5004/kova:{controller,runner,worker}-$REV` tags and `IMAGE_PLATFORM=linux/amd64` on the KVM host. Use `deploy/digest-collision-kind-cluster.yaml` and `deploy/digest-collision-kind-values.yaml` with the existing `e2e-helm-quickstart` entrypoint, the dedicated registry variables, a unique setup source/output tag, `SERVICE_AUTH_SECRET=kova-e2e-token`, active capacity 2, and `KEEP_KIND_CLUSTER=true`. Only the dedicated registry port may be opened. After its setup build and TTL have drained, upgrade only that Helm release to `serviceDaemon.jobTTL=2h` and the exact `serviceDaemon.registryPlainHTTP` pair `kind-registry-digest-41:5000` and `kova-digest-fault-proxy.kova.svc.cluster.local:5000`. Keep `serviceDaemon.maxBuildDuration=2h` and `serviceDaemon.verificationWindow=5m`. The second host is not created by Helm; the one-shot test creates it after the empty-workload preflight. Do not run the shared-registry quickstart defaults for this fixture.
+
+The reviewed setup shape is below; check the actual KVM state, image SHA and resource headroom immediately before running it. Do not run setup if any Kind cluster, test registry name, or port 5004 owner already exists. The unique setup tag is intentionally outside the collision run's repositories.
+
+```bash
+REV=$(git rev-parse --short=12 HEAD)
+SETUP_RUN=digest-41-setup-$(date -u +%Y%m%dt%H%M%Sz)
+CONTROLLER_IMAGE="localhost:5004/kova:controller-$REV" \
+  RUNNER_IMAGE="localhost:5004/kova:runner-$REV" \
+  WORKER_IMAGE="localhost:5004/kova:worker-$REV" \
+  IMAGE_PLATFORM=linux/amd64 make image
+QUICKSTART_KIND_CLUSTER=kova-digest-collision-41 \
+  QUICKSTART_KIND_CONFIG=deploy/digest-collision-kind-cluster.yaml \
+  QUICKSTART_KIND_VALUES=deploy/digest-collision-kind-values.yaml \
+  KEEP_KIND_CLUSTER=true \
+  REGISTRY_NAME=kind-registry-digest-41 REGISTRY_PORT=5004 \
+  REGISTRY_HOST=localhost:5004 CLUSTER_REGISTRY=kind-registry-digest-41:5000 \
+  CONTROLLER_IMAGE="localhost:5004/kova:controller-$REV" \
+  RUNNER_IMAGE="localhost:5004/kova:runner-$REV" \
+  WORKER_IMAGE="localhost:5004/kova:worker-$REV" COMMIT="$REV" \
+  SERVICE_AUTH_SECRET=kova-e2e-token SERVICE_JOB_TTL=60s \
+  SERVICE_MAX_ACTIVE_JOBS=2 SERVICE_MAX_ACTIVE_JOBS_PER_REQUESTER=2 \
+  SERVICE_MAX_QUEUED_JOBS=2 SERVICE_MAX_QUEUED_JOBS_PER_REQUESTER=2 \
+  SERVICE_WORKER_SLOTS=2 \
+  SERVICE_TARGET="kind-registry-digest-41:5000/kova-examples/$SETUP_RUN:dev" \
+  SERVICE_PULL_TARGET="localhost:5004/kova-examples/$SETUP_RUN:dev" \
+  SOURCE_REPOSITORY="localhost:5004/kova-sources/$SETUP_RUN:dev" \
+  make e2e-helm-quickstart
+helm upgrade kova ./charts/kova \
+  --kubeconfig .kind/kova-digest-collision-41.kubeconfig -n kova \
+  --reuse-values --wait --timeout=180s \
+  --set-string serviceDaemon.jobTTL=2h \
+  --set-string serviceDaemon.maxBuildDuration=2h \
+  --set-string serviceDaemon.verificationWindow=5m \
+  --set-json 'serviceDaemon.registryPlainHTTP=["kind-registry-digest-41:5000","kova-digest-fault-proxy.kova.svc.cluster.local:5000"]'
+```
+
+The isolated preflight is read-only, requires a clean checkout and matching Linux CLI/role-image revision, one exact Kind, 2/2 healthy nodes, empty build/runner/admission state, exact image IDs and Service/worker values, test token Secret, and the pinned loopback registry. Run it before considering the opt-in live mode:
+
+```bash
+REV=$(git rev-parse --short=12 HEAD)
+DIGEST_COLLISION_EXPECTED_REVISION="$REV" make e2e-service-digest-collision
+DIGEST_COLLISION_EXPECTED_REVISION="$REV" \
+  DIGEST_COLLISION_MODE=run \
+  DIGEST_COLLISION_ACK="kova-digest-collision-41/kova/$REV" \
+  make e2e-service-digest-collision
+```
+
+Live mode first publishes a unique immutable source and submits A with `format=both`, one successful OCI/Nydus target and a later BuildKit `/missing` failure. A's output target is the dedicated proxy host, which forwards pushes to the dedicated registry but initially returns 503 for GET-by-digest of the exact run-scoped shared output repository. It requires A to stay in `FailedVerifying` with its own two durable `pushedDigest` values and no output; the runner's exact `/missing` failure export must be captured. The proxy is then narrowed to fault only A's two immutable digests, with its Deployment and Pod UID unchanged. B publishes a different immutable source and pushes both OCI/Nydus outputs to A's same tags while A remains pending. B must reach verified `Succeeded`; both shared tag HEADs must now equal B's different digests, and A's older manifests must still be readable by digest from the dedicated backend. The proxy is restored to healthy through the same exact-UID ConfigMap mode gate. A must finish `Failed/BuildFailed` with two partial outputs bound to A's digests; B's two outputs must remain bound to B's digests. Both public results and immutable refs must agree. A missed overlap, missing old digest, proxy write failure, unexpected object, digest drift, resource guard, or timeout is an inconclusive/failed acceptance, never a silent success.
+
+The run has a 20-minute pre-recovery deadline, a bounded verification recovery wait, per-node and host headroom guards, and exact candidate image checks. Evidence under `.work/digest-collision/<run-id>/` includes source archives, exact target names, projected pending/overlap/final statuses, runner failure proof, proxy identity/mode, public results, registry digest comparisons, and UID-preconditioned CR deletion receipts. On success it removes only A and B CRs; the healthy proxy, dedicated Kind, registry, tags and evidence remain for inspection. An abnormal or uncertain outcome retains the isolated fixture and attempts only proven UID-preconditioned emergency stops. Do not retry or retire the fixture until its receipts are reviewed. Old-digest deletion/GC is intentionally **off** in this real-runner test; the cluster-free regression separately proves fail-closed behavior when an overwritten digest becomes unavailable. This is a functional race acceptance, not a throughput or production SLA test.
 
 ## CRD Upgrade Smoke
 

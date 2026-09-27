@@ -36,6 +36,7 @@ RELEASE = "kova"
 KUBECONFIG = ROOT / ".kind" / f"{CLUSTER}.kubeconfig"
 REGISTRY = "kind-registry"
 REGISTRY_HOST = "127.0.0.1:5002"
+REGISTRY_PORT = "5002"
 REGISTRY_CLUSTER = "kind-registry:5000"
 REGISTRY_IMAGE = (
     "registry:2@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373"
@@ -428,7 +429,7 @@ def check_registry() -> str:
         registry["Config"]["Image"] != REGISTRY_IMAGE
         or registry["State"]["Running"] is not True
         or "kind" not in registry["NetworkSettings"]["Networks"]
-        or binding != [{"HostIp": "127.0.0.1", "HostPort": "5002"}]
+        or binding != [{"HostIp": "127.0.0.1", "HostPort": REGISTRY_PORT}]
     ):
         fail("local registry image, Kind network, or loopback port binding differs")
     code, _ = registry_request("GET", "/v2/")
@@ -1031,7 +1032,14 @@ def stop_process(process: subprocess.Popen | None, stream: object | None) -> Non
 
 
 def check_expected_job(
-    build: dict, job_id: str, uid: str, source_uri: str, source_digest: str, targets: list[str]
+    build: dict,
+    job_id: str,
+    uid: str,
+    source_uri: str,
+    source_digest: str,
+    targets: list[str],
+    *,
+    idempotency_key: str | None = None,
 ) -> None:
     metadata, spec = build["metadata"], build["spec"]
     if (
@@ -1039,7 +1047,8 @@ def check_expected_job(
         or metadata["uid"] != uid
         or metadata["namespace"] != NAMESPACE
         or spec["source"] != {"uri": source_uri, "digest": source_digest}
-        or spec.get("idempotencyKey") != run_id_from_target(targets[0])
+        or spec.get("idempotencyKey")
+        != (idempotency_key if idempotency_key is not None else run_id_from_target(targets[0]))
     ):
         fail("KovaBuild identity/source drifted")
     if [(item["target"], item["platform"]) for item in spec["targets"]] != [

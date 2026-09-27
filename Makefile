@@ -63,7 +63,7 @@ export REGISTRY_NAME REGISTRY_IMAGE REGISTRY_HOST REGISTRY_PORT CLUSTER_REGISTRY
 export RELEASE_NAME NAMESPACE WORK_DIR KOVA_RUNNER_NAME SOURCE_ZIP RESULT_JSONL
 export KOVA_CONCURRENT_RUNNER_NAME CONCURRENT_SOURCE_ZIP CONCURRENT_RESULT_JSONL NYDUS_RESULT_JSONL RUNTIME_OCI_SOURCE_ZIP RUNTIME_NYDUS_SOURCE_ZIP RUNTIME_OCI_RESULT_JSONL RUNTIME_NYDUS_RESULT_JSONL EXAMPLE_COUNT BUILD_CONCURRENCY
 
-.PHONY: all kova kovad install generate-crds image kind-registry kind-create kind-load deploy-kind diagnose-kind observability-up observability-down observability-status dragonfly-nydus-install e2e e2e-helm-quickstart e2e-service e2e-service-admission e2e-service-admission-failover e2e-service-admission-fairness e2e-service-auth-read-probe e2e-service-auth-owner-probe e2e-service-admission-ledger-loss e2e-service-admission-deep-queue e2e-service-partial-output e2e-source-capacity e2e-source-oci-oversize e2e-crd-upgrade e2e-release e2e-concurrent e2e-dragonfly-nydus e2e-runtime-preflight e2e-runtime e2e-observability clean clean-kind test sdk-smoke python-sdk sdk-examples docs-check lint-scripts helm-template package-example package-concurrent-example FORCE
+.PHONY: all kova kovad install generate-crds image kind-registry kind-create kind-load deploy-kind diagnose-kind observability-up observability-down observability-status dragonfly-nydus-install e2e e2e-helm-quickstart e2e-service e2e-service-admission e2e-service-admission-failover e2e-service-admission-fairness e2e-service-auth-read-probe e2e-service-auth-owner-probe e2e-service-admission-ledger-loss e2e-service-admission-deep-queue e2e-service-partial-output e2e-service-digest-collision e2e-source-capacity e2e-source-oci-oversize e2e-crd-upgrade e2e-release e2e-concurrent e2e-dragonfly-nydus e2e-runtime-preflight e2e-runtime e2e-observability clean clean-kind test sdk-smoke python-sdk sdk-examples docs-check lint-scripts helm-template package-example package-concurrent-example FORCE
 
 all: kova
 
@@ -178,6 +178,13 @@ e2e-service-partial-output:
 	KIND_CLUSTER=kova-partial-output-41 \
 	KIND_KUBECONFIG=.kind/kova-partial-output-41.kubeconfig \
 	python3 ./scripts/e2e/e2e-service-partial-output.py
+
+e2e-service-digest-collision:
+	KIND_CLUSTER=kova-digest-collision-41 \
+	KIND_KUBECONFIG=.kind/kova-digest-collision-41.kubeconfig \
+	REGISTRY_NAME=kind-registry-digest-41 REGISTRY_PORT=5004 \
+	REGISTRY_HOST=localhost:5004 \
+	python3 ./scripts/e2e/e2e-service-digest-collision.py
 
 e2e-source-capacity:
 	KIND_CLUSTER=kova-source-capacity \
