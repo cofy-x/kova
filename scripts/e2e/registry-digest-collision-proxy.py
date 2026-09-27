@@ -290,12 +290,20 @@ class Handler(BaseHTTPRequestHandler):
                     for key, value in response.getheaders()
                     if key.lower() not in HOP_HEADERS
                 }
+                content_length = None
+                if self.command == "HEAD":
+                    declared_length = response.getheader("Content-Length")
+                    if declared_length is None or not declared_length.isdecimal():
+                        raise ValueError("registry HEAD omitted a valid descriptor size")
+                    content_length = int(declared_length)
                 for key in list(forwarded):
                     if key.lower() == "location":
                         forwarded[key] = safe_location(forwarded[key], host)
                 if digest:
                     record_digest_get(peer_ip, digest, mode, "forwarded", response.status)
-                self.reply(response.status, payload, headers=forwarded)
+                self.reply(
+                    response.status, payload, headers=forwarded, content_length=content_length
+                )
             finally:
                 connection.close()
         except (OSError, ValueError, http.client.HTTPException) as error:
@@ -309,13 +317,15 @@ class Handler(BaseHTTPRequestHandler):
         content_type: str = "text/plain",
         *,
         headers: dict | None = None,
+        content_length: int | None = None,
     ) -> None:
         self.send_response(status)
         for key, value in (headers or {}).items():
             self.send_header(key, value)
         if not any(key.lower() == "content-type" for key in (headers or {})):
             self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(len(payload)))
+        response_length = len(payload) if content_length is None else content_length
+        self.send_header("Content-Length", str(response_length))
         self.end_headers()
         if self.command != "HEAD":
             try:

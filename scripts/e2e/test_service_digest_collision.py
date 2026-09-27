@@ -481,7 +481,7 @@ class RegistryProxyTest(unittest.TestCase):
                     self.reply(202)
 
                 def do_HEAD(self) -> None:  # noqa: N802
-                    self.reply(200, **{"Docker-Content-Digest": digest})
+                    self.reply(200, manifest, **{"Docker-Content-Digest": digest})
 
                 def do_GET(self) -> None:  # noqa: N802
                     self.reply(200, manifest, **{"Docker-Content-Digest": digest})
@@ -553,7 +553,11 @@ class RegistryProxyTest(unittest.TestCase):
                     self.assertEqual(
                         request("PUT", f"/v2/{repository}/manifests/dev", manifest)[0], 201
                     )
-                    self.assertEqual(request("HEAD", f"/v2/{repository}/manifests/dev")[0], 200)
+                    status, body, headers = request("HEAD", f"/v2/{repository}/manifests/dev")
+                    self.assertEqual(
+                        (status, body, headers["Content-Length"]),
+                        (200, b"", str(len(manifest))),
+                    )
                     self.assertEqual(
                         request(
                             "GET",
