@@ -1,8 +1,8 @@
 package batch
 
 import (
-	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -15,6 +15,8 @@ import (
 	"github.com/cofy-x/kova/internal/scheduler"
 	"github.com/cofy-x/kova/internal/source"
 	"github.com/cofy-x/kova/internal/store"
+	"github.com/google/go-containerregistry/pkg/name"
+	"github.com/google/go-containerregistry/pkg/v1"
 
 	"go.opentelemetry.io/otel/attribute"
 )
@@ -59,29 +61,30 @@ func executeBuild(ctx context.Context, spec source.Spec, addr *scheduler.Addr, o
 	}
 	defer buildCancel()
 
-	var outputBuf bytes.Buffer
-	err := runBuildCommands(buildCtx, spec, addr, opts, &outputBuf)
+	var outputBuf boundedTailBuffer
+	digest, err := runBuildCommands(buildCtx, spec, addr, opts, &outputBuf)
 	buildErr = err
 	finishedAt := time.Now()
 	elapsed := finishedAt.Sub(startedAt)
 
 	entry := store.Entry{
-		StartedAt:  startedAt.Format(time.RFC3339),
-		FinishedAt: finishedAt.Format(time.RFC3339),
-		Elapsed:    logging.FormatElapsed(elapsed),
-		Target:     spec.Target,
-		NodeIP:     nodeIP,
-		Success:    err == nil,
+		StartedAt:      startedAt.Format(time.RFC3339),
+		FinishedAt:     finishedAt.Format(time.RFC3339),
+		Elapsed:        logging.FormatElapsed(elapsed),
+		Target:         spec.Target,
+		NodeIP:         nodeIP,
+		ManifestDigest: digest,
+		Success:        err == nil,
 	}
 
 	if err != nil {
-		entry.Logs = outputBuf.String()
+		output := outputBuf.String()
+		entry.Logs = output
 		entry.Reason = err.Error()
 		op.SetResult(observability.ResultError)
 		op.SetErrorClass("build_command_failed")
 
-		output := strings.ToLower(outputBuf.String())
-		if strings.Contains(output, "connection refused") {
+		if outputBuf.ContainsConnectionRefused() {
 			logging.Infof("Detected OOM-style failure for %s, cooling down %s for %s",
 				spec.Target, addr.Addr, addr.Cooldown)
 			addr.SetCooldown()
@@ -91,20 +94,90 @@ func executeBuild(ctx context.Context, spec source.Spec, addr *scheduler.Addr, o
 	return entry
 }
 
-func runBuildCommands(ctx context.Context, spec source.Spec, addr *scheduler.Addr, opts Options, outputBuf *bytes.Buffer) error {
+func runBuildCommands(ctx context.Context, spec source.Spec, addr *scheduler.Addr, opts Options, outputBuf io.Writer) (string, error) {
 	if source.FormatIsOCI(spec.Format) {
-		return runCommand(ctx, opts.Verbose, outputBuf, "buildctl", buildCommandArgs(spec, addr)...)
+		return runBuildctl(ctx, spec, addr, opts, outputBuf)
 	}
 
 	ociSpec := spec
 	ociSpec.Target = source.StripNydusV3Suffix(spec.Target)
-	if err := runCommand(ctx, opts.Verbose, outputBuf, "buildctl", buildCommandArgs(ociSpec, addr)...); err != nil {
-		return err
+	ociDigest, err := runBuildctl(ctx, ociSpec, addr, opts, outputBuf)
+	if err != nil {
+		return "", err
 	}
-	return runCommand(ctx, opts.Verbose, outputBuf, "nydusify", nydusConvertArgs(ociSpec.Target, spec.Target)...)
+	ref, err := name.ParseReference(ociSpec.Target, name.WeakValidation)
+	if err != nil {
+		return "", fmt.Errorf("parse Nydus source reference: %w", err)
+	}
+	// Conversion must consume this build's OCI image, even if another job
+	// overwrites the intermediate tag before nydusify starts pulling it.
+	sourceRef := ref.Context().Name() + "@" + ociDigest
+	return runNydusify(ctx, sourceRef, spec.Target, opts, outputBuf)
 }
 
-func runCommand(ctx context.Context, verbose bool, outputBuf *bytes.Buffer, name string, args ...string) error {
+func runNydusify(ctx context.Context, sourceRef, target string, opts Options, outputBuf io.Writer) (string, error) {
+	metadata, err := os.CreateTemp("", "kova-nydusify-metadata-*.json")
+	if err != nil {
+		return "", fmt.Errorf("create Nydusify metadata file: %w", err)
+	}
+	metadataPath := metadata.Name()
+	defer os.Remove(metadataPath)
+	if err := metadata.Close(); err != nil {
+		return "", fmt.Errorf("close Nydusify metadata file: %w", err)
+	}
+	args := append(nydusConvertArgs(sourceRef, target, opts.RegistryPlainHTTP), "--output-json", metadataPath)
+	if err := runCommand(ctx, opts.Verbose, outputBuf, "nydusify", args...); err != nil {
+		return "", err
+	}
+	data, err := os.ReadFile(metadataPath)
+	if err != nil {
+		return "", fmt.Errorf("read Nydusify push metadata: %w", err)
+	}
+	var pushed struct {
+		Digest string `json:"target_manifest_digest"`
+	}
+	if err := json.Unmarshal(data, &pushed); err != nil {
+		return "", fmt.Errorf("parse Nydusify push metadata: %w", err)
+	}
+	return validatePushedDigest(pushed.Digest, "Nydusify")
+}
+
+func runBuildctl(ctx context.Context, spec source.Spec, addr *scheduler.Addr, opts Options, outputBuf io.Writer) (string, error) {
+	metadata, err := os.CreateTemp("", "kova-buildctl-metadata-*.json")
+	if err != nil {
+		return "", fmt.Errorf("create BuildKit metadata file: %w", err)
+	}
+	metadataPath := metadata.Name()
+	defer os.Remove(metadataPath)
+	if err := metadata.Close(); err != nil {
+		return "", fmt.Errorf("close BuildKit metadata file: %w", err)
+	}
+	args := append(buildCommandArgs(spec, addr), "--metadata-file", metadataPath)
+	if err := runCommand(ctx, opts.Verbose, outputBuf, "buildctl", args...); err != nil {
+		return "", err
+	}
+	data, err := os.ReadFile(metadataPath)
+	if err != nil {
+		return "", fmt.Errorf("read BuildKit metadata: %w", err)
+	}
+	var pushed struct {
+		Digest string `json:"containerimage.digest"`
+	}
+	if err := json.Unmarshal(data, &pushed); err != nil {
+		return "", fmt.Errorf("parse BuildKit metadata: %w", err)
+	}
+	return validatePushedDigest(pushed.Digest, "BuildKit")
+}
+
+func validatePushedDigest(value, tool string) (string, error) {
+	hash, err := v1.NewHash(value)
+	if err != nil || hash.Algorithm != "sha256" {
+		return "", fmt.Errorf("%s did not report a valid pushed manifest digest", tool)
+	}
+	return hash.String(), nil
+}
+
+func runCommand(ctx context.Context, verbose bool, outputBuf io.Writer, name string, args ...string) error {
 	cmd := exec.CommandContext(ctx, name, args...)
 	if verbose {
 		cmd.Stdout = io.MultiWriter(os.Stdout, outputBuf)
@@ -137,7 +210,7 @@ func buildCommandArgs(spec source.Spec, addr *scheduler.Addr) []string {
 	return args
 }
 
-func nydusConvertArgs(sourceTarget, nydusTarget string) []string {
+func nydusConvertArgs(sourceTarget, nydusTarget string, plainHTTPRegistries []string) []string {
 	args := []string{
 		"convert",
 		"--source", sourceTarget,
@@ -145,8 +218,8 @@ func nydusConvertArgs(sourceTarget, nydusTarget string) []string {
 		"--fs-version", "5",
 		"--nydus-image", "/usr/bin/nydus-image",
 	}
-	sourcePlainHTTP := registryUsesPlainHTTP(sourceTarget)
-	targetPlainHTTP := registryUsesPlainHTTP(nydusTarget)
+	sourcePlainHTTP := registryUsesPlainHTTP(sourceTarget, plainHTTPRegistries)
+	targetPlainHTTP := registryUsesPlainHTTP(nydusTarget, plainHTTPRegistries)
 	if sourcePlainHTTP {
 		args = append(args, "--source-insecure")
 	}
@@ -159,13 +232,19 @@ func nydusConvertArgs(sourceTarget, nydusTarget string) []string {
 	return args
 }
 
-func registryUsesPlainHTTP(target string) bool {
+func registryUsesPlainHTTP(target string, plainHTTPRegistries []string) bool {
 	normalized := strings.TrimPrefix(strings.TrimPrefix(strings.TrimSpace(target), "docker://"), "oci://")
 	firstSlash := strings.IndexByte(normalized, '/')
 	if firstSlash <= 0 {
 		return false
 	}
-	host := normalized[:firstSlash]
+	registry := normalized[:firstSlash]
+	for _, configured := range plainHTTPRegistries {
+		if strings.EqualFold(strings.TrimSpace(configured), registry) {
+			return true
+		}
+	}
+	host := registry
 	if idx := strings.IndexByte(host, ':'); idx >= 0 {
 		host = host[:idx]
 	}

@@ -18,6 +18,7 @@ KIND_VALUES=${KIND_VALUES-${ROOT}/deploy/kind-values.yaml}
 KIND_LOAD_IMAGES=${KIND_LOAD_IMAGES:-true}
 START_OBSERVABILITY=${START_OBSERVABILITY:-true}
 WORKER_PLATFORM=${WORKER_PLATFORM-$(kova_platform)}
+VERIFY_RETRY_CRD_SCHEMA=${VERIFY_RETRY_CRD_SCHEMA:-true}
 
 if [[ "${KOVA_CHART}" != /* ]]; then
   KOVA_CHART=${ROOT}/${KOVA_CHART}
@@ -31,6 +32,17 @@ fi
 
 require_cmd helm
 
+case ${VERIFY_RETRY_CRD_SCHEMA} in
+  true|false) ;;
+  *)
+    echo "error: VERIFY_RETRY_CRD_SCHEMA must be true or false" >&2
+    exit 2
+    ;;
+esac
+if [[ "${VERIFY_RETRY_CRD_SCHEMA}" == "true" ]]; then
+  require_cmd kubectl
+fi
+
 if [[ "${START_OBSERVABILITY}" == "true" ]]; then
   "${ROOT}/scripts/observability/local-up.sh"
 fi
@@ -38,6 +50,13 @@ if [[ "${KIND_LOAD_IMAGES}" == "true" ]]; then
   "${ROOT}/scripts/kind/kind-load.sh"
 else
   "${ROOT}/scripts/kind/kind-create.sh"
+fi
+
+if [[ "${VERIFY_RETRY_CRD_SCHEMA}" == "true" ]]; then
+  helm show crds "${KOVA_CHART}" | \
+    kubectl --kubeconfig "${KIND_KUBECONFIG}" apply -f -
+  KUBECONFIG="${KIND_KUBECONFIG}" \
+    "${ROOT}/scripts/deployment/verify-kovabuild-crd.sh"
 fi
 
 helm_args=(

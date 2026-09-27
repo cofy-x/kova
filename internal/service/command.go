@@ -2,9 +2,12 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -12,21 +15,27 @@ import (
 	kovav1 "github.com/cofy-x/kova/internal/apis/kova/v1alpha1"
 	"github.com/cofy-x/kova/internal/buildcontract"
 	"github.com/cofy-x/kova/internal/kube"
+	"github.com/cofy-x/kova/internal/logging"
 	"github.com/cofy-x/kova/internal/runner"
 	serviceauth "github.com/cofy-x/kova/internal/service/auth"
 	"github.com/cofy-x/kova/internal/service/buildcontroller"
 	"github.com/cofy-x/kova/internal/service/config"
 	"github.com/cofy-x/kova/internal/service/httpapi"
+	"github.com/cofy-x/kova/internal/source"
 
 	"github.com/urfave/cli/v2"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
+	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
+	"k8s.io/client-go/util/flowcontrol"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
+	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 	ctrlzap "sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 )
@@ -43,6 +52,9 @@ func CLICommand() *cli.Command {
 			&cli.StringFlag{Name: "runner-image-pull-policy", Value: defaults.RunnerImagePullPolicy, Usage: "runner image pull policy"},
 			&cli.StringFlag{Name: "runner-image-pull-secret", Value: defaults.ImagePullSecret, Usage: "runner image pull secret name"},
 			&cli.StringSliceFlag{Name: "runner-node-selector", Usage: "node selector for runner Pods; repeatable key=value"},
+			&cli.StringFlag{Name: "runner-resources", Usage: "JSON resource requests and limits for runner Pods"},
+			&cli.StringFlag{Name: "source-fetch-resources", Usage: "JSON resource requests and limits for source fetch init containers"},
+			&cli.StringFlag{Name: "source-volume-size-limit", Value: "4Gi", Usage: "job-local source and runner temporary volume size limit (at least 4Gi)"},
 			&cli.StringSliceFlag{Name: "registry-plain-http", EnvVars: []string{"KOVA_SERVICE_REGISTRY_PLAIN_HTTP"}, Usage: "output registry host that uses plain HTTP; repeatable and intended for development"},
 			&cli.StringSliceFlag{Name: "buildkit-platform-addr", Usage: "BuildKit worker pool as platform=address; repeatable"},
 			&cli.DurationFlag{Name: "job-ttl", Value: 2 * time.Hour, Usage: "duration to retain terminal jobs before cleanup"},
@@ -51,16 +63,30 @@ func CLICommand() *cli.Command {
 			&cli.StringFlag{Name: "auth-static-principal", Value: "kova:static", EnvVars: []string{"KOVA_SERVICE_AUTH_STATIC_PRINCIPAL"}, Usage: "Kubernetes username represented by the static token"},
 			&cli.DurationFlag{Name: "wait", Value: 3 * time.Minute, Usage: "timeout for runner Pod readiness"},
 			&cli.DurationFlag{Name: "poll-interval", Value: 5 * time.Second, Usage: "build status polling interval"},
+			&cli.DurationFlag{Name: "poll-retry-window", Value: time.Minute, Usage: "maximum time to retry runner status errors while the Pod remains available"},
+			&cli.DurationFlag{Name: "max-build-duration", Value: 2 * time.Hour, Usage: "maximum time from runner admission to terminal build status"},
+			&cli.DurationFlag{Name: "verification-attempt-timeout", Value: 10 * time.Second, Usage: "maximum time for one result export or registry verification round"},
+			&cli.DurationFlag{Name: "verification-window", Value: 5 * time.Minute, Usage: "overall result verification window after runner completion"},
 			&cli.IntFlag{Name: "max-active-jobs", Value: 20, Usage: "maximum concurrently active service jobs"},
 			&cli.IntFlag{Name: "max-active-jobs-per-requester", Value: 4, Usage: "maximum concurrently active jobs for one authenticated requester"},
+			&cli.IntFlag{Name: "max-queued-jobs", Value: 1000, Usage: "maximum globally queued HTTP service jobs (1-1000)"},
 			&cli.IntFlag{Name: "max-queued-jobs-per-requester", Value: 100, Usage: "maximum queued jobs for one authenticated requester"},
 			&cli.IntFlag{Name: "worker-slots", Value: 20, Usage: "total build slots shared fairly across active jobs"},
 			&cli.IntFlag{Name: "controller-concurrency", Value: buildcontract.DefaultControllerConcurrency, Usage: "maximum concurrent KovaBuild reconciliations"},
+			&cli.IntFlag{Name: "kube-client-qps", Value: 20, Usage: "per-traffic-class, per-Service-Pod Kubernetes API QPS budget (1-100)"},
+			&cli.IntFlag{Name: "kube-client-burst", Value: 40, Usage: "per-traffic-class, per-Service-Pod Kubernetes API burst budget (at least QPS, at most 200)"},
+			&cli.StringFlag{Name: "metrics-bind-address", Value: "0", Usage: "disabled by default; optional loopback controller-runtime Prometheus metrics address"},
 			&cli.BoolFlag{Name: "leader-elect", Value: true, Usage: "enable controller-runtime leader election"},
 			&cli.StringFlag{Name: "leader-election-namespace", Usage: "namespace used for controller leader election leases; defaults to --namespace"},
 		},
 		Action: func(c *cli.Context) error {
 			ctrl.SetLogger(ctrlzap.New(ctrlzap.UseDevMode(false), ctrlzap.WriteTo(os.Stderr)))
+			if err := validateKubeClientRateLimit(c.Int("kube-client-qps"), c.Int("kube-client-burst")); err != nil {
+				return err
+			}
+			if err := validateMetricsBindAddress(c.String("metrics-bind-address"), c.String("listen")); err != nil {
+				return err
+			}
 			runnerNodeSelector, err := parseNodeSelector(c.StringSlice("runner-node-selector"))
 			if err != nil {
 				return err
@@ -73,44 +99,84 @@ func CLICommand() *cli.Command {
 			if err != nil {
 				return err
 			}
+			runnerResources, err := parsePodResources(c.String("runner-resources"))
+			if err != nil {
+				return fmt.Errorf("--runner-resources: %w", err)
+			}
+			sourceFetchResources, err := parsePodResources(c.String("source-fetch-resources"))
+			if err != nil {
+				return fmt.Errorf("--source-fetch-resources: %w", err)
+			}
+			sourceVolumeSizeLimit, err := resource.ParseQuantity(c.String("source-volume-size-limit"))
+			if err != nil || sourceVolumeSizeLimit.Cmp(runner.DefaultSourceVolumeSizeLimit()) < 0 {
+				return fmt.Errorf("--source-volume-size-limit must be at least 4Gi")
+			}
+			if err := validateSourcePodBudget(sourceVolumeSizeLimit, runnerResources, sourceFetchResources); err != nil {
+				return err
+			}
 			restConfig, err := rest.InClusterConfig()
 			if err != nil {
 				return err
 			}
-			kubeClient, err := kube.NewClientForConfig(restConfig)
+			restConfig = singleAttemptWrites(restConfig)
+			// The controller can saturate its API budget while a deep queue is
+			// reconciling. HTTP admission, readiness, and lease renewal must not
+			// wait for that backlog. All four budgets are per Service Pod.
+			leaderConfig, readinessConfig, httpConfig := configureKubeClientRateLimits(restConfig, c.Int("kube-client-qps"), c.Int("kube-client-burst"))
+			controllerKubeClient, err := kube.NewClientForConfig(restConfig)
 			if err != nil {
 				return err
 			}
-			clientset, err := kubernetes.NewForConfig(restConfig)
+			httpKubeClient, err := kube.NewClientForConfig(httpConfig)
+			if err != nil {
+				return err
+			}
+			clientset, err := kubernetes.NewForConfig(httpConfig)
 			if err != nil {
 				return err
 			}
 			scheme := runtime.NewScheme()
 			utilruntime.Must(corev1.AddToScheme(scheme))
 			utilruntime.Must(kovav1.AddToScheme(scheme))
+			readinessReader, err := ctrlclient.New(readinessConfig, ctrlclient.Options{Scheme: scheme})
+			if err != nil {
+				return err
+			}
+			httpClient, err := ctrlclient.New(httpConfig, ctrlclient.Options{Scheme: scheme})
+			if err != nil {
+				return err
+			}
 			ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 			defer stop()
 			cfg := config.Config{
-				Listen:                    c.String("listen"),
-				Namespace:                 c.String("namespace"),
-				RunnerImage:               strings.TrimSpace(c.String("runner-image")),
-				RunnerImagePullPolicy:     c.String("runner-image-pull-policy"),
-				RunnerImagePullSecret:     c.String("runner-image-pull-secret"),
-				RunnerNodeSelector:        runnerNodeSelector,
-				RunnerEnv:                 runnerObservabilityEnv(),
-				RegistryPlainHTTP:         plainHTTPRegistries,
-				BuildkitPlatformAddrs:     platformAddrs,
-				JobTTL:                    c.Duration("job-ttl"),
-				AuthToken:                 c.String("auth-token"),
-				AuthMode:                  strings.TrimSpace(c.String("auth-mode")),
-				AuthStaticPrincipal:       strings.TrimSpace(c.String("auth-static-principal")),
-				WaitTimeout:               c.Duration("wait"),
-				PollInterval:              c.Duration("poll-interval"),
-				MaxActiveJobs:             c.Int("max-active-jobs"),
-				MaxActiveJobsPerRequester: c.Int("max-active-jobs-per-requester"),
-				MaxQueuedJobsPerRequester: c.Int("max-queued-jobs-per-requester"),
-				WorkerSlots:               c.Int("worker-slots"),
-				ControllerConcurrency:     c.Int("controller-concurrency"),
+				Listen:                     c.String("listen"),
+				Namespace:                  c.String("namespace"),
+				RunnerImage:                strings.TrimSpace(c.String("runner-image")),
+				RunnerImagePullPolicy:      c.String("runner-image-pull-policy"),
+				RunnerImagePullSecret:      c.String("runner-image-pull-secret"),
+				RunnerNodeSelector:         runnerNodeSelector,
+				RunnerEnv:                  runnerObservabilityEnv(),
+				RunnerResources:            runnerResources,
+				SourceFetchResources:       sourceFetchResources,
+				SourceVolumeSizeLimit:      &sourceVolumeSizeLimit,
+				RegistryPlainHTTP:          plainHTTPRegistries,
+				BuildkitPlatformAddrs:      platformAddrs,
+				JobTTL:                     c.Duration("job-ttl"),
+				AuthToken:                  c.String("auth-token"),
+				AuthMode:                   strings.TrimSpace(c.String("auth-mode")),
+				AuthStaticPrincipal:        strings.TrimSpace(c.String("auth-static-principal")),
+				WaitTimeout:                c.Duration("wait"),
+				PollInterval:               c.Duration("poll-interval"),
+				PollRetryWindow:            c.Duration("poll-retry-window"),
+				MaxBuildDuration:           c.Duration("max-build-duration"),
+				VerificationAttemptTimeout: c.Duration("verification-attempt-timeout"),
+				VerificationWindow:         c.Duration("verification-window"),
+				MaxActiveJobs:              c.Int("max-active-jobs"),
+				MaxActiveJobsPerRequester:  c.Int("max-active-jobs-per-requester"),
+				MaxQueuedJobs:              c.Int("max-queued-jobs"),
+				MaxQueuedJobsPerRequester:  c.Int("max-queued-jobs-per-requester"),
+				WorkerSlots:                c.Int("worker-slots"),
+				ControllerConcurrency:      c.Int("controller-concurrency"),
 			}
 			if err := validateCapacityConfig(cfg); err != nil {
 				return err
@@ -127,27 +193,42 @@ func CLICommand() *cli.Command {
 				}
 			}
 			mgr, err := ctrl.NewManager(restConfig, ctrl.Options{
-				Scheme:                  scheme,
-				Cache:                   cache.Options{DefaultNamespaces: map[string]cache.Config{cfg.Namespace: {}}},
-				Metrics:                 metricsserver.Options{BindAddress: "0"},
+				Scheme: scheme,
+				Cache: cache.Options{
+					DefaultNamespaces: map[string]cache.Config{cfg.Namespace: {}},
+					// The admission pump watches only its active ledger. A
+					// metadata.name field selector lets RBAC grant List/Watch for
+					// that named ConfigMap without opening all namespace ConfigMaps.
+					ByObject: map[ctrlclient.Object]cache.ByObject{
+						&corev1.ConfigMap{}: {Field: fields.OneTermEqualSelector("metadata.name", buildcontroller.AdmissionLedgerName)},
+					},
+				},
+				Metrics:                 metricsserver.Options{BindAddress: c.String("metrics-bind-address")},
 				LeaderElection:          c.Bool("leader-elect"),
+				LeaderElectionConfig:    leaderConfig,
 				LeaderElectionID:        "kova-service.kova.cofy.dev",
 				LeaderElectionNamespace: leaderElectionNamespace(c, cfg.Namespace),
 			})
 			if err != nil {
 				return err
 			}
+			admissionPump := buildcontroller.NewAdmissionPump(mgr.GetAPIReader(), cfg)
+			if err := admissionPump.SetupWithManager(mgr); err != nil {
+				return err
+			}
 			if err := (&buildcontroller.KovaBuildReconciler{
-				Client:   mgr.GetClient(),
-				Scheme:   mgr.GetScheme(),
-				Kube:     kubeClient,
-				Cfg:      cfg,
-				Recorder: mgr.GetEventRecorderFor("kova-service"),
-			}).SetupWithManager(mgr); err != nil {
+				Client:    mgr.GetClient(),
+				APIReader: mgr.GetAPIReader(),
+				Scheme:    mgr.GetScheme(),
+				Kube:      controllerKubeClient,
+				Cfg:       cfg,
+				Recorder:  mgr.GetEventRecorderFor("kova-service"),
+			}).SetupWithManager(mgr, admissionPump.WakeEvents()); err != nil {
 				return err
 			}
 			go func() {
-				if err := httpapi.NewServer(cfg, kubeClient, mgr.GetClient(), mgr.GetAPIReader(), authenticator, authorizer).Start(ctx); err != nil {
+				if err := httpapi.NewServer(cfg, httpKubeClient, httpClient, httpClient, readinessReader, authenticator, authorizer).Start(ctx); err != nil {
+					logging.Errorf("Kova Service HTTP server stopped: %v", err)
 					stop()
 				}
 			}()
@@ -156,7 +237,69 @@ func CLICommand() *cli.Command {
 	}
 }
 
+func validateKubeClientRateLimit(qps, burst int) error {
+	if qps < 1 || qps > 100 {
+		return fmt.Errorf("kube-client-qps must be between 1 and 100")
+	}
+	if burst < qps || burst > 200 {
+		return fmt.Errorf("kube-client-burst must be between kube-client-qps and 200")
+	}
+	return nil
+}
+
+func validateMetricsBindAddress(address, serviceAddress string) error {
+	if address == "0" {
+		return nil
+	}
+	host, port, err := net.SplitHostPort(address)
+	if err != nil || host != "127.0.0.1" {
+		return fmt.Errorf("metrics-bind-address must be 0 or 127.0.0.1:<port>")
+	}
+	number, err := strconv.Atoi(port)
+	if err != nil || number < 1 || number > 65535 {
+		return fmt.Errorf("metrics-bind-address port must be between 1 and 65535")
+	}
+	if _, servicePort, err := net.SplitHostPort(serviceAddress); err == nil && servicePort == port {
+		return fmt.Errorf("metrics-bind-address must use a different port from the Service HTTP listener")
+	}
+	return nil
+}
+
+func configureKubeClientRateLimit(config *rest.Config, qps, burst int) {
+	config.QPS = float32(qps)
+	config.Burst = burst
+	// Clients in one traffic class must share a limiter; otherwise every
+	// clientset silently multiplies that class's intended budget.
+	config.RateLimiter = flowcontrol.NewTokenBucketRateLimiter(config.QPS, burst)
+}
+
+func configureKubeClientRateLimits(config *rest.Config, qps, burst int) (*rest.Config, *rest.Config, *rest.Config) {
+	leaderConfig := rest.CopyConfig(config)
+	readinessConfig := rest.CopyConfig(config)
+	httpConfig := rest.CopyConfig(config)
+	configureKubeClientRateLimit(leaderConfig, 5, 10)
+	configureKubeClientRateLimit(readinessConfig, 5, 10)
+	configureKubeClientRateLimit(httpConfig, qps, burst)
+	configureKubeClientRateLimit(config, qps, burst)
+	return leaderConfig, readinessConfig, httpConfig
+}
+
 func validateCapacityConfig(cfg config.Config) error {
+	if cfg.PollRetryWindow <= 0 {
+		return fmt.Errorf("poll-retry-window must be positive")
+	}
+	if cfg.MaxBuildDuration <= 0 {
+		return fmt.Errorf("max-build-duration must be positive")
+	}
+	if cfg.VerificationAttemptTimeout <= 0 || cfg.VerificationAttemptTimeout > time.Minute {
+		return fmt.Errorf("verification-attempt-timeout must be between 1ns and 1m")
+	}
+	if cfg.VerificationWindow < cfg.VerificationAttemptTimeout || cfg.VerificationWindow > time.Hour {
+		return fmt.Errorf("verification-window must be between verification-attempt-timeout and 1h")
+	}
+	if cfg.MaxBuildDuration > time.Duration(1<<63-1)-cfg.VerificationWindow {
+		return fmt.Errorf("max-build-duration plus verification-window overflows")
+	}
 	if cfg.MaxActiveJobs < 1 {
 		return fmt.Errorf("max-active-jobs must be at least 1")
 	}
@@ -166,11 +309,19 @@ func validateCapacityConfig(cfg config.Config) error {
 	if cfg.MaxQueuedJobsPerRequester < 1 {
 		return fmt.Errorf("max-queued-jobs-per-requester must be at least 1")
 	}
+	if cfg.MaxQueuedJobs < 1 || cfg.MaxQueuedJobs > 1000 {
+		return fmt.Errorf("max-queued-jobs must be between 1 and 1000")
+	}
+	if cfg.MaxQueuedJobsPerRequester > cfg.MaxQueuedJobs {
+		return fmt.Errorf("max-queued-jobs-per-requester must not exceed max-queued-jobs")
+	}
 	if cfg.WorkerSlots < 1 {
 		return fmt.Errorf("worker-slots must be at least 1")
 	}
-	if cfg.ControllerConcurrency < 1 || cfg.ControllerConcurrency > buildcontract.MaxControllerConcurrency {
-		return fmt.Errorf("controller-concurrency must be between 1 and %d", buildcontract.MaxControllerConcurrency)
+	// Result verification can block one reconciler until its bounded I/O
+	// attempt ends. Keep another worker available for cancellation and cleanup.
+	if cfg.ControllerConcurrency < 2 || cfg.ControllerConcurrency > buildcontract.MaxControllerConcurrency {
+		return fmt.Errorf("controller-concurrency must be between 2 and %d", buildcontract.MaxControllerConcurrency)
 	}
 	return nil
 }
@@ -236,6 +387,70 @@ func parseRegistryHosts(values []string) ([]string, error) {
 		hosts = append(hosts, host)
 	}
 	return hosts, nil
+}
+
+func parsePodResources(raw string) (corev1.ResourceRequirements, error) {
+	var resources corev1.ResourceRequirements
+	if strings.TrimSpace(raw) == "" {
+		return resources, nil
+	}
+	if err := json.Unmarshal([]byte(raw), &resources); err != nil {
+		return resources, err
+	}
+	for name, quantity := range resources.Requests {
+		if quantity.Sign() <= 0 {
+			return resources, fmt.Errorf("request %s must be positive", name)
+		}
+	}
+	for name, quantity := range resources.Limits {
+		if quantity.Sign() <= 0 {
+			return resources, fmt.Errorf("limit %s must be positive", name)
+		}
+	}
+	return resources, nil
+}
+
+func validateSourcePodBudget(volumeLimit resource.Quantity, runnerResources, fetchResources corev1.ResourceRequirements) error {
+	if err := validateReservedLimits("runner", runner.DefaultRunnerResources(), runnerResources); err != nil {
+		return err
+	}
+	if err := validateReservedLimits("source fetch", runner.DefaultSourceFetchResources(), fetchResources); err != nil {
+		return err
+	}
+	runnerLimit := runner.DefaultRunnerResources().Limits[corev1.ResourceEphemeralStorage]
+	if override, ok := runnerResources.Limits[corev1.ResourceEphemeralStorage]; ok {
+		runnerLimit = override
+	}
+	minimumRunnerLimit := volumeLimit.DeepCopy()
+	minimumRunnerLimit.Add(resource.MustParse("1Gi"))
+	if runnerLimit.Cmp(minimumRunnerLimit) < 0 {
+		return fmt.Errorf("runner ephemeral-storage limit must exceed source volume size limit by at least 1Gi")
+	}
+	initLimit := runner.DefaultSourceFetchResources().Limits[corev1.ResourceEphemeralStorage]
+	if override, ok := fetchResources.Limits[corev1.ResourceEphemeralStorage]; ok {
+		initLimit = override
+	}
+	if initLimit.Cmp(*resource.NewQuantity(source.MaxArchiveBytes, resource.BinarySI)) < 0 {
+		return fmt.Errorf("source fetch ephemeral-storage limit must be at least 512Mi")
+	}
+	return nil
+}
+
+func validateReservedLimits(name string, defaults, overrides corev1.ResourceRequirements) error {
+	for _, key := range []corev1.ResourceName{corev1.ResourceMemory, corev1.ResourceEphemeralStorage} {
+		request := defaults.Requests[key]
+		if override, ok := overrides.Requests[key]; ok {
+			request = override
+		}
+		limit := defaults.Limits[key]
+		if override, ok := overrides.Limits[key]; ok {
+			limit = override
+		}
+		if request.Cmp(limit) != 0 {
+			return fmt.Errorf("%s %s request must equal its limit", name, key)
+		}
+	}
+	return nil
 }
 
 func leaderElectionNamespace(c *cli.Context, fallback string) string {

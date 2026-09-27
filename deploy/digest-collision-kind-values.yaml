@@ -1,0 +1,58 @@
+# Disposable #41 fixture only. The registry and proxy are dedicated to this
+# Kind; do not reuse these values for a shared or cloud deployment.
+images:
+  controller:
+    repository: localhost:5004/kova
+    tag: controller-dev
+    pullPolicy: IfNotPresent
+  runner:
+    repository: localhost:5004/kova
+    tag: runner-dev
+    pullPolicy: IfNotPresent
+  worker:
+    repository: localhost:5004/kova
+    tag: worker-dev
+    pullPolicy: IfNotPresent
+
+networkPolicy:
+  worker:
+    enabled: false
+
+observability:
+  enabled: false
+
+deployment:
+  replicas: 1
+
+worker:
+  cache:
+    reservedSpaceGB: 1
+    maxUsedSpaceGB: 3
+    minFreeSpaceGB: 1
+  resources:
+    limits:
+      ephemeral-storage: 8Gi
+    requests:
+      ephemeral-storage: 1Gi
+  volumes:
+    - name: run-buildkit
+      emptyDir: {}
+    - name: lib-buildkit
+      emptyDir:
+        sizeLimit: 8Gi
+  volumeMounts:
+    - name: run-buildkit
+      mountPath: /run/user/1000
+    - name: lib-buildkit
+      mountPath: /home/user/.local/share/buildkit
+    - name: buildkit-config
+      mountPath: /etc/buildkit
+
+buildkitdConfig: |
+  debug = false
+
+  [registry."kind-registry-digest-41:5000"]
+    http = true
+
+  [registry."kova-digest-fault-proxy.kova.svc.cluster.local:5000"]
+    http = true

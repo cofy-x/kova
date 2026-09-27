@@ -3,6 +3,7 @@ package source
 import (
 	"archive/zip"
 	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -52,8 +53,15 @@ func TestValidateBuildArchiveRejectsRootFile(t *testing.T) {
 	}
 
 	_, err = ValidateBuildArchive(zipPath)
-	if err == nil || !strings.Contains(err.Error(), "root file") {
+	if !errors.Is(err, ErrInvalidBuildArchive) || !strings.Contains(err.Error(), "root file") {
 		t.Fatalf("expected root file validation error, got %v", err)
+	}
+}
+
+func TestBuildArchiveTargetsDoesNotMarkFilesystemFailureAsInvalid(t *testing.T) {
+	_, err := BuildArchiveTargets(filepath.Join(t.TempDir(), "missing.zip"))
+	if !errors.Is(err, os.ErrNotExist) || errors.Is(err, ErrInvalidBuildArchive) {
+		t.Fatalf("missing archive classification = %v", err)
 	}
 }
 
@@ -168,6 +176,64 @@ func TestLoadBuildSpecsForFormatsExpandsBothFormatsFromImageDirs(t *testing.T) {
 	}
 	if oci, ok := got["example.com/ns/repo:tag_nydus_v3"]; !ok || oci {
 		t.Fatalf("expected nydus target, got %#v", got)
+	}
+}
+
+func TestLoadBuildSpecsForFormatsInPlaceDoesNotCopyExpandedPayload(t *testing.T) {
+	contextDir := filepath.Join(t.TempDir(), "image")
+	if err := os.Mkdir(contextDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(contextDir, "Dockerfile"), []byte("FROM scratch\n# ${KOVA_VALUE}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(contextDir, "metadata.json"), []byte(`{"target":"example.com/ns/repo:tag","platform":"linux/amd64"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// A highly compressed payload reproduces the relevant capacity shape
+	// without allocating a multi-GiB archive in the unit test.
+	if err := os.WriteFile(filepath.Join(contextDir, "payload"), bytes.Repeat([]byte("p"), 8<<20), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	archive := filepath.Join(t.TempDir(), "source.zip")
+	if err := CreateSingleImageArchive(contextDir, "example.com/ns/repo:tag", "linux/amd64", archive); err != nil {
+		t.Fatal(err)
+	}
+	immutableArchive, err := os.ReadFile(archive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	extracted := filepath.Join(t.TempDir(), "extracted")
+	if err := ExtractZip(archive, extracted); err != nil {
+		t.Fatal(err)
+	}
+	tempRoot := t.TempDir()
+	t.Setenv("TMPDIR", tempRoot)
+	specs, cleanup, err := LoadBuildSpecsForFormatsInPlace(extracted, "", "", []BuildFormat{BuildFormatOCI, BuildFormatNydus}, map[string]string{"KOVA_VALUE": "ready"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cleanup != nil {
+		t.Fatal("in-place source must not return cleanup for its caller-owned extracted tree")
+	}
+	if len(specs) != 2 {
+		t.Fatalf("want OCI and Nydus specs, got %#v", specs)
+	}
+	for _, spec := range specs {
+		if spec.Dir != filepath.Join(extracted, "image") {
+			t.Fatalf("source payload was copied to %q", spec.Dir)
+		}
+	}
+	if entries, err := os.ReadDir(tempRoot); err != nil || len(entries) != 0 {
+		t.Fatalf("in-place source created temporary copies: %v, %v", entries, err)
+	}
+	dockerfile, err := os.ReadFile(filepath.Join(extracted, "image", "Dockerfile"))
+	if err != nil || string(dockerfile) != "FROM scratch\n# ready\n" {
+		t.Fatalf("job-local Dockerfile substitution = %q, %v", dockerfile, err)
+	}
+	after, err := os.ReadFile(archive)
+	if err != nil || !bytes.Equal(after, immutableArchive) {
+		t.Fatalf("immutable source archive changed: %v", err)
 	}
 }
 
@@ -290,6 +356,54 @@ func TestCreateSingleImageArchivePreservesSafeSymlink(t *testing.T) {
 	}
 	if target != "hello.txt" {
 		t.Fatalf("link target = %q", target)
+	}
+}
+
+func TestRequiredDockerfileCannotBeASymlink(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink permissions vary on Windows")
+	}
+	imageDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(imageDir, "Dockerfile.actual"), []byte("FROM scratch\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("Dockerfile.actual", filepath.Join(imageDir, "Dockerfile")); err != nil {
+		t.Fatal(err)
+	}
+	if err := CreateSingleImageArchive(imageDir, "example.com/ns/app:dev", "linux/amd64", filepath.Join(t.TempDir(), "source.zip")); err == nil || !strings.Contains(err.Error(), "regular file") {
+		t.Fatalf("symlinked Dockerfile accepted: %v", err)
+	}
+
+	archive := filepath.Join(t.TempDir(), "source.zip")
+	file, err := os.Create(archive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writer := zip.NewWriter(file)
+	header := &zip.FileHeader{Name: "image/Dockerfile"}
+	header.SetMode(os.ModeSymlink | 0o777)
+	dockerfile, err := writer.CreateHeader(header)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := dockerfile.Write([]byte("Dockerfile.actual")); err != nil {
+		t.Fatal(err)
+	}
+	metadata, err := writer.Create("image/metadata.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := metadata.Write([]byte(`{"target":"example.com/ns/app:dev","platform":"linux/amd64"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ValidateBuildArchive(archive); err == nil || !strings.Contains(err.Error(), "regular file") {
+		t.Fatalf("archive with symlinked Dockerfile accepted: %v", err)
 	}
 }
 

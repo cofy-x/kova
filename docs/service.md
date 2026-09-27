@@ -15,9 +15,29 @@ TokenReview mode submits SubjectAccessReview requests for the virtual `servicebu
 Only the controller ServiceAccount writes actual `KovaBuild` resources, so callers cannot bypass ownership or idempotency through the public API.
 The chart creates unbound `kova-service-submitter` and `kova-service-admin` Roles; each environment owns their RoleBindings.
 
+In `tokenreview` mode, every authenticated `/v1/*` request makes one Kubernetes TokenReview; Kova does not cache a positive authentication decision or extend token validity after revocation.
+Create and list requests, and non-owner per-build requests, also make a SubjectAccessReview; an authenticated build owner can read or manage that build without a redundant review.
+These calls share the per-Service-Pod HTTP Kubernetes client budget with admission and build reads; account for both authentication and authorization calls when setting `kubeClientQPS`, `kubeClientBurst`, and Service replica count.
+A definitively invalid bearer or denied policy returns non-retryable 401 or 403.
+If Kubernetes cannot check a token or cannot determine authorization, the request remains denied and returns retryable 503 with `Retry-After: 5`; the response never exposes the bearer or reviewer details.
+An uncertain list authorization does not silently fall back to an owner-only list.
+When a build CR is absent, Kova reviews a non-owner lookup even if no queue intent exists, so an unavailable authorizer returns the same 503 for both cases rather than revealing whether a queued build ID exists.
+This costs one additional SubjectAccessReview for non-owner CR misses; a matching queued owner returns its pending status without that review.
+The `kova.service.identity.review_unavailable` metric counts unresolved authentication and authorization reviews separately from definitive denial counters.
+
 `/healthz` is unauthenticated liveness.
-`/readyz` verifies Kubernetes API access.
+`/readyz` directly verifies Kubernetes API access to `KovaBuild` plus both admission ConfigMaps, including their schema and this replica's capacity limits.
+The Service initializes both ledgers before opening its HTTP listener; if a ledger is missing, malformed, or configured differently later, readiness returns 503 without silently repairing it.
+New submissions also check the active ledger immediately before queue reservation, and the reservation validates the queue ledger; existing build queries remain available during an admission outage.
 `/version` reports Service API and build provenance without credentials.
+
+The Service listener gives a connection 5 seconds to finish HTTP headers and 30 seconds total to read a request, including its body; an idle keep-alive connection closes after 60 seconds.
+The 1 MiB create-body limit still applies independently.
+These are transport safeguards, not build or controller deadlines.
+An incomplete request may be closed or receive an unstructured HTTP 408 before it reaches the API error handler.
+An incomplete JSON create body cannot reserve queue capacity.
+The Service intentionally has no absolute `WriteTimeout`: handlers may wait for Kubernetes operations after a mutation has begun, and cutting off the response at a fixed wall-clock time would make an accepted build indistinguishable from a failed submission.
+Callers should set their own response deadline, use a stable idempotency key, and reconcile any uncertain submission by its build ID instead of issuing a new logical request.
 
 ## Immutable Sources
 
@@ -34,12 +54,26 @@ kova source push \
 
 Kova also accepts an immutable HTTPS archive URL without user information, query credentials, or fragments when the caller supplies the expected SHA-256 content digest.
 OCI bundle retention and garbage collection belong to the registry or caller.
+The source contract permits at most 512 MiB of exact zip bytes, 2 GiB of total expanded ZIP member bytes, and 100,000 ZIP entries.
+Top-level `Dockerfile` and `metadata.json` files must be regular files and are each limited to 1 MiB, including the result of build-variable substitution.
+Standalone symlinks may point within their image context, but archive members nested below a symlink path are rejected to prevent extraction aliases from bypassing path-specific limits.
+These fixed limits apply to local source inspection and push, HTTPS and OCI fetches, runner uploads, and extraction.
+Kova counts bytes while reading and extracting as well as checking ZIP headers; a rejected source is reported as `InvalidSource` during source inspection or fetch, before any image push.
+The Service reports `invalid_source` only when source validation has proven that the reference or content violates the source contract, including size, layer type, or digest checks.
+Source fetch registry/network failures return `source_unavailable`; source-fetch out-of-memory or full disk, and Pod eviction before build submission, return `resource_exhausted`.
+An unclassified source-fetch init failure is treated as `source_unavailable`, not as proof that the immutable input is invalid.
+The post-fetch source inspection uses the same explicit invalid-source and resource-exhaustion exit codes. Its other process failures return `source_unavailable`; malformed inspection output is a runner protocol failure, not an invalid-source verdict.
+Callers should inspect their own retry policy for those transient or resource failures; Kova never retries a build automatically.
+`kova source push` uses a bounded immutable temporary file rather than buffering the source ZIP in client memory; the client host needs up to 512 MiB of temporary disk headroom per concurrent push.
 
 Each request has 1–100 logical targets. Every target is an object containing one unique, explicitly tagged OCI push destination and exactly one supported platform: `linux/amd64` or `linux/arm64`.
 Digest-only destinations and free-form platform labels are rejected.
 The `_nydus_v3` tag suffix is reserved for Kova's derived Nydus output and is rejected on logical targets, preventing OCI and Nydus concrete output collisions.
 With `format=both`, status can contain at most 200 concrete outputs.
 Requested concurrency is between 1 and 100 and cannot exceed the logical target count.
+The unique-target check applies within one request; Kova cannot reserve a mutable registry tag against another build or an external writer.
+Callers should use a distinct output tag per logical build and retain pushed manifests and blobs long enough for verification and downstream pulls.
+If a competing writer moves a tag and the registry removes this build's digest, Kova retries the exact digest only until its bounded verification deadline, then fails without substituting the new tag's image.
 
 After a source is fetched and digest-verified, the controller inspects its metadata in the runner Pod.
 The normalized source `(target, platform)` set must exactly match `spec.targets` before the build request is sent to BuildKit.
@@ -90,6 +124,8 @@ kova job cancel <job-id>
 ```
 
 Logs are available only while the runner Pod is active.
+Per-target command output retained for failure diagnostics is the latest 1 MiB, with a truncation marker when earlier output was discarded; verbose streaming is unchanged.
+The runner's ephemeral failure-log file is capped at 256 MiB and is not a durable log archive, so callers must capture logs they need to retain.
 The results endpoint returns the source identity and verified image outputs; it does not return an object-store URI.
 
 ## Python SDK
@@ -134,6 +170,8 @@ External cancellation of an async task propagates normally.
 `KovaAPIError` exposes `status_code`, stable `code`, safe `message`, `retryable`, and `retry_after` as a `datetime.timedelta` when supplied.
 
 The SDK returns `immutable_ref` exactly as supplied and validated by the Service; it never reconstructs an immutable reference from the mutable tag.
+Known terminal failure codes are `BuildFailureCode` enum values; a future unknown code is preserved as a nonempty string so status polling and receipt capture continue.
+Older Python SDK releases reject unknown failure codes while parsing jobs. Upgrade all Python clients to a release with this tolerant decoder before deploying a Service version that can emit `source_unavailable` or `resource_exhausted`; keep the older Service until that client rollout is complete.
 The caller owns retry policy and must persist source identity, build ID, manifest digest, and immutable reference before the terminal job TTL expires.
 The [executable Python and Go Service SDK examples](../examples/service-sdk/README.md) demonstrate the complete source URI and digest to receipt flow with one shared environment contract. The [seed build receipt reference shape](examples/seed-build-receipt-v1.json) records recipe identity, terminal status, target role, platform, format, image, digest, and immutable reference. The caller owns this receipt; Kova does not provide a long-term receipt store.
 
@@ -234,7 +272,7 @@ curl -sS -X POST "$BASE/v1/builds" \
   }'
 ```
 
-The first request returns `202 Accepted`.
+The first request returns `202 Accepted` after an atomic queue-intent reservation.
 Repeating the same caller-scoped idempotency key with identical inputs returns the existing build; changing any immutable input returns `409 Conflict`.
 Unknown fields and mutable source references are rejected.
 
@@ -249,14 +287,24 @@ POST /v1/builds/<id>/cancel
 ```
 
 Job responses contain the public execution state and a stable `failure_code` for terminal failures.
+After the runner completes, `verifying` is a durable nonterminal state; the response includes verification start/deadline/next-attempt times, attempt count, last error, and pending/succeeded/failed output counts.
+An internally distinct `FailedVerifying` state projects as public `verifying` while Kova checks outputs pushed before a runner failure. It cannot become `succeeded`: even if every earlier push verifies, the final job is `failed` with `build_failed`. The original runner failure is retained in Kubernetes status, and cancellation cannot rewrite the known failed outcome. Existing clients therefore continue waiting for a final `failed` response rather than mistaking partial receipts for a successful build.
 They do not expose runner Pod names, Kubernetes namespaces, or internal BuildKit addresses.
 List pages are limited to 500 jobs, and log requests are limited to the last 10,000 lines.
+Each log response is also limited to 4 MiB regardless of line count.
+If the selected tail exceeds that limit, Kova returns `413 logs_unavailable` without partial logs; request fewer lines or use an external log backend for longer output.
 
 Each successful output contains `format`, `platform`, the mutable pushed `image` tag, `manifest_digest`, and a server-derived `immutable_ref`.
 The Service removes the explicit tag, preserves registry ports and nested repositories, validates the SHA-256 digest, and returns a canonical `repository@sha256:...` reference.
 Clients must not construct this reference themselves.
 Registry descriptor checks use bounded parallelism.
-Kova resolves the digest-pinned single-platform manifest, reads its image configuration, and requires its OS and architecture to match the request; it never verifies platform through the mutable tag.
+Kova resolves the digest-pinned single-platform manifest, reads its image configuration, and requires its OS and architecture to match the request; it never verifies platform through the mutable tag. Each registry verification HTTP response is limited to 4 MiB, including manifests and image configurations; larger artifacts are rejected rather than loaded into controller memory.
+For OCI outputs, Kova records the digest returned by that build's BuildKit push.
+For Nydus outputs, the source-pinned Nydusify converter records the descriptor digest after that build's target push succeeds.
+Both formats fail verification if the push metadata omits a valid digest; a later lookup of the mutable tag cannot replace that digest.
+Runner completion and exact push receipts are persisted before registry verification. Each attempt has a 10-second default deadline and at most 16 pending outputs, with no more than four registry requests in flight. Transient export/registry failures retry with capped backoff inside a separate five-minute default verification window; an immutable digest or platform mismatch fails immediately. The controller never submits a completed runner again, including after restart or leader handoff.
+When the runner itself fails, Kova also retries collection of already-pushed partial receipts under a separate absolute deadline of at most five minutes, regardless of a larger configured verification window. Definitively missing or failed outputs finish promptly; temporary export or registry unavailability does not erase another output's exact digest. An unreachable registry at the deadline leaves that output failed, while verified partial outputs remain in the final `failed` result. The runner Pod and its active admission reservation remain until verification reaches this bounded terminal state and Pod deletion is confirmed; this protects capacity accounting but means a failed build can temporarily occupy one slot during receipt recovery.
+Only two controller reconciles perform verification I/O at once under the default four-reconcile setting, leaving admission capacity for other jobs. The runner Pod remains available during verification. Once all receipts are verified, Kova persists terminal status before Pod deletion; admission capacity stays reserved until terminal cleanup confirms the Pod is gone. Cancellation or deletion also removes the Pod. The Kubernetes active deadline includes the verification window, while the build-execution deadline still ends at `maxBuildDuration`.
 If one of several registries fails, the job is `Failed` while already verified output digests remain in status.
 Registry pushes are not transactional and Kova does not roll them back.
 
@@ -266,12 +314,12 @@ Workloads above 100 logical targets must be split by the caller into several bou
 
 ## Error Contract
 
-All Service API failures use a structured response:
+Once a request reaches an API handler, Service API failures use a structured response; connection-level read timeouts may instead close the socket or return an unstructured HTTP 408:
 
 ```json
 {
   "code": "queue_capacity_exceeded",
-  "message": "requester queue limit is reached",
+  "message": "queue limit is reached",
   "retryable": true
 }
 ```
@@ -284,11 +332,15 @@ All Service API failures use a structured response:
 | `not_found` | 404 | False; the job may never have existed or its TTL may have expired. |
 | `conflict` | 409 | False; the idempotency key is bound to different immutable inputs. |
 | `queue_capacity_exceeded` | 429 | True; respect `Retry-After` before making a new idempotent submission attempt. |
+| `queue_admission_pending` | 503 | True; one CR Create has an unknown or not-yet-observed outcome. Retry with the **same** idempotency key or inspect the `X-Kova-Build-ID`; do not submit a new key to recover this intent. |
 | `logs_unavailable` | 404 or 410 | True before a runner starts and false after terminal cleanup begins. |
 | `internal` | 500 or 503 | True only for transient service failures; false for deterministic service configuration or stored-contract failures. Mutating retries still require an idempotency key. |
 
 Non-administrative responses do not include raw Kubernetes, runner, Pod, registry credential, or implementation errors.
 Detailed implementation failures remain in operator-controlled logs and Kubernetes status rather than the public error response.
+
+HTTP submissions reserve in a single CAS queue ledger before CR creation. It applies both `maxQueuedJobs` (global, at most 1000) and `maxQueuedJobsPerRequester` across Service replicas. Direct/admin-created CRs are **outside** these HTTP queue limits, but their runner admission still uses the active hard limit. Unknown CR Create results keep their intent; the authenticated caller can query `GET /v1/builds/<id>` for a pending error when no CR is visible. Both SDKs expose the Build ID on API errors. A pending intent may require operator recovery and must not be released merely because the CR is absent. The exact safety conditions and upgrade barrier are in the [Service admission design](service-admission-design.md).
+If an earlier runner Pod Create has an unknown outcome, the build reports `recovery_required=true` while its capacity remains reserved; an operator must resolve the recorded attempt before that slot can be reused.
 
 ## Helm Configuration
 
@@ -301,13 +353,34 @@ serviceDaemon:
     mode: tokenreview
   maxActiveJobs: 20
   maxActiveJobsPerRequester: 4
+  maxQueuedJobs: 1000
   maxQueuedJobsPerRequester: 100
   workerSlots: 40
   controllerConcurrency: 4
+  kubeClientQPS: 20
+  kubeClientBurst: 40
+  pollRetryWindow: 1m
+  maxBuildDuration: 2h
+  verificationAttemptTimeout: 10s
+  verificationWindow: 5m
 
 worker:
   platform: linux/amd64
 ```
+
+The Service retries temporary runner status and source-inspect transport errors with backoff while checking the runner Pod, for at most `pollRetryWindow`.
+`maxBuildDuration` is the Service-owned limit from runner admission through completion; it applies even when a request sets the per-target `timeout` to `0`.
+At the limit the controller cancels the runner, deletes its Pod, and reports a failed build so its active slot can be reused.
+The runner Pod also has a Kubernetes active deadline, which stops a hung build if the controller is temporarily unavailable.
+When the controller reconciles after the deadline, it first makes a bounded status check; a reachable terminal runner state is processed and verified, while an active or unobservable runner is timed out.
+The separate verification window starts when a completed runner is durably observed. If it expires, pending outputs fail with `result_verification_failed`; verified digests remain available as partial results. Adjust the window for registry consistency and the number of concrete outputs, not to extend build execution.
+Keep `controllerConcurrency` at 2 or more: one reconciler may wait for a bounded registry verification attempt while another must remain available for cancellation and terminal Pod cleanup. Older one-worker configurations must be raised before upgrading.
+`kubeClientQPS` and `kubeClientBurst` set independent build-controller and HTTP-admission Kubernetes REST budgets; each class defaults to 20 QPS/40 burst in each Service Pod. This prevents a deep queued-reconcile backlog from consuming the HTTP submission budget, while clients within each class share one limiter instead of multiplying an implicit client-go 5 QPS/10 burst limit.
+Leader-election leases and direct `/readyz` checks each keep a separate 5 QPS/10 burst budget so a full build queue cannot starve leadership renewal or health probes. These are traffic-class budgets, not a hard aggregate API-server cap; sum them across all Service replicas, including follower HTTP traffic.
+Runner exec streams do not use the REST token bucket; active-job and runner concurrency limits bound those connections separately.
+Tune them only after measuring queue convergence and API-server 429/5xx rates on the target cluster, and budget across all Service replicas rather than treating the values as cluster-wide limits.
+
+The controller-runtime Prometheus endpoint is disabled by default (`metricsBindAddress: "0"`). A controlled diagnostic run may bind it only to `127.0.0.1:<port>` inside each Service Pod. It is not published through the Service, and Kova rejects wildcard or non-loopback bind addresses because this endpoint has no built-in authentication. Collect the low-cardinality `controller_runtime_reconcile_time_seconds` histogram separately from HTTP POST latency and queue-status convergence; histogram p95/p99 do not include workqueue wait or client-side submission time.
 
 Registry credentials are the only storage credentials needed by Kova.
 The same Docker config can authorize source pulls, output pushes, and controller-side manifest verification:

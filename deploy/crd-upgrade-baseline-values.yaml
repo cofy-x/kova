@@ -1,0 +1,3 @@
+# Exercise a real old Service Deployment, not just an old CRD and worker.
+serviceDaemon:
+  enabled: true

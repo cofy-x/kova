@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from kova_client import (
+    BuildFailureCode,
     BuildFormat,
     BuildJob,
     BuildOutput,
@@ -133,8 +134,9 @@ def main() -> int:
         "status": terminal.status.value,
         "outputs": outputs,
     }
-    if terminal.failure_code is not None:
-        receipt["failure_code"] = terminal.failure_code.value
+    failure_code = failure_code_value(terminal.failure_code)
+    if failure_code is not None:
+        receipt["failure_code"] = failure_code
     try:
         write_atomic(settings.receipt_path, receipt)
     except OSError as error:
@@ -274,12 +276,18 @@ def validate_successful_formats(outputs: list[dict[str, str]], requested: BuildF
 
 
 def terminal_failure(terminal: BuildJob, output_count: int) -> int:
-    failure_code = terminal.failure_code.value if terminal.failure_code else "unspecified"
+    failure_code = failure_code_value(terminal.failure_code) or "unspecified"
     return fail(
         3,
         f"Kova build {terminal.id} ended with status {terminal.status.value} "
         f"({failure_code}); saved {output_count} verified output(s)",
     )
+
+
+def failure_code_value(code: BuildFailureCode | str | None) -> str | None:
+    if isinstance(code, BuildFailureCode):
+        return code.value
+    return code
 
 
 def write_atomic(path: Path, value: Mapping[str, object]) -> None:

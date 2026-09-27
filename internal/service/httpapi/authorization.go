@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net/http"
 
@@ -32,6 +33,9 @@ func (s *Server) authMiddleware(next echo.HandlerFunc) echo.HandlerFunc {
 		}
 		principal, err := s.auth.Authenticate(c.Request().Context(), token)
 		if err != nil {
+			if errors.Is(err, serviceauth.ErrReviewUnavailable) {
+				return reviewUnavailable(c)
+			}
 			authDenied.Add(c.Request().Context(), 1)
 			return writeAPIError(c, http.StatusUnauthorized, apiv1.ErrorCodeUnauthenticated, "authentication failed", false, 0)
 		}
@@ -60,13 +64,25 @@ func (s *Server) authorize(ctx context.Context, principal serviceauth.Principal,
 }
 
 func (s *Server) authorizeBuild(ctx context.Context, principal serviceauth.Principal, verb string, build *kovav1.KovaBuild) error {
+	if principal.Username != "" && build.Spec.Requester.Username == principal.Username {
+		// Ownership already grants this operation. Calling SubjectAccessReview
+		// first would add an API-server request for every owner poll without
+		// changing the authorization decision, including when SAR is unavailable.
+		return nil
+	}
 	if err := s.authorize(ctx, principal, verb, build.Name); err == nil {
 		return nil
-	}
-	if principal.Username != "" && build.Spec.Requester.Username == principal.Username {
-		return nil
+	} else if errors.Is(err, serviceauth.ErrReviewUnavailable) {
+		return err
 	}
 	return fmt.Errorf("access denied")
+}
+
+func authorizationFailure(c echo.Context, err error) error {
+	if errors.Is(err, serviceauth.ErrReviewUnavailable) {
+		return reviewUnavailable(c)
+	}
+	return forbidden(c)
 }
 
 func forbidden(c echo.Context) error {

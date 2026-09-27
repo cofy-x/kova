@@ -60,6 +60,8 @@ paths:
           $ref: "#/components/responses/Conflict"
         "429":
           $ref: "#/components/responses/QueueCapacityExceeded"
+        "503":
+          $ref: "#/components/responses/QueueAdmissionPending"
         "500":
           $ref: "#/components/responses/InternalError"
     get:
@@ -105,6 +107,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/BuildJob"
+        "503":
+          $ref: "#/components/responses/QueueAdmissionPending"
         "401":
           $ref: "#/components/responses/Unauthenticated"
         "403":
@@ -166,6 +170,12 @@ paths:
           $ref: "#/components/responses/LogsUnavailable"
         "410":
           $ref: "#/components/responses/LogsUnavailable"
+        "413":
+          description: The selected log tail exceeds 4 MiB; request fewer lines. No partial log response is returned.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LogsUnavailableError"
         "500":
           $ref: "#/components/responses/InternalError"
   /v1/builds/{id}/cancel:
@@ -248,7 +258,7 @@ components:
           schema:
             $ref: "#/components/schemas/ConflictError"
     QueueCapacityExceeded:
-      description: The caller has reached its bounded queued-build capacity.
+      description: The global or requester queued-build limit was reached, or admission CAS contention requires a retry.
       headers:
         Retry-After:
           $ref: "#/components/headers/RetryAfter"
@@ -256,6 +266,19 @@ components:
         application/json:
           schema:
             $ref: "#/components/schemas/QueueCapacityExceededError"
+    QueueAdmissionPending:
+      description: A queue intent exists but its CR Create outcome is not yet observable; the same intent must not issue a second Create.
+      headers:
+        Retry-After:
+          $ref: "#/components/headers/RetryAfter"
+        X-Kova-Build-ID:
+          description: Build ID whose queue intent is pending and must be investigated if it does not resolve.
+          schema:
+            type: string
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/QueueAdmissionPendingError"
     LogsUnavailable:
       description: Ephemeral logs are not currently or no longer available.
       content:
@@ -367,12 +390,12 @@ components:
           type: string
         status:
           type: string
-          enum: [queued, starting, running, succeeded, failed, cancelled]
+          enum: [queued, starting, running, verifying, succeeded, failed, cancelled]
         error:
           type: string
         failure_code:
           type: string
-          enum: [invalid_source, invalid_targets, worker_platform_unavailable, runner_unavailable, build_submission_failed, result_verification_failed, build_failed, cancelled]
+          enum: [invalid_source, source_unavailable, resource_exhausted, invalid_targets, worker_platform_unavailable, runner_unavailable, build_submission_failed, result_verification_failed, build_failed, cancelled]
         created_at:
           type: string
           format: date-time
@@ -395,11 +418,34 @@ components:
           type: string
         cancellation_requested:
           type: boolean
+        recovery_required:
+          type: boolean
         requested_concurrency:
           type: integer
         allocated_concurrency:
           type: integer
           format: int32
+        verification_started_at:
+          type: string
+          format: date-time
+        verification_deadline_at:
+          type: string
+          format: date-time
+        verification_next_attempt_at:
+          type: string
+          format: date-time
+        verification_attempts:
+          type: integer
+          format: int32
+        verification_last_error:
+          type: string
+          maxLength: 2048
+        verification_pending:
+          type: integer
+        verification_succeeded:
+          type: integer
+        verification_failed:
+          type: integer
     BuildOutput:
       type: object
       additionalProperties: false
@@ -458,7 +504,7 @@ components:
       properties:
         code:
           type: string
-          enum: [invalid_request, unauthenticated, forbidden, not_found, conflict, queue_capacity_exceeded, logs_unavailable, internal]
+          enum: [invalid_request, unauthenticated, forbidden, not_found, conflict, queue_capacity_exceeded, queue_admission_pending, logs_unavailable, internal]
         message:
           type: string
         retryable:
@@ -515,6 +561,15 @@ components:
           properties:
             code:
               const: queue_capacity_exceeded
+            retryable:
+              const: true
+    QueueAdmissionPendingError:
+      allOf:
+        - $ref: "#/components/schemas/ErrorResponse"
+        - type: object
+          properties:
+            code:
+              const: queue_admission_pending
             retryable:
               const: true
     LogsUnavailableError:

@@ -55,6 +55,10 @@ func RunBuild(opts Options) error {
 		return runErr
 	}
 
+	if opts.ImageDirsAlreadyIsolated && (opts.ImageDir != "" || opts.ImageDirs == "") {
+		runErr = fmt.Errorf("in-place source preparation requires an isolated image-dirs tree")
+		return runErr
+	}
 	imageDirs := opts.ImageDirs
 	var singleCleanup func()
 	if opts.ImageDir != "" {
@@ -67,7 +71,11 @@ func RunBuild(opts Options) error {
 		defer singleCleanup()
 	}
 
-	specs, cleanup, err := source.LoadBuildSpecsForFormats(imageDirs, opts.Target, opts.Platform, buildFormats, opts.Vars)
+	loadSpecs := source.LoadBuildSpecsForFormats
+	if opts.ImageDirsAlreadyIsolated {
+		loadSpecs = source.LoadBuildSpecsForFormatsInPlace
+	}
+	specs, cleanup, err := loadSpecs(imageDirs, opts.Target, opts.Platform, buildFormats, opts.Vars)
 	if err != nil {
 		runErr = err
 		return runErr

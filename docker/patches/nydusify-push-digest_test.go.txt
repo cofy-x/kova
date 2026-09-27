@@ -1,0 +1,98 @@
+// Copyright 2026 Kova Contributors.
+// SPDX-License-Identifier: Apache-2.0
+
+package converter
+
+import (
+	"context"
+	"errors"
+	"sync"
+	"testing"
+	"time"
+
+	accelcontent "github.com/goharbor/acceleration-service/pkg/content"
+	"github.com/opencontainers/go-digest"
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
+)
+
+type digestTestProvider struct {
+	accelcontent.Provider
+	push func(context.Context, ocispec.Descriptor, string) error
+}
+
+func (p *digestTestProvider) Push(ctx context.Context, desc ocispec.Descriptor, ref string) error {
+	return p.push(ctx, desc, ref)
+}
+
+func TestPushedDigestProvider(t *testing.T) {
+	const target = "registry.example.com/team/image:same"
+	firstDigest := digest.FromString("first")
+	secondDigest := digest.FromString("second")
+	otherDigest := digest.FromString("other")
+	firstStored := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var mu sync.Mutex
+	var tagDigest digest.Digest
+	remote := &digestTestProvider{push: func(ctx context.Context, desc ocispec.Descriptor, ref string) error {
+		mu.Lock()
+		if ref == target {
+			tagDigest = desc.Digest
+		}
+		mu.Unlock()
+		if desc.Digest == firstDigest {
+			close(firstStored)
+			select {
+			case <-releaseFirst:
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+		return nil
+	}}
+	first := &pushedDigestProvider{Provider: remote, target: target}
+	second := &pushedDigestProvider{Provider: remote, target: target}
+	firstDone := make(chan error, 1)
+	go func() {
+		firstDone <- first.Push(ctx, ocispec.Descriptor{Digest: firstDigest}, target)
+	}()
+	select {
+	case <-firstStored:
+	case <-ctx.Done():
+		t.Fatal("first push did not reach the registry")
+	}
+	if err := second.Push(ctx, ocispec.Descriptor{Digest: secondDigest}, target); err != nil {
+		t.Fatal(err)
+	}
+	close(releaseFirst)
+	if err := <-firstDone; err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	gotTagDigest := tagDigest
+	mu.Unlock()
+	if gotTagDigest != secondDigest {
+		t.Fatalf("tag digest = %s, want concurrent writer %s", gotTagDigest, secondDigest)
+	}
+	if first.digest != firstDigest || second.digest != secondDigest {
+		t.Fatalf("per-push digests = %s and %s, want %s and %s", first.digest, second.digest, firstDigest, secondDigest)
+	}
+	if err := first.Push(ctx, ocispec.Descriptor{Digest: otherDigest}, "registry.example.com/team/other:tag"); err != nil {
+		t.Fatal(err)
+	}
+	if first.digest != firstDigest {
+		t.Fatalf("unrelated push overwrote target digest: %s", first.digest)
+	}
+
+	failed := &pushedDigestProvider{Provider: &digestTestProvider{push: func(context.Context, ocispec.Descriptor, string) error {
+		return errors.New("registry rejected push")
+	}}, target: target}
+	if err := failed.Push(ctx, ocispec.Descriptor{Digest: otherDigest}, target); err == nil {
+		t.Fatal("failed push unexpectedly succeeded")
+	}
+	if failed.digest != "" {
+		t.Fatalf("failed push recorded digest %s", failed.digest)
+	}
+}

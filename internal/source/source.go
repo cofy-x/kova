@@ -41,6 +41,17 @@ func LoadBuildSpecs(imageDirs, target, platform string, oci bool, buildVars map[
 }
 
 func LoadBuildSpecsForFormats(imageDirs, target, platform string, buildFormats []BuildFormat, buildVars map[string]string) ([]Spec, func(), error) {
+	return loadBuildSpecsForFormats(imageDirs, target, platform, buildFormats, buildVars, false)
+}
+
+// LoadBuildSpecsForFormatsInPlace is for a private, job-local extracted source
+// tree. It applies build variables in that tree without copying its payload a
+// second time. Callers own the tree and must remove it after the build.
+func LoadBuildSpecsForFormatsInPlace(imageDirs, target, platform string, buildFormats []BuildFormat, buildVars map[string]string) ([]Spec, func(), error) {
+	return loadBuildSpecsForFormats(imageDirs, target, platform, buildFormats, buildVars, true)
+}
+
+func loadBuildSpecsForFormats(imageDirs, target, platform string, buildFormats []BuildFormat, buildVars map[string]string, inPlace bool) ([]Spec, func(), error) {
 	if imageDirs == "" && target == "" {
 		return nil, nil, fmt.Errorf("either --image-dirs or a positional [target] is required")
 	}
@@ -78,41 +89,52 @@ func LoadBuildSpecsForFormats(imageDirs, target, platform string, buildFormats [
 			targetFilters[NormalizeTargetForFormat(target, format)] = struct{}{}
 		}
 	}
-	preparedRoot, err := prepareBuildImageDirs(imageDirs, buildVars)
-	if err != nil {
-		return nil, nil, err
+	var preparedRoot string
+	var cleanup func()
+	if inPlace {
+		preparedRoot = imageDirs
+		if err := prepareBuildImageDirsInPlace(imageDirs, buildVars); err != nil {
+			return nil, nil, err
+		}
+	} else {
+		var err error
+		preparedRoot, err = prepareBuildImageDirs(imageDirs, buildVars)
+		if err != nil {
+			return nil, nil, err
+		}
+		cleanup = func() {
+			_ = os.RemoveAll(preparedRoot)
+		}
 	}
-	cleanup := func() {
-		_ = os.RemoveAll(preparedRoot)
+	fail := func(err error) ([]Spec, func(), error) {
+		if cleanup != nil {
+			cleanup()
+		}
+		return nil, nil, err
 	}
 
 	entries, err := os.ReadDir(preparedRoot)
 	if err != nil {
-		cleanup()
-		return nil, nil, fmt.Errorf("read image-dirs: %w", err)
+		return fail(fmt.Errorf("read image-dirs: %w", err))
 	}
 	if len(entries) == 0 {
-		cleanup()
-		return nil, nil, fmt.Errorf("image-dirs %s does not contain any image directories", imageDirs)
+		return fail(fmt.Errorf("image-dirs %s does not contain any image directories", imageDirs))
 	}
 
 	var specs []Spec
 	for _, e := range entries {
 		if !e.IsDir() {
-			cleanup()
-			return nil, nil, fmt.Errorf("image-dirs %s must contain only directories, found %s", imageDirs, e.Name())
+			return fail(fmt.Errorf("image-dirs %s must contain only directories, found %s", imageDirs, e.Name()))
 		}
 		dir := filepath.Join(preparedRoot, e.Name())
 		metaPath := filepath.Join(dir, "metadata.json")
 
 		meta, err := loadImageMetadata(metaPath)
 		if err != nil {
-			cleanup()
-			return nil, nil, err
+			return fail(err)
 		}
 		if meta.Target == "" {
-			cleanup()
-			return nil, nil, fmt.Errorf("%s has empty target in metadata.json", dir)
+			return fail(fmt.Errorf("%s has empty target in metadata.json", dir))
 		}
 
 		for _, format := range buildFormats {
@@ -122,8 +144,7 @@ func LoadBuildSpecsForFormats(imageDirs, target, platform string, buildFormats [
 					continue
 				}
 				if meta.Platform != platform {
-					cleanup()
-					return nil, nil, fmt.Errorf("target %q declares platform %s, not requested platform %s", meta.Target, meta.Platform, platform)
+					return fail(fmt.Errorf("target %q declares platform %s, not requested platform %s", meta.Target, meta.Platform, platform))
 				}
 			}
 
@@ -143,7 +164,7 @@ func LoadBuildSpecsForFormats(imageDirs, target, platform string, buildFormats [
 }
 
 func loadImageMetadata(metaPath string) (ImageMetadata, error) {
-	raw, err := os.ReadFile(metaPath)
+	raw, err := readBoundedBuildFile(metaPath)
 	if err != nil {
 		return ImageMetadata{}, fmt.Errorf("read %s: %w", metaPath, err)
 	}

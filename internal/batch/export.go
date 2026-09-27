@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/cofy-x/kova/internal/logging"
 	"github.com/cofy-x/kova/internal/observability"
@@ -65,6 +66,9 @@ func RunExport(opts Options) (err error) {
 	writer := bufio.NewWriter(file)
 	var exported int
 	for _, entry := range entries {
+		if opts.SummaryOnly {
+			entry = boundedSummaryEntry(entry)
+		}
 		payload, err := json.Marshal(entry)
 		if err != nil {
 			return err
@@ -86,6 +90,17 @@ func RunExport(opts Options) (err error) {
 	op.SetAttributes(attribute.Int("kova.entries", exported))
 	logging.Infof("Exported %d entries to %s", exported, opts.ResultPath)
 	return nil
+}
+
+func boundedSummaryEntry(entry store.Entry) store.Entry {
+	entry.Logs = ""
+	if len(entry.Reason) > 2048 {
+		entry.Reason = entry.Reason[:2048]
+		for !utf8.ValidString(entry.Reason) {
+			entry.Reason = entry.Reason[:len(entry.Reason)-1]
+		}
+	}
+	return entry
 }
 
 func selectExportEntries(entries []store.Entry, opts Options) ([]store.Entry, error) {

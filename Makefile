@@ -63,7 +63,7 @@ export REGISTRY_NAME REGISTRY_IMAGE REGISTRY_HOST REGISTRY_PORT CLUSTER_REGISTRY
 export RELEASE_NAME NAMESPACE WORK_DIR KOVA_RUNNER_NAME SOURCE_ZIP RESULT_JSONL
 export KOVA_CONCURRENT_RUNNER_NAME CONCURRENT_SOURCE_ZIP CONCURRENT_RESULT_JSONL NYDUS_RESULT_JSONL RUNTIME_OCI_SOURCE_ZIP RUNTIME_NYDUS_SOURCE_ZIP RUNTIME_OCI_RESULT_JSONL RUNTIME_NYDUS_RESULT_JSONL EXAMPLE_COUNT BUILD_CONCURRENCY
 
-.PHONY: all kova kovad install generate-crds image kind-registry kind-create kind-load deploy-kind diagnose-kind observability-up observability-down observability-status dragonfly-nydus-install e2e e2e-helm-quickstart e2e-service e2e-release e2e-concurrent e2e-dragonfly-nydus e2e-runtime-preflight e2e-runtime e2e-observability clean clean-kind test sdk-smoke python-sdk sdk-examples docs-check lint-scripts helm-template package-example package-concurrent-example FORCE
+.PHONY: all kova kovad install generate-crds image kind-registry kind-create kind-load deploy-kind diagnose-kind observability-up observability-down observability-status dragonfly-nydus-install e2e e2e-helm-quickstart e2e-service e2e-service-admission e2e-service-admission-failover e2e-service-admission-fairness e2e-service-auth-read-probe e2e-service-auth-owner-probe e2e-service-admission-ledger-loss e2e-service-admission-deep-queue e2e-service-partial-output e2e-service-digest-collision e2e-source-capacity e2e-source-oci-oversize e2e-crd-upgrade e2e-release e2e-concurrent e2e-dragonfly-nydus e2e-runtime-preflight e2e-runtime e2e-observability clean clean-kind test sdk-smoke python-sdk sdk-examples docs-check lint-scripts helm-template package-example package-concurrent-example FORCE
 
 all: kova
 
@@ -142,13 +142,62 @@ e2e-helm-quickstart:
 	KIND_KUBECONFIG=$(QUICKSTART_KIND_KUBECONFIG) \
 	KIND_WORKERS=1 \
 	KIND_VALUES=$(QUICKSTART_KIND_VALUES) \
+	RESULT_JSONL=$(if $(filter file,$(origin RESULT_JSONL)),,$(RESULT_JSONL)) \
 	./scripts/e2e/e2e-helm-quickstart.sh
 
 e2e-service:
-	SOURCE_ZIP=$(WORK_DIR)/source-service.zip RESULT_JSONL=$(WORK_DIR)/result-service.jsonl ./scripts/e2e/e2e-service.sh
+	SOURCE_ZIP=$(WORK_DIR)/source-service.zip RESULT_JSONL=$(if $(filter file,$(origin RESULT_JSONL)),$(WORK_DIR)/result-service.jsonl,$(RESULT_JSONL)) ./scripts/e2e/e2e-service.sh
+
+e2e-crd-upgrade:
+	RESULT_JSONL=$(if $(filter file,$(origin RESULT_JSONL)),,$(RESULT_JSONL)) ./scripts/e2e/e2e-crd-upgrade.sh
+
+e2e-service-admission:
+	./scripts/e2e/e2e-service-admission.sh
+
+e2e-service-admission-failover:
+	./scripts/e2e/e2e-service-admission-failover.sh
+
+e2e-service-admission-fairness:
+	python3 ./scripts/e2e/e2e-service-admission-fairness.py
+
+e2e-service-auth-read-probe:
+	python3 ./scripts/e2e/e2e-service-auth-read-probe.py
+
+e2e-service-auth-owner-probe:
+	python3 ./scripts/e2e/e2e-service-auth-owner-probe.py
+
+e2e-service-admission-ledger-loss:
+	./scripts/e2e/e2e-service-admission-ledger-loss.sh
+
+e2e-service-admission-deep-queue:
+	KIND_CLUSTER=kova-deep-queue \
+	KIND_KUBECONFIG=.kind/kova-deep-queue.kubeconfig \
+	python3 ./scripts/e2e/e2e-service-admission-deep-queue.py
+
+e2e-service-partial-output:
+	KIND_CLUSTER=kova-partial-output-41 \
+	KIND_KUBECONFIG=.kind/kova-partial-output-41.kubeconfig \
+	python3 ./scripts/e2e/e2e-service-partial-output.py
+
+e2e-service-digest-collision:
+	KIND_CLUSTER=kova-digest-collision-41 \
+	KIND_KUBECONFIG=.kind/kova-digest-collision-41.kubeconfig \
+	REGISTRY_NAME=kind-registry-digest-41 REGISTRY_PORT=5004 \
+	REGISTRY_HOST=localhost:5004 \
+	python3 ./scripts/e2e/e2e-service-digest-collision.py
+
+e2e-source-capacity:
+	KIND_CLUSTER=kova-source-capacity \
+	KIND_KUBECONFIG=.kind/kova-source-capacity.kubeconfig \
+	./scripts/e2e/e2e-source-capacity.sh
+
+e2e-source-oci-oversize:
+	KIND_CLUSTER=kova-source-capacity \
+	KIND_KUBECONFIG=.kind/kova-source-capacity.kubeconfig \
+	./scripts/e2e/e2e-source-oci-oversize.sh
 
 e2e-release:
-	./scripts/e2e/e2e-release.sh "$(KOVA_VERSION)"
+	RESULT_JSONL=$(if $(filter file,$(origin RESULT_JSONL)),,$(RESULT_JSONL)) ./scripts/e2e/e2e-release.sh "$(KOVA_VERSION)"
 
 e2e-concurrent:
 	KOVA_RUNNER_NAME=$(KOVA_CONCURRENT_RUNNER_NAME) SOURCE_ZIP=$(CONCURRENT_SOURCE_ZIP) RESULT_JSONL=$(CONCURRENT_RESULT_JSONL) ./scripts/e2e/e2e-concurrent.sh
@@ -182,6 +231,7 @@ docs-check:
 
 lint-scripts:
 	find scripts -name '*.sh' -print0 | xargs -0 -n1 bash -n
+	bash scripts/e2e/test-service-migration-preflight.sh
 	@if command -v shellcheck >/dev/null 2>&1; then \
 		find scripts -name '*.sh' -print0 | xargs -0 shellcheck -x -e SC1091; \
 	else \
@@ -190,6 +240,7 @@ lint-scripts:
 
 helm-template:
 	bash scripts/chart/verify-worker-cache.sh
+	bash scripts/chart/verify-service-metrics.sh
 	helm template $(RELEASE_NAME) ./charts/kova -f deploy/kind-values.yaml >/dev/null
 	helm template $(RELEASE_NAME) ./charts/kova -f deploy/production-values.yaml >/dev/null
 	helm template $(RELEASE_NAME) ./charts/kova \
@@ -201,6 +252,10 @@ helm-template:
 		--set networkPolicy.service.enabled=true >/dev/null
 	helm template $(RELEASE_NAME) ./charts/kova \
 		--set serviceDaemon.enabled=true \
+		--set serviceDaemon.authentication.mode=unsafe-none >/dev/null
+	helm template $(RELEASE_NAME) ./charts/kova \
+		--set serviceDaemon.enabled=true \
+		--set serviceDaemon.replicas=0 \
 		--set serviceDaemon.authentication.mode=unsafe-none >/dev/null
 	helm template $(RELEASE_NAME) ./charts/kova \
 		--set-string worker.platform=linux/arm64 >/dev/null

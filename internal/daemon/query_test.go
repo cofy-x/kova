@@ -9,14 +9,15 @@ import (
 
 func TestBuildOptionsFromQuery(t *testing.T) {
 	q := url.Values{
-		"concurrency":  []string{"3"},
-		"fail-fast":    []string{"true"},
-		"format":       []string{"both"},
-		"oom-cooldown": []string{"45s"},
-		"timeout":      []string{"600"},
-		"verbose":      []string{"yes"},
-		"target":       []string{"localhost:5001/example:dev"},
-		"var":          []string{"KOVA_IMAGE_REGISTRY=localhost:5001", "KOVA_TAG=dev"},
+		"concurrency":         []string{"3"},
+		"fail-fast":           []string{"true"},
+		"format":              []string{"both"},
+		"oom-cooldown":        []string{"45s"},
+		"timeout":             []string{"600"},
+		"verbose":             []string{"yes"},
+		"target":              []string{"localhost:5001/example:dev"},
+		"var":                 []string{"KOVA_IMAGE_REGISTRY=localhost:5001", "KOVA_TAG=dev"},
+		"registry-plain-http": []string{"kind-registry:5000", "kova-digest-fault-proxy.kova.svc.cluster.local:5000"},
 	}
 
 	opts, err := buildOptionsFromQuery(q, "127.0.0.1:9094", "/tmp/result.lmdb", "/tmp/logs.jsonl")
@@ -47,6 +48,23 @@ func TestBuildOptionsFromQuery(t *testing.T) {
 	}
 	if len(opts.Addrs) != 1 || opts.Addrs[0].Addr != "tcp://127.0.0.1:9094" {
 		t.Fatalf("unexpected addrs: %#v", opts.Addrs)
+	}
+	if got := opts.RegistryPlainHTTP; len(got) != 2 || got[0] != "kind-registry:5000" || got[1] != "kova-digest-fault-proxy.kova.svc.cluster.local:5000" {
+		t.Fatalf("plain HTTP registries = %#v", got)
+	}
+}
+
+func TestBuildOptionsFromQueryKeepsHTTPSDefaultAndRejectsInvalidRegistryHosts(t *testing.T) {
+	base := url.Values{"platform-addr": []string{"linux/amd64=tcp://buildkitd:9094"}}
+	opts, err := buildOptionsFromQuery(base, "", "/tmp/result.lmdb", "/tmp/logs.jsonl")
+	if err != nil || len(opts.RegistryPlainHTTP) != 0 {
+		t.Fatalf("default plain HTTP registries = %#v, err = %v", opts.RegistryPlainHTTP, err)
+	}
+	for _, host := range []string{"", "http://registry.example:5000", "registry.example:5000/team", "registry.example:5000?query=1", "user@registry.example:5000"} {
+		query := url.Values{"platform-addr": []string{"linux/amd64=tcp://buildkitd:9094"}, "registry-plain-http": []string{host}}
+		if _, err := buildOptionsFromQuery(query, "", "/tmp/result.lmdb", "/tmp/logs.jsonl"); err == nil {
+			t.Fatalf("registry host %q was accepted", host)
+		}
 	}
 }
 
@@ -84,6 +102,13 @@ func TestExportOptionsFromQueryAcceptsExactTargets(t *testing.T) {
 	}
 	if len(opts.ExportTargets) != 2 || opts.ExportTargets[0] != "registry.example.com/ns/app:dev" || opts.ExportTargets[1] != "registry.example.com/ns/base:dev" {
 		t.Fatalf("unexpected export targets: %#v", opts.ExportTargets)
+	}
+}
+
+func TestExportOptionsFromQueryAcceptsBoundedSummary(t *testing.T) {
+	opts, err := exportOptionsFromQuery(url.Values{"summary": []string{"true"}, "with-fail": []string{"true"}}, "/tmp/result.lmdb")
+	if err != nil || !opts.SummaryOnly || !opts.WithFail {
+		t.Fatalf("opts=%#v err=%v", opts, err)
 	}
 }
 

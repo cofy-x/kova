@@ -11,12 +11,14 @@ import (
 	kovav1 "github.com/cofy-x/kova/internal/apis/kova/v1alpha1"
 	"github.com/cofy-x/kova/internal/kube"
 	"github.com/cofy-x/kova/internal/service/config"
+	"github.com/cofy-x/kova/internal/sourcebundle"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	utilexec "k8s.io/client-go/util/exec"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	crfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -25,6 +27,7 @@ import (
 type fakeKube struct {
 	deleted   []string
 	deleteErr error
+	podClient client.Client
 	execFn    func(kube.ExecOptions) error
 	execCalls [][]string
 }
@@ -58,7 +61,21 @@ func (f *fakeKube) DeletePod(_ context.Context, namespace string, name string) e
 		return f.deleteErr
 	}
 	f.deleted = append(f.deleted, namespace+"/"+name)
+	if f.podClient != nil {
+		pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace}}
+		if err := f.podClient.Delete(context.Background(), pod); err != nil && !apierrors.IsNotFound(err) {
+			return err
+		}
+	}
 	return nil
+}
+
+func testRunnerPod(build *kovav1.KovaBuild) *corev1.Pod {
+	return &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Name: buildPodName(build.Name), Namespace: build.Namespace,
+		Labels:          map[string]string{"kova.cofy.dev/build-id": build.Name},
+		OwnerReferences: []metav1.OwnerReference{{APIVersion: kovav1.Group + "/" + kovav1.Version, Kind: "KovaBuild", Name: build.Name, UID: build.UID}},
+	}}
 }
 
 func (f *fakeKube) WritePodLogsTail(context.Context, string, string, int64, io.Writer) error {
@@ -117,10 +134,12 @@ func TestReconcilerCreatesRunnerWithImmutableSourceFetcher(t *testing.T) {
 			BuildkitPlatformAddrs: map[string]string{"linux/amd64": "tcp://kova.kova.svc:9094"},
 			RegistryPlainHTTP:     []string{"registry.local"},
 			JobTTL:                time.Hour,
+			MaxBuildDuration:      time.Hour,
 			PollInterval:          time.Millisecond,
 			RunnerNodeSelector:    map[string]string{"kova.cofy.io/source-node": "true"},
 		},
 	}
+	initializeAdmissionForTest(t, &reconciler)
 
 	if _, err := reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "jobs", Name: "abc"}}); err != nil {
 		t.Fatal(err)
@@ -148,6 +167,9 @@ func TestReconcilerCreatesRunnerWithImmutableSourceFetcher(t *testing.T) {
 	}
 	if len(pod.Spec.Volumes) == 0 || pod.Spec.Volumes[0].EmptyDir == nil {
 		t.Fatalf("unexpected volumes: %#v", pod.Spec.Volumes)
+	}
+	if pod.Spec.ActiveDeadlineSeconds == nil || *pod.Spec.ActiveDeadlineSeconds != 3900 {
+		t.Fatalf("runner active deadline = %v", pod.Spec.ActiveDeadlineSeconds)
 	}
 	if len(pod.Spec.Containers[0].VolumeMounts) == 0 || pod.Spec.Containers[0].VolumeMounts[0].MountPath != "/var/lib/kova/source" {
 		t.Fatalf("unexpected mounts: %#v", pod.Spec.Containers[0].VolumeMounts)
@@ -178,6 +200,7 @@ func TestReconcilerMaterializesHTTPSSource(t *testing.T) {
 	}
 	client := crfake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&kovav1.KovaBuild{}).WithObjects(build).Build()
 	reconciler := KovaBuildReconciler{Client: client, Scheme: scheme, Kube: &fakeKube{}, Cfg: config.Config{RunnerImage: "registry.local/kova:dev", BuildkitPlatformAddrs: map[string]string{"linux/amd64": "tcp://kova.kova.svc:9094"}}}
+	initializeAdmissionForTest(t, &reconciler)
 	_, err := reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "jobs", Name: "pending"}})
 	if err != nil {
 		t.Fatal(err)
@@ -208,6 +231,7 @@ func TestReconcilerFailsWithoutRequestedPlatformCapacity(t *testing.T) {
 	reconciler := KovaBuildReconciler{Client: crClient, Scheme: scheme, Kube: &fakeKube{}, Cfg: config.Config{
 		RunnerImage: "registry.local/kova:dev", BuildkitPlatformAddrs: map[string]string{"linux/amd64": "tcp://kova.kova.svc:9094"},
 	}}
+	initializeAdmissionForTest(t, &reconciler)
 	if _, err := reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "jobs", Name: "no-arm64"}}); err != nil {
 		t.Fatal(err)
 	}
@@ -276,33 +300,52 @@ func TestSubmitWhenReadyFailsWhenRunnerDisappears(t *testing.T) {
 	}
 }
 
-func TestSubmitWhenReadyReportsSourceFetchFailureAsInvalidSource(t *testing.T) {
-	scheme := testScheme(t)
-	build := &kovav1.KovaBuild{
-		ObjectMeta: metav1.ObjectMeta{Name: "invalid-source", Namespace: "jobs", Finalizers: []string{cleanupFinalizer}},
-		Status: kovav1.KovaBuildStatus{
-			Phase: kovav1.PhaseStarting, RunnerPodName: "kova-job-invalid-source",
-		},
-	}
-	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Name: "kova-job-invalid-source", Namespace: "jobs"},
-		Status: corev1.PodStatus{Phase: corev1.PodPending, InitContainerStatuses: []corev1.ContainerStatus{{
-			Name: "source-fetch", State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
-				ExitCode: 1, Message: "source digest mismatch",
-			}},
-		}}},
-	}
-	crClient := crfake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&kovav1.KovaBuild{}).WithObjects(build, pod).Build()
-	reconciler := KovaBuildReconciler{Client: crClient, Scheme: scheme, Kube: &fakeKube{}}
-	if _, err := reconciler.submitWhenReady(context.Background(), build); err != nil {
-		t.Fatal(err)
-	}
-	var updated kovav1.KovaBuild
-	if err := crClient.Get(context.Background(), types.NamespacedName{Namespace: "jobs", Name: "invalid-source"}, &updated); err != nil {
-		t.Fatal(err)
-	}
-	if updated.Status.Phase != kovav1.PhaseFailed || updated.Status.Reason != "InvalidSource" || updated.Status.Message != "source digest mismatch" {
-		t.Fatalf("status = %#v", updated.Status)
+func TestSubmitWhenReadyClassifiesSourceFetchFailureByStatus(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		exitCode   int32
+		termReason string
+		podReason  string
+		wantReason string
+	}{
+		{name: "invalid source", exitCode: sourcebundle.FetchExitCodeInvalidSource, wantReason: "InvalidSource"},
+		{name: "registry unavailable", exitCode: 1, wantReason: "SourceFetchUnavailable"},
+		{name: "disk full", exitCode: sourcebundle.FetchExitCodeResourceExhausted, wantReason: "SourceFetchResourceExhausted"},
+		{name: "out of memory", exitCode: 137, termReason: "OOMKilled", wantReason: "SourceFetchResourceExhausted"},
+		{name: "evicted", podReason: "Evicted", wantReason: "RunnerResourceExhausted"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			scheme := testScheme(t)
+			build := &kovav1.KovaBuild{
+				ObjectMeta: metav1.ObjectMeta{Name: "source-failure", Namespace: "jobs", Finalizers: []string{cleanupFinalizer}},
+				Status:     kovav1.KovaBuildStatus{Phase: kovav1.PhaseStarting, RunnerPodName: "kova-job-source-failure"},
+			}
+			pod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: "kova-job-source-failure", Namespace: "jobs"},
+				Status:     corev1.PodStatus{Phase: corev1.PodPending, Reason: tc.podReason},
+			}
+			if tc.podReason == "Evicted" {
+				pod.Status.Phase = corev1.PodFailed
+			} else {
+				pod.Status.InitContainerStatuses = []corev1.ContainerStatus{{
+					Name: "source-fetch", State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
+						ExitCode: tc.exitCode, Reason: tc.termReason, Message: "fetch failed",
+					}},
+				}}
+			}
+			crClient := crfake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&kovav1.KovaBuild{}).WithObjects(build, pod).Build()
+			reconciler := KovaBuildReconciler{Client: crClient, Scheme: scheme, Kube: &fakeKube{}}
+			if _, err := reconciler.submitWhenReady(context.Background(), build); err != nil {
+				t.Fatal(err)
+			}
+			var updated kovav1.KovaBuild
+			if err := crClient.Get(context.Background(), types.NamespacedName{Namespace: "jobs", Name: build.Name}, &updated); err != nil {
+				t.Fatal(err)
+			}
+			if updated.Status.Phase != kovav1.PhaseFailed || updated.Status.Reason != tc.wantReason {
+				t.Fatalf("status = %#v", updated.Status)
+			}
+		})
 	}
 }
 
@@ -318,7 +361,11 @@ func TestSubmitWhenReadyValidatesExactSourceTargetSetBeforeBuild(t *testing.T) {
 		{name: "missing", inspection: `{"targets":[]}`, wantReason: "InvalidTargets"},
 		{name: "different", inspection: `{"targets":[{"target":"registry.example/b:dev","platform":"linux/amd64"}]}`, wantReason: "InvalidTargets"},
 		{name: "different-platform", inspection: `{"targets":[{"target":"registry.example/a:dev","platform":"linux/arm64"},{"target":"registry.example/b:dev","platform":"linux/amd64"}]}`, wantReason: "InvalidTargets"},
-		{name: "duplicate", inspectionErr: errors.New("duplicate target"), wantReason: "InvalidSource"},
+		{name: "duplicate", inspectionErr: utilexec.CodeExitError{Err: errors.New("duplicate target"), Code: sourcebundle.FetchExitCodeInvalidSource}, wantReason: "InvalidSource"},
+		{name: "inspect disk full", inspectionErr: utilexec.CodeExitError{Err: errors.New("no space left on device"), Code: sourcebundle.FetchExitCodeResourceExhausted}, wantReason: "SourceInspectResourceExhausted"},
+		{name: "inspect process fault", inspectionErr: utilexec.CodeExitError{Err: errors.New("process fault"), Code: 1}, wantReason: "SourceInspectUnavailable"},
+		{name: "malformed inspect response", inspection: `not-json`, wantReason: "RunnerProtocolError"},
+		{name: "oversized-runner-response", inspection: strings.Repeat("x", (1<<20)+1), wantReason: "RunnerProtocolError"},
 		{name: "same-set-different-order", inspection: `{"targets":[{"target":"registry.example/b:dev","platform":"linux/amd64"},{"target":"registry.example/a:dev","platform":"linux/amd64"}]}`, wantBuild: true},
 	}
 	for _, tt := range tests {
@@ -349,6 +396,10 @@ func TestSubmitWhenReadyValidatesExactSourceTargetSetBeforeBuild(t *testing.T) {
 					_, _ = io.WriteString(opts.Stdout, tt.inspection)
 					return nil
 				}
+				if strings.Contains(command, "--method GET") {
+					_, _ = io.WriteString(opts.Stdout, `{"status":"idle","capabilities":["idempotent-build-request-v1"]}`)
+					return nil
+				}
 				_, _ = io.WriteString(opts.Stdout, `{"status":"running"}`)
 				return nil
 			}
@@ -362,7 +413,7 @@ func TestSubmitWhenReadyValidatesExactSourceTargetSetBeforeBuild(t *testing.T) {
 			}
 			buildCalled := false
 			for _, command := range kubeClient.execCalls {
-				if strings.Contains(strings.Join(command, " "), " transport ") {
+				if strings.Contains(strings.Join(command, " "), "--method POST") {
 					buildCalled = true
 				}
 			}
@@ -382,16 +433,6 @@ func TestSubmitWhenReadyValidatesExactSourceTargetSetBeforeBuild(t *testing.T) {
 
 func TestReconcilerDeleteCleansPodAndFinalizer(t *testing.T) {
 	scheme := testScheme(t)
-	client := crfake.NewClientBuilder().
-		WithScheme(scheme).
-		WithStatusSubresource(&kovav1.KovaBuild{}).
-		Build()
-	kube := &fakeKube{}
-	reconciler := KovaBuildReconciler{
-		Client: client,
-		Scheme: scheme,
-		Kube:   kube,
-	}
 	build := &kovav1.KovaBuild{
 		TypeMeta: metav1.TypeMeta{APIVersion: kovav1.Group + "/" + kovav1.Version, Kind: "KovaBuild"},
 		ObjectMeta: metav1.ObjectMeta{
@@ -401,6 +442,10 @@ func TestReconcilerDeleteCleansPodAndFinalizer(t *testing.T) {
 		},
 		Status: kovav1.KovaBuildStatus{RunnerPodName: "kova-job-abc"},
 	}
+	client := crfake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&kovav1.KovaBuild{}).WithObjects(build, testRunnerPod(build)).Build()
+	kube := &fakeKube{podClient: client}
+	reconciler := KovaBuildReconciler{Client: client, Scheme: scheme, Kube: kube}
+	initializeAdmissionForTest(t, &reconciler)
 
 	if _, err := reconciler.reconcileDelete(context.Background(), build); err != nil {
 		t.Fatal(err)
@@ -425,8 +470,10 @@ func TestTerminalBuildDeletesRunnerButRetainsResultForTTL(t *testing.T) {
 			}},
 		},
 	}
-	kube := &fakeKube{}
-	reconciler := KovaBuildReconciler{Kube: kube, Cfg: config.Config{JobTTL: time.Hour}}
+	crClient := crfake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(build, testRunnerPod(build)).Build()
+	kube := &fakeKube{podClient: crClient}
+	reconciler := KovaBuildReconciler{Client: crClient, Kube: kube, Cfg: config.Config{JobTTL: time.Hour}}
+	initializeAdmissionForTest(t, &reconciler)
 	result, err := reconciler.reconcileTerminal(context.Background(), build)
 	if err != nil {
 		t.Fatal(err)
@@ -446,8 +493,10 @@ func TestTerminalBuildDeletesRunnerEvenWithoutTTL(t *testing.T) {
 			Phase: kovav1.PhaseSucceeded, RunnerPodName: "kova-job-completed",
 		},
 	}
-	kube := &fakeKube{}
-	reconciler := KovaBuildReconciler{Kube: kube}
+	crClient := crfake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(build, testRunnerPod(build)).Build()
+	kube := &fakeKube{podClient: crClient}
+	reconciler := KovaBuildReconciler{Client: crClient, Kube: kube}
+	initializeAdmissionForTest(t, &reconciler)
 	if _, err := reconciler.reconcileTerminal(context.Background(), build); err != nil {
 		t.Fatal(err)
 	}
@@ -463,7 +512,9 @@ func TestTerminalBuildRetriesRunnerDeleteFailure(t *testing.T) {
 			Phase: kovav1.PhaseSucceeded, RunnerPodName: "kova-job-completed",
 		},
 	}
-	reconciler := KovaBuildReconciler{Kube: &fakeKube{deleteErr: errors.New("delete failed")}}
+	crClient := crfake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(build, testRunnerPod(build)).Build()
+	reconciler := KovaBuildReconciler{Client: crClient, Kube: &fakeKube{deleteErr: errors.New("delete failed")}}
+	initializeAdmissionForTest(t, &reconciler)
 	if _, err := reconciler.reconcileTerminal(context.Background(), build); err == nil {
 		t.Fatal("expected runner cleanup error to retry reconciliation")
 	}
@@ -471,16 +522,6 @@ func TestTerminalBuildRetriesRunnerDeleteFailure(t *testing.T) {
 
 func TestReconcilerDeleteKeepsFinalizerWhenPodDeleteFails(t *testing.T) {
 	scheme := testScheme(t)
-	client := crfake.NewClientBuilder().
-		WithScheme(scheme).
-		WithStatusSubresource(&kovav1.KovaBuild{}).
-		Build()
-	kube := &fakeKube{deleteErr: errors.New("delete failed")}
-	reconciler := KovaBuildReconciler{
-		Client: client,
-		Scheme: scheme,
-		Kube:   kube,
-	}
 	build := &kovav1.KovaBuild{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:       "abc",
@@ -489,6 +530,10 @@ func TestReconcilerDeleteKeepsFinalizerWhenPodDeleteFails(t *testing.T) {
 		},
 		Status: kovav1.KovaBuildStatus{RunnerPodName: "kova-job-abc"},
 	}
+	client := crfake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&kovav1.KovaBuild{}).WithObjects(build, testRunnerPod(build)).Build()
+	kube := &fakeKube{deleteErr: errors.New("delete failed")}
+	reconciler := KovaBuildReconciler{Client: client, Scheme: scheme, Kube: kube}
+	initializeAdmissionForTest(t, &reconciler)
 
 	if _, err := reconciler.reconcileDelete(context.Background(), build); err == nil {
 		t.Fatal("expected error")
@@ -537,6 +582,7 @@ func TestAdmissionIsFIFOAndCapacityAware(t *testing.T) {
 	}
 	client := crfake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&kovav1.KovaBuild{}).WithObjects(older, newer, active).Build()
 	reconciler := KovaBuildReconciler{Client: client, Cfg: config.Config{MaxActiveJobs: 2, WorkerSlots: 8}}
+	initializeAdmissionForTest(t, &reconciler)
 
 	decision, err := reconciler.admission(context.Background(), older)
 	if err != nil || !decision.Admitted || decision.Allocation != 5 {
@@ -561,6 +607,7 @@ func TestAdmissionRoundRobinsRequesters(t *testing.T) {
 	}
 	crClient := crfake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&kovav1.KovaBuild{}).WithObjects(objects...).Build()
 	reconciler := KovaBuildReconciler{Client: crClient, Cfg: config.Config{MaxActiveJobs: 2, WorkerSlots: 2}}
+	initializeAdmissionForTest(t, &reconciler)
 
 	decision, err := reconciler.admission(context.Background(), builds[2])
 	if err != nil || !decision.Admitted {
@@ -578,9 +625,10 @@ func TestReconcilerProcessesCancellationRequest(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "cancel", Namespace: "jobs", Finalizers: []string{cleanupFinalizer}, Annotations: map[string]string{kovav1.CancellationRequestedAnnotation: time.Now().Format(time.RFC3339Nano)}},
 		Status:     kovav1.KovaBuildStatus{Phase: kovav1.PhaseRunning, RunnerPodName: "kova-job-cancel", AllocatedConcurrency: 2},
 	}
-	crClient := crfake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&kovav1.KovaBuild{}).WithObjects(build).Build()
-	kube := &fakeKube{}
+	crClient := crfake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&kovav1.KovaBuild{}).WithObjects(build, testRunnerPod(build)).Build()
+	kube := &fakeKube{podClient: crClient}
 	reconciler := KovaBuildReconciler{Client: crClient, Scheme: scheme, Kube: kube}
+	initializeAdmissionForTest(t, &reconciler)
 
 	if _, err := reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "jobs", Name: "cancel"}}); err != nil {
 		t.Fatal(err)

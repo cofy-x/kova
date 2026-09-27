@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"sort"
 	"strconv"
@@ -15,41 +17,125 @@ import (
 	"github.com/cofy-x/kova/internal/daemonclient"
 	"github.com/cofy-x/kova/internal/kube"
 	"github.com/cofy-x/kova/internal/runner"
+	"github.com/cofy-x/kova/internal/sourcebundle"
+	utilexec "k8s.io/client-go/util/exec"
 )
 
 type Client struct {
 	Kube                  kube.API
 	BuildkitPlatformAddrs map[string]string
+	RegistryPlainHTTP     []string
 }
 
+var ErrInvalidBuildStatus = errors.New("invalid runner build status")
+var ErrSourceInspectTransport = errors.New("source inspect transport failed")
+var ErrSourceInspectInvalid = errors.New("source inspect rejected invalid archive")
+var ErrSourceInspectResourceExhausted = errors.New("source inspect exhausted runner resources")
+var ErrSourceInspectUnavailable = errors.New("source inspect command failed")
+var ErrSourceInspectProtocol = errors.New("source inspect returned invalid response")
+var ErrExportTooLarge = errors.New("runner export exceeds 1 MiB limit")
+var ErrRunnerResponseTooLarge = errors.New("runner response exceeds 1 MiB limit")
+
+const maxRunnerResponseBytes = 1 << 20
+const maxRunnerErrorBytes = 64 << 10
+
+// Keep the buffer private so io.WriteString cannot bypass the bounded Write.
+type boundedResponseBuffer struct {
+	buffer      bytes.Buffer
+	overflowErr error
+	overflow    bool
+}
+
+func (b *boundedResponseBuffer) Write(data []byte) (int, error) {
+	remaining := maxRunnerResponseBytes - b.buffer.Len()
+	if len(data) > remaining {
+		_, _ = b.buffer.Write(data[:remaining])
+		b.overflow = true
+		return remaining, b.overflowErr
+	}
+	return b.buffer.Write(data)
+}
+
+func (b *boundedResponseBuffer) Bytes() []byte  { return b.buffer.Bytes() }
+func (b *boundedResponseBuffer) String() string { return b.buffer.String() }
+func (b *boundedResponseBuffer) Len() int       { return b.buffer.Len() }
+
+var _ io.Writer = (*boundedResponseBuffer)(nil)
+
+// Stderr is diagnostic only; drain it while retaining a finite prefix.
+type boundedErrorBuffer struct {
+	buffer    bytes.Buffer
+	truncated bool
+}
+
+func (b *boundedErrorBuffer) Write(data []byte) (int, error) {
+	remaining := maxRunnerErrorBytes - b.buffer.Len()
+	if len(data) > remaining {
+		b.truncated = true
+	}
+	if remaining > 0 {
+		_, _ = b.buffer.Write(data[:min(remaining, len(data))])
+	}
+	return len(data), nil
+}
+
+func (b *boundedErrorBuffer) Diagnostic() []byte {
+	if b.truncated {
+		return append(bytes.TrimSpace(b.buffer.Bytes()), []byte("\n[runner stderr truncated]")...)
+	}
+	return b.buffer.Bytes()
+}
+
+func (b *boundedErrorBuffer) Len() int { return b.buffer.Len() }
+
 func (c Client) SourceTargets(ctx context.Context, build *kovav1.KovaBuild, sourcePath string) ([]buildcontract.TargetSpec, error) {
-	var stdout, stderr bytes.Buffer
+	stdout := boundedResponseBuffer{overflowErr: ErrRunnerResponseTooLarge}
+	var stderr boundedErrorBuffer
 	err := c.Kube.Exec(ctx, build.Namespace, build.Status.RunnerPodName, kube.ExecOptions{
 		Stdout:  &stdout,
 		Stderr:  &stderr,
 		Command: []string{"kovad", "source", "inspect", "--input", sourcePath},
 	})
+	if stdout.overflow {
+		return nil, fmt.Errorf("inspect source contract: %w", ErrRunnerResponseTooLarge)
+	}
 	if err != nil {
-		return nil, ExecError("inspect source contract", stderr.Bytes(), err)
+		wrapped := ExecError("inspect source contract", stderr.Diagnostic(), err)
+		var exitErr utilexec.ExitError
+		if errors.As(err, &exitErr) && exitErr.Exited() {
+			switch exitErr.ExitStatus() {
+			case sourcebundle.FetchExitCodeInvalidSource:
+				return nil, fmt.Errorf("%w: %w", ErrSourceInspectInvalid, wrapped)
+			case sourcebundle.FetchExitCodeResourceExhausted:
+				return nil, fmt.Errorf("%w: %w", ErrSourceInspectResourceExhausted, wrapped)
+			default:
+				return nil, fmt.Errorf("%w: %w", ErrSourceInspectUnavailable, wrapped)
+			}
+		}
+		return nil, fmt.Errorf("%w: %w", ErrSourceInspectTransport, wrapped)
 	}
 	var contract struct {
 		Targets []buildcontract.TargetSpec `json:"targets"`
 	}
 	if err := json.Unmarshal(stdout.Bytes(), &contract); err != nil {
-		return nil, fmt.Errorf("parse source contract: %w", err)
+		return nil, fmt.Errorf("%w: %w", ErrSourceInspectProtocol, err)
 	}
 	return contract.Targets, nil
 }
 
 func (c Client) SubmitBuild(ctx context.Context, build *kovav1.KovaBuild, sourcePath string) error {
-	var stdout, stderr bytes.Buffer
+	stdout := boundedResponseBuffer{overflowErr: ErrRunnerResponseTooLarge}
+	var stderr boundedErrorBuffer
 	err := c.Kube.Exec(ctx, build.Namespace, build.Status.RunnerPodName, kube.ExecOptions{
 		Stdout:  &stdout,
 		Stderr:  &stderr,
-		Command: daemonclient.TransportCommand("POST", daemonclient.BuildPath, BuildQuery(build, c.BuildkitPlatformAddrs), sourcePath),
+		Command: daemonclient.TransportCommand("POST", daemonclient.BuildPath, BuildQuery(build, c.BuildkitPlatformAddrs, c.RegistryPlainHTTP), sourcePath),
 	})
+	if stdout.overflow {
+		return fmt.Errorf("submit build: %w", ErrRunnerResponseTooLarge)
+	}
 	if err != nil {
-		return ExecError("submit build", stderr.Bytes(), err)
+		return ExecError("submit build", stderr.Diagnostic(), err)
 	}
 	state, err := runner.ParseBuildState(stdout.Bytes())
 	if err != nil {
@@ -62,49 +148,58 @@ func (c Client) SubmitBuild(ctx context.Context, build *kovav1.KovaBuild, source
 }
 
 func (c Client) BuildStatus(ctx context.Context, build *kovav1.KovaBuild) (runner.BuildState, error) {
-	var stdout, stderr bytes.Buffer
+	stdout := boundedResponseBuffer{overflowErr: ErrRunnerResponseTooLarge}
+	var stderr boundedErrorBuffer
 	err := c.Kube.Exec(ctx, build.Namespace, build.Status.RunnerPodName, kube.ExecOptions{
 		Stdout:  &stdout,
 		Stderr:  &stderr,
 		Command: daemonclient.TransportCommand("GET", daemonclient.StatusPath, "", ""),
 	})
+	if stdout.overflow {
+		return runner.BuildState{}, fmt.Errorf("%w: %w", ErrInvalidBuildStatus, ErrRunnerResponseTooLarge)
+	}
 	if err != nil {
-		return runner.BuildState{}, ExecError("build status", stderr.Bytes(), err)
+		return runner.BuildState{}, ExecError("build status", stderr.Diagnostic(), err)
 	}
 	state, err := runner.ParseBuildState(stdout.Bytes())
 	if err != nil {
-		return runner.BuildState{}, fmt.Errorf("parse build status: %w", err)
+		return runner.BuildState{}, fmt.Errorf("%w: %v", ErrInvalidBuildStatus, err)
 	}
 	return state, nil
 }
 
 func (c Client) CancelBuild(ctx context.Context, build *kovav1.KovaBuild) error {
-	var stderr bytes.Buffer
+	var stderr boundedErrorBuffer
 	err := c.Kube.Exec(ctx, build.Namespace, build.Status.RunnerPodName, kube.ExecOptions{
 		Stderr:  &stderr,
 		Command: daemonclient.TransportCommand("POST", daemonclient.CancelPath, "", ""),
 	})
 	if err != nil {
-		return ExecError("cancel build", stderr.Bytes(), err)
+		return ExecError("cancel build", stderr.Diagnostic(), err)
 	}
 	return nil
 }
 
 func (c Client) Post(ctx context.Context, build *kovav1.KovaBuild, path string, query string) ([]byte, error) {
-	var out, stderr bytes.Buffer
+	out := boundedResponseBuffer{overflowErr: ErrExportTooLarge}
+	var stderr boundedErrorBuffer
 	err := c.Kube.Exec(ctx, build.Namespace, build.Status.RunnerPodName, kube.ExecOptions{
 		Stdout:  &out,
 		Stderr:  &stderr,
 		Command: daemonclient.TransportCommand("POST", "/api/v1/"+path, query, ""),
 	})
+	if out.overflow {
+		return nil, ErrExportTooLarge
+	}
 	if err != nil {
-		return nil, ExecError(path, stderr.Bytes(), err)
+		return nil, ExecError(path, stderr.Diagnostic(), err)
 	}
 	return out.Bytes(), nil
 }
 
-func BuildQuery(build *kovav1.KovaBuild, platformAddrs map[string]string) string {
+func BuildQuery(build *kovav1.KovaBuild, platformAddrs map[string]string, plainHTTPRegistries []string) string {
 	values := url.Values{}
+	values.Set("request-id", RequestID(build))
 	platforms := make([]string, 0, len(platformAddrs))
 	for platform := range platformAddrs {
 		platforms = append(platforms, platform)
@@ -112,6 +207,9 @@ func BuildQuery(build *kovav1.KovaBuild, platformAddrs map[string]string) string
 	sort.Strings(platforms)
 	for _, platform := range platforms {
 		values.Add("platform-addr", platform+"="+platformAddrs[platform])
+	}
+	for _, registry := range plainHTTPRegistries {
+		values.Add("registry-plain-http", registry)
 	}
 	opts := build.Spec.Build
 	setString(values, "format", opts.Format)
@@ -136,6 +234,13 @@ func BuildQuery(build *kovav1.KovaBuild, platformAddrs map[string]string) string
 		values.Add("var", value)
 	}
 	return values.Encode()
+}
+
+func RequestID(build *kovav1.KovaBuild) string {
+	if build.UID != "" {
+		return string(build.UID)
+	}
+	return build.Namespace + "/" + build.Name
 }
 
 func ExecError(action string, stderr []byte, err error) error {

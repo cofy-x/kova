@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	"sigs.k8s.io/yaml"
 )
 
@@ -132,6 +133,21 @@ func TestPreparePodFetchesImmutableOCISource(t *testing.T) {
 	if len(pod.Spec.InitContainers) != 1 {
 		t.Fatalf("init containers = %#v", pod.Spec.InitContainers)
 	}
+	if got := pod.Spec.Volumes[0].EmptyDir.SizeLimit; got == nil || got.Cmp(DefaultSourceVolumeSizeLimit()) != 0 {
+		t.Fatalf("source volume size limit = %v, want 4Gi", got)
+	}
+	if got := pod.Spec.Containers[0].Resources.Limits[corev1.ResourceEphemeralStorage]; got.Cmp(resource.MustParse("5Gi")) != 0 {
+		t.Fatalf("runner ephemeral-storage limit = %s, want 5Gi", got.String())
+	}
+	if got := pod.Spec.InitContainers[0].Resources.Limits[corev1.ResourceEphemeralStorage]; got.Cmp(resource.MustParse("1Gi")) != 0 {
+		t.Fatalf("source fetch ephemeral-storage limit = %s, want 1Gi", got.String())
+	}
+	if pod.Spec.InitContainers[0].TerminationMessagePolicy != corev1.TerminationMessageFallbackToLogsOnError {
+		t.Fatalf("init termination message policy = %q", pod.Spec.InitContainers[0].TerminationMessagePolicy)
+	}
+	if len(pod.Spec.Containers[0].VolumeMounts) < 2 || pod.Spec.Containers[0].VolumeMounts[1].MountPath != "/tmp" {
+		t.Fatalf("runner temporary storage is not on source volume: %#v", pod.Spec.Containers[0].VolumeMounts)
+	}
 	fetch := pod.Spec.InitContainers[0]
 	command := strings.Join(fetch.Command, " ")
 	if !strings.Contains(command, "source fetch") || !strings.Contains(command, "--registry-plain-http registry.local") {
@@ -143,6 +159,30 @@ func TestPreparePodFetchesImmutableOCISource(t *testing.T) {
 	if len(pod.Spec.Volumes) != 2 || pod.Spec.Volumes[1].Secret == nil ||
 		pod.Spec.Volumes[1].Secret.SecretName != "registry-secret" {
 		t.Fatalf("source auth volumes = %#v", pod.Spec.Volumes)
+	}
+}
+
+func TestPreparePodMergesResourceOverridesWithoutDroppingCaps(t *testing.T) {
+	pod := PreparePod(ManifestOptions{
+		PodName: "source", Namespace: "jobs", Image: "registry.local/kova:dev",
+		SourceURI: "https://sources.example.com/source.zip",
+		RunnerResources: corev1.ResourceRequirements{Limits: corev1.ResourceList{
+			corev1.ResourceMemory: resource.MustParse("3Gi"),
+		}, Requests: corev1.ResourceList{
+			corev1.ResourceMemory: resource.MustParse("3Gi"),
+		}},
+		SourceFetchResources: corev1.ResourceRequirements{Requests: corev1.ResourceList{
+			corev1.ResourceCPU: resource.MustParse("100m"),
+		}},
+	})
+	if got := pod.Spec.Containers[0].Resources.Limits[corev1.ResourceMemory]; got.Cmp(resource.MustParse("3Gi")) != 0 {
+		t.Fatalf("runner memory override = %s", got.String())
+	}
+	if got := pod.Spec.Containers[0].Resources.Limits[corev1.ResourceEphemeralStorage]; got.Cmp(resource.MustParse("5Gi")) != 0 {
+		t.Fatalf("runner ephemeral cap was lost: %s", got.String())
+	}
+	if got := pod.Spec.InitContainers[0].Resources.Requests[corev1.ResourceCPU]; got.Cmp(resource.MustParse("100m")) != 0 {
+		t.Fatalf("init CPU request override = %s", got.String())
 	}
 }
 

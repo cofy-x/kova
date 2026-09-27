@@ -13,15 +13,16 @@ import (
 
 	"github.com/google/go-containerregistry/pkg/name"
 	"github.com/google/go-containerregistry/pkg/registry"
+	"github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/empty"
 	"github.com/google/go-containerregistry/pkg/v1/mutate"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 )
 
-type registryResolverFunc func(context.Context, string, []string) (string, string, error)
+type registryResolverFunc func(context.Context, string, string, []string) (string, string, error)
 
-func (fn registryResolverFunc) Resolve(ctx context.Context, target string, plainHTTP []string) (string, string, error) {
-	return fn(ctx, target, plainHTTP)
+func (fn registryResolverFunc) Resolve(ctx context.Context, target, digest string, plainHTTP []string) (string, string, error) {
+	return fn(ctx, target, digest, plainHTTP)
 }
 
 func targetSpecs(targets ...string) []kovav1.KovaBuildTargetSpec {
@@ -88,13 +89,139 @@ func TestRegistryResolverReadsPlatformFromDigestPinnedImageConfig(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	digest, platform, err := (remoteRegistryResolver{}).Resolve(context.Background(), ref.Name(), []string{host})
+	digest, platform, err := (remoteRegistryResolver{}).Resolve(context.Background(), ref.Name(), wantDigest.String(), []string{host})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if digest != wantDigest.String() || platform != "linux/arm64" {
 		t.Fatalf("digest=%q platform=%q, want %q linux/arm64", digest, platform, wantDigest)
 	}
+}
+
+func TestResolveKeepsThisJobsDigestAfterConcurrentSameTagOverwrite(t *testing.T) {
+	t.Setenv("DOCKER_CONFIG", t.TempDir())
+	server := httptest.NewServer(registry.New())
+	defer server.Close()
+	host := strings.TrimPrefix(server.URL, "http://")
+	ref, err := name.NewTag(host+"/team/image:shared", name.Insecure)
+	if err != nil {
+		t.Fatal(err)
+	}
+	imageA, digestA := imageForPlatform(t, "amd64", "job-a")
+	imageB, digestB := imageForPlatform(t, "amd64", "job-b")
+	if digestA == digestB {
+		t.Fatal("test images must have different manifest digests")
+	}
+	if err := remote.Write(ref, imageA); err != nil {
+		t.Fatal(err)
+	}
+	// The second job overwrites the mutable tag after A exports its receipt,
+	// but before the controller verifies A. Channels make this ordering exact.
+	overwrite := make(chan error, 1)
+	startOverwrite := make(chan struct{})
+	go func() {
+		<-startOverwrite
+		overwrite <- remote.Write(ref, imageB)
+	}()
+	exporter := exporterFunc(func(context.Context, *kovav1.KovaBuild, string, string) ([]byte, error) {
+		close(startOverwrite)
+		if err := <-overwrite; err != nil {
+			return nil, err
+		}
+		return []byte(fmt.Sprintf("{\"target\":%q,\"success\":true,\"manifest_digest\":%q}\n", ref.Name(), digestA)), nil
+	})
+	build := &kovav1.KovaBuild{Spec: kovav1.KovaBuildSpec{
+		Targets: targetSpecs(ref.Name()), Build: kovav1.KovaBuildOptions{Format: "oci"},
+	}}
+	results := Resolve(context.Background(), exporter, build, []string{host})
+	if len(results) != 1 || results[0].Status != "succeeded" || results[0].ManifestDigest != digestA {
+		t.Fatalf("results = %#v, want this job's digest %s", results, digestA)
+	}
+	current, err := remote.Get(ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.Descriptor.Digest.String() != digestB {
+		t.Fatalf("tag digest = %s, want competing job's %s", current.Descriptor.Digest, digestB)
+	}
+	// The old path queried the tag. Both images are linux/amd64, so it
+	// would have silently accepted B's digest as A's successful output.
+	tagImage, err := remote.Image(ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tagConfig, err := tagImage.ConfigFile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tagConfig.OS != "linux" || tagConfig.Architecture != "amd64" {
+		t.Fatalf("competing job's platform = %s/%s, want linux/amd64", tagConfig.OS, tagConfig.Architecture)
+	}
+}
+
+func TestResolveNydusKeepsThisJobsDigestAfterConcurrentSameTagOverwrite(t *testing.T) {
+	t.Setenv("DOCKER_CONFIG", t.TempDir())
+	server := httptest.NewServer(registry.New())
+	defer server.Close()
+	host := strings.TrimPrefix(server.URL, "http://")
+	baseTarget := host + "/team/image:shared"
+	nydusTarget := baseTarget + "_nydus_v3"
+	ref, err := name.NewTag(nydusTarget, name.Insecure)
+	if err != nil {
+		t.Fatal(err)
+	}
+	imageA, digestA := imageForPlatform(t, "amd64", "nydus-job-a")
+	imageB, digestB := imageForPlatform(t, "amd64", "nydus-job-b")
+	if err := remote.Write(ref, imageA); err != nil {
+		t.Fatal(err)
+	}
+	overwrite := make(chan error, 1)
+	startOverwrite := make(chan struct{})
+	go func() {
+		<-startOverwrite
+		overwrite <- remote.Write(ref, imageB)
+	}()
+	exporter := exporterFunc(func(context.Context, *kovav1.KovaBuild, string, string) ([]byte, error) {
+		close(startOverwrite)
+		if err := <-overwrite; err != nil {
+			return nil, err
+		}
+		return []byte(fmt.Sprintf("{\"target\":%q,\"success\":true,\"manifest_digest\":%q}\n", nydusTarget, digestA)), nil
+	})
+	build := &kovav1.KovaBuild{Spec: kovav1.KovaBuildSpec{
+		Targets: targetSpecs(baseTarget), Build: kovav1.KovaBuildOptions{Format: "nydus"},
+	}}
+	results := Resolve(context.Background(), exporter, build, []string{host})
+	if len(results) != 1 || results[0].Status != "succeeded" || results[0].ManifestDigest != digestA {
+		t.Fatalf("results = %#v, want this Nydus job's digest %s", results, digestA)
+	}
+	current, err := remote.Get(ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.Descriptor.Digest.String() != digestB {
+		t.Fatalf("tag digest = %s, want competing job's %s", current.Descriptor.Digest, digestB)
+	}
+}
+
+func imageForPlatform(t *testing.T, arch, owner string) (v1.Image, string) {
+	t.Helper()
+	config, err := empty.Image.ConfigFile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	config.OS = "linux"
+	config.Architecture = arch
+	config.Config.Labels = map[string]string{"example.test/job": owner}
+	image, err := mutate.ConfigFile(empty.Image, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest, err := image.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return image, digest.String()
 }
 
 type exporterFunc func(context.Context, *kovav1.KovaBuild, string, string) ([]byte, error)
@@ -183,19 +310,24 @@ func TestHundredLogicalTargetsExpandToTwoHundredConcreteOutputs(t *testing.T) {
 }
 
 func TestResolvePreservesSuccessfulDigestsWhenAnotherRegistryFails(t *testing.T) {
+	digestA := "sha256:" + strings.Repeat("a", 64)
+	digestB := "sha256:" + strings.Repeat("b", 64)
 	build := &kovav1.KovaBuild{Spec: kovav1.KovaBuildSpec{
 		Targets: targetSpecs("registry.example/a:dev", "registry.example/b:dev"),
 		Build:   kovav1.KovaBuildOptions{Format: "oci", Concurrency: 2},
 	}}
 	exporter := exporterFunc(func(context.Context, *kovav1.KovaBuild, string, string) ([]byte, error) {
-		return []byte("{\"target\":\"registry.example/a:dev\",\"success\":true}\n" +
-			"{\"target\":\"registry.example/b:dev\",\"success\":true}\n"), nil
+		return []byte(fmt.Sprintf("{\"target\":\"registry.example/a:dev\",\"success\":true,\"manifest_digest\":%q}\n", digestA) +
+			fmt.Sprintf("{\"target\":\"registry.example/b:dev\",\"success\":true,\"manifest_digest\":%q}\n", digestB)), nil
 	})
-	results := resolveWithRegistry(context.Background(), exporter, registryResolverFunc(func(_ context.Context, target string, _ []string) (string, string, error) {
+	results := resolveWithRegistry(context.Background(), exporter, registryResolverFunc(func(_ context.Context, target, pushedDigest string, _ []string) (string, string, error) {
 		if strings.Contains(target, "/b:") {
 			return "", "", fmt.Errorf("registry unavailable")
 		}
-		return "sha256:" + strings.Repeat("a", 64), "linux/amd64", nil
+		if pushedDigest != digestA {
+			t.Errorf("pushed digest = %q, want %q", pushedDigest, digestA)
+		}
+		return digestA, "linux/amd64", nil
 	}), build, nil)
 	if AllSucceeded(results) {
 		t.Fatal("expected overall failure")
@@ -206,15 +338,63 @@ func TestResolvePreservesSuccessfulDigestsWhenAnotherRegistryFails(t *testing.T)
 	}
 }
 
+func TestResolveDoesNotVerifySuccessfulOCIEntryWithoutPushDigest(t *testing.T) {
+	digest := "sha256:" + strings.Repeat("a", 64)
+	build := &kovav1.KovaBuild{Spec: kovav1.KovaBuildSpec{
+		Targets: targetSpecs("registry.example/a:dev", "registry.example/b:dev"),
+		Build:   kovav1.KovaBuildOptions{Format: "oci", Concurrency: 2},
+	}}
+	var calls atomic.Int32
+	results := resolveWithRegistry(context.Background(), exporterFunc(func(context.Context, *kovav1.KovaBuild, string, string) ([]byte, error) {
+		return []byte(fmt.Sprintf("{\"target\":\"registry.example/a:dev\",\"success\":true,\"manifest_digest\":%q}\n", digest) +
+			"{\"target\":\"registry.example/b:dev\",\"success\":true}\n"), nil
+	}), registryResolverFunc(func(_ context.Context, target, pushedDigest string, _ []string) (string, string, error) {
+		calls.Add(1)
+		if target != "registry.example/a:dev" || pushedDigest != digest {
+			t.Errorf("unexpected verification: target=%q digest=%q", target, pushedDigest)
+		}
+		return digest, "linux/amd64", nil
+	}), build, nil)
+	if calls.Load() != 1 || len(results) != 2 || results[0].Status != "succeeded" ||
+		results[1].Status != "failed" || !strings.Contains(results[1].Error, "missing the pushed manifest digest") {
+		t.Fatalf("calls=%d results=%#v", calls.Load(), results)
+	}
+	if outputs := Outputs(results); len(outputs) != 1 || outputs[0].ManifestDigest != digest {
+		t.Fatalf("partial outputs = %#v", outputs)
+	}
+}
+
+func TestResolveDoesNotVerifySuccessfulNydusEntryWithoutPushDigest(t *testing.T) {
+	build := &kovav1.KovaBuild{Spec: kovav1.KovaBuildSpec{
+		Targets: targetSpecs("registry.example/a:dev"),
+		Build:   kovav1.KovaBuildOptions{Format: "nydus"},
+	}}
+	var calls atomic.Int32
+	results := resolveWithRegistry(context.Background(), exporterFunc(func(context.Context, *kovav1.KovaBuild, string, string) ([]byte, error) {
+		return []byte("{\"target\":\"registry.example/a:dev_nydus_v3\",\"success\":true}\n"), nil
+	}), registryResolverFunc(func(context.Context, string, string, []string) (string, string, error) {
+		calls.Add(1)
+		return "", "", nil
+	}), build, nil)
+	if calls.Load() != 0 || len(results) != 1 || results[0].Status != "failed" ||
+		!strings.Contains(results[0].Error, "missing the pushed manifest digest") {
+		t.Fatalf("calls=%d results=%#v", calls.Load(), results)
+	}
+}
+
 func TestResolveRejectsDigestPinnedImagePlatformMismatch(t *testing.T) {
+	digest := "sha256:" + strings.Repeat("c", 64)
 	build := &kovav1.KovaBuild{Spec: kovav1.KovaBuildSpec{
 		Targets: targetSpecs("registry.example/a:dev"),
 		Build:   kovav1.KovaBuildOptions{Format: "oci", Concurrency: 1},
 	}}
 	results := resolveWithRegistry(context.Background(), exporterFunc(func(context.Context, *kovav1.KovaBuild, string, string) ([]byte, error) {
-		return []byte("{\"target\":\"registry.example/a:dev\",\"success\":true}\n"), nil
-	}), registryResolverFunc(func(context.Context, string, []string) (string, string, error) {
-		return "sha256:" + strings.Repeat("c", 64), "linux/arm64", nil
+		return []byte(fmt.Sprintf("{\"target\":\"registry.example/a:dev\",\"success\":true,\"manifest_digest\":%q}\n", digest)), nil
+	}), registryResolverFunc(func(_ context.Context, _, pushedDigest string, _ []string) (string, string, error) {
+		if pushedDigest != digest {
+			t.Errorf("pushed digest = %q, want %q", pushedDigest, digest)
+		}
+		return digest, "linux/arm64", nil
 	}), build, nil)
 	if len(results) != 1 || results[0].Status != "failed" || !strings.Contains(results[0].Error, "does not match requested platform") {
 		t.Fatalf("results = %#v", results)
@@ -226,18 +406,22 @@ func TestResolveRejectsDigestPinnedImagePlatformMismatch(t *testing.T) {
 
 func TestResolveBoundsManifestVerificationConcurrency(t *testing.T) {
 	const count = 20
+	digest := "sha256:" + strings.Repeat("b", 64)
 	targets := make([]string, count)
 	var exported strings.Builder
 	for index := range targets {
 		targets[index] = fmt.Sprintf("registry.example/image-%02d:dev", index)
-		fmt.Fprintf(&exported, "{\"target\":%q,\"success\":true}\n", targets[index])
+		fmt.Fprintf(&exported, "{\"target\":%q,\"success\":true,\"manifest_digest\":%q}\n", targets[index], digest)
 	}
 	build := &kovav1.KovaBuild{
 		Spec:   kovav1.KovaBuildSpec{Targets: targetSpecs(targets...), Build: kovav1.KovaBuildOptions{Format: "oci", Concurrency: count}},
 		Status: kovav1.KovaBuildStatus{AllocatedConcurrency: 4},
 	}
 	var active, maximum atomic.Int32
-	resolver := registryResolverFunc(func(context.Context, string, []string) (string, string, error) {
+	resolver := registryResolverFunc(func(_ context.Context, _, pushedDigest string, _ []string) (string, string, error) {
+		if pushedDigest != digest {
+			t.Errorf("pushed digest = %q, want %q", pushedDigest, digest)
+		}
 		current := active.Add(1)
 		defer active.Add(-1)
 		for {

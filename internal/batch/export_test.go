@@ -3,6 +3,7 @@ package batch
 import (
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/cofy-x/kova/internal/store"
 )
@@ -23,6 +24,14 @@ func TestSelectExportEntriesUsesExactRequestedTargets(t *testing.T) {
 	}
 	if len(selected) != 2 || selected[0].Target != "registry.example.com/app:dev" || selected[1].Target != "registry.example.com/base:dev" {
 		t.Fatalf("unexpected selected entries: %#v", selected)
+	}
+}
+
+func TestBoundedSummaryEntryDropsLogsAndTruncatesUTF8Reason(t *testing.T) {
+	entry := store.Entry{Target: "registry.example/demo:dev", Success: false, Logs: strings.Repeat("secret log", 1000), Reason: strings.Repeat("a", 2047) + "界"}
+	summary := boundedSummaryEntry(entry)
+	if summary.Logs != "" || len(summary.Reason) > 2048 || !utf8.ValidString(summary.Reason) || summary.Target != entry.Target || entry.Logs == "" {
+		t.Fatalf("summary=%#v", summary)
 	}
 }
 

@@ -11,6 +11,7 @@ import (
 	"github.com/cofy-x/kova/internal/buildcontract"
 	"github.com/cofy-x/kova/internal/scheduler"
 	"github.com/cofy-x/kova/internal/source"
+	"github.com/google/go-containerregistry/pkg/name"
 )
 
 func validateQueryKeys(q url.Values, allowed ...string) error {
@@ -98,7 +99,7 @@ func queryDurationStrict(q url.Values, key string, def time.Duration, min time.D
 }
 
 func buildOptionsFromQuery(q url.Values, defaultAddrs string, resultDB string, logsFile string) (batch.Options, error) {
-	if err := validateQueryKeys(q, "addrs", "platform-addr", "platform", "concurrency", "fail-fast", "format", "oom-cooldown", "timeout", "verbose", "target", "var"); err != nil {
+	if err := validateQueryKeys(q, "addrs", "platform-addr", "platform", "concurrency", "fail-fast", "format", "oom-cooldown", "registry-plain-http", "request-id", "timeout", "verbose", "target", "var"); err != nil {
 		return batch.Options{}, err
 	}
 	addrsValue, ok, err := queryValue(q, "addrs")
@@ -197,27 +198,47 @@ func buildOptionsFromQuery(q url.Values, defaultAddrs string, resultDB string, l
 	if err != nil {
 		return batch.Options{}, err
 	}
+	plainHTTPRegistries, err := plainHTTPRegistryHosts(q["registry-plain-http"])
+	if err != nil {
+		return batch.Options{}, err
+	}
 	return batch.Options{
-		Addrs:            addrs,
-		AddrsRaw:         addrsValue,
-		PlatformAddrs:    platformAddrs,
-		PlatformAddrsRaw: platformValues,
-		Concurrency:      concurrency,
-		Failfast:         failFast,
-		BuildFormat:      format,
-		OOMCooldown:      oomCooldown,
-		ResultPath:       resultDB,
-		LogsPath:         logsFile,
-		Vars:             buildVars,
-		Timeout:          timeout,
-		Verbose:          verbose,
-		Target:           target,
-		Platform:         platform,
+		Addrs:             addrs,
+		AddrsRaw:          addrsValue,
+		PlatformAddrs:     platformAddrs,
+		PlatformAddrsRaw:  platformValues,
+		Concurrency:       concurrency,
+		Failfast:          failFast,
+		BuildFormat:       format,
+		OOMCooldown:       oomCooldown,
+		ResultPath:        resultDB,
+		LogsPath:          logsFile,
+		Vars:              buildVars,
+		Timeout:           timeout,
+		Verbose:           verbose,
+		Target:            target,
+		Platform:          platform,
+		RegistryPlainHTTP: plainHTTPRegistries,
 	}, nil
 }
 
+func plainHTTPRegistryHosts(values []string) ([]string, error) {
+	hosts := make([]string, 0, len(values))
+	for _, value := range values {
+		host := strings.TrimSpace(value)
+		if host == "" {
+			return nil, fmt.Errorf("registry-plain-http values must be registry hosts without a scheme or path")
+		}
+		if _, err := name.NewRegistry(host); err != nil {
+			return nil, fmt.Errorf("registry-plain-http values must be registry hosts without a scheme or path: %w", err)
+		}
+		hosts = append(hosts, host)
+	}
+	return hosts, nil
+}
+
 func exportOptionsFromQuery(q url.Values, resultDB string) (batch.Options, error) {
-	if err := validateQueryKeys(q, "oci", "with-fail", "target"); err != nil {
+	if err := validateQueryKeys(q, "oci", "with-fail", "summary", "target"); err != nil {
 		return batch.Options{}, err
 	}
 	oci, err := queryBoolStrict(q, "oci", false)
@@ -225,6 +246,10 @@ func exportOptionsFromQuery(q url.Values, resultDB string) (batch.Options, error
 		return batch.Options{}, err
 	}
 	withFail, err := queryBoolStrict(q, "with-fail", false)
+	if err != nil {
+		return batch.Options{}, err
+	}
+	summary, err := queryBoolStrict(q, "summary", false)
 	if err != nil {
 		return batch.Options{}, err
 	}
@@ -236,6 +261,7 @@ func exportOptionsFromQuery(q url.Values, resultDB string) (batch.Options, error
 		FromResultPath: resultDB,
 		OCI:            oci,
 		WithFail:       withFail,
+		SummaryOnly:    summary,
 		ExportTargets:  targets,
 	}, nil
 }
@@ -290,14 +316,9 @@ func preheatOptionsFromQuery(q url.Values, resultDB string) (batch.Options, erro
 	if err != nil {
 		return batch.Options{}, err
 	}
-	plainHTTPRegistries, err := trimmedQueryValues(q["registry-plain-http"])
+	plainHTTPRegistries, err := plainHTTPRegistryHosts(q["registry-plain-http"])
 	if err != nil {
 		return batch.Options{}, err
-	}
-	for _, registry := range plainHTTPRegistries {
-		if strings.Contains(registry, "://") || strings.Contains(registry, "/") {
-			return batch.Options{}, fmt.Errorf("registry-plain-http values must be registry hosts without a scheme or path")
-		}
 	}
 	return batch.Options{
 		FromResultPath:             resultDB,

@@ -204,4 +204,24 @@ jobs:
           E2E_SERVICE_BUILD_IMAGE: "false"
           KIND_LOAD_IMAGES: "false"
           START_OBSERVABILITY: "false"
+          KIND_CONFIG: deploy/quickstart-kind-cluster.yaml
+          KIND_VALUES: deploy/quickstart-kind-values.yaml
+          KOVA_VALUES: deploy/quickstart-kind-values.yaml
+          KIND_WORKERS: "1"
         run: make e2e-service
+      - name: Diagnose Service lifecycle failure
+        if: failure()
+        shell: bash
+        run: |
+          kubeconfig=.kind/kova-local.kubeconfig
+          if [[ ! -f "${kubeconfig}" ]]; then
+            echo "No Service lifecycle Kind kubeconfig exists; failure occurred before this cluster was created."
+            exit 0
+          fi
+          kubectl --kubeconfig "${kubeconfig}" -n kova get pods -o json |
+            jq -r '.items[] | [.metadata.name, .status.phase,
+              ([.status.containerStatuses[]? | .name + ":" + (.state | keys[0]) + ":" + (.lastState.terminated.reason // "")] | join(","))] | @tsv' || true
+          kubectl --kubeconfig "${kubeconfig}" -n kova get kovabuilds -o json |
+            jq -r '.items[] | [.metadata.name, (.status.phase // ""), (.status.reason // ""), (.status.runnerPodName // "")] | @tsv' || true
+          kubectl --kubeconfig "${kubeconfig}" -n kova get events -o json |
+            jq -r '.items[-30:][] | [(.lastTimestamp // .eventTime // ""), (.involvedObject.name // ""), (.reason // ""), (.message // "")] | @tsv' || true

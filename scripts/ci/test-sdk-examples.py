@@ -22,6 +22,7 @@ DIGEST_B = "sha256:" + "b" * 64
 DIGEST_C = "sha256:" + "c" * 64
 CREATED_AT = "2026-09-20T00:00:00Z"
 TOKEN = "sdk-example-token-must-not-leak"
+FUTURE_FAILURE_CODE = "future_source_fault"
 SOURCE_URI = f"oci://registry.example.com/team/sources@{DIGEST_A}"
 TARGET = "registry.example.com/team/seed:build-example"
 
@@ -85,6 +86,10 @@ class Scenario:
                 self.respond(request, 200, job("running"))
             elif self.mode == "failed":
                 self.respond(request, 200, job("failed"))
+            elif self.mode == "future-failed":
+                terminal = job("failed")
+                terminal["failure_code"] = FUTURE_FAILURE_CODE
+                self.respond(request, 200, terminal)
             elif self.mode == "terminal-cancelled":
                 self.respond(request, 200, job("cancelled"))
             elif gets == 1:
@@ -97,7 +102,7 @@ class Scenario:
                 []
                 if self.mode == "terminal-cancelled"
                 else [output("oci", DIGEST_B)]
-                if self.mode == "failed"
+                if self.mode in {"failed", "future-failed"}
                 else [
                     output("nydus", DIGEST_C),
                     output("oci", DIGEST_B),
@@ -286,13 +291,15 @@ def run_example(
         assert return_code == 2, failure(command, mode, return_code, stdout, stderr)
         assert not receipt_path.exists()
         assert "cancelled" in stderr
-    elif mode == "failed":
+    elif mode in {"failed", "future-failed"}:
         assert return_code == 3, failure(command, mode, return_code, stdout, stderr)
         assert stdout == ""
         assert "status failed" in stderr
         receipt = load_receipt(receipt_path, receipt_example)
         assert receipt["status"] == "failed"
-        assert receipt["failure_code"] == "build_failed"
+        expected_code = FUTURE_FAILURE_CODE if mode == "future-failed" else "build_failed"
+        assert receipt["failure_code"] == expected_code
+        assert expected_code in stderr
         assert len(receipt["outputs"]) == 1
         assert receipt["outputs"][0]["immutable_ref"] == (
             f"registry.example.com/team/seed@{DIGEST_B}"
@@ -369,14 +376,17 @@ def main() -> None:
     with tempfile.TemporaryDirectory(prefix="kova-sdk-examples-") as directory:
         temporary = Path(directory)
         for language, command in examples.items():
-            for mode in (
+            modes = (
                 "success",
                 "api-error",
                 "timeout",
                 "cancel",
                 "failed",
                 "terminal-cancelled",
-            ):
+            )
+            if language == "python":
+                modes += ("future-failed",)
+            for mode in modes:
                 run_example(command, mode, temporary / language, receipt_example)
     print("validated Go and Python SDK examples")
 

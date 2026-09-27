@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"time"
 
@@ -10,11 +11,14 @@ import (
 	"github.com/cofy-x/kova/internal/logging"
 	"github.com/cofy-x/kova/internal/observability"
 	serviceauth "github.com/cofy-x/kova/internal/service/auth"
+	"github.com/cofy-x/kova/internal/service/buildcontroller"
 	"github.com/cofy-x/kova/internal/service/config"
+	"github.com/cofy-x/kova/internal/service/queueadmission"
 	"github.com/cofy-x/kova/internal/version"
 	apiv1 "github.com/cofy-x/kova/pkg/api/v1"
 
 	"github.com/labstack/echo/v4"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -23,21 +27,29 @@ type kubeAPI interface {
 }
 
 type Server struct {
-	cfg    config.Config
-	kube   kubeAPI
-	client client.Client
-	reader client.Reader
-	auth   serviceauth.Authenticator
-	authz  serviceauth.Authorizer
+	cfg             config.Config
+	kube            kubeAPI
+	client          client.Client
+	reader          client.Reader
+	readinessReader client.Reader
+	auth            serviceauth.Authenticator
+	authz           serviceauth.Authorizer
 }
 
 var (
-	authDenied   = observability.Int64Counter("kova.service.auth.denied", "Rejected service API authentication attempts")
-	authzDenied  = observability.Int64Counter("kova.service.authorization.denied", "Rejected service API authorization attempts")
-	buildCancels = observability.Int64Counter("kova.service.job.cancellations", "Accepted job cancellations")
+	authDenied             = observability.Int64Counter("kova.service.auth.denied", "Rejected service API authentication attempts")
+	authzDenied            = observability.Int64Counter("kova.service.authorization.denied", "Rejected service API authorization attempts")
+	reviewUnavailableCount = observability.Int64Counter("kova.service.identity.review_unavailable", "Service API identity review outcomes that Kubernetes could not determine")
+	buildCancels           = observability.Int64Counter("kova.service.job.cancellations", "Accepted job cancellations")
 )
 
-func NewServer(cfg config.Config, kube kubeAPI, crClient client.Client, crReader client.Reader, authenticator serviceauth.Authenticator, authorizer serviceauth.Authorizer) *Server {
+const (
+	serviceReadHeaderTimeout = 5 * time.Second
+	serviceReadTimeout       = 30 * time.Second
+	serviceIdleTimeout       = time.Minute
+)
+
+func NewServer(cfg config.Config, kube kubeAPI, crClient client.Client, crReader client.Reader, readinessReader client.Reader, authenticator serviceauth.Authenticator, authorizer serviceauth.Authorizer) *Server {
 	if cfg.Listen == "" {
 		cfg.Listen = ":8080"
 	}
@@ -53,12 +65,28 @@ func NewServer(cfg config.Config, kube kubeAPI, crClient client.Client, crReader
 	if crReader == nil {
 		crReader = crClient
 	}
-	return &Server{cfg: cfg, kube: kube, client: crClient, reader: crReader, auth: authenticator, authz: authorizer}
+	if readinessReader == nil {
+		readinessReader = crReader
+	}
+	return &Server{cfg: cfg, kube: kube, client: crClient, reader: crReader, readinessReader: readinessReader, auth: authenticator, authz: authorizer}
+}
+
+func (s *Server) queueStore() queueadmission.Store {
+	return s.queueStoreWithReader(s.reader)
+}
+
+func (s *Server) queueStoreWithReader(reader client.Reader) queueadmission.Store {
+	return queueadmission.Store{
+		Client: s.client, Reader: reader, Namespace: s.cfg.Namespace,
+		GlobalLimit: s.cfg.MaxQueuedJobs, RequesterLimit: s.cfg.MaxQueuedJobsPerRequester,
+	}
 }
 
 func (s *Server) Start(ctx context.Context) error {
-	e := s.routes()
-	httpSrv := &http.Server{Addr: s.cfg.Listen, Handler: e}
+	if err := s.initializeAdmission(ctx); err != nil {
+		return err
+	}
+	httpSrv := s.httpServer()
 	go func() {
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -70,6 +98,81 @@ func (s *Server) Start(ctx context.Context) error {
 		return err
 	}
 	return nil
+}
+
+func (s *Server) httpServer() *http.Server {
+	return &http.Server{
+		Addr:              s.cfg.Listen,
+		Handler:           s.routes(),
+		ReadHeaderTimeout: serviceReadHeaderTimeout,
+		ReadTimeout:       serviceReadTimeout,
+		IdleTimeout:       serviceIdleTimeout,
+		// A write deadline would also cover potentially slow Kubernetes calls
+		// after a mutation has begun. Until those operations have a separate
+		// bounded response contract, do not turn an accepted build into an
+		// indistinguishable transport timeout here.
+	}
+}
+
+func (s *Server) initializeAdmission(ctx context.Context) error {
+	queue := s.queueStore()
+	activeErr := s.checkActiveAdmissionLedger(ctx)
+	queueErr := queue.CheckReady(ctx)
+	if activeErr == nil {
+		if queueErr == nil {
+			return nil
+		}
+		if !apierrors.IsNotFound(queueErr) {
+			return queueErr
+		}
+		// Another replica may be between first-start active and queue
+		// creation. Observe briefly, but never create the missing queue here:
+		// it may instead have been deleted with an unknown CR Create intent.
+		for retry := 0; retry < 10; retry++ {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(100 * time.Millisecond):
+			}
+			if err := queue.CheckReady(ctx); err == nil {
+				return nil
+			} else if !apierrors.IsNotFound(err) {
+				return err
+			}
+		}
+		return fmt.Errorf("queue admission ledger is absent while active admission ledger exists in %s; inspect recovery evidence before migration", s.cfg.Namespace)
+	}
+	if !apierrors.IsNotFound(activeErr) {
+		return activeErr
+	}
+	if queueErr == nil {
+		return fmt.Errorf("active admission ledger is absent while queue admission ledger exists in %s; inspect recovery evidence before migration", s.cfg.Namespace)
+	}
+	if !apierrors.IsNotFound(queueErr) {
+		return queueErr
+	}
+	// Active-first creation makes either ledger a marker that prevents silent
+	// replacement of the other after startup. A crash in this short bootstrap
+	// window requires an explicit, audited empty-namespace recovery.
+	if err := buildcontroller.EnsureAdmissionLedger(ctx, s.client, s.reader, s.cfg.Namespace, s.cfg); err != nil {
+		return err
+	}
+	return queue.EnsureInitialized(ctx)
+}
+
+func (s *Server) checkAdmissionLedgers(ctx context.Context) error {
+	return s.checkAdmissionLedgersWithReader(ctx, s.reader)
+}
+
+func (s *Server) checkAdmissionLedgersWithReader(ctx context.Context, reader client.Reader) error {
+	if err := s.queueStoreWithReader(reader).CheckReady(ctx); err != nil {
+		return err
+	}
+	return buildcontroller.CheckAdmissionLedger(ctx, reader, s.cfg.Namespace, s.cfg)
+}
+
+func (s *Server) checkActiveAdmissionLedger(ctx context.Context) error {
+	return buildcontroller.CheckAdmissionLedger(ctx, s.reader, s.cfg.Namespace, s.cfg)
 }
 
 func (s *Server) routes() *echo.Echo {
@@ -88,7 +191,10 @@ func (s *Server) routes() *echo.Echo {
 	})
 	e.GET("/readyz", func(c echo.Context) error {
 		var builds kovav1.KovaBuildList
-		if err := s.reader.List(c.Request().Context(), &builds, client.InNamespace(s.cfg.Namespace), client.Limit(1)); err != nil {
+		if err := s.readinessReader.List(c.Request().Context(), &builds, client.InNamespace(s.cfg.Namespace), client.Limit(1)); err != nil {
+			return serviceUnavailable(c, err)
+		}
+		if err := s.checkAdmissionLedgersWithReader(c.Request().Context(), s.readinessReader); err != nil {
 			return serviceUnavailable(c, err)
 		}
 		return c.JSON(http.StatusOK, apiv1.ReadyStatus{Status: "ready"})

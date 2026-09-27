@@ -60,8 +60,7 @@ The tag workflow:
 2. builds the six CLI archives and the Python wheel and source distribution, validates their contents, and generates the CLI SBOM;
 3. packages and attests a candidate Helm chart while building and attesting
    controller, runner, and worker images for Linux `amd64` and `arm64`;
-4. upgrades a kind cluster from the previous public release to the candidate,
-   runs the authenticated Service lifecycle, and rolls back to the baseline;
+4. stops and drains the previous public Service in a kind cluster, applies and probes the candidate CRD, starts the candidate in a fresh runner namespace, runs the authenticated Service lifecycle, then drains it before rolling back to the baseline;
 5. promotes the validated role image digests and publishes the OCI chart;
 6. assembles checksums and verifies the CLI, anonymously pullable chart, role
    image boundaries, runtime users, and anonymous image pulls;

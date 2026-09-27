@@ -13,6 +13,7 @@ class JobStatus(str, Enum):
     QUEUED = "queued"
     STARTING = "starting"
     RUNNING = "running"
+    VERIFYING = "verifying"
     SUCCEEDED = "succeeded"
     FAILED = "failed"
     CANCELLED = "cancelled"
@@ -20,6 +21,8 @@ class JobStatus(str, Enum):
 
 class BuildFailureCode(str, Enum):
     INVALID_SOURCE = "invalid_source"
+    SOURCE_UNAVAILABLE = "source_unavailable"
+    RESOURCE_EXHAUSTED = "resource_exhausted"
     INVALID_TARGETS = "invalid_targets"
     WORKER_PLATFORM_UNAVAILABLE = "worker_platform_unavailable"
     RUNNER_UNAVAILABLE = "runner_unavailable"
@@ -125,7 +128,7 @@ class BuildJob:
     created_at: datetime
     requester: str
     error: str | None = None
-    failure_code: BuildFailureCode | None = None
+    failure_code: BuildFailureCode | str | None = None
     started_at: datetime | None = None
     finished_at: datetime | None = None
     expires_at: datetime | None = None
@@ -133,20 +136,28 @@ class BuildJob:
     source_uri: str | None = None
     idempotency_key: str | None = None
     cancellation_requested: bool = False
+    recovery_required: bool = False
     requested_concurrency: int | None = None
     allocated_concurrency: int | None = None
+    verification_started_at: datetime | None = None
+    verification_deadline_at: datetime | None = None
+    verification_next_attempt_at: datetime | None = None
+    verification_attempts: int | None = None
+    verification_last_error: str | None = None
+    verification_pending: int | None = None
+    verification_succeeded: int | None = None
+    verification_failed: int | None = None
 
     @classmethod
     def from_dict(cls, value: JSON) -> BuildJob:
         _require_fields(value, {"id", "status", "created_at", "requester"}, _BUILD_JOB_FIELDS)
-        failure = value.get("failure_code")
         return cls(
             id=_string(value, "id"),
             status=JobStatus(_string(value, "status")),
             created_at=_datetime(value, "created_at"),
             requester=_string(value, "requester"),
             error=_optional_string(value, "error"),
-            failure_code=BuildFailureCode(failure) if failure is not None else None,
+            failure_code=_failure_code(value),
             started_at=_optional_datetime(value, "started_at"),
             finished_at=_optional_datetime(value, "finished_at"),
             expires_at=_optional_datetime(value, "expires_at"),
@@ -154,8 +165,17 @@ class BuildJob:
             source_uri=_optional_string(value, "source_uri"),
             idempotency_key=_optional_string(value, "idempotency_key"),
             cancellation_requested=_optional_bool(value, "cancellation_requested") or False,
+            recovery_required=_optional_bool(value, "recovery_required") or False,
             requested_concurrency=_optional_int(value, "requested_concurrency"),
             allocated_concurrency=_optional_int(value, "allocated_concurrency"),
+            verification_started_at=_optional_datetime(value, "verification_started_at"),
+            verification_deadline_at=_optional_datetime(value, "verification_deadline_at"),
+            verification_next_attempt_at=_optional_datetime(value, "verification_next_attempt_at"),
+            verification_attempts=_optional_int(value, "verification_attempts"),
+            verification_last_error=_optional_string(value, "verification_last_error"),
+            verification_pending=_optional_int(value, "verification_pending"),
+            verification_succeeded=_optional_int(value, "verification_succeeded"),
+            verification_failed=_optional_int(value, "verification_failed"),
         )
 
 
@@ -247,9 +267,34 @@ _BUILD_JOB_FIELDS = {
     "idempotency_key",
     "requester",
     "cancellation_requested",
+    "recovery_required",
     "requested_concurrency",
     "allocated_concurrency",
+    "verification_started_at",
+    "verification_deadline_at",
+    "verification_next_attempt_at",
+    "verification_attempts",
+    "verification_last_error",
+    "verification_pending",
+    "verification_succeeded",
+    "verification_failed",
 }
+
+
+def _failure_code(value: JSON) -> BuildFailureCode | str | None:
+    raw = value.get("failure_code")
+    if raw is None:
+        return None
+    if not isinstance(raw, str):
+        raise TypeError("failure_code must be a string")
+    if not raw:
+        raise ValueError("failure_code must not be empty")
+    try:
+        return BuildFailureCode(raw)
+    except ValueError:
+        return raw
+
+
 _DIGEST = re.compile(r"^sha256:[a-f0-9]{64}$")
 _IMMUTABLE_REFERENCE = re.compile(r"^.+@sha256:[a-f0-9]{64}$")
 

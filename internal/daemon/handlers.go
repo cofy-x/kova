@@ -3,13 +3,14 @@ package daemon
 import (
 	"context"
 	"errors"
-	"io"
 	"net/http"
 	"net/url"
 	"os"
 	"time"
 
+	"github.com/cofy-x/kova/internal/daemonclient"
 	"github.com/cofy-x/kova/internal/logging"
+	"github.com/cofy-x/kova/internal/source"
 
 	"github.com/labstack/echo/v4"
 )
@@ -19,7 +20,9 @@ func (s *daemonServer) handleHealth(c echo.Context) error {
 }
 
 func (s *daemonServer) handleBuildStatus(c echo.Context) error {
-	return c.JSON(http.StatusOK, s.getBuildState())
+	state := s.getBuildState()
+	state.Capabilities = []string{daemonclient.IdempotentBuildRequestCapability}
+	return c.JSON(http.StatusOK, state)
 }
 
 func (s *daemonServer) handleBuildCancel(c echo.Context) error {
@@ -37,13 +40,30 @@ func (s *daemonServer) handleBuildCancel(c echo.Context) error {
 func (s *daemonServer) handleBuildPost(c echo.Context) error {
 	logging.ResetCommandStartTime(time.Now())
 
+	if len(c.QueryParams()["request-id"]) > 1 {
+		return c.JSON(http.StatusBadRequest, daemonState{Status: "error", Error: "request-id must be specified at most once"})
+	}
+	requestID := c.QueryParam("request-id")
+	if len(requestID) > 128 {
+		return c.JSON(http.StatusBadRequest, daemonState{Status: "error", Error: "request-id is too long"})
+	}
 	s.mu.Lock()
+	if requestID != "" && requestID == s.buildRequestID {
+		state := s.build
+		s.mu.Unlock()
+		return c.JSON(http.StatusOK, state)
+	}
+	if s.buildRequestID != "" {
+		s.mu.Unlock()
+		return c.JSON(http.StatusConflict, daemonState{Status: "error", Error: "runner belongs to another build"})
+	}
 	if buildActive(s.build.Status) {
 		s.mu.Unlock()
 		logging.Errorf("Rejected build request: another build is already running")
 		return c.JSON(http.StatusConflict, daemonState{Status: "error", Error: "a build is already running"})
 	}
-	s.build = daemonState{Status: "running"}
+	s.buildRequestID = requestID
+	s.build = daemonState{Status: "running", RequestID: requestID}
 	done := make(chan struct{})
 	buildCtx, buildCancel := context.WithCancel(context.Background())
 	s.buildCancel = buildCancel
@@ -62,7 +82,12 @@ func (s *daemonServer) handleBuildPost(c echo.Context) error {
 		s.clearBuildExecution(done)
 		return c.JSON(http.StatusInternalServerError, s.getBuildState())
 	}
-	bytesWritten, err := io.Copy(tmpZip, c.Request().Body)
+	var bytesWritten int64
+	if c.Request().ContentLength > source.MaxArchiveBytes {
+		err = source.ErrArchiveTooLarge
+	} else {
+		bytesWritten, err = source.CopyArchive(tmpZip, c.Request().Body, source.MaxArchiveBytes)
+	}
 	if err != nil {
 		tmpZip.Close()
 		os.Remove(tmpZip.Name())
@@ -71,6 +96,9 @@ func (s *daemonServer) handleBuildPost(c echo.Context) error {
 		buildCancel()
 		close(done)
 		s.clearBuildExecution(done)
+		if errors.Is(err, source.ErrArchiveTooLarge) {
+			return c.JSON(http.StatusRequestEntityTooLarge, s.getBuildState())
+		}
 		return c.JSON(http.StatusInternalServerError, s.getBuildState())
 	}
 	if err := tmpZip.Close(); err != nil {
@@ -108,7 +136,7 @@ func (s *daemonServer) handleBuildPost(c echo.Context) error {
 
 	logging.Infof("Build request accepted for async processing: zip=%s", tmpZip.Name())
 	go s.runBuildAsync(buildCtx, tmpZip.Name(), q, done)
-	return c.JSON(http.StatusAccepted, daemonState{Status: "running"})
+	return c.JSON(http.StatusAccepted, s.getBuildState())
 }
 
 func (s *daemonServer) runBuildAsync(buildCtx context.Context, zipPath string, q url.Values, done chan struct{}) {
@@ -136,8 +164,16 @@ func (s *daemonServer) runBuildAsync(buildCtx context.Context, zipPath string, q
 		s.setBuildState(daemonState{Status: "failed", Error: "extract zip: " + err.Error()})
 		return
 	}
+	// The immutable source.zip remains mounted separately for provenance. The
+	// HTTP upload copy is no longer needed once extraction has succeeded.
+	if err := os.Remove(zipPath); err != nil && !os.IsNotExist(err) {
+		logging.Errorf("Async build: release upload copy %s failed: %v", zipPath, err)
+		s.setBuildState(daemonState{Status: "failed", Error: "release upload copy: " + err.Error()})
+		return
+	}
 	logging.Infof("Async build extracted zip to %s", daemonImageDir)
 	opts.ImageDirs = daemonImageDir
+	opts.ImageDirsAlreadyIsolated = true
 
 	logging.Infof("Async build entering batch.RunBuild")
 	if err := s.backend.runBuild(opts); err != nil {
@@ -215,6 +251,7 @@ func (s *daemonServer) handlePreheat(c echo.Context) error {
 
 func (s *daemonServer) setBuildState(st daemonState) {
 	s.mu.Lock()
+	st.RequestID = s.buildRequestID
 	s.build = st
 	s.mu.Unlock()
 	if st.Error != "" {
@@ -246,7 +283,7 @@ func (s *daemonServer) cancelActiveBuild(reason string) (chan struct{}, bool) {
 		return s.buildDone, false
 	}
 	s.buildCancel()
-	s.build = daemonState{Status: "cancelling", Error: reason}
+	s.build = daemonState{Status: "cancelling", Error: reason, RequestID: s.buildRequestID}
 	return s.buildDone, true
 }
 

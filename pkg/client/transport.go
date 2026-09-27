@@ -17,6 +17,7 @@ import (
 type APIError struct {
 	StatusCode int
 	Code       apiv1.ErrorCode
+	BuildID    string
 	Message    string
 	Retryable  bool
 	RetryAfter time.Duration
@@ -131,6 +132,7 @@ func responseError(resp *http.Response) error {
 	return &APIError{
 		StatusCode: resp.StatusCode,
 		Code:       payload.Code,
+		BuildID:    strings.TrimSpace(resp.Header.Get("X-Kova-Build-ID")),
 		Message:    strings.TrimSpace(payload.Message),
 		Retryable:  payload.Retryable,
 		RetryAfter: parseRetryAfter(resp.Header.Get("Retry-After"), time.Now()),

@@ -59,6 +59,7 @@ def api_error(status_code: int, headers: Mapping[str, str], raw: bytes) -> KovaA
         message=message,
         retryable=retryable,
         retry_after=parse_retry_after(headers.get("Retry-After")),
+        build_id=headers.get("X-Kova-Build-ID"),
     )
 
 

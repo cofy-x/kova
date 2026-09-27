@@ -221,6 +221,9 @@ func runnerBuildArgsFromContext(c *cli.Context) []string {
 	for _, value := range c.StringSlice("var") {
 		args = append(args, "--var", value)
 	}
+	for _, registry := range c.StringSlice("registry-plain-http") {
+		args = append(args, "--registry-plain-http", registry)
+	}
 	if target := strings.TrimSpace(c.String("target")); target != "" {
 		args = append(args, "--target", target)
 		args = append(args, "--platform", strings.TrimSpace(c.String("platform")))

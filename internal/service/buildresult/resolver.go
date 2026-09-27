@@ -5,9 +5,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"net"
+	"net/http"
 	"strings"
 	"sync"
+	"syscall"
 
 	kovav1 "github.com/cofy-x/kova/internal/apis/kova/v1alpha1"
 	"github.com/cofy-x/kova/internal/buildcontract"
@@ -16,7 +21,9 @@ import (
 
 	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/google/go-containerregistry/pkg/name"
+	"github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
+	"github.com/google/go-containerregistry/pkg/v1/remote/transport"
 )
 
 type Exporter interface {
@@ -24,38 +31,151 @@ type Exporter interface {
 }
 
 type RegistryResolver interface {
-	Resolve(context.Context, string, []string) (string, string, error)
+	Resolve(context.Context, string, string, []string) (string, string, error)
 }
 
 type remoteRegistryResolver struct{}
 
-func (remoteRegistryResolver) Resolve(ctx context.Context, target string, plainHTTPRegistries []string) (string, string, error) {
+// Registry manifests and image configs are untrusted input. In particular,
+// manifest config.size and HTTP Content-Length can both lie, while the image
+// library reads the config body into memory before parsing it.
+const maxRegistryVerificationResponseBytes int64 = 4 << 20
+
+var errRegistryVerificationResponseTooLarge = errors.New("registry verification response exceeds 4 MiB")
+
+type boundedRegistryTransport struct {
+	base http.RoundTripper
+}
+
+func (t boundedRegistryTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	response, err := t.base.RoundTrip(request)
+	if err != nil {
+		return nil, err
+	}
+	if response.ContentLength > maxRegistryVerificationResponseBytes {
+		_ = response.Body.Close()
+		return nil, errRegistryVerificationResponseTooLarge
+	}
+	response.Body = &boundedRegistryBody{ReadCloser: response.Body, remaining: maxRegistryVerificationResponseBytes}
+	return response, nil
+}
+
+type boundedRegistryBody struct {
+	io.ReadCloser
+	remaining int64
+}
+
+func (b *boundedRegistryBody) Read(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	if b.remaining == 0 {
+		var extra [1]byte
+		n, err := b.ReadCloser.Read(extra[:])
+		if n > 0 {
+			return 0, errRegistryVerificationResponseTooLarge
+		}
+		if err == nil {
+			return 0, io.ErrNoProgress
+		}
+		return 0, err
+	}
+	if int64(len(p)) > b.remaining {
+		p = p[:int(b.remaining)]
+	}
+	n, err := b.ReadCloser.Read(p)
+	b.remaining -= int64(n)
+	if n == 0 && err == nil {
+		return 0, io.ErrNoProgress
+	}
+	return n, err
+}
+
+func registryVerificationOptions(ctx context.Context) []remote.Option {
+	return []remote.Option{
+		remote.WithContext(ctx),
+		remote.WithAuthFromKeychain(authn.DefaultKeychain),
+		remote.WithTransport(boundedRegistryTransport{base: remote.DefaultTransport}),
+	}
+}
+
+func registryResponseError(operation string, err error) error {
+	if errors.Is(err, errRegistryVerificationResponseTooLarge) {
+		return fmt.Errorf("%w: %s: %w", ErrDefinitive, operation, err)
+	}
+	return fmt.Errorf("%s: %w", operation, err)
+}
+
+func retryableRegistryConfigFetch(err error) bool {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) ||
+		errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.ErrNoProgress) ||
+		errors.Is(err, syscall.EPIPE) || errors.Is(err, syscall.ECONNRESET) || errors.Is(err, net.ErrClosed) {
+		return true
+	}
+	var registryErr *transport.Error
+	if errors.As(err, &registryErr) {
+		// A digest-pinned manifest may reach a replicated registry before its
+		// config blob. A 404 remains pending until the overall deadline.
+		status := registryErr.StatusCode
+		return registryErr.Temporary() || status == http.StatusNotFound || status == http.StatusRequestTimeout ||
+			status == http.StatusTooManyRequests || status >= http.StatusInternalServerError || status == 499
+	}
+	var networkErr net.Error
+	return errors.As(err, &networkErr)
+}
+
+// ErrDefinitive means that retrying the same immutable pushed digest cannot
+// make the receipt valid. Transport and availability errors are retryable.
+var ErrDefinitive = errors.New("definitive result verification failure")
+
+func (remoteRegistryResolver) Resolve(ctx context.Context, target, pushedDigest string, plainHTTPRegistries []string) (string, string, error) {
+	if pushedDigest == "" {
+		return "", "", fmt.Errorf("build result is missing the pushed manifest digest")
+	}
 	ref, err := name.ParseReference(target, referenceOptions(target, plainHTTPRegistries)...)
 	if err != nil {
-		return "", "", err
+		return "", "", fmt.Errorf("%w: invalid output reference: %v", ErrDefinitive, err)
 	}
-	descriptor, err := remote.Get(ref, remote.WithContext(ctx), remote.WithAuthFromKeychain(authn.DefaultKeychain))
+	digestRef, err := name.NewDigest(ref.Context().Name()+"@"+pushedDigest, referenceOptions(target, plainHTTPRegistries)...)
 	if err != nil {
-		return "", "", fmt.Errorf("resolve pushed descriptor: %w", err)
+		return "", "", fmt.Errorf("%w: parse pushed digest reference: %v", ErrDefinitive, err)
 	}
-	digest := descriptor.Descriptor.Digest.String()
-	digestRef, err := name.NewDigest(ref.Context().Name()+"@"+digest, referenceOptions(target, plainHTTPRegistries)...)
+	descriptor, err := remote.Get(digestRef, registryVerificationOptions(ctx)...)
 	if err != nil {
-		return "", "", fmt.Errorf("parse pushed digest reference: %w", err)
+		return "", "", registryResponseError("resolve pushed descriptor by digest", err)
 	}
-	image, err := remote.Image(digestRef, remote.WithContext(ctx), remote.WithAuthFromKeychain(authn.DefaultKeychain))
-	if err != nil {
-		return "", "", fmt.Errorf("resolve pushed single-platform image: %w", err)
+	if descriptor.Descriptor.Digest.String() != pushedDigest {
+		return "", "", fmt.Errorf("%w: resolved manifest digest %s does not match pushed digest %s", ErrDefinitive, descriptor.Descriptor.Digest, pushedDigest)
 	}
-	config, err := image.ConfigFile()
+	if !descriptor.MediaType.IsImage() {
+		return "", "", fmt.Errorf("%w: pushed descriptor is not a single-platform image manifest (%s)", ErrDefinitive, descriptor.MediaType)
+	}
+	image, err := descriptor.Image()
 	if err != nil {
-		return "", "", fmt.Errorf("read pushed image platform: %w", err)
+		return "", "", fmt.Errorf("%w: invalid pushed single-platform image: %w", ErrDefinitive, err)
+	}
+	// RawConfigFile may fail while fetching the blob, before the immutable
+	// content can be parsed. Keep recognized transport/availability failures
+	// retryable; checksum, size and malformed-content errors are definitive.
+	rawConfig, err := image.RawConfigFile()
+	if err != nil {
+		if retryableRegistryConfigFetch(err) {
+			return "", "", fmt.Errorf("read pushed image config: %w", err)
+		}
+		return "", "", fmt.Errorf("%w: read pushed image platform: %w", ErrDefinitive, err)
+	}
+	if int64(len(rawConfig)) > maxRegistryVerificationResponseBytes {
+		return "", "", fmt.Errorf("%w: read pushed image platform: %w", ErrDefinitive, errRegistryVerificationResponseTooLarge)
+	}
+	config, err := v1.ParseConfigFile(bytes.NewReader(rawConfig))
+	if err != nil {
+		return "", "", fmt.Errorf("%w: parse pushed image config: %w", ErrDefinitive, err)
 	}
 	platform, err := buildcontract.NormalizePlatform(config.OS + "/" + config.Architecture)
 	if err != nil {
-		return "", "", fmt.Errorf("pushed image has unsupported platform: %w", err)
+		return "", "", fmt.Errorf("%w: pushed image has unsupported platform: %v", ErrDefinitive, err)
 	}
-	return digest, platform, nil
+	return pushedDigest, platform, nil
 }
 
 type Result struct {
@@ -99,7 +219,11 @@ func resolveWithRegistry(ctx context.Context, exporter Exporter, registry Regist
 		formats[result.Format] = entries
 	}
 
-	pending := make([]int, 0, len(expected))
+	type verification struct {
+		index  int
+		digest string
+	}
+	pending := make([]verification, 0, len(expected))
 	for index := range expected {
 		if err := formatErrors[expected[index].Format]; err != nil {
 			expected[index].Status, expected[index].Error = "failed", err.Error()
@@ -114,7 +238,11 @@ func resolveWithRegistry(ctx context.Context, exporter Exporter, registry Regist
 			expected[index].Status, expected[index].Error = "failed", entry.Reason
 			continue
 		}
-		pending = append(pending, index)
+		if entry.ManifestDigest == "" {
+			expected[index].Status, expected[index].Error = "failed", "build result is missing the pushed manifest digest"
+			continue
+		}
+		pending = append(pending, verification{index: index, digest: entry.ManifestDigest})
 	}
 
 	limit := int(build.Status.AllocatedConcurrency)
@@ -130,14 +258,15 @@ func resolveWithRegistry(ctx context.Context, exporter Exporter, registry Regist
 	if limit > len(pending) {
 		limit = len(pending)
 	}
-	jobs := make(chan int)
+	jobs := make(chan verification)
 	var wg sync.WaitGroup
 	for worker := 0; worker < limit; worker++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			for index := range jobs {
-				digest, platform, err := registry.Resolve(ctx, expected[index].Repository, plainHTTPRegistries)
+			for job := range jobs {
+				index := job.index
+				digest, platform, err := registry.Resolve(ctx, expected[index].Repository, job.digest, plainHTTPRegistries)
 				if err != nil {
 					expected[index].Status, expected[index].Error = "failed", err.Error()
 					continue
@@ -152,8 +281,8 @@ func resolveWithRegistry(ctx context.Context, exporter Exporter, registry Regist
 			}
 		}()
 	}
-	for _, index := range pending {
-		jobs <- index
+	for _, job := range pending {
+		jobs <- job
 	}
 	close(jobs)
 	wg.Wait()

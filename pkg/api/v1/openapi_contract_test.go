@@ -60,16 +60,17 @@ func TestOpenAPIContractMatchesPublicTypes(t *testing.T) {
 	assertStringEnum(t, object(t, object(t, object(t, schemas, "VersionInfo"), "properties"), "api_version"), []string{APIVersion})
 	assertStringEnum(t, object(t, object(t, object(t, schemas, "BuildJob"), "properties"), "status"), []string{
 		string(JobStatusCancelled), string(JobStatusFailed), string(JobStatusQueued),
-		string(JobStatusRunning), string(JobStatusStarting), string(JobStatusSucceeded),
+		string(JobStatusRunning), string(JobStatusStarting), string(JobStatusSucceeded), string(JobStatusVerifying),
 	})
 	assertStringEnum(t, object(t, object(t, object(t, schemas, "BuildJob"), "properties"), "failure_code"), []string{
 		string(BuildFailureCancelled), string(BuildFailureExecutionFailed), string(BuildFailureInvalidSource),
-		string(BuildFailureInvalidTargets), string(BuildFailureRunnerUnavailable), string(BuildFailureSubmissionFailed),
+		string(BuildFailureInvalidTargets), string(BuildFailureResourceExhausted), string(BuildFailureRunnerUnavailable),
+		string(BuildFailureSourceUnavailable), string(BuildFailureSubmissionFailed),
 		string(BuildFailureVerificationFailed), string(BuildFailureWorkerPlatformUnavailable),
 	})
 	assertStringEnum(t, object(t, object(t, object(t, schemas, "ErrorResponse"), "properties"), "code"), []string{
 		string(ErrorCodeConflict), string(ErrorCodeForbidden), string(ErrorCodeInternal), string(ErrorCodeInvalidRequest),
-		string(ErrorCodeLogsUnavailable), string(ErrorCodeNotFound), string(ErrorCodeQueueCapacityExceeded), string(ErrorCodeUnauthenticated),
+		string(ErrorCodeLogsUnavailable), string(ErrorCodeNotFound), string(ErrorCodeQueueAdmissionPending), string(ErrorCodeQueueCapacityExceeded), string(ErrorCodeUnauthenticated),
 	})
 	createProperties := object(t, object(t, schemas, "CreateBuildRequest"), "properties")
 	assertInteger(t, object(t, createProperties, "source_uri")["maxLength"], MaxSourceURILength)
@@ -85,13 +86,16 @@ func TestOpenAPIContractMatchesPublicTypes(t *testing.T) {
 	assertInteger(t, object(t, object(t, object(t, schemas, "BuildResults"), "properties"), "outputs")["maxItems"], MaxConcreteOutputs)
 	logsOperation := object(t, object(t, paths, "/v1/builds/{id}/logs"), "get")
 	assertParameterMaximum(t, logsOperation["parameters"], "tail_lines", MaxLogTailLines)
+	if _, ok := object(t, logsOperation, "responses")["413"]; !ok {
+		t.Fatal("log-tail response limit must be documented as HTTP 413")
+	}
 	listOperation := object(t, object(t, paths, "/v1/builds"), "get")
 	assertParameterMaximum(t, listOperation["parameters"], "limit", MaxListBuildsPageSize)
 	for schema, code := range map[string]ErrorCode{
 		"ConflictError": ErrorCodeConflict, "ForbiddenError": ErrorCodeForbidden,
 		"InternalAPIError": ErrorCodeInternal, "InvalidRequestError": ErrorCodeInvalidRequest,
 		"LogsUnavailableError": ErrorCodeLogsUnavailable, "NotFoundError": ErrorCodeNotFound,
-		"QueueCapacityExceededError": ErrorCodeQueueCapacityExceeded, "UnauthenticatedError": ErrorCodeUnauthenticated,
+		"QueueAdmissionPendingError": ErrorCodeQueueAdmissionPending, "QueueCapacityExceededError": ErrorCodeQueueCapacityExceeded, "UnauthenticatedError": ErrorCodeUnauthenticated,
 	} {
 		assertErrorSchemaCode(t, object(t, schemas, schema), code)
 	}

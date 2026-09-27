@@ -30,6 +30,15 @@ func BuildQuery(args []string) (string, error) {
 		case strings.HasPrefix(arg, "--var="):
 			values.Add("var", strings.TrimPrefix(arg, "--var="))
 			i++
+		case arg == "--registry-plain-http":
+			if i+1 >= len(args) {
+				return "", fmt.Errorf("--registry-plain-http requires a value")
+			}
+			values.Add("registry-plain-http", args[i+1])
+			i += 2
+		case strings.HasPrefix(arg, "--registry-plain-http="):
+			values.Add("registry-plain-http", strings.TrimPrefix(arg, "--registry-plain-http="))
+			i++
 		case arg == "--target":
 			if i+1 >= len(args) {
 				return "", fmt.Errorf("--target requires a value")

@@ -13,6 +13,22 @@ the categorized paths below.
 
 - `docs/check.sh`: validate relative links in public and contributor Markdown.
 
+## Deployment
+
+- `deployment/verify-kovabuild-crd.sh`: block a controller upgrade until the
+  live KovaBuild CRD is Established and its retry status fields have the expected schema.
+- `deployment/test-verify-kovabuild-crd.sh`: exercise the upgrade gate against
+  new, old, incompatible, and unavailable mock CRDs without a cluster.
+- `deployment/probe-kovabuild-status.sh`: prove retry status fields are pruned
+  by a legacy CRD and retained by the current CRD using a temporary namespace.
+- `deployment/test-probe-kovabuild-status.sh`: exercise the probe and its
+  namespace cleanup against a mock Kubernetes API.
+- `deployment/verify-kovabuild-drained.sh`: require all KovaBuilds terminal,
+  no runner or Service Pods, and a stopped Service Deployment before a
+  cross-version controller upgrade; submission must remain frozen separately.
+- `deployment/test-verify-kovabuild-drained.sh`: cluster-free fail-closed
+  checks for active, unknown, unavailable, and malformed drain states.
+
 ## CI
 
 - `ci/public-go-consumer.sh`: compile a clean external module against the local public Go SDK or an exact release tag, and verify versioned `go install` for releases.
@@ -39,7 +55,9 @@ the categorized paths below.
 - `kind/kind-registry.sh`: create or attach the local Docker registry.
 - `kind/kind-create.sh`: create the local kind cluster.
 - `kind/kind-load.sh`: load the Kova image into kind.
-- `kind/deploy-kind.sh`: deploy Kova into the local kind cluster.
+- `kind/deploy-kind.sh`: apply and verify the current KovaBuild CRD before
+  upgrading the local controller; historical-chart tests explicitly skip the
+  current retry-schema gate.
 - `kind/diagnose-kind.sh`: print local kind, registry, Kova, Dragonfly/Nydus,
   runtime smoke, and result summaries.
 - `kind/clean-kind.sh`: delete local kind resources.
@@ -66,6 +84,10 @@ the categorized paths below.
   reuses a caller-owned cluster without deleting it.
 - `e2e/e2e.sh`: run the basic local OCI build smoke.
 - `e2e/e2e-service.sh`: run the service daemon HTTP build smoke.
+- `e2e/e2e-crd-upgrade.sh`: migrate from the pinned public pre-retry CRD in
+  an isolated Kind cluster, check live status pruning/persistence, assert the
+  drain gate, and verify an injected old Starting runner fails closed before
+  running the Service smoke.
 - `e2e/e2e-concurrent.sh`: run concurrent local builds.
 - `e2e/e2e-dragonfly-nydus.sh`: run local Dragonfly/Nydus validation.
 - `e2e/e2e-runtime.sh`: run OCI and Nydus runtime validation.

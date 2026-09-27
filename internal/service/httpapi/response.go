@@ -4,6 +4,8 @@ import (
 	kovav1 "github.com/cofy-x/kova/internal/apis/kova/v1alpha1"
 	"github.com/cofy-x/kova/internal/service/config"
 	apiv1 "github.com/cofy-x/kova/pkg/api/v1"
+
+	apiMeta "k8s.io/apimachinery/pkg/api/meta"
 )
 
 func buildJobFromCR(build *kovav1.KovaBuild, cfg config.Config) apiv1.BuildJob {
@@ -16,6 +18,7 @@ func buildJobFromCR(build *kovav1.KovaBuild, cfg config.Config) apiv1.BuildJob {
 		IdempotencyKey:        build.Spec.IdempotencyKey,
 		Requester:             build.Spec.Requester.Username,
 		CancellationRequested: build.Annotations[kovav1.CancellationRequestedAnnotation] != "",
+		RecoveryRequired:      apiMeta.IsStatusConditionTrue(build.Status.Conditions, "AdmissionRecoveryRequired"),
 		RequestedConcurrency:  requestedConcurrency(build),
 		AllocatedConcurrency:  build.Status.AllocatedConcurrency,
 	}
@@ -32,6 +35,30 @@ func buildJobFromCR(build *kovav1.KovaBuild, cfg config.Config) apiv1.BuildJob {
 		job.FinishedAt = &t
 		expires := t.Add(cfg.JobTTL)
 		job.ExpiresAt = &expires
+	}
+	if build.Status.VerificationStartedAt != nil {
+		t := build.Status.VerificationStartedAt.Time
+		job.VerificationStartedAt = &t
+	}
+	if build.Status.VerificationDeadlineAt != nil {
+		t := build.Status.VerificationDeadlineAt.Time
+		job.VerificationDeadlineAt = &t
+	}
+	if build.Status.VerificationNextAttemptAt != nil && (build.Status.Phase == kovav1.PhaseVerifying || build.Status.Phase == kovav1.PhaseFailedVerifying) {
+		t := build.Status.VerificationNextAttemptAt.Time
+		job.VerificationNextAttemptAt = &t
+	}
+	job.VerificationAttempts = build.Status.VerificationAttempts
+	job.VerificationLastError = build.Status.VerificationLastError
+	for _, result := range build.Status.VerificationResults {
+		switch result.State {
+		case "pending":
+			job.VerificationPending++
+		case "succeeded":
+			job.VerificationSucceeded++
+		case "failed":
+			job.VerificationFailed++
+		}
 	}
 	return job
 }
@@ -56,6 +83,10 @@ func publicBuildFailureCode(reason string) apiv1.BuildFailureCode {
 	switch reason {
 	case "InvalidSource":
 		return apiv1.BuildFailureInvalidSource
+	case "SourceFetchUnavailable", "SourceInspectUnavailable":
+		return apiv1.BuildFailureSourceUnavailable
+	case "SourceFetchResourceExhausted", "SourceInspectResourceExhausted", "RunnerResourceExhausted":
+		return apiv1.BuildFailureResourceExhausted
 	case "InvalidTargets":
 		return apiv1.BuildFailureInvalidTargets
 	case "WorkerPlatformUnavailable":
@@ -79,6 +110,8 @@ func httpStatus(phase string) apiv1.JobStatus {
 		return apiv1.JobStatusStarting
 	case kovav1.PhaseRunning:
 		return apiv1.JobStatusRunning
+	case kovav1.PhaseVerifying, kovav1.PhaseFailedVerifying:
+		return apiv1.JobStatusVerifying
 	case kovav1.PhaseSucceeded:
 		return apiv1.JobStatusSucceeded
 	case kovav1.PhaseFailed:
@@ -94,6 +127,10 @@ func publicBuildError(reason string) string {
 	switch reason {
 	case "InvalidSource":
 		return "immutable source validation failed"
+	case "SourceFetchUnavailable", "SourceInspectUnavailable":
+		return "immutable source could not be fetched or inspected"
+	case "SourceFetchResourceExhausted", "SourceInspectResourceExhausted", "RunnerResourceExhausted":
+		return "build runner exhausted its resources"
 	case "InvalidTargets":
 		return "source targets do not exactly match requested targets"
 	case "WorkerPlatformUnavailable":
@@ -106,6 +143,8 @@ func publicBuildError(reason string) string {
 		return "one or more build results could not be verified"
 	case "Cancelled":
 		return "build was cancelled"
+	case "BuildTimedOut":
+		return "build exceeded the service maximum duration"
 	default:
 		return "build execution failed"
 	}

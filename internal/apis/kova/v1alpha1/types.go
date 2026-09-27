@@ -19,13 +19,19 @@ const (
 	Version = "v1alpha1"
 
 	CancellationRequestedAnnotation = "kova.cofy.dev/cancellation-requested-at"
+	CleanupFinalizer                = "kova.cofy.dev/cleanup"
 
 	PhaseQueued    = "Queued"
 	PhaseStarting  = "Starting"
 	PhaseRunning   = "Running"
-	PhaseSucceeded = "Succeeded"
-	PhaseFailed    = "Failed"
-	PhaseCancelled = "Cancelled"
+	PhaseVerifying = "Verifying"
+	// PhaseFailedVerifying preserves a runner's failed outcome while bounded
+	// partial-output receipts are still being verified. Older controllers do
+	// not recognize this phase and therefore cannot turn it into Succeeded.
+	PhaseFailedVerifying = "FailedVerifying"
+	PhaseSucceeded       = "Succeeded"
+	PhaseFailed          = "Failed"
+	PhaseCancelled       = "Cancelled"
 )
 
 var SchemeGroupVersion = schema.GroupVersion{Group: Group, Version: Version}
@@ -112,7 +118,7 @@ type KovaBuildOptions struct {
 }
 
 type KovaBuildStatus struct {
-	// +kubebuilder:validation:Enum=Queued;Starting;Running;Succeeded;Failed;Cancelled
+	// +kubebuilder:validation:Enum=Queued;Starting;Running;Verifying;FailedVerifying;Succeeded;Failed;Cancelled
 	Phase                string `json:"phase,omitempty"`
 	ObservedGeneration   int64  `json:"observedGeneration,omitempty"`
 	AllocatedConcurrency int32  `json:"allocatedConcurrency,omitempty"`
@@ -121,14 +127,24 @@ type KovaBuildStatus struct {
 	// +kubebuilder:validation:MaxLength=128
 	Reason string `json:"reason,omitempty"`
 	// +kubebuilder:validation:MaxLength=2048
-	Message    string       `json:"message,omitempty"`
-	StartedAt  *metav1.Time `json:"startedAt,omitempty"`
-	FinishedAt *metav1.Time `json:"finishedAt,omitempty"`
+	Message                   string       `json:"message,omitempty"`
+	StartedAt                 *metav1.Time `json:"startedAt,omitempty"`
+	FinishedAt                *metav1.Time `json:"finishedAt,omitempty"`
+	PollFailureSince          *metav1.Time `json:"pollFailureSince,omitempty"`
+	PollFailureCount          int32        `json:"pollFailureCount,omitempty"`
+	VerificationStartedAt     *metav1.Time `json:"verificationStartedAt,omitempty"`
+	VerificationDeadlineAt    *metav1.Time `json:"verificationDeadlineAt,omitempty"`
+	VerificationNextAttemptAt *metav1.Time `json:"verificationNextAttemptAt,omitempty"`
+	VerificationAttempts      int32        `json:"verificationAttempts,omitempty"`
+	// +kubebuilder:validation:MaxLength=2048
+	VerificationLastError string `json:"verificationLastError,omitempty"`
+	// +kubebuilder:validation:MaxItems=200
+	VerificationResults []BuildVerificationResult `json:"verificationResults,omitempty"`
 	// +kubebuilder:validation:MaxItems=200
 	Outputs []BuildOutput `json:"outputs,omitempty"`
 	// +listType=map
 	// +listMapKey=type
-	// +kubebuilder:validation:MaxItems=1
+	// +kubebuilder:validation:MaxItems=2
 	Conditions []metav1.Condition `json:"conditions,omitempty" patchStrategy:"merge" patchMergeKey:"type"`
 }
 
@@ -142,6 +158,24 @@ type BuildOutput struct {
 	ManifestDigest string `json:"manifestDigest"`
 	// +kubebuilder:validation:Enum=linux/amd64;linux/arm64
 	Platform string `json:"platform"`
+}
+
+// BuildVerificationResult is a bounded, durable receipt for one concrete output.
+// PushedDigest is evidence from the runner's exact push, not a mutable tag lookup.
+type BuildVerificationResult struct {
+	// +kubebuilder:validation:Enum=oci;nydus
+	Format string `json:"format"`
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=512
+	Image string `json:"image"`
+	// +kubebuilder:validation:Enum=linux/amd64;linux/arm64
+	Platform string `json:"platform"`
+	// +kubebuilder:validation:Pattern=`^sha256:[a-f0-9]{64}$`
+	PushedDigest string `json:"pushedDigest,omitempty"`
+	// +kubebuilder:validation:Enum=pending;succeeded;failed
+	State string `json:"state"`
+	// +kubebuilder:validation:MaxLength=2048
+	Error string `json:"error,omitempty"`
 }
 
 // +kubebuilder:object:root=true

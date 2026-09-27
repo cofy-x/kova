@@ -2,6 +2,7 @@ package buildcontroller
 
 import (
 	"context"
+	"fmt"
 	"sync"
 
 	kovav1 "github.com/cofy-x/kova/internal/apis/kova/v1alpha1"
@@ -9,6 +10,7 @@ import (
 	"github.com/cofy-x/kova/internal/kube"
 	"github.com/cofy-x/kova/internal/observability"
 	"github.com/cofy-x/kova/internal/service/config"
+	"github.com/cofy-x/kova/internal/service/queueadmission"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -17,9 +19,12 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	controllerOptions "sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/event"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
+	"sigs.k8s.io/controller-runtime/pkg/source"
 )
 
-const cleanupFinalizer = "kova.cofy.dev/cleanup"
+const cleanupFinalizer = kovav1.CleanupFinalizer
 
 var (
 	jobQueueLatency = observability.DurationHistogram("kova.service.job.queue.duration", "Time from job creation to runner admission")
@@ -34,8 +39,17 @@ type KovaBuildReconciler struct {
 	Kube     kube.API
 	Cfg      config.Config
 	Recorder record.EventRecorder
+	// APIReader bypasses the manager cache for capacity and recovery reads.
+	APIReader         client.Reader
+	verificationOnce  sync.Once
+	verificationSlots chan struct{}
+}
 
-	admissionMu sync.Mutex
+func (r *KovaBuildReconciler) queueStoreForNamespace(namespace string) queueadmission.Store {
+	return queueadmission.Store{
+		Client: r.Client, Reader: r.reader(), Namespace: namespace,
+		GlobalLimit: r.Cfg.MaxQueuedJobs, RequesterLimit: r.Cfg.MaxQueuedJobsPerRequester,
+	}
 }
 
 func (r *KovaBuildReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -52,7 +66,9 @@ func (r *KovaBuildReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		}
 		return ctrl.Result{Requeue: true}, nil
 	}
-	if cancellationRequested(&build) && !isTerminalPhase(build.Status.Phase) {
+	// Once the runner reported failure, cancellation cannot rewrite that
+	// outcome; only bounded partial-receipt verification remains.
+	if cancellationRequested(&build) && !isTerminalPhase(build.Status.Phase) && build.Status.Phase != kovav1.PhaseFailedVerifying {
 		return r.cancelBuild(ctx, &build)
 	}
 	if isTerminalPhase(build.Status.Phase) {
@@ -71,13 +87,15 @@ func (r *KovaBuildReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 				return ctrl.Result{}, r.finish(ctx, &build, kovav1.PhaseFailed, "WorkerPlatformUnavailable", "no BuildKit worker pool is configured for platform "+target.Platform)
 			}
 		}
-		r.admissionMu.Lock()
-		defer r.admissionMu.Unlock()
 		return r.startBuild(ctx, &build)
 	case kovav1.PhaseStarting:
 		return r.submitWhenReady(ctx, &build)
 	case kovav1.PhaseRunning:
 		return r.pollBuild(ctx, &build)
+	case kovav1.PhaseVerifying:
+		return r.reconcileVerifying(ctx, &build)
+	case kovav1.PhaseFailedVerifying:
+		return r.reconcileFailedVerifying(ctx, &build)
 	default:
 		return ctrl.Result{RequeueAfter: r.Cfg.PollInterval}, nil
 	}
@@ -91,14 +109,18 @@ func contractTargets(values []kovav1.KovaBuildTargetSpec) []buildcontract.Target
 	return targets
 }
 
-func (r *KovaBuildReconciler) SetupWithManager(mgr ctrl.Manager) error {
+func (r *KovaBuildReconciler) SetupWithManager(mgr ctrl.Manager, admissionWake <-chan event.GenericEvent) error {
 	concurrency := r.Cfg.ControllerConcurrency
 	if concurrency <= 0 {
 		concurrency = buildcontract.DefaultControllerConcurrency
 	}
+	if admissionWake == nil {
+		return fmt.Errorf("admission wake source is required for event-driven queued builds")
+	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&kovav1.KovaBuild{}).
 		Owns(&corev1.Pod{}).
+		WatchesRawSource(source.Channel(admissionWake, &handler.EnqueueRequestForObject{})).
 		WithOptions(controllerOptions.Options{MaxConcurrentReconciles: concurrency}).
 		Complete(r)
 }

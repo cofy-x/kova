@@ -11,13 +11,14 @@ import (
 )
 
 const (
-	DefaultSocket = "/tmp/kova.sock"
-	HealthPath    = "/api/v1/health"
-	BuildPath     = "/api/v1/build"
-	StatusPath    = "/api/v1/build/status"
-	CancelPath    = "/api/v1/build/cancel"
-	ExportPath    = "/api/v1/export"
-	PreheatPath   = "/api/v1/preheat"
+	DefaultSocket                    = "/tmp/kova.sock"
+	HealthPath                       = "/api/v1/health"
+	BuildPath                        = "/api/v1/build"
+	StatusPath                       = "/api/v1/build/status"
+	CancelPath                       = "/api/v1/build/cancel"
+	ExportPath                       = "/api/v1/export"
+	PreheatPath                      = "/api/v1/preheat"
+	IdempotentBuildRequestCapability = "idempotent-build-request-v1"
 )
 
 type Client struct {

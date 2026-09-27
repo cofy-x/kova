@@ -13,6 +13,7 @@ with the [complete CLI workflow](cli-workflow.md) for build operations or the
 - [Runtime design](architecture.md): roles, explicit platform worker pools,
   build/export, preheat, and scaling flows.
 - [Service API and official SDKs](service.md): immutable source contract, authenticated job CLI, Python and Go clients, structured errors, RBAC, and bounded results.
+- [Service admission design](service-admission-design.md): durable active and queued reservations, event-driven capacity wakes, and recovery requirements.
 - [Executable Go and Python SDK examples](../examples/service-sdk/README.md): submit one immutable source, wait for terminal state, and persist every verified output in a caller-owned receipt.
 - [Machine-readable Service API](../api/openapi.yaml): stable OpenAPI 3.1 operations, schemas, authentication, and error responses.
 - [Caller-owned seed build receipt](examples/seed-build-receipt-v1.json): reference shape that records recipe, source, Kova version, terminal status, role, platform, and immutable output facts outside Kova.

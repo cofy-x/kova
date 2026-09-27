@@ -22,7 +22,7 @@ func (s *Server) handleBuildResults(c echo.Context) error {
 		return internalError(c, err)
 	}
 	if err := s.authorizeBuild(c.Request().Context(), principalFromContext(c), "get", build); err != nil {
-		return forbidden(c)
+		return authorizationFailure(c, err)
 	}
 	outputs, err := apiOutputs(build.Status.Outputs)
 	if err != nil {

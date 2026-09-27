@@ -62,6 +62,8 @@ service:
 
 serviceDaemon:
   enabled: false
+  # Zero stages an upgrade with the controller stopped; restore a positive
+  # count after the CRD and drain gates pass.
   replicas: 1
   listen: ":8080"
   port: 8080
@@ -77,11 +79,24 @@ serviceDaemon:
   jobTTL: 2h
   wait: 3m
   pollInterval: 5s
+  pollRetryWindow: 1m
+  maxBuildDuration: 2h
+  verificationAttemptTimeout: 10s
+  verificationWindow: 5m
   maxActiveJobs: 20
   maxActiveJobsPerRequester: 4
+  maxQueuedJobs: 1000
   maxQueuedJobsPerRequester: 100
   workerSlots: 20
   controllerConcurrency: 4
+  # Each Service Pod gives build-controller and HTTP admission independent
+  # Kubernetes REST budgets at these values. Lease renewal and readiness
+  # retain separate small budgets. Budget the sum across all replicas.
+  kubeClientQPS: 20
+  kubeClientBurst: 40
+  # Disabled unless explicitly enabled for a controlled diagnostic run.
+  # Loopback-only: never expose unauthenticated controller metrics by Service.
+  metricsBindAddress: "0"
   leaderElect: true
   runnerNamespace: ""
   runnerImagePullSecret: ""
@@ -91,6 +106,27 @@ serviceDaemon:
   # Registry hosts that intentionally use plain HTTP. Development only.
   registryPlainHTTP: []
   runnerNodeSelector: {}
+  # These limits apply to each short-lived runner Pod, not the Service Pod.
+  runnerResources:
+    requests:
+      cpu: 100m
+      memory: 2Gi
+      ephemeral-storage: 5Gi
+    limits:
+      cpu: "4"
+      memory: 2Gi
+      ephemeral-storage: 5Gi
+  sourceFetchResources:
+    requests:
+      cpu: 50m
+      memory: 1Gi
+      ephemeral-storage: 1Gi
+    limits:
+      cpu: "2"
+      memory: 1Gi
+      ephemeral-storage: 1Gi
+  # Also contains runner /tmp, including the upload copy and extracted source.
+  sourceVolumeSizeLimit: 4Gi
   # Explicit platform-to-BuildKit worker Service mappings. Empty maps the
   # local worker.platform to this release's headless Service.
   buildkitPlatformAddrs: {}

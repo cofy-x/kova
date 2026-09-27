@@ -10,8 +10,11 @@ import (
 const DefaultBuildkitOOMCooldown = 2 * time.Minute
 
 type Options struct {
-	ImageDir                   string
-	ImageDirs                  string
+	ImageDir  string
+	ImageDirs string
+	// ImageDirsAlreadyIsolated is set only for a private, single-use runner
+	// extraction; ordinary callers keep copy-on-prepare source semantics.
+	ImageDirsAlreadyIsolated   bool
 	Addrs                      []*scheduler.Addr
 	AddrsRaw                   string
 	PlatformAddrs              map[string][]*scheduler.Addr
@@ -34,7 +37,9 @@ type Options struct {
 	DragonflySchedulerAddr     string
 	PreheatInsecureSkipVerify  bool
 	PreheatPlainHTTPRegistries []string
+	RegistryPlainHTTP          []string
 	DockerConfigPath           string
 	Interval                   int
 	WithFail                   bool
+	SummaryOnly                bool
 }

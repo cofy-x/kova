@@ -22,8 +22,10 @@ const (
 )
 
 type daemonState struct {
-	Status string `json:"status"`
-	Error  string `json:"error,omitempty"`
+	Status       string   `json:"status"`
+	Error        string   `json:"error,omitempty"`
+	RequestID    string   `json:"requestId,omitempty"`
+	Capabilities []string `json:"capabilities,omitempty"`
 }
 
 type serverBackend struct {
@@ -40,10 +42,11 @@ type daemonServer struct {
 	logsFile     string
 	backend      serverBackend
 
-	mu          sync.RWMutex
-	build       daemonState
-	buildCancel context.CancelFunc
-	buildDone   chan struct{}
+	mu             sync.RWMutex
+	build          daemonState
+	buildRequestID string
+	buildCancel    context.CancelFunc
+	buildDone      chan struct{}
 }
 
 func CLICommand() *cli.Command {
