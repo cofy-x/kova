@@ -379,11 +379,11 @@ class PartialOutputSafetyTest(unittest.TestCase):
             acceptance, "local_platform_image_fact", return_value={"config_digest": config_id}
         ) as inspect:
             self.assertEqual(acceptance.local_config_id(image, "a" * 12), config_id)
-            self.assertEqual(
-                inspect.call_args.args, (image, "a" * 12, acceptance.command)
-            )
+            self.assertEqual(inspect.call_args.args, (image, "a" * 12, acceptance.command))
         with patch.object(
-            acceptance, "local_platform_image_fact", side_effect=acceptance.ImageIdentityError("drift")
+            acceptance,
+            "local_platform_image_fact",
+            side_effect=acceptance.ImageIdentityError("drift"),
         ):
             with self.assertRaisesRegex(acceptance.AcceptanceError, "drift"):
                 acceptance.local_config_id(image, "b" * 12)

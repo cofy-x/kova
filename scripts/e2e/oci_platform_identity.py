@@ -13,7 +13,8 @@ import json
 import re
 import subprocess
 import tarfile
-from typing import IO, Callable
+from collections.abc import Callable
+from typing import IO
 
 SHA256 = r"sha256:[0-9a-f]{64}"
 MAX_METADATA_BLOB_BYTES = 2 * 1024 * 1024
@@ -68,7 +69,10 @@ def parse_saved_image(
                 if digest in blobs:
                     _fail("Docker OCI archive has duplicate blob metadata")
                 data = prefix + extracted.read(MAX_METADATA_BLOB_BYTES + 1 - len(prefix))
-                if len(data) != member.size or "sha256:" + hashlib.sha256(data).hexdigest() != digest:
+                if (
+                    len(data) != member.size
+                    or "sha256:" + hashlib.sha256(data).hexdigest() != digest
+                ):
                     _fail("Docker OCI archive blob is truncated or digest-mismatched")
                 blobs[digest] = data
     except (tarfile.TarError, OSError) as error:
@@ -158,8 +162,15 @@ def local_platform_image_fact(
     try:
         process = subprocess.Popen(
             [
-                "timeout", "--kill-after=5s", "90s", "docker", "image", "save",
-                "--platform", "linux/amd64", reference,
+                "timeout",
+                "--kill-after=5s",
+                "90s",
+                "docker",
+                "image",
+                "save",
+                "--platform",
+                "linux/amd64",
+                reference,
             ],
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,

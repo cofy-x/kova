@@ -22,12 +22,16 @@ REVISION = "a" * 12
 
 
 def archive_fixture(
-    *, extra_descriptor: bool = False, omit_config: bool = False,
-    corrupt_config: bool = False, wrong_reference: bool = False,
+    *,
+    extra_descriptor: bool = False,
+    omit_config: bool = False,
+    corrupt_config: bool = False,
+    wrong_reference: bool = False,
 ) -> tuple[bytes, str, str]:
     config = json.dumps(
         {
-            "architecture": "amd64", "os": "linux",
+            "architecture": "amd64",
+            "os": "linux",
             "config": {"Labels": {"org.opencontainers.image.revision": REVISION}},
         },
         separators=(",", ":"),
@@ -52,8 +56,7 @@ def archive_fixture(
         "digest": manifest_digest,
         "size": len(manifest),
         "annotations": {
-            "io.containerd.image.name": "localhost:5002/other:tag"
-            if wrong_reference else REFERENCE
+            "io.containerd.image.name": "localhost:5002/other:tag" if wrong_reference else REFERENCE
         },
         "platform": {"architecture": "amd64", "os": "linux"},
     }
@@ -116,10 +119,14 @@ class OCIPlatformIdentityTests(unittest.TestCase):
 
     def test_local_inspection_manifest_id_resolves_to_config_id(self) -> None:
         raw, manifest, config = archive_fixture()
-        inspected = [{
-            "Id": manifest, "Os": "linux", "Architecture": "amd64",
-            "Config": {"Labels": {"org.opencontainers.image.revision": REVISION}},
-        }]
+        inspected = [
+            {
+                "Id": manifest,
+                "Os": "linux",
+                "Architecture": "amd64",
+                "Config": {"Labels": {"org.opencontainers.image.revision": REVISION}},
+            }
+        ]
         process = FakeProcess(raw)
         with patch.object(identity.subprocess, "Popen", return_value=process) as started:
             fact = identity.local_platform_image_fact(
@@ -129,8 +136,17 @@ class OCIPlatformIdentityTests(unittest.TestCase):
         self.assertNotEqual(fact["platform_manifest_digest"], config)
         self.assertEqual(
             started.call_args.args[0],
-            ["timeout", "--kill-after=5s", "90s", "docker", "image", "save",
-             "--platform", "linux/amd64", REFERENCE],
+            [
+                "timeout",
+                "--kill-after=5s",
+                "90s",
+                "docker",
+                "image",
+                "save",
+                "--platform",
+                "linux/amd64",
+                REFERENCE,
+            ],
         )
 
     def test_digest_revision_reference_and_platform_drift_fail_closed(self) -> None:
@@ -148,7 +164,9 @@ class OCIPlatformIdentityTests(unittest.TestCase):
         for wrong_manifest, wrong_revision in ((config, REVISION), (manifest, "b" * 12)):
             with self.subTest(manifest=wrong_manifest, revision=wrong_revision):
                 with self.assertRaises(identity.ImageIdentityError):
-                    identity.parse_saved_image(io.BytesIO(raw), REFERENCE, wrong_manifest, wrong_revision)
+                    identity.parse_saved_image(
+                        io.BytesIO(raw), REFERENCE, wrong_manifest, wrong_revision
+                    )
 
     def test_metadata_limits_fail_closed_before_large_retention(self) -> None:
         raw, manifest, _ = archive_fixture()
@@ -161,13 +179,19 @@ class OCIPlatformIdentityTests(unittest.TestCase):
 
     def test_inspection_or_save_failure_is_not_accepted(self) -> None:
         raw, manifest, _ = archive_fixture()
-        inspected = [{
-            "Id": manifest, "Os": "linux", "Architecture": "amd64",
-            "Config": {"Labels": {"org.opencontainers.image.revision": REVISION}},
-        }]
+        inspected = [
+            {
+                "Id": manifest,
+                "Os": "linux",
+                "Architecture": "amd64",
+                "Config": {"Labels": {"org.opencontainers.image.revision": REVISION}},
+            }
+        ]
         with patch.object(identity.subprocess, "Popen", return_value=FakeProcess(raw, 1)):
             with self.assertRaisesRegex(identity.ImageIdentityError, "returned 1"):
-                identity.local_platform_image_fact(REFERENCE, REVISION, lambda _: json.dumps(inspected))
+                identity.local_platform_image_fact(
+                    REFERENCE, REVISION, lambda _: json.dumps(inspected)
+                )
         inspected[0]["Config"]["Labels"]["org.opencontainers.image.revision"] = "old"
         with self.assertRaises(identity.ImageIdentityError):
             identity.local_platform_image_fact(REFERENCE, REVISION, lambda _: json.dumps(inspected))
