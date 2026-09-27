@@ -62,7 +62,9 @@ func (r *KovaBuildReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		}
 		return ctrl.Result{Requeue: true}, nil
 	}
-	if cancellationRequested(&build) && !isTerminalPhase(build.Status.Phase) {
+	// Once the runner reported failure, cancellation cannot rewrite that
+	// outcome; only bounded partial-receipt verification remains.
+	if cancellationRequested(&build) && !isTerminalPhase(build.Status.Phase) && build.Status.Phase != kovav1.PhaseFailedVerifying {
 		return r.cancelBuild(ctx, &build)
 	}
 	if isTerminalPhase(build.Status.Phase) {
@@ -88,6 +90,8 @@ func (r *KovaBuildReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return r.pollBuild(ctx, &build)
 	case kovav1.PhaseVerifying:
 		return r.reconcileVerifying(ctx, &build)
+	case kovav1.PhaseFailedVerifying:
+		return r.reconcileFailedVerifying(ctx, &build)
 	default:
 		return ctrl.Result{RequeueAfter: r.Cfg.PollInterval}, nil
 	}

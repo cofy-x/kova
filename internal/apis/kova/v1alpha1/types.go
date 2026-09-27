@@ -25,9 +25,13 @@ const (
 	PhaseStarting  = "Starting"
 	PhaseRunning   = "Running"
 	PhaseVerifying = "Verifying"
-	PhaseSucceeded = "Succeeded"
-	PhaseFailed    = "Failed"
-	PhaseCancelled = "Cancelled"
+	// PhaseFailedVerifying preserves a runner's failed outcome while bounded
+	// partial-output receipts are still being verified. Older controllers do
+	// not recognize this phase and therefore cannot turn it into Succeeded.
+	PhaseFailedVerifying = "FailedVerifying"
+	PhaseSucceeded       = "Succeeded"
+	PhaseFailed          = "Failed"
+	PhaseCancelled       = "Cancelled"
 )
 
 var SchemeGroupVersion = schema.GroupVersion{Group: Group, Version: Version}
@@ -114,7 +118,7 @@ type KovaBuildOptions struct {
 }
 
 type KovaBuildStatus struct {
-	// +kubebuilder:validation:Enum=Queued;Starting;Running;Verifying;Succeeded;Failed;Cancelled
+	// +kubebuilder:validation:Enum=Queued;Starting;Running;Verifying;FailedVerifying;Succeeded;Failed;Cancelled
 	Phase                string `json:"phase,omitempty"`
 	ObservedGeneration   int64  `json:"observedGeneration,omitempty"`
 	AllocatedConcurrency int32  `json:"allocatedConcurrency,omitempty"`

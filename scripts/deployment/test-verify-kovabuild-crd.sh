@@ -51,12 +51,13 @@ assert_blocked() {
   fi
 }
 
-current_schema='string|date-time|integer|int32|Queued,Starting,Running,Verifying,Succeeded,Failed,Cancelled,|string|date-time|string|date-time|string|date-time|integer|int32|string|array|200|^sha256:[a-f0-9]{64}$|pending,succeeded,failed,'
+current_schema='string|date-time|integer|int32|Queued,Starting,Running,Verifying,FailedVerifying,Succeeded,Failed,Cancelled,|string|date-time|string|date-time|string|date-time|integer|int32|string|array|200|^sha256:[a-f0-9]{64}$|pending,succeeded,failed,'
 legacy_schema='|||'
 assert_pass 'new CRD schema' "${current_schema}" current
 assert_pass 'legacy CRD schema' "${legacy_schema}" --expect-legacy
 assert_blocked 'old CRD schema' "${legacy_schema}" 0 0
 assert_blocked 'missing Verifying phase' "${current_schema/Verifying,/}" 0 0
+assert_blocked 'missing FailedVerifying phase' "${current_schema/FailedVerifying,/}" 0 0
 assert_blocked 'unbounded receipt array' "${current_schema/array|200|/array|201|}" 0 0
 assert_blocked 'wrong retry timestamp format' "${current_schema/string|date-time|integer|int32/string||integer|int32}" 0 0
 assert_blocked 'CRD not Established' "${current_schema}" 1 0

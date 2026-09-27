@@ -48,7 +48,7 @@ helm show crds oci://ghcr.io/cofy-x/charts/kova \
 Run the gate from the matching Kova checkout, using the same `KUBECONFIG` as
 the Helm upgrade. Proceed only if it exits zero; it blocks when the CRD is not
 Established, cannot be read, or lacks the `v1alpha1` status retry fields,
-`Verifying` phase, and bounded verification receipt/timing schema.
+`Verifying` and `FailedVerifying` phases, and bounded verification receipt/timing schema.
 Then upgrade the controller:
 
 ```bash
@@ -61,6 +61,8 @@ helm upgrade --install kova oci://ghcr.io/cofy-x/charts/kova \
 ```
 
 ### Cross-Version Service Upgrade
+
+The `FailedVerifying` partial-receipt protocol also requires this stop-and-drain sequence for upgrades and rollbacks across versions that do not both understand the phase. An older controller does not process the new phase and therefore cannot accidentally report it as success, but it also cannot finish its receipt recovery. Do not start an older controller while any `FailedVerifying` KovaBuild exists. The drain gate rejects all remaining KovaBuilds, including this phase and terminal receipts; preserve caller-owned receipts before deletion. Applying the matching CRD before startup and running the status round-trip probe are mandatory, because a serving API that prunes `FailedVerifying` or its deadline/receipt fields would invalidate the bounded recovery contract.
 
 This drain is mandatory when crossing from `v0.1.0-rc.9` to a controller that
 requires idempotent runner submission and immutable result digests. Do not
@@ -137,7 +139,7 @@ The example scale command assumes the chart's default fullname; adjust it and
 Apply the CRD for every selected release before the Helm upgrade. Helm creates
 objects from `crds/` during initial installation but does not upgrade them.
 Verify both the live CRD schema and an actual `/status` write/read round trip
-for `pollFailureSince`, `pollFailureCount`, `Verifying`, and all bounded
+for `pollFailureSince`, `pollFailureCount`, `FailedVerifying`, and all bounded
 verification timing/receipt fields before starting the new controller. The
 schema check alone does not prove that the API serving path has picked up the
 new schema; an older serving schema can prune retry/deadline/receipt state and

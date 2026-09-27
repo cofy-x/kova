@@ -57,7 +57,7 @@ spec:
 EOF
 
 legacy_patch='{"status":{"pollFailureSince":"2026-01-02T03:04:05Z","pollFailureCount":3,"verificationStartedAt":"2026-01-02T03:04:05Z","verificationDeadlineAt":"2026-01-02T03:09:05Z","verificationNextAttemptAt":"2026-01-02T03:04:06Z","verificationAttempts":2,"verificationLastError":"temporary registry error","verificationResults":[{"format":"oci","image":"registry.invalid/example:probe","platform":"linux/amd64","pushedDigest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","state":"pending"}]}}'
-current_patch='{"status":{"phase":"Verifying","pollFailureSince":"2026-01-02T03:04:05Z","pollFailureCount":3,"verificationStartedAt":"2026-01-02T03:04:05Z","verificationDeadlineAt":"2026-01-02T03:09:05Z","verificationNextAttemptAt":"2026-01-02T03:04:06Z","verificationAttempts":2,"verificationLastError":"temporary registry error","verificationResults":[{"format":"oci","image":"registry.invalid/example:probe","platform":"linux/amd64","pushedDigest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","state":"pending"}]}}'
+current_patch='{"status":{"phase":"FailedVerifying","reason":"BuildFailed","message":"runner failed","pollFailureSince":"2026-01-02T03:04:05Z","pollFailureCount":3,"verificationStartedAt":"2026-01-02T03:04:05Z","verificationDeadlineAt":"2026-01-02T03:09:05Z","verificationNextAttemptAt":"2026-01-02T03:04:06Z","verificationAttempts":2,"verificationLastError":"temporary registry error","verificationResults":[{"format":"oci","image":"registry.invalid/example:probe","platform":"linux/amd64","pushedDigest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","state":"pending"}]}}'
 if [[ "${MODE}" == '--expect-pruned' ]]; then
   "${KUBECTL}" -n "${probe_namespace}" patch kovabuild retry-status-probe \
     --type=merge --subresource=status -p "${legacy_patch}" >/dev/null
@@ -77,7 +77,7 @@ else
     if "${KUBECTL}" -n "${probe_namespace}" patch kovabuild retry-status-probe \
       --type=merge --subresource=status -p "${current_patch}" >/dev/null 2>&1; then
       if observed=$("${KUBECTL}" -n "${probe_namespace}" get kovabuild retry-status-probe -o json); then
-        if jq -e '.status.phase == "Verifying" and .status.pollFailureSince == "2026-01-02T03:04:05Z" and
+        if jq -e '.status.phase == "FailedVerifying" and .status.reason == "BuildFailed" and .status.pollFailureSince == "2026-01-02T03:04:05Z" and
             .status.pollFailureCount == 3 and .status.verificationStartedAt == "2026-01-02T03:04:05Z" and
             .status.verificationDeadlineAt == "2026-01-02T03:09:05Z" and
             .status.verificationNextAttemptAt == "2026-01-02T03:04:06Z" and

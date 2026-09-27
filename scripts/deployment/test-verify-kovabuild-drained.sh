@@ -57,6 +57,7 @@ empty='{"items":[]}'
 terminal='{"items":[{"metadata":{"name":"done"},"status":{"phase":"Succeeded"}}]}'
 starting='{"items":[{"metadata":{"name":"legacy"},"status":{"phase":"Starting"}}]}'
 verifying='{"items":[{"metadata":{"name":"verifying"},"status":{"phase":"Verifying"}}]}'
+failed_verifying='{"items":[{"metadata":{"name":"failed-verifying"},"status":{"phase":"FailedVerifying"}}]}'
 unknown='{"items":[{"metadata":{"name":"unknown"},"status":{}}]}'
 runner='{"items":[{"metadata":{"name":"legacy-runner","labels":{"app.kubernetes.io/name":"kova-runner"}}}]}'
 service='{"items":[{"metadata":{"name":"kova-service"},"spec":{"replicas":1},"status":{"readyReplicas":1}}]}'
@@ -71,6 +72,7 @@ assert_gate terminal "${terminal}" "${empty}" "${empty}" "${stopped}" '' false
 assert_gate separate-runner-namespace "${empty}" "${empty}" "${empty}" "${stopped}" '' true jobs
 assert_gate starting "${starting}" "${empty}" "${empty}" "${stopped}" '' false
 assert_gate verifying "${verifying}" "${empty}" "${empty}" "${stopped}" '' false
+assert_gate failed-verifying "${failed_verifying}" "${empty}" "${empty}" "${stopped}" '' false
 assert_gate unknown-phase "${unknown}" "${empty}" "${empty}" "${stopped}" '' false
 assert_gate runner-pod "${empty}" "${runner}" "${empty}" "${stopped}" '' false
 assert_gate service-pod "${empty}" "${empty}" "${service_pod}" "${stopped}" '' false

@@ -56,7 +56,7 @@ assert_probe() {
 }
 
 pruned='{"status":{}}'
-persisted='{"status":{"pollFailureSince":"2026-01-02T03:04:05Z","pollFailureCount":3}}'
+persisted='{"status":{"phase":"FailedVerifying","reason":"BuildFailed","pollFailureSince":"2026-01-02T03:04:05Z","pollFailureCount":3,"verificationStartedAt":"2026-01-02T03:04:05Z","verificationDeadlineAt":"2026-01-02T03:09:05Z","verificationNextAttemptAt":"2026-01-02T03:04:06Z","verificationAttempts":2,"verificationLastError":"temporary registry error","verificationResults":[{"pushedDigest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","state":"pending"}]}}'
 assert_probe 'legacy pruning' --expect-pruned "${pruned}" true
 assert_probe 'legacy unexpectedly persisted' --expect-pruned "${persisted}" false
 assert_probe 'current persistence' --expect-persisted "${persisted}" true

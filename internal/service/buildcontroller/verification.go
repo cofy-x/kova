@@ -34,23 +34,38 @@ func (r *KovaBuildReconciler) verificationWindow() time.Duration {
 }
 
 func (r *KovaBuildReconciler) beginVerification(ctx context.Context, build *kovav1.KovaBuild) (ctrl.Result, error) {
+	return r.beginVerificationPhase(ctx, build, kovav1.PhaseVerifying, "RunnerCompleted", "verifying digest-pinned build outputs", r.verificationWindow())
+}
+
+func (r *KovaBuildReconciler) beginFailedVerification(ctx context.Context, build *kovav1.KovaBuild, runnerError string) (ctrl.Result, error) {
+	// A failed runner must never become Succeeded, even if every earlier push
+	// can be verified. This distinct phase also fails closed under an older
+	// controller, which only knows the successful Verifying phase.
+	window := min(r.verificationWindow(), defaultVerificationWindow)
+	return r.beginVerificationPhase(ctx, build, kovav1.PhaseFailedVerifying, "BuildFailed", runnerError, window)
+}
+
+func (r *KovaBuildReconciler) beginVerificationPhase(ctx context.Context, build *kovav1.KovaBuild, phase, reason, message string, window time.Duration) (ctrl.Result, error) {
 	pending := buildresult.Pending(build)
 	if len(pending) == 0 || len(pending) > kovav1.MaxConcreteOutputs {
+		if phase == kovav1.PhaseFailedVerifying {
+			return ctrl.Result{}, r.finish(ctx, build, kovav1.PhaseFailed, "BuildFailed", message)
+		}
 		return ctrl.Result{}, r.finish(ctx, build, kovav1.PhaseFailed, "ResultVerificationFailed", "invalid expected output set")
 	}
 	now := metav1.Now()
-	deadlineTime := now.Add(r.verificationWindow())
+	deadlineTime := now.Add(window)
 	if r.Cfg.MaxBuildDuration > 0 && build.Status.StartedAt != nil {
-		podBudgetDeadline := build.Status.StartedAt.Add(r.Cfg.MaxBuildDuration + r.verificationWindow())
+		podBudgetDeadline := build.Status.StartedAt.Add(r.Cfg.MaxBuildDuration + window)
 		if podBudgetDeadline.Before(deadlineTime) {
 			deadlineTime = podBudgetDeadline
 		}
 	}
 	deadline := metav1.NewTime(deadlineTime)
-	build.Status.Phase = kovav1.PhaseVerifying
+	build.Status.Phase = phase
 	build.Status.ObservedGeneration = build.Generation
-	build.Status.Reason = "RunnerCompleted"
-	build.Status.Message = "verifying digest-pinned build outputs"
+	build.Status.Reason = truncate(reason, 128)
+	build.Status.Message = truncate(message, 2048)
 	build.Status.VerificationStartedAt = &now
 	build.Status.VerificationDeadlineAt = &deadline
 	build.Status.VerificationNextAttemptAt = &now
@@ -62,7 +77,7 @@ func (r *KovaBuildReconciler) beginVerification(ctx context.Context, build *kova
 			Format: result.Format, Image: result.Repository, Platform: result.Platform, State: "pending",
 		})
 	}
-	setPhaseCondition(build, kovav1.PhaseVerifying, "RunnerCompleted", build.Status.Message)
+	setPhaseCondition(build, phase, build.Status.Reason, build.Status.Message)
 	if err := r.Status().Update(ctx, build); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -178,6 +193,130 @@ func (r *KovaBuildReconciler) reconcileVerifying(ctx context.Context, build *kov
 		return ctrl.Result{}, err
 	}
 	return ctrl.Result{RequeueAfter: delay}, nil
+}
+
+// reconcileFailedVerifying retains the runner's failed outcome while it
+// independently verifies any outputs pushed before the failure. Unlike a
+// successful build, one definitive failed output does not prevent another
+// output's exact pushed digest from being collected and checked.
+func (r *KovaBuildReconciler) reconcileFailedVerifying(ctx context.Context, build *kovav1.KovaBuild) (ctrl.Result, error) {
+	if build.Status.VerificationStartedAt == nil || build.Status.VerificationDeadlineAt == nil || !validVerificationResults(build) {
+		// Discard malformed receipt state rather than repeatedly trying to
+		// update an object the CRD schema cannot accept.
+		build.Status.VerificationResults = nil
+		build.Status.Outputs = nil
+		build.Status.VerificationLastError = "failed build verification state is missing or inconsistent"
+		return r.finishFailedVerification(ctx, build)
+	}
+	done, _ := buildresult.VerificationDone(build.Status.VerificationResults)
+	// A previous leader can persist the exact receipts but lose the terminal
+	// write. Complete a fully verified receipt even after the deadline.
+	if done {
+		build.Status.Outputs = buildresult.VerificationOutputs(build.Status.VerificationResults)
+		build.Status.VerificationLastError = firstFailedResultError(build.Status.VerificationResults)
+		return r.finishFailedVerification(ctx, build)
+	}
+	remaining := time.Until(build.Status.VerificationDeadlineAt.Time)
+	if remaining <= 0 {
+		return r.expireFailedVerification(ctx, build)
+	}
+	if next := build.Status.VerificationNextAttemptAt; next != nil && time.Now().Before(next.Time) {
+		return ctrl.Result{RequeueAfter: min(time.Until(next.Time), remaining)}, nil
+	}
+	slot := r.verificationSlot()
+	select {
+	case slot <- struct{}{}:
+		defer func() { <-slot }()
+	default:
+		return ctrl.Result{RequeueAfter: min(250*time.Millisecond, remaining)}, nil
+	}
+	attemptCtx, cancel := context.WithTimeout(ctx, min(r.verificationAttemptTimeout(), remaining))
+	defer cancel()
+	build.Status.VerificationAttempts++
+	exporter := runnerexec.Client{Kube: r.Kube, BuildkitPlatformAddrs: r.Cfg.BuildkitPlatformAddrs}
+	transient, _ := buildresult.CollectReceipts(attemptCtx, exporter, build, build.Status.VerificationResults)
+	// Persist each exact runner push receipt before registry I/O. No later
+	// mutable tag lookup may substitute for a missing digest.
+	boundVerificationErrors(build.Status.VerificationResults)
+	build.Status.VerificationLastError = truncate(transient, 2048)
+	if err := r.Status().Update(ctx, build); err != nil {
+		return ctrl.Result{}, err
+	}
+	if attemptCtx.Err() == nil {
+		registryTransient, _ := buildresult.VerifyRemoteReceipts(attemptCtx, build.Status.VerificationResults, r.Cfg.RegistryPlainHTTP, verificationBatchSize)
+		if registryTransient != "" {
+			transient = registryTransient
+		}
+	}
+	if attemptCtx.Err() != nil && transient == "" {
+		transient = attemptCtx.Err().Error()
+	}
+	boundVerificationErrors(build.Status.VerificationResults)
+	build.Status.Outputs = buildresult.VerificationOutputs(build.Status.VerificationResults)
+	done, _ = buildresult.VerificationDone(build.Status.VerificationResults)
+	if done {
+		build.Status.VerificationLastError = firstFailedResultError(build.Status.VerificationResults)
+		return r.finishFailedVerification(ctx, build)
+	}
+	if transient == "" {
+		transient = "verification batch remains pending"
+	}
+	build.Status.VerificationLastError = truncate(transient, 2048)
+	delay := verificationBackoff(build.Status.VerificationAttempts)
+	if transient == "verification batch remains pending" {
+		delay = 100 * time.Millisecond
+	}
+	remaining = time.Until(build.Status.VerificationDeadlineAt.Time)
+	if remaining <= 0 {
+		return r.expireFailedVerification(ctx, build)
+	}
+	delay = min(delay, remaining)
+	next := metav1.NewTime(time.Now().Add(delay))
+	build.Status.VerificationNextAttemptAt = &next
+	if err := r.Status().Update(ctx, build); err != nil {
+		return ctrl.Result{}, err
+	}
+	return ctrl.Result{RequeueAfter: delay}, nil
+}
+
+func firstFailedResultError(results []kovav1.BuildVerificationResult) string {
+	for _, result := range results {
+		if result.State == "failed" && result.Error != "" {
+			return truncate(fmt.Sprintf("%s %s: %s", result.Format, result.Image, result.Error), 2048)
+		}
+	}
+	return ""
+}
+
+func (r *KovaBuildReconciler) expireFailedVerification(ctx context.Context, build *kovav1.KovaBuild) (ctrl.Result, error) {
+	message := "partial result verification exceeded its deadline"
+	if build.Status.VerificationLastError != "" {
+		message += ": " + build.Status.VerificationLastError
+	}
+	build.Status.VerificationLastError = truncate(message, 2048)
+	for i := range build.Status.VerificationResults {
+		if build.Status.VerificationResults[i].State == "pending" {
+			build.Status.VerificationResults[i].State = "failed"
+			build.Status.VerificationResults[i].Error = truncate(message, 2048)
+		}
+	}
+	build.Status.Outputs = buildresult.VerificationOutputs(build.Status.VerificationResults)
+	return r.finishFailedVerification(ctx, build)
+}
+
+func (r *KovaBuildReconciler) finishFailedVerification(ctx context.Context, build *kovav1.KovaBuild) (ctrl.Result, error) {
+	build.Status.VerificationNextAttemptAt = nil
+	if err := r.Status().Update(ctx, build); err != nil {
+		return ctrl.Result{}, err
+	}
+	message := build.Status.Message
+	if message == "" {
+		message = "runner reported a failed build"
+	}
+	if err := r.finish(ctx, build, kovav1.PhaseFailed, "BuildFailed", message); err != nil {
+		return ctrl.Result{}, err
+	}
+	return ctrl.Result{RequeueAfter: time.Millisecond}, nil
 }
 
 func validVerificationResults(build *kovav1.KovaBuild) bool {

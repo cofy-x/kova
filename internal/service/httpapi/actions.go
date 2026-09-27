@@ -23,7 +23,10 @@ func (s *Server) handleCancelBuild(c echo.Context) error {
 	if err := s.authorizeBuild(c.Request().Context(), principalFromContext(c), "delete", build); err != nil {
 		return forbidden(c)
 	}
-	if isTerminalPhase(build.Status.Phase) {
+	// FailedVerifying has a fixed runner-failure outcome but is still
+	// collecting bounded partial receipts. A cancellation request cannot
+	// replace it with Cancelled; report the current state without mutation.
+	if isTerminalPhase(build.Status.Phase) || build.Status.Phase == kovav1.PhaseFailedVerifying {
 		return c.JSON(http.StatusOK, buildJobFromCR(build, s.cfg))
 	}
 	base := build.DeepCopy()

@@ -8,7 +8,7 @@ CRD=kovabuilds.kova.cofy.dev
 STATUS_PATH='.spec.versions[?(@.name=="v1alpha1")].schema.openAPIV3Schema.properties.status.properties'
 RETRY_SCHEMA_PATH="{${STATUS_PATH}.pollFailureSince.type}{\"|\"}{${STATUS_PATH}.pollFailureSince.format}{\"|\"}{${STATUS_PATH}.pollFailureCount.type}{\"|\"}{${STATUS_PATH}.pollFailureCount.format}"
 SCHEMA_PATH="${RETRY_SCHEMA_PATH}{\"|\"}{range ${STATUS_PATH}.phase.enum[*]}{@}{\",\"}{end}{\"|\"}{${STATUS_PATH}.verificationStartedAt.type}{\"|\"}{${STATUS_PATH}.verificationStartedAt.format}{\"|\"}{${STATUS_PATH}.verificationDeadlineAt.type}{\"|\"}{${STATUS_PATH}.verificationDeadlineAt.format}{\"|\"}{${STATUS_PATH}.verificationNextAttemptAt.type}{\"|\"}{${STATUS_PATH}.verificationNextAttemptAt.format}{\"|\"}{${STATUS_PATH}.verificationAttempts.type}{\"|\"}{${STATUS_PATH}.verificationAttempts.format}{\"|\"}{${STATUS_PATH}.verificationLastError.type}{\"|\"}{${STATUS_PATH}.verificationResults.type}{\"|\"}{${STATUS_PATH}.verificationResults.maxItems}{\"|\"}{${STATUS_PATH}.verificationResults.items.properties.pushedDigest.pattern}{\"|\"}{range ${STATUS_PATH}.verificationResults.items.properties.state.enum[*]}{@}{\",\"}{end}"
-EXPECTED_SCHEMA='string|date-time|integer|int32|Queued,Starting,Running,Verifying,Succeeded,Failed,Cancelled,|string|date-time|string|date-time|string|date-time|integer|int32|string|array|200|^sha256:[a-f0-9]{64}$|pending,succeeded,failed,'
+EXPECTED_SCHEMA='string|date-time|integer|int32|Queued,Starting,Running,Verifying,FailedVerifying,Succeeded,Failed,Cancelled,|string|date-time|string|date-time|string|date-time|integer|int32|string|array|200|^sha256:[a-f0-9]{64}$|pending,succeeded,failed,'
 MODE=${1:-current}
 
 case ${MODE} in

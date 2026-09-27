@@ -10,7 +10,6 @@ import (
 	kovav1 "github.com/cofy-x/kova/internal/apis/kova/v1alpha1"
 	"github.com/cofy-x/kova/internal/buildcontract"
 	"github.com/cofy-x/kova/internal/runner"
-	"github.com/cofy-x/kova/internal/service/buildresult"
 	"github.com/cofy-x/kova/internal/service/queueadmission"
 	"github.com/cofy-x/kova/internal/service/runnerexec"
 
@@ -362,14 +361,10 @@ func (r *KovaBuildReconciler) finishObservedBuild(ctx context.Context, build *ko
 	if state.Status == "cancelled" {
 		return ctrl.Result{}, r.finish(ctx, build, kovav1.PhaseCancelled, "Cancelled", state.Error)
 	}
-	// A failed runner is already terminal. Keep its best-effort partial outputs,
-	// but never let export/registry I/O hold a reconciler indefinitely.
-	resolveCtx, cancel := context.WithTimeout(ctx, r.verificationAttemptTimeout())
-	defer cancel()
-	build.Status.Phase = kovav1.PhaseFailed
-	resolved := buildresult.Resolve(resolveCtx, client, build, r.Cfg.RegistryPlainHTTP)
-	build.Status.Outputs = buildresult.Outputs(resolved)
-	return ctrl.Result{}, r.finish(ctx, build, kovav1.PhaseFailed, "BuildFailed", state.Error)
+	// The runner's failure is immutable, but a preceding output may already
+	// have reached its registry. Persist this outcome before bounded receipt
+	// collection so a leader restart never re-submits or reports success.
+	return r.beginFailedVerification(ctx, build, state.Error)
 }
 
 func (r *KovaBuildReconciler) observeBuildStatus(ctx context.Context, client runnerexec.Client, build *kovav1.KovaBuild) (runner.BuildState, error) {

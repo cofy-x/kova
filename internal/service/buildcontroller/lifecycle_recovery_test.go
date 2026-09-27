@@ -135,7 +135,7 @@ func TestSubmitObservesAlreadyRunningLegacyRunner(t *testing.T) {
 		t.Fatal(err)
 	}
 	stored := storedLifecycleBuild(t, crClient, "legacy-running")
-	if stored.Status.Phase != kovav1.PhaseFailed || stored.Status.Reason != "BuildFailed" || stored.Status.Message != "legacy build failed" || buildPosts != 0 {
+	if stored.Status.Phase != kovav1.PhaseFailedVerifying || stored.Status.Reason != "BuildFailed" || stored.Status.Message != "legacy build failed" || buildPosts != 0 {
 		t.Fatalf("status=%#v buildPosts=%d", stored.Status, buildPosts)
 	}
 }
@@ -391,12 +391,24 @@ func TestPollTreatsReportedBuildFailureAsTerminal(t *testing.T) {
 	}}
 	r := KovaBuildReconciler{Client: crClient, Scheme: scheme, Kube: kubeClient, Cfg: config.Config{PollRetryWindow: time.Minute}}
 	result, err := r.pollBuild(context.Background(), build)
-	if err != nil || result.RequeueAfter != 0 {
+	if err != nil || result.RequeueAfter <= 0 {
 		t.Fatalf("result=%#v err=%v", result, err)
 	}
 	stored := storedLifecycleBuild(t, crClient, "build-failed")
-	if stored.Status.Phase != kovav1.PhaseFailed || stored.Status.Reason != "BuildFailed" || stored.Status.Message != "buildkit rejected build" {
+	if stored.Status.Phase != kovav1.PhaseFailedVerifying || stored.Status.Reason != "BuildFailed" || stored.Status.Message != "buildkit rejected build" {
 		t.Fatalf("status=%#v", stored.Status)
+	}
+	deadline := metav1.NewTime(time.Now().Add(-time.Second))
+	stored.Status.VerificationDeadlineAt = &deadline
+	if err := crClient.Status().Update(context.Background(), stored); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "jobs", Name: "build-failed"}}); err != nil {
+		t.Fatal(err)
+	}
+	stored = storedLifecycleBuild(t, crClient, "build-failed")
+	if stored.Status.Phase != kovav1.PhaseFailed || stored.Status.Reason != "BuildFailed" || stored.Status.FinishedAt == nil {
+		t.Fatalf("bounded failed terminal status=%#v", stored.Status)
 	}
 }
 
