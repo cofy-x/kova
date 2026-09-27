@@ -180,6 +180,7 @@ The owner GET path needs a real authenticated owner and an existing `KovaBuild`.
 Do not reuse the ordinary quickstart Service E2E fixture: that entrypoint explicitly installs static authentication, so it cannot prove TokenReview or SubjectAccessReview behavior.
 Use a newly created, sole `kova-admission-fairness` Kind with the two-replica TokenReview overlay and its two test ServiceAccounts; the script neither creates nor deletes the Kind cluster.
 The default `check` requires a fresh, empty fairness cursor, zero builds/runners and empty admission ledgers, both exact candidate image bindings, two Ready Service Pods, healthy nodes, Pod/memory/CPU headroom, and no virtual `get servicebuilds` RBAC for either principal.
+The RBAC check impersonates each ServiceAccount username, exact UID, and its standard authenticated and ServiceAccount groups; a name-only impersonation is insufficient to prove denial.
 Supply the full SHA of the commit used to build the deployed controller image, even when the checkout contains a later script-only commit:
 
 ```bash
@@ -193,6 +194,7 @@ ADMISSION_AUTH_OWNER_CANDIDATE_COMMIT=<deployed-full-sha> \
 Live mode uses a short TokenRequest bearer for each test ServiceAccount, retained only in memory.
 It submits one run-scoped, unschedulable build through the Service API, waits for its exact `Starting`/Pending runner state, then sends 30 owner and 10 non-owner GETs at two total requests per second across the two pinned Service Pods.
 Hard caps are 60 owner GETs, 30 non-owner GETs, four total requests per second, and five minutes before cleanup.
+Each next GET waits at least one rate interval after the previous GET completes; slow health samples never trigger catch-up bursts.
 The owner must receive only its exact build with zero SAR requests during its measured phase; the non-owner must receive a non-disclosing `403 forbidden` with one SAR per measured request.
 Both phases require one TokenReview per measured request; exact API Server counter deltas fail closed on unrelated review traffic or counter resets because these counters are cluster-wide.
 Every request has a private allowlisted receipt, and repeated samples enforce Service Pod UID/image stability, healthy nodes, CPU/memory and Pod capacity.

@@ -142,16 +142,93 @@ class AuthOwnerProbeTest(unittest.TestCase):
                 PROBE.fresh_preflight(SHA)
 
     def test_virtual_get_requires_definitive_yes_or_no(self) -> None:
+        identity = {"service_account_uids": {"b": UID}}
         with patch.object(
             PROBE.subprocess, "run", return_value=SimpleNamespace(returncode=1, stdout="no\n")
         ) as run:
-            self.assertFalse(PROBE.virtual_get_granted(PROBE.fair.principal("b")))
-            self.assertIn("--as=" + PROBE.fair.principal("b"), run.call_args.args[0])
+            self.assertFalse(PROBE.virtual_get_granted("b", identity))
+            argv = run.call_args.args[0]
+            self.assertIn("--as=" + PROBE.fair.principal("b"), argv)
+            self.assertIn("--as-uid=" + UID, argv)
+            self.assertIn("--as-group=system:serviceaccounts", argv)
+            self.assertIn("--as-group=system:serviceaccounts:kova", argv)
+            self.assertIn("--as-group=system:authenticated", argv)
         with patch.object(
             PROBE.subprocess, "run", return_value=SimpleNamespace(returncode=1, stdout="")
         ):
             with self.assertRaisesRegex(PROBE.fair.SafetyError, "inconclusive"):
-                PROBE.virtual_get_granted(PROBE.fair.principal("b"))
+                PROBE.virtual_get_granted("b", identity)
+
+    def test_completed_request_pacing_never_catches_up_after_slow_health(self) -> None:
+        clock = [0.0]
+        starts = []
+
+        def monotonic() -> float:
+            return clock[0]
+
+        def sleep(seconds: float) -> None:
+            clock[0] += seconds
+
+        def observe(_state: dict, _baseline: dict) -> tuple[dict, dict]:
+            clock[0] += 2.0  # periodic health checks take longer than the QPS interval
+            return {}, {}
+
+        def get(_which: str, _token: str, _port: int, _case: dict) -> dict:
+            starts.append(clock[0])
+            clock[0] += 0.1
+            return {"elapsed_seconds": 0.1}
+
+        with (
+            patch.object(PROBE.time, "monotonic", side_effect=monotonic),
+            patch.object(PROBE.time, "sleep", side_effect=sleep),
+            patch.object(PROBE, "observe_owned", side_effect=observe),
+            patch.object(PROBE.fair, "stage_matches", return_value=True),
+            patch.object(PROBE, "get_build", side_effect=get),
+            patch.object(PROBE, "save"),
+        ):
+            rows, health, _ = PROBE.request_phase(
+                {"case": {}},
+                Path("/tmp/unwritten"),
+                {"service_pods": [{"name": "a"}, {"name": "b"}]},
+                {"a": "in-memory-token"},
+                "a",
+                6,
+                2.0,
+                100.0,
+            )
+        self.assertEqual(len(rows), 6)
+        self.assertEqual(len(health), 2)
+        self.assertGreater(starts[5] - starts[4], 2.0)
+        self.assertTrue(
+            all(later - (earlier + 0.1) >= 0.5 for earlier, later in zip(starts, starts[1:]))
+        )
+
+    def test_slow_health_cannot_start_request_after_deadline(self) -> None:
+        clock = [0.0]
+
+        def observe(_state: dict, _baseline: dict) -> tuple[dict, dict]:
+            clock[0] += 2.0
+            return {}, {}
+
+        with (
+            patch.object(PROBE.time, "monotonic", side_effect=lambda: clock[0]),
+            patch.object(PROBE, "observe_owned", side_effect=observe),
+            patch.object(PROBE.fair, "stage_matches", return_value=True),
+            patch.object(PROBE, "get_build") as get,
+            patch.object(PROBE, "save"),
+        ):
+            with self.assertRaisesRegex(PROBE.fair.SafetyError, "five-minute bound"):
+                PROBE.request_phase(
+                    {"case": {}},
+                    Path("/tmp/unwritten"),
+                    {"service_pods": [{"name": "a"}, {"name": "b"}]},
+                    {"a": "in-memory-token"},
+                    "a",
+                    1,
+                    2.0,
+                    1.0,
+                )
+            get.assert_not_called()
 
     def test_node_cpu_quantity_is_bounded_and_understood(self) -> None:
         self.assertEqual(PROBE.allocatable_cpu_cores("4"), 4.0)

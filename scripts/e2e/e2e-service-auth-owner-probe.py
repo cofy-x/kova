@@ -93,14 +93,21 @@ def fresh_preflight(candidate_commit: str) -> tuple[dict, dict]:
     sample_capacity(identity, baseline)
     for who in ("a", "b"):
         require(
-            not virtual_get_granted(fair.principal(who)),
+            not virtual_get_granted(who, identity),
             "a test principal has virtual Service GET permission; owner bypass cannot be isolated",
         )
     return identity, baseline
 
 
-def virtual_get_granted(username: str) -> bool:
-    """Prove both test principals lack virtual Service GET RBAC before POST."""
+def virtual_get_granted(which: str, identity: dict) -> bool:
+    """Use the actual ServiceAccount UID and standard TokenReview groups."""
+    require(which in fair.SA, "virtual GET identity is not a fixture ServiceAccount")
+    uid = identity["service_account_uids"][which]
+    require(
+        isinstance(uid, str) and fair.UID.fullmatch(uid) is not None,
+        "fixture ServiceAccount UID is invalid",
+    )
+    username = fair.principal(which)
     try:
         result = subprocess.run(
             [
@@ -115,6 +122,10 @@ def virtual_get_granted(username: str) -> bool:
                 "get",
                 "servicebuilds.kova.cofy.dev",
                 f"--as={username}",
+                f"--as-uid={uid}",
+                "--as-group=system:serviceaccounts",
+                f"--as-group=system:serviceaccounts:{fair.NAMESPACE}",
+                "--as-group=system:authenticated",
             ],
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
@@ -411,11 +422,9 @@ def request_phase(
     receipts = []
     health_samples = []
     started = time.monotonic()
+    next_earliest = started
     for index in range(count):
         require(time.monotonic() < deadline, "owner auth probe exceeded its five-minute bound")
-        delay = started + index / qps - time.monotonic()
-        if delay > 0:
-            time.sleep(delay)
         if index % 5 == 0:
             view, health = observe_owned(state, baseline)
             require(
@@ -424,9 +433,18 @@ def request_phase(
             )
             save(directory, f"health-{which}-{index // 5 + 1:03d}.json", health)
             health_samples.append(health)
+        # Schedule from the completion of the previous request, not from the
+        # phase start. A slow health sample must never cause a catch-up burst.
+        current = time.monotonic()
+        delay = max(0.0, next_earliest - current)
+        require(current + delay < deadline, "next GET would exceed the five-minute bound")
+        if delay > 0:
+            time.sleep(delay)
+        require(time.monotonic() < deadline, "owner auth probe exceeded its five-minute bound")
         port = fair.PORT["a" if index % 2 == 0 else "b"]
         try:
             receipt = get_build(which, tokens[which], port, state["case"])
+            next_earliest = time.monotonic() + 1.0 / qps
             receipt.update({"index": index + 1, "pod": baseline["service_pods"][index % 2]["name"]})
             save(directory, f"request-{which}-{index + 1:03d}.json", receipt)
             receipts.append(receipt)
