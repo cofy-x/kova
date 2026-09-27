@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import http.client
 import importlib.util
+import io
 import json
 import os
 import sys
@@ -15,6 +16,7 @@ from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import patch
+from urllib.error import HTTPError
 
 HERE = Path(__file__).parent
 sys.path.insert(0, str(HERE))
@@ -126,6 +128,146 @@ class ReceiptSafetyTest(unittest.TestCase):
                 self.assertEqual(len(source.namelist()), 3)
                 self.assertEqual(json.loads(source.read("a-pass/metadata.json"))["target"], FIRST)
                 self.assertIn(b"second overwrite build", source.read("a-pass/payload"))
+
+
+class ProxyIdentityTest(unittest.TestCase):
+    def test_orphan_proxy_pod_or_replicaset_blocks_preflight(self) -> None:
+        with patch.object(acceptance.base, "kctl", return_value=""):
+            for orphan in ("pods", "replicasets"):
+
+                def selected(*args: str) -> dict:
+                    return (
+                        {"items": [{"metadata": {"uid": "orphan"}}]}
+                        if orphan in args
+                        else {"items": []}
+                    )
+
+                with (
+                    self.subTest(orphan=orphan),
+                    patch.object(acceptance.base, "kjson", side_effect=selected),
+                    self.assertRaises(acceptance.base.AcceptanceError),
+                ):
+                    acceptance.assert_proxy_absent()
+
+    def test_proxy_contract_pins_service_and_configmap(self) -> None:
+        code = (HERE / "registry-digest-collision-proxy.py").read_text(encoding="utf-8")
+        identity = acceptance.ProxyIdentity(
+            "deployment-uid", "service-uid", "config-uid", acceptance.base.sha256(code.encode())
+        )
+        config = {
+            "metadata": {"uid": identity.config_uid},
+            "data": {"mode": "503", "proxy.py": code},
+        }
+        service = {
+            "metadata": {"uid": identity.service_uid},
+            "spec": {
+                "type": "ClusterIP",
+                "selector": {"kova.cofy.dev/e2e": "digest-collision-proxy"},
+                "ports": [{"name": "http", "port": 5000, "targetPort": 5000, "protocol": "TCP"}],
+            },
+        }
+
+        def get_object(*args: str) -> dict:
+            return config if "configmap" in args else service
+
+        with (
+            patch.object(acceptance.base, "kjson", side_effect=get_object),
+            patch.object(acceptance, "proxy_pod", return_value={"metadata": {"uid": "pod-uid"}}),
+        ):
+            self.assertEqual(
+                acceptance.check_proxy_contract(identity, "503")["metadata"]["uid"], "pod-uid"
+            )
+            config["data"]["proxy.py"] = "changed"
+            with self.assertRaises(acceptance.base.AcceptanceError):
+                acceptance.check_proxy_contract(identity, "503")
+            config["data"]["proxy.py"] = code
+            service["spec"]["selector"] = {"kova.cofy.dev/e2e": "other"}
+            with self.assertRaises(acceptance.base.AcceptanceError):
+                acceptance.check_proxy_contract(identity, "503")
+            service["spec"]["selector"] = {"kova.cofy.dev/e2e": "digest-collision-proxy"}
+            service["metadata"]["uid"] = "different"
+            with self.assertRaises(acceptance.base.AcceptanceError):
+                acceptance.check_proxy_contract(identity, "503")
+
+    def test_direct_proxy_probe_requires_exact_fault_and_manifest(self) -> None:
+        repository = f"kova-examples/{RUN}-a"
+        manifest = b'{"schemaVersion":2,"config":{"digest":"sha256:example"}}'
+        digest = "sha256:" + hashlib.sha256(manifest).hexdigest()
+        identity = acceptance.ProxyIdentity("deployment", "service", "config", "code")
+
+        class Response:
+            status = 200
+            headers = {"Docker-Content-Digest": digest}
+
+            def __enter__(self) -> Response:
+                return self
+
+            def __exit__(self, *_args: object) -> None:
+                return None
+
+            def read(self, _length: int) -> bytes:
+                return manifest
+
+        fault = HTTPError(
+            f"http://127.0.0.1:5000/v2/{repository}/manifests/{digest}",
+            503,
+            "test fault",
+            {},
+            io.BytesIO(b"test-only digest verification fault"),
+        )
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            patch.object(
+                acceptance, "check_proxy_contract", return_value={"metadata": {"uid": "pod-uid"}}
+            ),
+            patch.object(acceptance.base, "start_port_forward", return_value=(None, 5000, None)),
+            patch.object(acceptance.base, "stop_process"),
+            patch.object(acceptance.base.HTTP, "open", side_effect=[fault, Response()]) as opened,
+        ):
+            run_dir = Path(temporary)
+            acceptance.probe_proxy_manifest(
+                run_dir, identity, "503", "a-fault", repository, digest, 503
+            )
+            acceptance.probe_proxy_manifest(
+                run_dir, identity, "healthy", "a-healthy", repository, digest, 200
+            )
+            self.assertEqual(
+                json.loads((run_dir / "proxy-probe-a-fault.json").read_text())["http_status"], 503
+            )
+            self.assertEqual(
+                json.loads((run_dir / "proxy-probe-a-healthy.json").read_text())["http_status"], 200
+            )
+            for call in opened.call_args_list:
+                self.assertEqual(call.args[0].get_header("Host"), acceptance.PROXY_HOST)
+            with self.assertRaises(acceptance.base.AcceptanceError):
+                acceptance.probe_proxy_manifest(
+                    run_dir, identity, "healthy", "outside", "kova-examples/unrelated", digest, 200
+                )
+
+    def test_direct_proxy_probe_rejects_unattributed_503(self) -> None:
+        repository = f"kova-examples/{RUN}-a"
+        digest = "sha256:" + "a" * 64
+        fault = HTTPError(
+            f"http://127.0.0.1:5000/v2/{repository}/manifests/{digest}",
+            503,
+            "unattributed",
+            {},
+            io.BytesIO(b"backend unavailable"),
+        )
+        identity = acceptance.ProxyIdentity("deployment", "service", "config", "code")
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            patch.object(
+                acceptance, "check_proxy_contract", return_value={"metadata": {"uid": "pod-uid"}}
+            ),
+            patch.object(acceptance.base, "start_port_forward", return_value=(None, 5000, None)),
+            patch.object(acceptance.base, "stop_process"),
+            patch.object(acceptance.base.HTTP, "open", side_effect=fault),
+            self.assertRaises(acceptance.base.AcceptanceError),
+        ):
+            acceptance.probe_proxy_manifest(
+                Path(temporary), identity, "503", "wrong-fault", repository, digest, 503
+            )
 
 
 class RegistryProxyTest(unittest.TestCase):

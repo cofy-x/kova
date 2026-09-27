@@ -22,6 +22,7 @@ import time
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import NamedTuple
 from urllib.error import HTTPError, URLError
 from urllib.request import Request
 
@@ -45,6 +46,15 @@ PROXY_IMAGE = "python@sha256:4c47124a8391cb7a9f571164147d154777cf012a4ece5f86097
 IMAGE_REPOSITORY = "localhost:5004/kova"
 RUN_SECONDS = 20 * 60
 SHA = re.compile(r"sha256:[0-9a-f]{64}")
+
+
+class ProxyIdentity(NamedTuple):
+    deployment_uid: str
+    service_uid: str
+    config_uid: str
+    code_sha256: str
+
+
 base.CLUSTER = CLUSTER
 base.KUBECONFIG = ROOT / ".kind" / f"{CLUSTER}.kubeconfig"
 base.REGISTRY = REGISTRY
@@ -73,6 +83,28 @@ def expected_targets(run_id: str) -> tuple[str, str]:
         f"{PROXY_HOST}/kova-examples/{run_id}-a:dev",
         f"{PROXY_HOST}/kova-examples/{run_id}-z:dev",
     )
+
+
+def assert_proxy_absent() -> None:
+    for resource in ("configmap", "deployment", "service"):
+        found = base.kctl(
+            "-n", NAMESPACE, "get", resource, PROXY_NAME, "--ignore-not-found", "-o", "json"
+        )
+        if found.strip():
+            fail(f"test proxy {resource}/{PROXY_NAME} already exists")
+    for resource in ("pods", "replicasets"):
+        found = base.kjson(
+            "-n",
+            NAMESPACE,
+            "get",
+            resource,
+            "-l",
+            "kova.cofy.dev/e2e=digest-collision-proxy",
+            "-o",
+            "json",
+        ).get("items", [])
+        if found:
+            fail(f"orphan test proxy {resource} already exist")
 
 
 def check_fixture(revision: str) -> dict:
@@ -123,12 +155,7 @@ def check_fixture(revision: str) -> dict:
         f'[registry."{host}"]' in buildkit_config for host in (REGISTRY_CLUSTER, PROXY_HOST)
     ):
         fail("BuildKit config lacks the exact isolated backend/proxy HTTP registries")
-    for resource in ("configmap", "deployment", "service"):
-        found = base.kctl(
-            "-n", NAMESPACE, "get", resource, PROXY_NAME, "--ignore-not-found", "-o", "json"
-        )
-        if found.strip():
-            fail(f"test proxy {resource}/{PROXY_NAME} already exists")
+    assert_proxy_absent()
     return facts
 
 
@@ -339,6 +366,36 @@ def proxy_pod(deployment_uid: str, mode_token: str) -> dict:
     return pod
 
 
+def check_proxy_contract(identity: ProxyIdentity, expected_mode: str) -> dict:
+    config = base.kjson("-n", NAMESPACE, "get", "configmap", PROXY_NAME, "-o", "json")
+    code = config.get("data", {}).get("proxy.py", "")
+    if (
+        config["metadata"]["uid"] != identity.config_uid
+        or config.get("data", {}).get("mode") != expected_mode
+        or base.sha256(code.encode()) != identity.code_sha256
+    ):
+        fail("exact proxy ConfigMap UID, mode, or code digest drifted")
+    service = base.kjson("-n", NAMESPACE, "get", "service", PROXY_NAME, "-o", "json")
+    ports = service.get("spec", {}).get("ports", [])
+    if (
+        service["metadata"]["uid"] != identity.service_uid
+        or service["spec"].get("type") != "ClusterIP"
+        or service["spec"].get("selector") != {"kova.cofy.dev/e2e": "digest-collision-proxy"}
+        or len(ports) != 1
+        or any(
+            ports[0].get(key) != value
+            for key, value in (
+                ("name", "http"),
+                ("port", 5000),
+                ("targetPort", 5000),
+                ("protocol", "TCP"),
+            )
+        )
+    ):
+        fail("exact proxy Service UID, selector, or port drifted")
+    return proxy_pod(identity.deployment_uid, "initial")
+
+
 def proxy_mode(run_dir: Path, expected: str) -> None:
     process, port, stream = base.start_port_forward(run_dir, f"svc/{PROXY_NAME}", 5000)
     try:
@@ -357,7 +414,11 @@ def proxy_mode(run_dir: Path, expected: str) -> None:
         base.stop_process(process, stream)
 
 
-def create_proxy(run_dir: Path, repository: str, failed_repository: str) -> tuple[str, str]:
+def create_proxy(run_dir: Path, repository: str, failed_repository: str) -> ProxyIdentity:
+    assert_proxy_absent()
+    code_sha256 = base.sha256(
+        Path(__file__).with_name("registry-digest-collision-proxy.py").read_bytes()
+    )
     config = json.loads(
         base.command(
             [
@@ -387,9 +448,17 @@ def create_proxy(run_dir: Path, repository: str, failed_repository: str) -> tupl
             "code_sha256": base.sha256(config["data"]["proxy.py"].encode()),
         },
     )
+    if base.sha256(config["data"]["proxy.py"].encode()) != code_sha256:
+        fail("created proxy ConfigMap code differs from the reviewed local file")
     deployment, service = proxy_objects(repository, failed_repository)
     deployed = create_object(deployment)
     served = create_object(service)
+    identity = ProxyIdentity(
+        deployed["metadata"]["uid"],
+        served["metadata"]["uid"],
+        config["metadata"]["uid"],
+        code_sha256,
+    )
     save(
         run_dir,
         "proxy-object-identities.json",
@@ -397,6 +466,7 @@ def create_proxy(run_dir: Path, repository: str, failed_repository: str) -> tupl
             "configmap_uid": config["metadata"]["uid"],
             "deployment_uid": deployed["metadata"]["uid"],
             "service_uid": served["metadata"]["uid"],
+            "code_sha256": code_sha256,
         },
     )
     base.kctl(
@@ -408,30 +478,32 @@ def create_proxy(run_dir: Path, repository: str, failed_repository: str) -> tupl
         "--timeout=180s",
         timeout=190,
     )
-    pod = proxy_pod(deployed["metadata"]["uid"], "initial")
+    pod = check_proxy_contract(identity, "503")
     save(run_dir, "proxy-initial-pod.json", base.project_pod(pod))
     proxy_mode(run_dir, "503")
-    return deployed["metadata"]["uid"], config["metadata"]["uid"]
+    return identity
 
 
-def set_proxy_mode(
-    run_dir: Path, deployment_uid: str, config_uid: str, old_mode: str, new_mode: str
-) -> None:
-    current = proxy_pod(deployment_uid, "initial")
+def set_proxy_mode(run_dir: Path, identity: ProxyIdentity, old_mode: str, new_mode: str) -> None:
+    current = check_proxy_contract(identity, old_mode)
     pod_uid = current["metadata"]["uid"]
-    config = base.kjson("-n", NAMESPACE, "get", "configmap", PROXY_NAME, "-o", "json")
-    if config["metadata"]["uid"] != config_uid or config.get("data", {}).get("mode") != old_mode:
-        fail("proxy ConfigMap fault mode drifted")
     patch = json.dumps(
         [
-            {"op": "test", "path": "/metadata/uid", "value": config_uid},
+            {"op": "test", "path": "/metadata/uid", "value": identity.config_uid},
             {"op": "test", "path": "/data/mode", "value": old_mode},
+            {
+                "op": "test",
+                "path": "/data/proxy.py",
+                "value": Path(__file__)
+                .with_name("registry-digest-collision-proxy.py")
+                .read_text(encoding="utf-8"),
+            },
             {"op": "replace", "path": "/data/mode", "value": new_mode},
         ]
     )
     base.kctl("-n", NAMESPACE, "patch", "configmap", PROXY_NAME, "--type=json", "-p", patch)
     proxy_mode(run_dir, new_mode)
-    pod = proxy_pod(deployment_uid, "initial")
+    pod = check_proxy_contract(identity, new_mode)
     if pod["metadata"]["uid"] != pod_uid:
         fail("proxy Pod changed while switching the exact digest fault mode")
     save(
@@ -439,12 +511,82 @@ def set_proxy_mode(
         f"proxy-mode-{new_mode.split(':', 1)[0]}.json",
         {
             "at": base.now(),
-            "deployment_uid": deployment_uid,
-            "configmap_uid": config_uid,
+            "deployment_uid": identity.deployment_uid,
+            "service_uid": identity.service_uid,
+            "configmap_uid": identity.config_uid,
+            "code_sha256": identity.code_sha256,
             "pod_uid": pod_uid,
             "mode": new_mode,
         },
     )
+
+
+def probe_proxy_manifest(
+    run_dir: Path,
+    identity: ProxyIdentity,
+    mode: str,
+    phase: str,
+    repository: str,
+    digest: str,
+    expected_status: int,
+) -> None:
+    if (
+        not re.fullmatch(r"[a-z0-9-]+", phase)
+        or not re.fullmatch(
+            r"kova-examples/digest-41-[0-9]{8}t[0-9]{6}z-[0-9a-f]{8}-a",
+            repository,
+        )
+        or SHA.fullmatch(digest) is None
+        or expected_status not in (200, 503)
+    ):
+        fail("proxy digest probe escaped the exact test repository or status contract")
+    pod_uid = check_proxy_contract(identity, mode)["metadata"]["uid"]
+    process, port, stream = base.start_port_forward(run_dir, f"svc/{PROXY_NAME}", 5000)
+    try:
+        request = Request(
+            f"http://127.0.0.1:{port}/v2/{repository}/manifests/{digest}",
+            method="GET",
+            headers={"Host": PROXY_HOST, "Accept": base.MANIFEST_ACCEPT},
+        )
+        try:
+            with base.HTTP.open(request, timeout=10) as response:
+                status = response.status
+                headers = response.headers
+                body = response.read(4 * 1024 * 1024 + 1)
+        except HTTPError as error:
+            status = error.code
+            headers = error.headers
+            body = error.read(4 * 1024 * 1024 + 1)
+            error.close()
+        except (URLError, OSError) as error:
+            fail(f"proxy digest GET outcome unknown: {type(error).__name__}")
+        if len(body) > 4 * 1024 * 1024 or status != expected_status:
+            fail(f"proxy digest GET returned HTTP {status}, expected {expected_status}")
+        if expected_status == 503:
+            if body != b"test-only digest verification fault":
+                fail("proxy digest fault was not emitted by the exact test proxy")
+        elif (
+            headers.get("Docker-Content-Digest", "") != digest
+            or "sha256:" + hashlib.sha256(body).hexdigest() != digest
+        ):
+            fail("proxy healthy digest response differs from its immutable manifest")
+        if check_proxy_contract(identity, mode)["metadata"]["uid"] != pod_uid:
+            fail("proxy Pod changed during exact digest probe")
+        save(
+            run_dir,
+            f"proxy-probe-{phase}.json",
+            {
+                "at": base.now(),
+                "mode": mode,
+                "pod_uid": pod_uid,
+                "repository": repository,
+                "digest": digest,
+                "http_status": status,
+                "body_sha256": base.sha256(body),
+            },
+        )
+    finally:
+        base.stop_process(process, stream)
 
 
 def submit(
@@ -960,7 +1102,7 @@ def run_acceptance(revision: str, facts: dict) -> None:
     )
     attempts: dict[str, tuple[str, str, str, list[str], str]] = {}
     accepted: dict[str, tuple[str, str, str, str, list[str], str]] = {}
-    proxy_uid = proxy_config_uid = ""
+    proxy_identity: ProxyIdentity | None = None
     service_forward: subprocess.Popen | None = None
     service_log = None
     copy_watch: dict = {}
@@ -976,7 +1118,7 @@ def run_acceptance(revision: str, facts: dict) -> None:
             (f"kova-sources/{run_id}-b", "dev"),
         ):
             base.manifest_digest(repository, tag, absent=True)
-        proxy_uid, proxy_config_uid = create_proxy(run_dir, first_repo, failed_repo)
+        proxy_identity = create_proxy(run_dir, first_repo, failed_repo)
         archive_a = base.make_archive(run_dir, first, second)
         source_a, digest_a = push_source(run_dir, "a", archive_a, run_id)
         guard_running(facts, {})
@@ -1019,10 +1161,30 @@ def run_acceptance(revision: str, facts: dict) -> None:
             fail("A Nydus tag did not initially equal its durable pushed digest")
         if len(set(pushed_a.values())) != 2:
             fail("A OCI and Nydus receipts unexpectedly share one manifest digest")
+        for image, digest in pushed_a.items():
+            probe_proxy_manifest(
+                run_dir,
+                proxy_identity,
+                "503",
+                "initial-a-nydus" if image.endswith("_nydus_v3") else "initial-a-oci",
+                first_repo,
+                digest,
+                503,
+            )
         only_a_mode = "only:" + ",".join(
             [pushed_a[first], pushed_a[first.replace(":dev", ":dev_nydus_v3")]]
         )
-        set_proxy_mode(run_dir, proxy_uid, proxy_config_uid, "503", only_a_mode)
+        set_proxy_mode(run_dir, proxy_identity, "503", only_a_mode)
+        for image, digest in pushed_a.items():
+            probe_proxy_manifest(
+                run_dir,
+                proxy_identity,
+                only_a_mode,
+                "narrow-a-nydus" if image.endswith("_nydus_v3") else "narrow-a-oci",
+                first_repo,
+                digest,
+                503,
+            )
         if pending_digests(exact_build(*accepted["a"]), first, second) != pushed_a:
             fail("A was no longer pending after narrowing the fault to only its digests")
         archive_b = make_b_archive(run_dir, first, run_id)
@@ -1045,6 +1207,25 @@ def run_acceptance(revision: str, facts: dict) -> None:
             tag = "dev_nydus_v3" if image.endswith("_nydus_v3") else "dev"
             if base.manifest_digest(first_repo, tag) != digest:
                 fail(f"B did not overwrite the shared {tag} tag with its own pushed digest")
+            probe_proxy_manifest(
+                run_dir,
+                proxy_identity,
+                only_a_mode,
+                "overlap-b-nydus" if image.endswith("_nydus_v3") else "overlap-b-oci",
+                first_repo,
+                digest,
+                200,
+            )
+        for image, digest in pushed_a.items():
+            probe_proxy_manifest(
+                run_dir,
+                proxy_identity,
+                only_a_mode,
+                "overlap-a-nydus" if image.endswith("_nydus_v3") else "overlap-a-oci",
+                first_repo,
+                digest,
+                503,
+            )
         save(
             run_dir,
             "overlap-proof.json",
@@ -1062,7 +1243,17 @@ def run_acceptance(revision: str, facts: dict) -> None:
         )
         for digest in pushed_a.values():
             immutable_manifest_digest(first_repo, digest)
-        set_proxy_mode(run_dir, proxy_uid, proxy_config_uid, only_a_mode, "healthy")
+        set_proxy_mode(run_dir, proxy_identity, only_a_mode, "healthy")
+        for image, digest in pushed_a.items():
+            probe_proxy_manifest(
+                run_dir,
+                proxy_identity,
+                "healthy",
+                "recovered-a-nydus" if image.endswith("_nydus_v3") else "recovered-a-oci",
+                first_repo,
+                digest,
+                200,
+            )
         deadline = time.monotonic() + 180
         next_guard = 0.0
         while time.monotonic() < deadline:
