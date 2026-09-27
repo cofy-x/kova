@@ -357,13 +357,74 @@ def local_image_fact(reference: str) -> dict:
     revision = (image.get("Config", {}).get("Labels") or {}).get(
         "org.opencontainers.image.revision"
     )
-    if not isinstance(revision, str) or not re.fullmatch(r"[0-9a-f]{12,40}", revision):
+    if not isinstance(revision, str) or not re.fullmatch(r"[0-9a-f]{12}", revision):
         fail(f"local Docker image {reference} has no exact Kova revision label")
+    image_id = image.get("Id")
+    if not isinstance(image_id, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", image_id):
+        fail(f"local Docker image {reference} has no exact SHA-256 image ID")
     return {
         "reference": reference,
-        "image_id": image["Id"],
+        "image_id": image_id,
         "revision": revision,
         "architecture": image.get("Architecture"),
+    }
+
+
+def kind_runtime_image_fact(node: str, reference: str) -> dict:
+    inspection = json.loads(
+        command(["docker", "exec", node, "crictl", "inspecti", "-o", "json", reference], timeout=30)
+    )
+    status = inspection.get("status")
+    if not isinstance(status, dict):
+        fail(f"Kind node {node} did not return CRI image status for {reference}")
+    image_id = status.get("id")
+    if not isinstance(image_id, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", image_id):
+        fail(f"Kind node {node} returned an unrecognized CRI image ID for {reference}")
+    repo_digests = status.get("repoDigests") or []
+    if not isinstance(repo_digests, list) or any(
+        not isinstance(item, str) for item in repo_digests
+    ):
+        fail(f"Kind node {node} returned malformed CRI repo digests for {reference}")
+    return {"image_id": image_id, "repo_digests": repo_digests}
+
+
+def sha256_reference(value: str) -> str:
+    match = re.search(r"(?:@|^)sha256:([0-9a-f]{64})$", value)
+    if match is None:
+        fail("Pod imageID has no comparable SHA-256 digest")
+    return "sha256:" + match.group(1)
+
+
+def deployed_image_fact(pod: dict, container_name: str, expected_id: str) -> dict:
+    pod_name = pod.get("metadata", {}).get("name")
+    node = pod.get("spec", {}).get("nodeName")
+    if not isinstance(node, str) or node not in (
+        f"{CLUSTER}-control-plane",
+        f"{CLUSTER}-worker",
+    ):
+        fail(f"Pod {pod_name} is not scheduled on a verified Kind node")
+    containers = [
+        item
+        for item in pod.get("status", {}).get("containerStatuses", [])
+        if item.get("name") == container_name
+    ]
+    if len(containers) != 1 or not isinstance(containers[0].get("imageID"), str):
+        fail(f"Pod {pod_name} has no exact {container_name} image identity")
+    pod_image_id = containers[0]["imageID"]
+    runtime = kind_runtime_image_fact(node, pod_image_id)
+    if runtime["image_id"] != expected_id:
+        fail(f"Pod {pod_name} runs an image other than the reviewed local Docker image")
+    comparable = {runtime["image_id"]} | {
+        sha256_reference(digest) for digest in runtime["repo_digests"]
+    }
+    if sha256_reference(pod_image_id) not in comparable:
+        fail(f"Pod {pod_name} imageID is not in the matching CRI image's digests")
+    return {
+        "pod": pod_name,
+        "node": node,
+        "pod_image_id": pod_image_id,
+        "runtime_image_id": runtime["image_id"],
+        "runtime_repo_digests": runtime["repo_digests"],
     }
 
 
@@ -380,6 +441,24 @@ def resource_sample(expected_pods: list[dict], stage_dir: Path | None, docker_ro
     original_pods = {pod["metadata"]["name"]: pod["metadata"]["uid"] for pod in expected_pods}
     if {pod["metadata"]["name"]: pod["metadata"]["uid"] for pod in current_pods} != original_pods:
         fail("Service Pod identity changed during the benchmark")
+    original_images = {
+        pod["metadata"]["name"]: next(
+            status["imageID"]
+            for status in pod["status"]["containerStatuses"]
+            if status["name"] == "kova-service"
+        )
+        for pod in expected_pods
+    }
+    current_images = {
+        pod["metadata"]["name"]: next(
+            status["imageID"]
+            for status in pod["status"]["containerStatuses"]
+            if status["name"] == "kova-service"
+        )
+        for pod in current_pods
+    }
+    if current_images != original_images:
+        fail("Service Pod image identity changed during the benchmark")
     services = []
     node_samples = []
     for node in nodes:
@@ -487,6 +566,11 @@ def request_json(
         fail(f"{method} {path} transport outcome is unknown: {type(error).__name__}")
     if len(raw) > HTTP_BODY_MAX:
         fail(f"{method} {path} response exceeds {HTTP_BODY_MAX} bytes; outcome needs review")
+    if token and (
+        token.encode() in raw
+        or any(token in key or token in value for key, value in response_headers.items())
+    ):
+        fail(f"{method} {path} response reflected the request credential; receipt withheld")
     response_headers = {key.lower(): value for key, value in response_headers.items()}
     elapsed = time.monotonic() - started
     try:
@@ -716,6 +800,13 @@ def preflight() -> dict:
     for binary in ("kind", "kubectl", "docker", "helm", "git"):
         if shutil.which(binary) is None:
             fail(f"missing required command {binary}")
+    kova_commit = command(["git", "-C", str(ROOT), "rev-parse", "HEAD"]).strip()
+    if not re.fullmatch(r"[0-9a-f]{40}", kova_commit):
+        fail("Kova checkout HEAD is not an exact commit")
+    if command(
+        ["git", "-C", str(ROOT), "status", "--porcelain", "--untracked-files=normal"]
+    ).strip():
+        fail("Kova checkout is dirty; benchmark candidate must be a clean commit")
     fingerprint = exact_kind_identity()
     nodes = good_nodes(kjson("get", "nodes", "-o", "json"))
     deployment = kjson("-n", NAMESPACE, "get", "deployment", f"{RELEASE}-service", "-o", "json")
@@ -760,6 +851,47 @@ def preflight() -> dict:
     }
     if len({fact["revision"] for fact in image_facts.values()}) != 1:
         fail("controller, runner, and worker local image revision labels differ")
+    if any(fact["revision"] != kova_commit[:12] for fact in image_facts.values()):
+        fail("local role image revisions differ from the clean Kova checkout HEAD")
+    runtime_role_images = {}
+    for node in nodes:
+        node_name = node["metadata"]["name"]
+        runtime_role_images[node_name] = {}
+        for role, fact in image_facts.items():
+            runtime = kind_runtime_image_fact(node_name, fact["reference"])
+            if runtime["image_id"] != fact["image_id"]:
+                fail(f"Kind node {node_name} has a stale {role} image")
+            runtime_role_images[node_name][role] = runtime
+    worker_selector = worker["spec"]["selector"]["matchLabels"]
+    if worker_selector != {
+        "app.kubernetes.io/instance": RELEASE,
+        "app.kubernetes.io/name": RELEASE,
+    }:
+        fail("worker Deployment selector differs from the dedicated Helm release")
+    worker_pods = kjson(
+        "-n",
+        NAMESPACE,
+        "get",
+        "pods",
+        "-l",
+        f"app.kubernetes.io/instance={RELEASE},app.kubernetes.io/name={RELEASE}",
+        "-o",
+        "json",
+    )["items"]
+    if len(worker_pods) != 1 or not any(
+        condition.get("type") == "Ready" and condition.get("status") == "True"
+        for condition in worker_pods[0].get("status", {}).get("conditions", [])
+    ):
+        fail("worker Pod is not exactly one Ready Pod")
+    deployed_images = {
+        "service": [
+            deployed_image_fact(pod, "kova-service", image_facts["controller"]["image_id"])
+            for pod in pods
+        ],
+        "worker": deployed_image_fact(
+            worker_pods[0], worker_containers[0]["name"], image_facts["worker"]["image_id"]
+        ),
+    }
     if kjson("get", "kovabuilds", "--all-namespaces", "-o", "json")["items"]:
         fail("another KovaBuild exists in the dedicated Kind cluster")
     if kjson(
@@ -789,8 +921,10 @@ def preflight() -> dict:
             for pod in pods
         },
         "local_role_images": image_facts,
+        "kind_runtime_role_images": runtime_role_images,
+        "deployed_images": deployed_images,
         "helm_chart": helm_status.get("chart"),
-        "kova_commit": command(["git", "-C", str(ROOT), "rev-parse", "HEAD"]).strip(),
+        "kova_commit": kova_commit,
         "principal": principal,
         "platform": platform,
         "docker_root": str(docker_root),
@@ -1188,9 +1322,7 @@ def main() -> None:
     ):
         fail(f"run mode requires DEEP_QUEUE_E2E_ACK={CLUSTER}/{NAMESPACE}/{RELEASE}-service")
     pre = preflight()
-    note(
-        f"read-only preflight passed: {CLUSTER}; 2/2 nodes; two Service Pods; empty ledgers"
-    )
+    note(f"read-only preflight passed: {CLUSTER}; 2/2 nodes; two Service Pods; empty ledgers")
     if mode == "check":
         note(
             "no writes performed; explicit run mode needs DEEP_QUEUE_E2E_ACK and SERVICE_AUTH_TOKEN"

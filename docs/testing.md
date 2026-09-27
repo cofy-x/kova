@@ -101,8 +101,10 @@ These caps are a stress fixture, not recommended production defaults.
 Do not use quickstart's build/tag setup for this benchmark if preserving the existing local registry is required; the benchmark itself neither contacts the registry nor creates source/output tags.
 The following one-time setup runs on the isolated Linux host only after all other Kind clusters have been removed and the intended candidate role images have been built locally from one reviewed Kova revision.
 It uses the pinned two-node Kind config, loads local image objects directly into Kind, and sets `imagePullPolicy=Never`; do not run `make kind-load` here because that target pushes the images to the local registry.
-Before setup, record the clean checkout commit, `sha256sum deploy/quickstart-kind-cluster.yaml`, and each role's `docker image inspect ... --format '{{.Id}} {{index .Config.Labels "org.opencontainers.image.revision"}}'`; the three revision labels must agree.
-If an image is stale, `make image` builds it locally without a registry push.
+Before setup, record the clean checkout commit, `sha256sum deploy/quickstart-kind-cluster.yaml`, the pinned Kind node image digest, and each role's `docker image inspect ... --format '{{.Id}} {{index .Config.Labels "org.opencontainers.image.revision"}}'`.
+All three 12-character revision labels must equal the clean checkout's HEAD prefix; matching one another is insufficient.
+If an image is stale, run `make image` at that final clean HEAD and inspect the new image IDs before `kind load docker-image`.
+`make image` builds local Docker objects only; do not run `make kind-load`, which pushes to the local registry.
 
 ```bash
 kind create cluster --name kova-deep-queue \
@@ -131,7 +133,10 @@ kubectl --kubeconfig .kind/kova-deep-queue.kubeconfig -n kova \
 ```
 
 Use a test-only `SERVICE_AUTH_TOKEN` already present in the process environment; do not paste its value into commands, Helm values, receipts, or Git.
-The setup should record the Helm chart/values, Kind node UIDs, and deployed Pod image IDs alongside the Docker image IDs; the benchmark's `identity.json` automatically records the reviewed checkout commit, three local role image IDs/revisions, two Service Pod image IDs, and exact Kind kubeconfig fingerprint.
+The setup should record the exact Helm install values above, Kind config SHA-256 and pinned node image digest, Kind node UIDs, and deployed Pod image IDs alongside the Docker image IDs.
+The benchmark's `identity.json` records the clean checkout commit, three local role SHA-256 image IDs/revisions, the image IDs preloaded on both Kind nodes, actual Service/worker Pod image IDs, and exact Kind kubeconfig fingerprint.
+Preflight resolves each Pod imageID through that node's CRI and requires its image ID to equal the local Docker object; it also checks the runner image is preloaded on both nodes despite never creating a runner container.
+If the runtime does not expose comparable CRI IDs/digests, preflight stops instead of assuming the cached image is current.
 No setup command above pushes to the local or cloud registry, and no HK ACK context is used.
 
 The default entrypoint reads the cluster, kubeconfig identity, ledgers, readiness, API-server request counters, and kubelet summary metrics without writing Kubernetes objects or local receipts:
