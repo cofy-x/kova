@@ -40,12 +40,6 @@ REQUIRE_LEGACY_CRD=${REQUIRE_LEGACY_CRD:-false}
 RESULT_JSONL=${RESULT_JSONL:-}
 KOVA_PLATFORM=$(kova_platform)
 
-require_cmd curl
-require_cmd docker
-require_cmd helm
-require_cmd jq
-require_cmd kubectl
-
 case ${REQUIRE_LEGACY_CRD} in
   true|false) ;;
   *) echo "error: REQUIRE_LEGACY_CRD must be true or false" >&2; exit 2 ;;
@@ -54,10 +48,16 @@ if [[ "${REQUIRE_LEGACY_CRD}" == true && -z "${BASELINE_CHART}" ]]; then
   echo 'error: REQUIRE_LEGACY_CRD requires BASELINE_CHART' >&2
   exit 2
 fi
-if [[ "${REQUIRE_LEGACY_CRD}" == true && "${SERVICE_RUNNER_NAMESPACE}" == "${NAMESPACE}" ]]; then
-  echo 'error: legacy Service migration requires a fresh runner namespace' >&2
+if [[ -n "${BASELINE_CHART}" && "${SERVICE_RUNNER_NAMESPACE}" == "${NAMESPACE}" ]]; then
+  echo 'error: baseline Service migration requires a fresh runner namespace' >&2
   exit 2
 fi
+
+require_cmd curl
+require_cmd docker
+require_cmd helm
+require_cmd jq
+require_cmd kubectl
 
 # Opt-in receipts are allocated before any Kind/image side effects. The base
 # names a private .work/ location; each invocation gets a distinct file.
@@ -98,18 +98,18 @@ if [[ -n "${BASELINE_CHART}" ]]; then
     KIND_LOAD_IMAGES=false \
     VERIFY_RETRY_CRD_SCHEMA=false \
     "${ROOT}/scripts/kind/deploy-kind.sh"
+  kubectl --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" -n "${NAMESPACE}" \
+    scale "deployment/${RELEASE_NAME}-service" --replicas=0 >/dev/null
+  drain_deadline=$((SECONDS + 120))
+  until KUBECONFIG="${ROOT}/${KIND_KUBECONFIG}" NAMESPACE="${NAMESPACE}" RELEASE_NAME="${RELEASE_NAME}" \
+    "${ROOT}/scripts/deployment/verify-kovabuild-drained.sh"; do
+    if (( SECONDS >= drain_deadline )); then
+      echo 'error: old Service did not drain after scale-down' >&2
+      exit 1
+    fi
+    sleep 2
+  done
   if [[ "${REQUIRE_LEGACY_CRD}" == true ]]; then
-    kubectl --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" -n "${NAMESPACE}" \
-      scale "deployment/${RELEASE_NAME}-service" --replicas=0 >/dev/null
-    drain_deadline=$((SECONDS + 120))
-    until KUBECONFIG="${ROOT}/${KIND_KUBECONFIG}" NAMESPACE="${NAMESPACE}" RELEASE_NAME="${RELEASE_NAME}" \
-      "${ROOT}/scripts/deployment/verify-kovabuild-drained.sh"; do
-      if (( SECONDS >= drain_deadline )); then
-        echo 'error: old Service did not drain after scale-down' >&2
-        exit 1
-      fi
-      sleep 2
-    done
     KUBECONFIG="${ROOT}/${KIND_KUBECONFIG}" \
       "${ROOT}/scripts/deployment/verify-kovabuild-crd.sh" --expect-legacy
     KUBECONFIG="${ROOT}/${KIND_KUBECONFIG}" \
@@ -124,25 +124,40 @@ if [[ -n "${BASELINE_CHART}" ]]; then
     kubectl --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" apply -f -
   KUBECONFIG="${ROOT}/${KIND_KUBECONFIG}" \
     "${ROOT}/scripts/deployment/verify-kovabuild-crd.sh"
-  if [[ "${REQUIRE_LEGACY_CRD}" == true ]]; then
-    KUBECONFIG="${ROOT}/${KIND_KUBECONFIG}" \
-      "${ROOT}/scripts/deployment/probe-kovabuild-status.sh" --expect-persisted
-  fi
+  KUBECONFIG="${ROOT}/${KIND_KUBECONFIG}" \
+    "${ROOT}/scripts/deployment/probe-kovabuild-status.sh" --expect-persisted
 else
   "${ROOT}/scripts/kind/deploy-kind.sh"
 fi
 
-kubectl --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" -n "${NAMESPACE}" \
-  delete kovabuild --all --ignore-not-found --wait=false || true
-kubectl --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" -n "${NAMESPACE}" \
-  delete pod -l 'app.kubernetes.io/name=kova-runner' --ignore-not-found || true
+# The baseline path passed a drain gate; never erase an unknown old build or
+# runner to make migration appear safe. The non-baseline quickstart keeps its
+# historical cleanup of test-owned resources in the disposable Kind namespace.
+if [[ -z "${BASELINE_CHART}" ]]; then
+  kubectl --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" -n "${NAMESPACE}" \
+    delete kovabuild --all --ignore-not-found --wait=false || true
+  kubectl --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" -n "${NAMESPACE}" \
+    delete pod -l 'app.kubernetes.io/name=kova-runner' --ignore-not-found || true
+fi
 
 legacy_upgrade_probe=legacy-starting-upgrade-probe
 legacy_upgrade_pod=kova-job-${legacy_upgrade_probe}
+if [[ -n "${BASELINE_CHART}" ]]; then
+  # The production drain gate must pass immediately before upgrading. The
+  # optional legacy-CRD fixture below then injects an intentionally unsafe
+  # old build to prove the new namespace does not touch it.
+  KUBECONFIG="${ROOT}/${KIND_KUBECONFIG}" NAMESPACE="${NAMESPACE}" RELEASE_NAME="${RELEASE_NAME}" \
+    "${ROOT}/scripts/deployment/verify-kovabuild-drained.sh"
+  if kubectl --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" get namespace "${SERVICE_RUNNER_NAMESPACE}" >/dev/null 2>&1; then
+    echo "error: fresh runner namespace ${SERVICE_RUNNER_NAMESPACE} already exists" >&2
+    exit 1
+  fi
+  kubectl --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" create namespace "${SERVICE_RUNNER_NAMESPACE}" >/dev/null
+fi
 if [[ "${REQUIRE_LEGACY_CRD}" == true ]]; then
-  # The production drain gate must pass immediately before upgrading. This
-  # isolated test then injects a late old Starting runner to prove the new
-  # controller fails closed if an operator bypasses that gate or a race occurs.
+  # Inject a late old Starting runner after the production drain gate passes.
+  # The new controller must not touch its old namespace if an operator bypasses
+  # that gate or a late old request reaches the API server.
   KUBECONFIG="${ROOT}/${KIND_KUBECONFIG}" NAMESPACE="${NAMESPACE}" RELEASE_NAME="${RELEASE_NAME}" \
     "${ROOT}/scripts/deployment/verify-kovabuild-drained.sh"
   jq -n --arg namespace "${NAMESPACE}" --arg name "${legacy_upgrade_probe}" \
@@ -181,11 +196,6 @@ if [[ "${REQUIRE_LEGACY_CRD}" == true ]]; then
     echo "error: quiescence gate did not identify the old Starting runner: ${gate_output}" >&2
     exit 1
   fi
-  if kubectl --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" get namespace "${SERVICE_RUNNER_NAMESPACE}" >/dev/null 2>&1; then
-    echo "error: fresh runner namespace ${SERVICE_RUNNER_NAMESPACE} already exists" >&2
-    exit 1
-  fi
-  kubectl --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" create namespace "${SERVICE_RUNNER_NAMESPACE}" >/dev/null
 fi
 
 sync_service_auth_secret() (
@@ -202,9 +212,9 @@ sync_service_auth_secret() (
 sync_service_auth_secret
 
 service_replicas=${SERVICE_REPLICAS}
-if [[ "${REQUIRE_LEGACY_CRD}" == true ]]; then
-  # Keep the new controller stopped through Helm --wait so the short E2E JobTTL
-  # cannot remove the legacy fixture before its fail-closed result is checked.
+if [[ -n "${BASELINE_CHART}" ]]; then
+  # Keep the new controller stopped through Helm --wait. No old and new
+  # Service processes may overlap across this protocol migration.
   service_replicas=0
 fi
 helm upgrade --install "${RELEASE_NAME}" "${KOVA_CHART}" \
@@ -240,11 +250,13 @@ kubectl --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" -n "${SERVICE_RUNNER_NAMESPACE
   --dry-run=client -o yaml | \
   kubectl --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" apply -f - >/dev/null
 
-if [[ "${REQUIRE_LEGACY_CRD}" == true ]]; then
+if [[ -n "${BASELINE_CHART}" ]]; then
   kubectl --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" -n "${NAMESPACE}" \
-    scale "deployment/${RELEASE_NAME}-service" --replicas=1 >/dev/null
+    scale "deployment/${RELEASE_NAME}-service" --replicas="${SERVICE_REPLICAS}" >/dev/null
   kubectl --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" -n "${NAMESPACE}" \
     rollout status "deployment/${RELEASE_NAME}-service" --timeout=180s
+fi
+if [[ "${REQUIRE_LEGACY_CRD}" == true ]]; then
   # The upgraded Service watches only the fresh runner namespace. A late old
   # Starting CR and idle old runner must remain untouched in the old one.
   sleep 5
@@ -489,6 +501,22 @@ for completed_job_id in "${failed_job_id}" "${job_id}"; do
 done
 
 if [[ -n "${baseline_revision}" ]]; then
+  kubectl --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" -n "${NAMESPACE}" \
+    scale "deployment/${RELEASE_NAME}-service" --replicas=0 >/dev/null
+  drained_namespace() {
+    local runner_namespace=$1
+    KUBECONFIG="${ROOT}/${KIND_KUBECONFIG}" NAMESPACE="${NAMESPACE}" \
+      RUNNER_NAMESPACE="${runner_namespace}" RELEASE_NAME="${RELEASE_NAME}" \
+      "${ROOT}/scripts/deployment/verify-kovabuild-drained.sh"
+  }
+  rollback_deadline=$((SECONDS + 120))
+  until drained_namespace "${SERVICE_RUNNER_NAMESPACE}" && drained_namespace "${NAMESPACE}"; do
+    if (( SECONDS >= rollback_deadline )); then
+      echo 'error: upgraded Service did not drain before baseline rollback' >&2
+      exit 1
+    fi
+    sleep 2
+  done
   helm rollback "${RELEASE_NAME}" "${baseline_revision}" \
     --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" --namespace "${NAMESPACE}" \
     --wait --timeout 180s

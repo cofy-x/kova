@@ -224,6 +224,7 @@ docs-check:
 
 lint-scripts:
 	find scripts -name '*.sh' -print0 | xargs -0 -n1 bash -n
+	bash scripts/e2e/test-service-migration-preflight.sh
 	@if command -v shellcheck >/dev/null 2>&1; then \
 		find scripts -name '*.sh' -print0 | xargs -0 shellcheck -x -e SC1091; \
 	else \
