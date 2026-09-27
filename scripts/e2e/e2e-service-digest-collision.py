@@ -876,14 +876,21 @@ def exact_build(
     return build
 
 
-def pending_digests(build: dict, first: str, second: str | None) -> dict[str, str]:
+def pending_digests(
+    build: dict, first: str, second: str | None, *, allow_inflight: bool = False
+) -> dict[str, str]:
+    """Rechecks may see lastError cleared during a retry after fault proof."""
     status = build.get("status", {})
     expected_phase = "FailedVerifying" if second is not None else "Verifying"
+    last_error = status.get("verificationLastError")
     if (
         status.get("phase") != expected_phase
         or (second is not None and status.get("reason") != "BuildFailed")
         or status.get("verificationAttempts", 0) < 1
-        or status.get("verificationLastError") != "registry manifest verification unavailable"
+        or (
+            last_error != "registry manifest verification unavailable"
+            and (not allow_inflight or last_error not in (None, ""))
+        )
         or status.get("outputs", [])
         or not status.get("verificationDeadlineAt")
     ):
@@ -1029,7 +1036,7 @@ def wait_b_succeeded(
     runtime_seen = False
     while time.monotonic() < deadline:
         current_a = exact_build(*a_identity)
-        if pending_digests(current_a, first, second) != pushed_a:
+        if pending_digests(current_a, first, second, allow_inflight=True) != pushed_a:
             fail("A lost its immutable pending receipts before B completed")
         current_b = exact_build(*b_identity)
         phase = current_b.get("status", {}).get("phase", "")
@@ -1423,7 +1430,9 @@ def run_acceptance(revision: str, facts: dict) -> None:
                 digest,
                 200,
             )
-        if pending_digests(exact_build(*accepted["a"]), first, second) != pushed_a:
+        if pending_digests(
+            exact_build(*accepted["a"]), first, second, allow_inflight=True
+        ) != pushed_a:
             fail("A was no longer pending after narrowing the fault to only its digests")
         archive_b = make_b_archive(run_dir, first, run_id)
         source_b, digest_b = push_source(run_dir, "b", archive_b, run_id)
@@ -1439,7 +1448,7 @@ def run_acceptance(revision: str, facts: dict) -> None:
         for image, digest in pushed_a.items():
             if pushed_b.get(image) == digest:
                 fail("A and B produced the same manifest; overwrite was not demonstrated")
-        if pending_digests(current_a, first, second) != pushed_a:
+        if pending_digests(current_a, first, second, allow_inflight=True) != pushed_a:
             fail("A lost its durable pushed digests before B tag overwrite")
         overlap_observations = proxy_observations(
             run_dir, proxy_identity, "b-succeeded", only_a_mode

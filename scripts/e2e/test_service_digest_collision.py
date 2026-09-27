@@ -149,6 +149,19 @@ class ReceiptSafetyTest(unittest.TestCase):
         with self.assertRaises(acceptance.base.AcceptanceError):
             acceptance.pending_digests(build, FIRST, SECOND)
 
+    def test_rechecked_pending_receipt_allows_only_inflight_missing_error(self) -> None:
+        build = pending_build(failed=True, prefix="a")
+        expected = acceptance.pending_digests(build, FIRST, SECOND)
+        build["status"].pop("verificationLastError")
+        with self.assertRaises(acceptance.base.AcceptanceError):
+            acceptance.pending_digests(build, FIRST, SECOND)
+        self.assertEqual(
+            acceptance.pending_digests(build, FIRST, SECOND, allow_inflight=True), expected
+        )
+        build["status"]["verificationLastError"] = "unexpected registry failure"
+        with self.assertRaises(acceptance.base.AcceptanceError):
+            acceptance.pending_digests(build, FIRST, SECOND, allow_inflight=True)
+
     def test_successful_second_build_keeps_its_own_two_digests(self) -> None:
         build = pending_build(failed=False, prefix="c")
         build["status"].update(
