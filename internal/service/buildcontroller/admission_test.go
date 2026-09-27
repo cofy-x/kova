@@ -669,6 +669,36 @@ func TestConcurrentReconcilesReserveBeforePodWithStaleCache(t *testing.T) {
 	}
 }
 
+func TestIneligibleQueuedBuildDoesNotConsumeVirtualFairShare(t *testing.T) {
+	for _, mode := range []string{"deleting", "cancelling"} {
+		t.Run(mode, func(t *testing.T) {
+			old := queuedBuild("old", "alice", 1, 1)
+			old.Status.Phase = kovav1.PhaseQueued
+			switch mode {
+			case "deleting":
+				deletingAt := metav1.NewTime(time.Unix(3, 0))
+				old.DeletionTimestamp = &deletingAt
+			case "cancelling":
+				old.Annotations = map[string]string{kovav1.CancellationRequestedAnnotation: "requested"}
+			}
+			eligible := queuedBuild("eligible", "bob", 2, 1)
+			scheme := testScheme(t)
+			base := crfake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&kovav1.KovaBuild{}).WithObjects(old, eligible).Build()
+			cfg := admissionConfig()
+			cfg.MaxActiveJobs, cfg.WorkerSlots = 1, 1
+			r := KovaBuildReconciler{Client: base, APIReader: base, Scheme: scheme, Kube: &fakeKube{}, Cfg: cfg}
+			decision, err := r.admission(context.Background(), eligible)
+			if err != nil || !decision.Admitted || decision.Allocation != 1 {
+				t.Fatalf("eligible build blocked by %s queued build: decision=%#v err=%v", mode, decision, err)
+			}
+			_, ledger, err := r.readReservations(context.Background(), "jobs")
+			if err != nil || len(ledger.Active) != 1 || ledger.Active[reservationKey(eligible)].Slots != 1 {
+				t.Fatalf("wrong active reservation after %s queued build: %#v err=%v", mode, ledger.Active, err)
+			}
+		})
+	}
+}
+
 func TestReservationSurvivesUnknownWriteAndRestart(t *testing.T) {
 	scheme := testScheme(t)
 	a := queuedBuild("a", "alice", 1, 1)

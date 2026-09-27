@@ -80,7 +80,11 @@ func decideAdmission(build *kovav1.KovaBuild, builds []kovav1.KovaBuild, active 
 	queued := make([]*kovav1.KovaBuild, 0, len(builds))
 	for i := range builds {
 		item := &builds[i]
-		if (item.Status.Phase == "" || item.Status.Phase == kovav1.PhaseQueued) && active[reservationKey(item)].Slots == 0 {
+		// Deleting and cancellation-requested builds can remain Queued while
+		// cleanup is blocked. They will never receive a real grant, so they
+		// must not consume one in the virtual fair-share allocation either.
+		if item.DeletionTimestamp.IsZero() && !cancellationRequested(item) &&
+			(item.Status.Phase == "" || item.Status.Phase == kovav1.PhaseQueued) && active[reservationKey(item)].Slots == 0 {
 			queued = append(queued, item)
 		}
 	}
