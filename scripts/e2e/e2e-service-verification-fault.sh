@@ -57,6 +57,9 @@ jq -e '.items | length == 0' <<<"$(kctl get pods --all-namespaces -l app.kuberne
 deployment=$(kctl -n "${namespace}" get deployment "${release}-service" -o json)
 jq -e '.spec.replicas == 2 and .status.readyReplicas == 2' <<<"${deployment}" >/dev/null || die "two Service replicas must be Ready"
 deployment_uid=$(jq -er '.metadata.uid' <<<"${deployment}")
+original_helm_values=$(helm get values "${release}" --kubeconfig "${kubeconfig}" -n "${namespace}" -o json)
+jq -e '.serviceDaemon.registryPlainHTTP == ["kind-registry:5000"] and .serviceDaemon.jobTTL == "60s"' \
+  <<<"${original_helm_values}" >/dev/null || die "Service Helm values differ from this disposable Kind baseline"
 pods=$(kctl -n "${namespace}" get pods -l "${selector}" -o json)
 jq -e '.items | length == 2 and all(.[]; any(.status.conditions[]?; .type == "Ready" and .status == "True"))' <<<"${pods}" >/dev/null || die "Service Pods are not 2/2 Ready"
 active=$(kctl -n "${namespace}" get configmap kova-service-admission -o json)
@@ -86,6 +89,7 @@ second_id="verification-timeout-${run_id}"
 target="${proxy_host}/${repository}:${tag}"
 printf 'cluster=%s\nnamespace=%s\nrepository=%s\ntag=%s\ndigest=%s\nproxy=%s\nproxy_image=%s\nfirst_id=%s\nsecond_id=%s\n' \
   "${cluster}" "${namespace}" "${repository}" "${tag}" "${digest}" "${proxy_host}" "${proxy_image}" "${first_id}" "${second_id}" >"${work_dir}/identities.txt"
+printf '%s\n' "${original_helm_values}" >"${work_dir}/helm-values-original.json"
 success=false
 proxy_forward=
 snapshot() {
@@ -122,14 +126,46 @@ kctl -n "${namespace}" create configmap "${proxy_name}" \
   --from-file="proxy.py=${root}/scripts/e2e/registry-verification-fault-proxy.py" \
   --from-literal=mode=503 >"${work_dir}/proxy-configmap-create.txt"
 jq -n --arg name "${proxy_name}" --arg namespace "${namespace}" --arg repo "${repository}" --arg image "${proxy_image}" \
-  '{apiVersion:"apps/v1",kind:"Deployment",metadata:{name:$name,namespace:$namespace,labels:{"kova.cofy.dev/e2e":"verification-fault"}},spec:{replicas:1,selector:{matchLabels:{"kova.cofy.dev/e2e":"verification-fault-proxy"}},template:{metadata:{labels:{"kova.cofy.dev/e2e":"verification-fault-proxy"}},spec:{securityContext:{runAsNonRoot:true,runAsUser:65532,runAsGroup:65532},containers:[{name:"proxy",image:$image,imagePullPolicy:"IfNotPresent",command:["python3","-u","/fault/proxy.py"],env:[{name:"FAULT_REPOSITORY",value:$repo}],ports:[{containerPort:5000,name:"http"}],readinessProbe:{httpGet:{path:"/v2/",port:5000},periodSeconds:2},resources:{requests:{cpu:"20m",memory:"32Mi"},limits:{cpu:"500m",memory:"128Mi"}},volumeMounts:[{name:"fault",mountPath:"/fault",readOnly:true}]}],volumes:[{name:"fault",configMap:{name:$name}}]}}}}' |
+  '{apiVersion:"apps/v1",kind:"Deployment",metadata:{name:$name,namespace:$namespace,labels:{"kova.cofy.dev/e2e":"verification-fault"}},spec:{replicas:1,strategy:{type:"Recreate"},selector:{matchLabels:{"kova.cofy.dev/e2e":"verification-fault-proxy"}},template:{metadata:{labels:{"kova.cofy.dev/e2e":"verification-fault-proxy"},annotations:{"kova.cofy.dev/fault-mode-token":"initial"}},spec:{securityContext:{runAsNonRoot:true,runAsUser:65532,runAsGroup:65532},containers:[{name:"proxy",image:$image,imagePullPolicy:"IfNotPresent",command:["python3","-u","/fault/proxy.py"],env:[{name:"FAULT_REPOSITORY",value:$repo}],ports:[{containerPort:5000,name:"http"}],readinessProbe:{httpGet:{path:"/v2/",port:5000},periodSeconds:2},resources:{requests:{cpu:"20m",memory:"32Mi"},limits:{cpu:"500m",memory:"128Mi"}},volumeMounts:[{name:"fault",mountPath:"/fault",readOnly:true}]}],volumes:[{name:"fault",configMap:{name:$name}}]}}}}' |
   kctl create -f - >"${work_dir}/proxy-deployment-create.txt"
 jq -n --arg name "${proxy_name}" --arg namespace "${namespace}" \
   '{apiVersion:"v1",kind:"Service",metadata:{name:$name,namespace:$namespace,labels:{"kova.cofy.dev/e2e":"verification-fault"}},spec:{type:"ClusterIP",selector:{"kova.cofy.dev/e2e":"verification-fault-proxy"},ports:[{name:"http",port:5000,targetPort:5000}]}}' |
   kctl create -f - >"${work_dir}/proxy-service-create.txt"
 kctl -n "${namespace}" rollout status "deployment/${proxy_name}" --timeout=180s >"${work_dir}/proxy-rollout.txt"
-kctl -n "${namespace}" port-forward --address 127.0.0.1 "service/${proxy_name}" 18087:5000 >"${work_dir}/proxy-port-forward.log" 2>&1 &
-proxy_forward=$!
+proxy_deployment_uid=$(kctl -n "${namespace}" get deployment "${proxy_name}" -o json | jq -er '.metadata.uid')
+proxy_mode_token=initial
+validate_proxy_pod() {
+  local pods rs_name rs_uid rs current_deployment
+  current_deployment=$(kctl -n "${namespace}" get deployment "${proxy_name}" -o json)
+  jq -e --arg uid "${proxy_deployment_uid}" --arg image "${proxy_image}" --arg token "${proxy_mode_token}" \
+    '.metadata.uid == $uid and .metadata.labels["kova.cofy.dev/e2e"] == "verification-fault" and
+     .spec.replicas == 1 and .spec.strategy.type == "Recreate" and
+     .spec.template.metadata.annotations["kova.cofy.dev/fault-mode-token"] == $token and
+     .spec.template.spec.containers[0].image == $image' \
+    <<<"${current_deployment}" >/dev/null || die "test proxy Deployment identity drifted"
+  pods=$(kctl -n "${namespace}" get pods -l kova.cofy.dev/e2e=verification-fault-proxy -o json)
+  jq -e --arg image "${proxy_image}" --arg token "${proxy_mode_token}" \
+    '.items | length == 1 and all(.[]; .status.phase == "Running" and
+     .spec.containers[0].image == $image and
+     .metadata.annotations["kova.cofy.dev/fault-mode-token"] == $token and
+     any(.status.conditions[]?; .type == "Ready" and .status == "True"))' \
+    <<<"${pods}" >/dev/null || die "test proxy Pod is not uniquely Ready with pinned image"
+  proxy_pod_name=$(jq -er '.items[0].metadata.name' <<<"${pods}")
+  proxy_pod_uid=$(jq -er '.items[0].metadata.uid' <<<"${pods}")
+  rs_name=$(jq -er '[.items[0].metadata.ownerReferences[]? | select(.controller == true and .kind == "ReplicaSet") | .name] | if length == 1 then .[0] else empty end' <<<"${pods}")
+  rs_uid=$(jq -er '[.items[0].metadata.ownerReferences[]? | select(.controller == true and .kind == "ReplicaSet") | .uid] | if length == 1 then .[0] else empty end' <<<"${pods}")
+  rs=$(kctl -n "${namespace}" get replicaset "${rs_name}" -o json)
+  jq -e --arg uid "${rs_uid}" --arg deployment_uid "${proxy_deployment_uid}" \
+    '.metadata.uid == $uid and any(.metadata.ownerReferences[]?;
+     .controller == true and .kind == "Deployment" and .uid == $deployment_uid)' \
+    <<<"${rs}" >/dev/null || die "test proxy Pod is not owned by exact Deployment"
+}
+start_proxy_forward() {
+  kctl -n "${namespace}" port-forward --address 127.0.0.1 "pod/${proxy_pod_name}" 18087:5000 >>"${work_dir}/proxy-port-forward.log" 2>&1 &
+  proxy_forward=$!
+}
+validate_proxy_pod
+start_proxy_forward
 mode_wait() {
   local expected=$1 deadline=$((SECONDS + 70)) observed
   while (( SECONDS < deadline )); do
@@ -150,16 +186,43 @@ helm get values "${release}" --kubeconfig "${kubeconfig}" -n "${namespace}" -o j
 snapshot proxy-ready
 
 set_mode() {
-  local desired=$1
-  kctl -n "${namespace}" patch configmap "${proxy_name}" --type=merge -p "{\"data\":{\"mode\":\"${desired}\"}}" >"${work_dir}/mode-${desired}-patch.txt"
+  local desired=$1 old_name old_uid new_mode new_token stage patch_payload
+  mode_sequence=$((mode_sequence + 1))
+  stage="mode-${mode_sequence}-${desired}"
+  validate_proxy_pod
+  old_name=${proxy_pod_name}
+  old_uid=${proxy_pod_uid}
+  kctl -n "${namespace}" get pod "${old_name}" -o json >"${work_dir}/${stage}-old-proxy-pod.json"
+  kill "${proxy_forward}" 2>/dev/null || true
+  wait "${proxy_forward}" 2>/dev/null || true
+  proxy_forward=
+  kctl -n "${namespace}" patch configmap "${proxy_name}" --type=merge -p "{\"data\":{\"mode\":\"${desired}\"}}" >"${work_dir}/${stage}-patch.txt"
+  kctl -n "${namespace}" get configmap "${proxy_name}" -o json >"${work_dir}/${stage}-configmap.json"
+  new_token="${stage}-$(openssl rand -hex 8)"
+  patch_payload=$(jq -cn --arg uid "${proxy_deployment_uid}" --arg token "${new_token}" \
+    '[{op:"test",path:"/metadata/uid",value:$uid},
+      {op:"replace",path:"/spec/template/metadata/annotations/kova.cofy.dev~1fault-mode-token",value:$token}]')
+  kctl -n "${namespace}" patch deployment "${proxy_name}" --type=json -p "${patch_payload}" >"${work_dir}/${stage}-restart.txt"
+  proxy_mode_token=${new_token}
+  kctl -n "${namespace}" rollout status "deployment/${proxy_name}" --timeout=180s >"${work_dir}/${stage}-rollout.txt"
+  kubectl --kubeconfig "${kubeconfig}" --request-timeout=125s -n "${namespace}" \
+    wait --for=delete "pod/${old_name}" --timeout=120s >"${work_dir}/${stage}-old-pod-delete.txt"
+  validate_proxy_pod
+  [[ ${proxy_pod_uid} != "${old_uid}" ]] || die "test proxy Pod UID did not change after mode rollout"
+  kctl -n "${namespace}" get pod "${proxy_pod_name}" -o json >"${work_dir}/${stage}-new-proxy-pod.json"
+  new_mode=$(kctl -n "${namespace}" exec "pod/${proxy_pod_name}" -- cat /fault/mode)
+  printf '%s\n' "${new_mode}" >"${work_dir}/${stage}-pod-mode.txt"
+  [[ ${new_mode} == "${desired}" ]] || die "new test proxy Pod has wrong mounted mode"
+  start_proxy_forward
   mode_wait "${desired}"
 }
+mode_sequence=0
 create_fixture() {
   local id=$1 now deadline status_payload
   kctl -n "${namespace}" scale "deployment/${release}-service" --replicas=0 >"${work_dir}/${id}-scale-down.txt"
   kctl -n "${namespace}" wait --for=delete pod -l "${selector}" --timeout=120s >"${work_dir}/${id}-drain.txt"
   now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-  deadline=$(date -u -d '+4 minutes' +%Y-%m-%dT%H:%M:%SZ)
+  deadline=$(date -u -d '+10 minutes' +%Y-%m-%dT%H:%M:%SZ)
   jq -n --arg name "${id}" --arg namespace "${namespace}" --arg target "${target}" \
     '{apiVersion:"kova.cofy.dev/v1alpha1",kind:"KovaBuild",metadata:{name:$name,namespace:$namespace,labels:{"kova.cofy.dev/e2e":"verification-fault"}},spec:{requester:{username:"verification-fault-e2e"},source:{uri:"oci://kind-registry:5000/kova-sources/verification-fault@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",digest:"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},targets:[{target:$target,platform:"linux/amd64"}],build:{format:"oci",concurrency:1}}}' |
     kctl create -f - >"${work_dir}/${id}-create.txt"
@@ -267,7 +330,8 @@ helm upgrade "${release}" "${root}/charts/kova" --kubeconfig "${kubeconfig}" -n 
   --set-json 'serviceDaemon.registryPlainHTTP=["kind-registry:5000"]' >"${work_dir}/helm-restore.txt"
 kctl -n "${namespace}" rollout status "deployment/${release}-service" --timeout=180s >"${work_dir}/service-restore-rollout.txt"
 helm get values "${release}" --kubeconfig "${kubeconfig}" -n "${namespace}" -o json >"${work_dir}/helm-values-restored.json"
-jq -e '.serviceDaemon.registryPlainHTTP == ["kind-registry:5000"]' "${work_dir}/helm-values-restored.json" >/dev/null || die "Service registry list still contains test proxy"
+jq -e '.serviceDaemon.registryPlainHTTP == ["kind-registry:5000"] and .serviceDaemon.jobTTL == "60s"' \
+  "${work_dir}/helm-values-restored.json" >/dev/null || die "Service Helm values differ from disposable Kind baseline"
 jq -e '.spec.replicas == 2 and .status.readyReplicas == 2' <<<"$(kctl -n "${namespace}" get deployment "${release}-service" -o json)" >/dev/null || die "Service did not return to 2/2 Ready"
 snapshot after-helm-restore
 kctl -n "${namespace}" delete service "${proxy_name}" --wait=true --timeout=60s >"${work_dir}/proxy-service-delete.txt"
