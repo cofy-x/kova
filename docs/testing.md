@@ -52,6 +52,7 @@ and environment policy in the consuming workspace rather than this repository.
 | `make e2e-service-admission-failover` | Read-only preflight by default; normal live mode proves leader handoff while a challenger remains queued. An explicit `ADMISSION_FAILOVER_PROMOTION=true` fixture additionally releases the exact blocker and verifies the challenger acquires the sole active grant and Pending runner. Receipts survive ambiguous outcomes. | Same empty, dedicated two-replica Kind admission caps; promotion is restricted further to the sole `kova-admission-pump` Kind on `wayne-hk-kvm`. |
 | `make e2e-service-admission-fairness` | Read-only preflight by default; opt-in live mode uses two TokenReview-authenticated callers to prove requester and global queue caps, durable fair rotation across leader handoff, and exact UID cleanup. | Sole dedicated `kova-admission-fairness` Kind on `wayne-hk-kvm`; run receipts under `/data/forge-artifacts/kova-admission-fairness/`. |
 | `make e2e-service-auth-read-probe` | Read-only preflight by default; opt-in bounded two-principal empty-list GET probe records TokenReview/SAR API counters, per-request latency, and Kind health without creating a KovaBuild. | Existing idle `kova-admission-fairness` Kind on `wayne-hk-kvm`; private JSON receipts under `/data/forge-artifacts/kova-admission-fairness/auth-read-*/`. |
+| `make e2e-service-auth-owner-probe` | Read-only fresh-fixture preflight by default; opt-in bounded owner and denied non-owner GET probe creates one unschedulable build, compares exact TokenReview/SAR counter deltas, and uses UID-preconditioned cleanup. | Newly created, sole `kova-admission-fairness` TokenReview Kind on `wayne-hk-kvm`; private JSON receipts under `/data/forge-artifacts/kova-admission-fairness/owner-get-*/`. |
 | `make e2e-service-admission-ledger-loss` | Read-only preflight by default; live mode deliberately deletes only the exact active admission ConfigMap in a disposable dedicated Kind cluster, then proves both Service replicas return 503 for readiness and new submissions without creating a CR. Optional exact follower Pod replacement proves startup does not silently recreate the ledger. Preserves receipts and never repairs the fault. | Same empty, dedicated two-replica Kind admission cluster and caps as above; retire cluster after live mode |
 | `make e2e-service-admission-deep-queue` | Read-only preflight by default; live mode holds one unschedulable blocker, grows a real API-server-backed queue through 100, 500, and 1000 CRs, records independent HTTP/API/resource receipts, and performs exact-ID cleanup only after every stage passes. | The only Kind cluster must be `kova-deep-queue`, with two ready Service replicas, empty ledgers/workloads, active=1, queued global/requester=1000, and `never=true` runner selector. |
 | `make e2e-service-partial-output` | Read-only preflight by default; live mode executes a real two-target OCI+Nydus runner build whose later target fails in BuildKit, then checks final `Failed` and the first target's exact digest-pinned partial receipts. | Existing empty `kova-partial-output-41` Kind on `wayne-hk-kvm`; run-scoped source/output tags and private receipts under `.work/partial-output/`. |
@@ -172,6 +173,40 @@ Run mode uses short TokenRequest bearers only in process memory, shares the fair
 An unexpected HTTP response, workload, Pod replacement, identity drift, resource cap, or API counter reset stops the probe and preserves receipts.
 The Service's empty-list GET performs both TokenReview and list SubjectAccessReview; this probe does not test the owner GET path's SAR bypass, which needs an owned KovaBuild.
 The API Server counters are cluster-wide, so their deltas are a lower-bound consistency check for this path, not exclusive attribution or a production SLA.
+
+### Bounded Owned-Build Authentication Probe
+
+The owner GET path needs a real authenticated owner and an existing `KovaBuild`.
+Do not reuse the ordinary quickstart Service E2E fixture: that entrypoint explicitly installs static authentication, so it cannot prove TokenReview or SubjectAccessReview behavior.
+Use a newly created, sole `kova-admission-fairness` Kind with the two-replica TokenReview overlay and its two test ServiceAccounts; the script neither creates nor deletes the Kind cluster.
+The default `check` requires a fresh, empty fairness cursor, zero builds/runners and empty admission ledgers, both exact candidate image bindings, two Ready Service Pods, healthy nodes, Pod/memory/CPU headroom, and no virtual `get servicebuilds` RBAC for either principal.
+Supply the full SHA of the commit used to build the deployed controller image, even when the checkout contains a later script-only commit:
+
+```bash
+ADMISSION_AUTH_OWNER_CANDIDATE_COMMIT=<deployed-full-sha> \
+  make e2e-service-auth-owner-probe
+ADMISSION_AUTH_OWNER_CANDIDATE_COMMIT=<deployed-full-sha> \
+  ADMISSION_AUTH_OWNER_ACK=kova-admission-fairness/kova/kova-service/auth-owner \
+  ADMISSION_AUTH_OWNER_MODE=run make e2e-service-auth-owner-probe
+```
+
+Live mode uses a short TokenRequest bearer for each test ServiceAccount, retained only in memory.
+It submits one run-scoped, unschedulable build through the Service API, waits for its exact `Starting`/Pending runner state, then sends 30 owner and 10 non-owner GETs at two total requests per second across the two pinned Service Pods.
+Hard caps are 60 owner GETs, 30 non-owner GETs, four total requests per second, and five minutes before cleanup.
+The owner must receive only its exact build with zero SAR requests during its measured phase; the non-owner must receive a non-disclosing `403 forbidden` with one SAR per measured request.
+Both phases require one TokenReview per measured request; exact API Server counter deltas fail closed on unrelated review traffic or counter resets because these counters are cluster-wide.
+Every request has a private allowlisted receipt, and repeated samples enforce Service Pod UID/image stability, healthy nodes, CPU/memory and Pod capacity.
+After measurement, only the recorded KovaBuild UID is deleted with a Kubernetes UID precondition; the script waits for the CR, runner, and both ledgers to empty.
+If cleanup is interrupted, keep the Kind and use its exact recorded run ID:
+
+```bash
+ADMISSION_AUTH_OWNER_ACK=kova-admission-fairness/kova/kova-service/auth-owner \
+  ADMISSION_AUTH_OWNER_MODE=recover ADMISSION_AUTH_OWNER_RUN_ID=<exact-owner-get-run-id> \
+  make e2e-service-auth-owner-probe
+```
+
+An uncertain POST with no matching exact CR remains blocked for operator review; `recover` never deletes a guessed object.
+These results describe only this low-rate Kind read path, not build throughput or production SLA.
 
 ## Admission Ledger-Loss Fault Acceptance
 
