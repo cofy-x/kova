@@ -415,7 +415,7 @@ func TestDelayedDeadlineReconcilePreservesCompletedBuild(t *testing.T) {
 				case strings.Contains(command, "--method GET"):
 					_, _ = fmt.Fprintf(opts.Stdout, `{"status":"completed","requestId":%q}`, string(build.UID))
 				case strings.Contains(command, "/api/v1/export"):
-					_, _ = fmt.Fprintf(opts.Stdout, "{\"target\":%q,\"success\":true}\n", ref.Name())
+					_, _ = fmt.Fprintf(opts.Stdout, "{\"target\":%q,\"manifest_digest\":%q,\"success\":true}\n", ref.Name(), wantDigest.String())
 				default:
 					t.Fatalf("unexpected runner command: %s", command)
 				}
