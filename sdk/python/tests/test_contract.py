@@ -79,8 +79,10 @@ def test_job_preserves_unknown_future_failure_code() -> None:
         "created_at": "2026-09-27T00:00:00Z",
         "requester": "test-user",
     }
-    assert BuildJob.from_dict({**base, "failure_code": "invalid_source"}).failure_code is BuildFailureCode.INVALID_SOURCE
-    assert BuildJob.from_dict({**base, "failure_code": "future_source_fault"}).failure_code == "future_source_fault"
+    known = BuildJob.from_dict({**base, "failure_code": "invalid_source"})
+    unknown = BuildJob.from_dict({**base, "failure_code": "future_source_fault"})
+    assert known.failure_code is BuildFailureCode.INVALID_SOURCE
+    assert unknown.failure_code == "future_source_fault"
     with pytest.raises(TypeError, match="failure_code must be a string"):
         BuildJob.from_dict({**base, "failure_code": 42})
     with pytest.raises(ValueError, match="failure_code must not be empty"):
