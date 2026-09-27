@@ -137,6 +137,13 @@ worker:
   # One worker release serves exactly one platform. Install additional
   # worker releases and map their Services above when both are required.
   platform: linux/amd64
+  cache:
+    # Absolute BuildKit GC budgets, independent of the node filesystem size.
+    # maxUsedSpaceGB must leave headroom below the cache emptyDir and worker
+    # ephemeral-storage limit; GC cannot reclaim active build references.
+    reservedSpaceGB: 2
+    maxUsedSpaceGB: 8
+    minFreeSpaceGB: 2
   name: buildkitd
   args:
     - --config

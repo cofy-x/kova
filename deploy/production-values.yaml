@@ -48,6 +48,11 @@ deployment:
       maxUnavailable: 0
 
 worker:
+  cache:
+    # Tune from measured per-worker cache, memory, and cold-cache latency.
+    reservedSpaceGB: 2
+    maxUsedSpaceGB: 8
+    minFreeSpaceGB: 2
   resources:
     limits:
       ephemeral-storage: 80Gi

@@ -1,3 +1,29 @@
+{{- $cache := .Values.worker.cache -}}
+{{- if ge (int $cache.reservedSpaceGB) (int $cache.maxUsedSpaceGB) -}}
+{{- fail "worker.cache.reservedSpaceGB must be smaller than worker.cache.maxUsedSpaceGB" -}}
+{{- end -}}
+{{- /* BuildKit v0.31.2 interprets its GB suffix as binary GiB-sized units. */ -}}
+{{- $maxBytes := mul (int64 $cache.maxUsedSpaceGB) 1073741824 -}}
+{{- range .Values.worker.volumes -}}
+{{- if and (eq .name "lib-buildkit") (hasKey . "emptyDir") -}}
+{{- $limit := required "lib-buildkit emptyDir.sizeLimit is required for a bounded worker cache" .emptyDir.sizeLimit -}}
+{{- $limitBytes := include "kova.cacheStorageBytes" $limit | int64 -}}
+{{- if gt (mul $maxBytes 5) (mul $limitBytes 4) -}}
+{{- fail "worker.cache.maxUsedSpaceGB must be at most 80% of lib-buildkit emptyDir.sizeLimit" -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- with .Values.worker.resources.limits -}}
+{{- with (index . "ephemeral-storage") -}}
+{{- $limitBytes := include "kova.cacheStorageBytes" . | int64 -}}
+{{- if gt (mul $maxBytes 5) (mul $limitBytes 4) -}}
+{{- fail "worker.cache.maxUsedSpaceGB must be at most 80% of worker ephemeral-storage limit" -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- if regexMatch `(?m)^\s*\[\[?worker\.oci` .Values.buildkitdConfig -}}
+{{- fail "buildkitdConfig must not declare worker.oci; configure worker.cache instead" -}}
+{{- end -}}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -8,3 +34,9 @@ metadata:
 data:
   buildkitd.toml: |
     {{- .Values.buildkitdConfig | nindent 4 }}
+
+    [worker.oci]
+      gc = true
+      reservedSpace = "{{ $cache.reservedSpaceGB }}GB"
+      maxUsedSpace = "{{ $cache.maxUsedSpaceGB }}GB"
+      minFreeSpace = "{{ $cache.minFreeSpaceGB }}GB"

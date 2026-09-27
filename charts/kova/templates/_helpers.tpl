@@ -2,6 +2,20 @@
 {{- default .Chart.Name .Values.nameOverride | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
 
+{{/* Only explicit binary storage quantities are accepted for cache-budget checks. */}}
+{{- define "kova.cacheStorageBytes" -}}
+{{- $value := toString . -}}
+{{- if regexMatch `^[1-9][0-9]*Mi$` $value -}}
+{{- mul (int64 (trimSuffix "Mi" $value)) 1048576 -}}
+{{- else if regexMatch `^[1-9][0-9]*Gi$` $value -}}
+{{- mul (int64 (trimSuffix "Gi" $value)) 1073741824 -}}
+{{- else if regexMatch `^[1-9][0-9]*Ti$` $value -}}
+{{- mul (int64 (trimSuffix "Ti" $value)) 1099511627776 -}}
+{{- else -}}
+{{- fail (printf "worker cache storage quantity %q must use an integer Mi, Gi, or Ti value" $value) -}}
+{{- end -}}
+{{- end -}}
+
 {{- define "kova.fullname" -}}
 {{- if .Values.fullnameOverride -}}
 {{- .Values.fullnameOverride | trunc 63 | trimSuffix "-" -}}
