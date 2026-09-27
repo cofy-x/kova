@@ -186,6 +186,10 @@ class Registry:
         connection = http.client.HTTPConnection(self.host, timeout=30)
         try:
             connection.putrequest(method, path)
+            if method == "HEAD" and "/manifests/" in path:
+                # Distribution registries may return 404 for an OCI manifest
+                # unless its media type is explicitly accepted.
+                connection.putheader("Accept", MANIFEST_MEDIA_TYPE)
             if content_type:
                 connection.putheader("Content-Type", content_type)
             size = body.stat().st_size if isinstance(body, Path) else len(body) if body else 0

@@ -46,6 +46,9 @@ class RegistryFixture(BaseHTTPRequestHandler):
 
     def do_HEAD(self) -> None:
         if "/manifests/" in self.path:
+            if self.headers.get("Accept") != source.MANIFEST_MEDIA_TYPE:
+                self.respond(404)
+                return
             manifest = self.manifest
             self.respond(
                 200, digest=source.digest_bytes(manifest), size=len(manifest)
