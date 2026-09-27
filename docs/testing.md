@@ -95,9 +95,44 @@ Do not restore the deleted ConfigMap from a blank template: an apparently empty 
 ## Deep-Queue Admission Benchmark
 
 Use only a disposable, otherwise idle Linux Kind cluster named `kova-deep-queue` with a single worker and its exact `.kind/kova-deep-queue.kubeconfig`.
-Prepare the candidate chart and two same-image Service replicas before this test, with `serviceDaemon.maxActiveJobs=1`, `maxActiveJobsPerRequester=1`, `workerSlots=1`, `maxQueuedJobs=1000`, `maxQueuedJobsPerRequester=1000`, `pollInterval=5s`, static principal `kova:e2e`, leader election, and `runnerNodeSelector.never=true`.
+Prepare the candidate chart and two same-image Service replicas before this test, with `serviceDaemon.maxActiveJobs=1`, `maxActiveJobsPerRequester=1`, `workerSlots=1`, `maxQueuedJobs=1000`, `maxQueuedJobsPerRequester=1000`, `pollInterval=5s`, `wait=2h`, `maxBuildDuration=2h`, static principal `kova:e2e`, leader election, and `runnerNodeSelector.never=true`.
+The two-hour `wait` is essential: the default three-minute wait would fail the Pending blocker and could allow a queued build to acquire a runner during a later stage.
 These caps are a stress fixture, not recommended production defaults.
 Do not use quickstart's build/tag setup for this benchmark if preserving the existing local registry is required; the benchmark itself neither contacts the registry nor creates source/output tags.
+The following one-time setup runs on the isolated Linux host only after all other Kind clusters have been removed and the intended candidate role images have been built locally from one reviewed Kova revision.
+It uses the pinned two-node Kind config, loads local image objects directly into Kind, and sets `imagePullPolicy=Never`; do not run `make kind-load` here because that target pushes the images to the local registry.
+Before setup, record the clean checkout commit, `sha256sum deploy/quickstart-kind-cluster.yaml`, and each role's `docker image inspect ... --format '{{.Id}} {{index .Config.Labels "org.opencontainers.image.revision"}}'`; the three revision labels must agree.
+If an image is stale, `make image` builds it locally without a registry push.
+
+```bash
+kind create cluster --name kova-deep-queue \
+  --image kindest/node:v1.36.1@sha256:3489c7674813ba5d8b1a9977baea8a6e553784dab7b84759d1014dbd78f7ebd5 \
+  --config deploy/quickstart-kind-cluster.yaml \
+  --kubeconfig .kind/kova-deep-queue.kubeconfig
+kind load docker-image localhost:5002/kova:controller-dev localhost:5002/kova:runner-dev localhost:5002/kova:worker-dev \
+  --name kova-deep-queue
+kubectl --kubeconfig .kind/kova-deep-queue.kubeconfig create namespace kova
+printf '%s' "$SERVICE_AUTH_TOKEN" | kubectl --kubeconfig .kind/kova-deep-queue.kubeconfig -n kova \
+  create secret generic kova-e2e-token --from-file=token=/dev/stdin
+helm install kova charts/kova --kubeconfig .kind/kova-deep-queue.kubeconfig -n kova \
+  -f deploy/quickstart-kind-values.yaml --wait --timeout 10m \
+  --set images.controller.pullPolicy=Never --set images.runner.pullPolicy=Never --set images.worker.pullPolicy=Never \
+  --set serviceDaemon.enabled=true --set serviceDaemon.replicas=2 \
+  --set serviceDaemon.authentication.mode=static \
+  --set serviceDaemon.authentication.staticTokenSecret.name=kova-e2e-token \
+  --set-string serviceDaemon.authentication.staticPrincipal=kova:e2e \
+  --set serviceDaemon.maxActiveJobs=1 --set serviceDaemon.maxActiveJobsPerRequester=1 \
+  --set serviceDaemon.workerSlots=1 --set serviceDaemon.maxQueuedJobs=1000 \
+  --set serviceDaemon.maxQueuedJobsPerRequester=1000 --set serviceDaemon.pollInterval=5s \
+  --set serviceDaemon.wait=2h --set serviceDaemon.maxBuildDuration=2h \
+  --set-string serviceDaemon.runnerNodeSelector.never=true
+kubectl --kubeconfig .kind/kova-deep-queue.kubeconfig -n kova \
+  create rolebinding kova-e2e-submitter --role=kova-service-submitter --user=kova:e2e
+```
+
+Use a test-only `SERVICE_AUTH_TOKEN` already present in the process environment; do not paste its value into commands, Helm values, receipts, or Git.
+The setup should record the Helm chart/values, Kind node UIDs, and deployed Pod image IDs alongside the Docker image IDs; the benchmark's `identity.json` automatically records the reviewed checkout commit, three local role image IDs/revisions, two Service Pod image IDs, and exact Kind kubeconfig fingerprint.
+No setup command above pushes to the local or cloud registry, and no HK ACK context is used.
 
 The default entrypoint reads the cluster, kubeconfig identity, ledgers, readiness, API-server request counters, and kubelet summary metrics without writing Kubernetes objects or local receipts:
 
@@ -122,7 +157,8 @@ Missing metrics, transport errors, limits, identity drift, unrecorded CRs, ledge
 
 Receipts are kept separately for the blocker, each 100/500/1000 stage, and exact-ID cleanup under `.work/deep-queue/<run-id>/`.
 On success, only the recorded queued CRs and blocker CR are deleted; the Kind cluster, local registry, and all registry tags remain untouched.
-On failure, no automatic CR or ledger cleanup is attempted because an uncertain HTTP Create or deletion may still be in flight.
+If a submission or measurement fails before exact cleanup starts, no CR or ledger cleanup is attempted because an uncertain HTTP Create may still be in flight.
+If a deletion or its verification fails after exact cleanup starts, some recorded CRs may already have been deleted; the script stops and preserves the delete-batch receipts for operator inspection rather than guessing at a repair.
 The existing controller does **not** expose per-reconcile latency p95/p99 to this black-box script: POST latency and queue-status convergence are separate measurements and must not be reported as reconcile latency.
 This bounded Kind profile is a design diagnostic, not production SLO or SLA evidence.
 
