@@ -793,13 +793,7 @@ def capture_runner_logs(run_dir: Path, runner_name: str) -> None:
 
 
 def verify_copy_missing_export(raw: str, second: str) -> dict | None:
-    """Attribute the second target's failure to this fixture's missing COPY source.
-
-    The exact /missing path is fixture-owned evidence from BuildKit's failure,
-    not a match on BuildKit's version-dependent error prose. An export without
-    the second result is still in progress; any completed ambiguous result
-    fails closed.
-    """
+    """Require the runner's exact failed result, before reading ephemeral logs."""
     if len(raw.encode()) > MAX_RUNNER_EXPORT_BYTES:
         fail("runner failure export exceeded its bounded evidence size")
     try:
@@ -814,16 +808,44 @@ def verify_copy_missing_export(raw: str, second: str) -> dict | None:
     if len(entries) != 1 or entries[0].get("target") != target:
         fail("runner failure export was not scoped to the exact second Nydus target")
     entry = entries[0]
-    logs = entry.get("logs", "")
     if (
         entry.get("success") is not False
         or entry.get("manifest_digest")
         or not isinstance(entry.get("reason"), str)
         or not entry["reason"]
-        or not isinstance(logs, str)
-        or not logs
+        or entry.get("logs", "") != ""
     ):
         fail("intentional failure target lacks a failed BuildKit result")
+    return {
+        "target": target,
+        "success": False,
+        "reason_sha256": sha256(entry["reason"].encode()),
+        "export_sha256": sha256(raw.encode()),
+    }
+
+
+def verify_copy_missing_failure_log(raw: str, second: str) -> dict | None:
+    """Read the runner-only bounded failure log, not the log-free LMDB export.
+
+    Kova writes failure diagnostics to /tmp/logs.jsonl *before* persisting a
+    log-free result in LMDB. The exact /missing path is fixture-owned evidence
+    from BuildKit, not a match on version-dependent error prose.
+    """
+    if len(raw.encode()) > MAX_RUNNER_EXPORT_BYTES:
+        fail("runner failure log exceeded its bounded evidence size")
+    try:
+        entries = [json.loads(line) for line in raw.splitlines() if line.strip()]
+    except ValueError:
+        fail("runner failure log was not valid JSONL")
+    if not entries:
+        return None
+    target = second.replace(":dev", ":dev_nydus_v3")
+    if len(entries) != 1 or not isinstance(entries[0], dict) or entries[0].get("target") != target:
+        fail("runner failure log was not scoped to the exact second Nydus target")
+    entry = entries[0]
+    logs = entry.get("logs", "")
+    if entry.get("success") is not False or not isinstance(logs, str) or not logs:
+        fail("intentional failure target lacks runner-local BuildKit diagnostics")
     # The source archive has COPY missing /must-not-exist and no file named
     # missing. A bare `COPY missing ...` progress line cannot satisfy /missing.
     # If a BuildKit release omits the source path from its diagnostic, this
@@ -839,9 +861,8 @@ def verify_copy_missing_export(raw: str, second: str) -> dict | None:
         "target": target,
         "success": False,
         "source_path": "/missing",
-        "reason_sha256": sha256(entry["reason"].encode()),
         "diagnostic_line_sha256": sha256(path_lines[-1].encode()),
-        "export_sha256": sha256(raw.encode()),
+        "failure_log_sha256": sha256(raw.encode()),
     }
 
 
@@ -872,14 +893,36 @@ def capture_copy_failure(run_dir: Path, runner_name: str, runner_uid: str, secon
         # the exact Pod exists; a terminal build without proof fails closed.
         save_text(run_dir / "runner-failure-export-unavailable.txt", f"{error}\n")
         return False
-    proof = verify_copy_missing_export(raw, second)
-    if proof is None:
+    export_proof = verify_copy_missing_export(raw, second)
+    if export_proof is None:
+        return False
+    try:
+        failure_log = kctl(
+            "-n",
+            NAMESPACE,
+            "exec",
+            f"pod/{runner_name}",
+            "-c",
+            "runner",
+            "--",
+            "head",
+            "-c",
+            str(MAX_RUNNER_EXPORT_BYTES + 1),
+            "/tmp/logs.jsonl",
+            timeout=30,
+        )
+    except AcceptanceError as error:
+        save_text(run_dir / "runner-failure-log-unavailable.txt", f"{error}\n")
+        return False
+    log_proof = verify_copy_missing_failure_log(failure_log, second)
+    if log_proof is None:
         return False
     observed = kjson("-n", NAMESPACE, "get", "pod", runner_name, "-o", "json")
     if observed["metadata"]["uid"] != runner_uid:
         fail("runner Pod changed during failure-export capture")
-    proof["runner_pod_uid"] = runner_uid
+    proof = {**export_proof, **log_proof, "runner_pod_uid": runner_uid}
     save_text(run_dir / "runner-failure-export.jsonl", raw)
+    save_text(run_dir / "runner-failure-log.jsonl", failure_log)
     save_json(run_dir / "copy-missing-proof.json", proof)
     return True
 

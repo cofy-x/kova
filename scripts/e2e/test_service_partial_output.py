@@ -158,48 +158,74 @@ class PartialOutputSafetyTest(unittest.TestCase):
         with self.assertRaises(acceptance.AcceptanceError):
             acceptance.verify_failed_receipt(build, first, second)
 
-    def test_copy_missing_export_requires_fixture_source_path_diagnostic(self) -> None:
+    def test_export_and_runner_local_log_prove_copy_source_path(self) -> None:
         build = failed_build()
         second = build["status"]["verificationResults"][2]["image"]
-        failed = {
-            "target": second.replace(":dev", ":dev_nydus_v3"),
+        target = second.replace(":dev", ":dev_nydus_v3")
+        failed_export = {
+            "target": target,
             "success": False,
             "reason": "exit status 1",
+        }
+        failed_log = {
+            "target": target,
+            "success": False,
             "logs": 'COPY missing /must-not-exist\nfailed to solve: "/missing": not found\n',
         }
-        proof = acceptance.verify_copy_missing_export(json.dumps(failed) + "\n", second)
-        self.assertEqual(proof["target"], failed["target"])
-        self.assertEqual(proof["source_path"], "/missing")
+        export_proof = acceptance.verify_copy_missing_export(
+            json.dumps(failed_export) + "\n", second
+        )
+        log_proof = acceptance.verify_copy_missing_failure_log(
+            json.dumps(failed_log) + "\n", second
+        )
+        self.assertEqual(export_proof["target"], target)
+        self.assertEqual(log_proof["source_path"], "/missing")
         self.assertEqual(
-            acceptance.verify_copy_missing_export(
-                json.dumps({**failed, "logs": "BuildKit diagnostic: /missing"}) + "\n", second
+            acceptance.verify_copy_missing_failure_log(
+                json.dumps({**failed_log, "logs": "BuildKit diagnostic: /missing"}) + "\n",
+                second,
             )["source_path"],
             "/missing",
         )
         self.assertIsNone(acceptance.verify_copy_missing_export("", second))
+        self.assertIsNone(acceptance.verify_copy_missing_failure_log("", second))
 
         for drift in (
             {"target": "kind-registry:5000/unrelated:dev_nydus_v3"},
-            {"logs": "COPY missing /must-not-exist\nnetwork timeout\n"},
             {"success": True},
             {"manifest_digest": "sha256:" + "f" * 64},
             {"reason": ""},
+            {"logs": "unexpected durable log"},
         ):
-            with self.subTest(drift=drift):
+            with self.subTest(export_drift=drift):
                 with self.assertRaises(acceptance.AcceptanceError):
                     acceptance.verify_copy_missing_export(
-                        json.dumps({**failed, **drift}) + "\n", second
+                        json.dumps({**failed_export, **drift}) + "\n", second
+                    )
+        for drift in (
+            {"target": "kind-registry:5000/unrelated:dev_nydus_v3"},
+            {"success": True},
+            {"logs": "COPY missing /must-not-exist\nnetwork timeout\n"},
+            {"logs": ""},
+        ):
+            with self.subTest(log_drift=drift):
+                with self.assertRaises(acceptance.AcceptanceError):
+                    acceptance.verify_copy_missing_failure_log(
+                        json.dumps({**failed_log, **drift}) + "\n", second
                     )
 
     def test_copy_failure_capture_is_bound_to_runner_uid(self) -> None:
         build = failed_build()
         second = build["status"]["verificationResults"][2]["image"]
-        raw = (
+        target = second.replace(":dev", ":dev_nydus_v3")
+        raw_export = (
+            json.dumps({"target": target, "success": False, "reason": "exit status 1"}) + "\n"
+        )
+        raw_log = (
             json.dumps(
                 {
-                    "target": second.replace(":dev", ":dev_nydus_v3"),
+                    "target": target,
                     "success": False,
-                    "reason": "exit status 1",
                     "logs": 'failed to solve: "/missing": not found\n',
                 }
             )
@@ -207,7 +233,9 @@ class PartialOutputSafetyTest(unittest.TestCase):
         )
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)
-            with patch.object(acceptance, "kctl", return_value=raw) as exec_command:
+            with patch.object(
+                acceptance, "kctl", side_effect=[raw_export, raw_log]
+            ) as exec_command:
                 with patch.object(
                     acceptance, "kjson", return_value={"metadata": {"uid": "runner-uid"}}
                 ):
@@ -216,15 +244,17 @@ class PartialOutputSafetyTest(unittest.TestCase):
                             directory, "kova-job-idem-" + "a" * 20, "runner-uid", second
                         )
                     )
-            query = exec_command.call_args.args[-1]
+            query = exec_command.call_args_list[0].args[-1]
             self.assertIn("with-fail=true", query)
             self.assertIn("target=kind-registry%3A5000%2F", query)
-            self.assertEqual((directory / "runner-failure-export.jsonl").read_text(), raw)
+            self.assertEqual(exec_command.call_args_list[1].args[-1], "/tmp/logs.jsonl")
+            self.assertEqual((directory / "runner-failure-export.jsonl").read_text(), raw_export)
+            self.assertEqual((directory / "runner-failure-log.jsonl").read_text(), raw_log)
             self.assertEqual(
                 json.loads((directory / "copy-missing-proof.json").read_text())["runner_pod_uid"],
                 "runner-uid",
             )
-            with patch.object(acceptance, "kctl", return_value=raw):
+            with patch.object(acceptance, "kctl", side_effect=[raw_export, raw_log]):
                 with patch.object(acceptance, "kjson", return_value={"metadata": {"uid": "other"}}):
                     with self.assertRaises(acceptance.AcceptanceError):
                         acceptance.capture_copy_failure(
