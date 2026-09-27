@@ -23,6 +23,12 @@ E2E_SERVICE_BUILD_IMAGE=${E2E_SERVICE_BUILD_IMAGE:-true}
 E2E_SERVICE_BUILD_CLI=${E2E_SERVICE_BUILD_CLI:-true}
 KOVA_CLI=${KOVA_CLI:-${ROOT}/bin/kova}
 SERVICE_JOB_TTL=${SERVICE_JOB_TTL:-30s}
+SERVICE_REPLICAS=${SERVICE_REPLICAS:-1}
+SERVICE_MAX_ACTIVE_JOBS=${SERVICE_MAX_ACTIVE_JOBS:-20}
+SERVICE_MAX_ACTIVE_JOBS_PER_REQUESTER=${SERVICE_MAX_ACTIVE_JOBS_PER_REQUESTER:-4}
+SERVICE_MAX_QUEUED_JOBS=${SERVICE_MAX_QUEUED_JOBS:-1000}
+SERVICE_MAX_QUEUED_JOBS_PER_REQUESTER=${SERVICE_MAX_QUEUED_JOBS_PER_REQUESTER:-100}
+SERVICE_WORKER_SLOTS=${SERVICE_WORKER_SLOTS:-20}
 KOVA_CHART=${KOVA_CHART:-${ROOT}/charts/kova}
 KOVA_VALUES=${KOVA_VALUES:-${ROOT}/deploy/kind-values.yaml}
 BASELINE_CHART=${BASELINE_CHART:-}
@@ -168,7 +174,7 @@ sync_service_auth_secret() (
 )
 sync_service_auth_secret
 
-service_replicas=1
+service_replicas=${SERVICE_REPLICAS}
 if [[ "${REQUIRE_LEGACY_CRD}" == true ]]; then
   # Keep the new controller stopped through Helm --wait so the short E2E JobTTL
   # cannot remove the legacy fixture before its fail-closed result is checked.
@@ -187,6 +193,11 @@ helm upgrade --install "${RELEASE_NAME}" "${KOVA_CHART}" \
   --set-string "worker.platform=${KOVA_PLATFORM}" \
   --set serviceDaemon.enabled=true \
   --set "serviceDaemon.replicas=${service_replicas}" \
+  --set "serviceDaemon.maxActiveJobs=${SERVICE_MAX_ACTIVE_JOBS}" \
+  --set "serviceDaemon.maxActiveJobsPerRequester=${SERVICE_MAX_ACTIVE_JOBS_PER_REQUESTER}" \
+  --set "serviceDaemon.maxQueuedJobs=${SERVICE_MAX_QUEUED_JOBS}" \
+  --set "serviceDaemon.maxQueuedJobsPerRequester=${SERVICE_MAX_QUEUED_JOBS_PER_REQUESTER}" \
+  --set "serviceDaemon.workerSlots=${SERVICE_WORKER_SLOTS}" \
   --set-string serviceDaemon.authentication.mode=static \
   --set-string "serviceDaemon.authentication.staticTokenSecret.name=${SERVICE_AUTH_SECRET}" \
   --set-string serviceDaemon.authentication.staticTokenSecret.key=token \
