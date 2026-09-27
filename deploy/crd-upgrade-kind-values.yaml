@@ -23,6 +23,10 @@ deployment:
   replicas: 1
 
 worker:
+  cache:
+    reservedSpaceGB: 1
+    maxUsedSpaceGB: 3
+    minFreeSpaceGB: 1
   resources:
     limits:
       ephemeral-storage: 8Gi
