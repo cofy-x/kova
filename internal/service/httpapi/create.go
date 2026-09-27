@@ -1,7 +1,6 @@
 package httpapi
 
 import (
-	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -10,7 +9,8 @@ import (
 	"strings"
 
 	kovav1 "github.com/cofy-x/kova/internal/apis/kova/v1alpha1"
-	serviceauth "github.com/cofy-x/kova/internal/service/auth"
+	"github.com/cofy-x/kova/internal/logging"
+	"github.com/cofy-x/kova/internal/service/queueadmission"
 
 	"github.com/labstack/echo/v4"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -37,18 +37,28 @@ func (s *Server) handleCreateBuild(c echo.Context) error {
 			return internalError(c, err)
 		}
 	}
-	if err := s.ensureQueueCapacity(c.Request().Context(), principal, id, request.IdempotencyKey != ""); err != nil {
-		var capacityErr *queueCapacityError
-		if errors.As(err, &capacityErr) {
-			return queueCapacityExceeded(c)
+	c.Response().Header().Set("X-Kova-Build-ID", id)
+	if request.IdempotencyKey != "" {
+		var existing kovav1.KovaBuild
+		err := s.reader.Get(c.Request().Context(), client.ObjectKey{Namespace: s.cfg.Namespace, Name: id}, &existing)
+		if err == nil {
+			if !sameBuildRequest(&existing, request) {
+				return conflict(c, "idempotency key is already used with different build parameters")
+			}
+			return c.JSON(http.StatusOK, buildJobFromCR(&existing, s.cfg))
 		}
-		return internalError(c, err)
+		if !apierrors.IsNotFound(err) {
+			return internalError(c, err)
+		}
 	}
 	build := kovav1.KovaBuild{
 		TypeMeta: metav1.TypeMeta{APIVersion: kovav1.Group + "/" + kovav1.Version, Kind: "KovaBuild"},
 		ObjectMeta: metav1.ObjectMeta{
 			Name: id, Namespace: s.cfg.Namespace,
 			Labels: map[string]string{"app.kubernetes.io/name": "kova-build", requesterLabel: requesterID(principal.Username)},
+			// Deletion before the controller's first reconcile must still pass
+			// through verified queue-intent and runner cleanup.
+			Finalizers: []string{kovav1.CleanupFinalizer},
 		},
 		Spec: kovav1.KovaBuildSpec{
 			Requester: kovav1.KovaBuildRequester{Username: principal.Username, UID: principal.UID},
@@ -57,20 +67,65 @@ func (s *Server) handleCreateBuild(c echo.Context) error {
 			Build:     request.Options, IdempotencyKey: request.IdempotencyKey,
 		},
 	}
+	store := s.queueStore()
+	intent, fresh, err := store.Reserve(c.Request().Context(), &build)
+	if err != nil {
+		switch {
+		case errors.Is(err, queueadmission.ErrFull):
+			return queueCapacityExceeded(c, "queue limit is reached")
+		case errors.Is(err, queueadmission.ErrBusy):
+			return queueCapacityExceeded(c, "queue admission is busy; retry")
+		case errors.Is(err, queueadmission.ErrConflict):
+			return conflict(c, "idempotency key is already used with different build parameters")
+		default:
+			return internalError(c, err)
+		}
+	}
+	if !fresh {
+		var existing kovav1.KovaBuild
+		err := s.reader.Get(c.Request().Context(), client.ObjectKey{Namespace: s.cfg.Namespace, Name: id}, &existing)
+		if apierrors.IsNotFound(err) {
+			return queueAdmissionPending(c, id)
+		}
+		if err != nil {
+			return internalError(c, err)
+		}
+		if !sameBuildRequest(&existing, request) {
+			return conflict(c, "idempotency key is already used with different build parameters")
+		}
+		return c.JSON(http.StatusOK, buildJobFromCR(&existing, s.cfg))
+	}
+	build.Annotations = map[string]string{queueadmission.IntentAnnotation: intent.Nonce}
 	if err := s.client.Create(c.Request().Context(), &build); err != nil {
-		if apierrors.IsAlreadyExists(err) && request.IdempotencyKey != "" {
+		if apierrors.IsAlreadyExists(err) {
 			var existing kovav1.KovaBuild
 			if getErr := s.reader.Get(c.Request().Context(), client.ObjectKey{Namespace: s.cfg.Namespace, Name: id}, &existing); getErr != nil {
 				return internalError(c, getErr)
+			}
+			if existing.Annotations[queueadmission.IntentAnnotation] != intent.Nonce {
+				if err := store.ReleaseRejected(c.Request().Context(), id, intent.Nonce); err != nil {
+					return internalError(c, err)
+				}
 			}
 			if !sameBuildRequest(&existing, request) {
 				return conflict(c, "idempotency key is already used with different build parameters")
 			}
 			return c.JSON(http.StatusOK, buildJobFromCR(&existing, s.cfg))
 		}
-		return internalError(c, err)
+		if definitiveCreateRejection(err) {
+			if releaseErr := store.ReleaseRejected(c.Request().Context(), id, intent.Nonce); releaseErr != nil {
+				return internalError(c, releaseErr)
+			}
+			return internalError(c, err)
+		}
+		logging.Errorf("KovaBuild %s Create returned an uncertain outcome: %v", id, err)
+		return queueAdmissionPending(c, id)
 	}
 	return c.JSON(http.StatusAccepted, buildJobFromCR(&build, s.cfg))
+}
+
+func definitiveCreateRejection(err error) bool {
+	return apierrors.IsForbidden(err) || apierrors.IsInvalid(err) || apierrors.IsBadRequest(err) || apierrors.IsUnauthorized(err)
 }
 
 func sameBuildRequest(build *kovav1.KovaBuild, request createBuildRequest) bool {
@@ -87,38 +142,6 @@ func idempotentJobID(username, key string) string {
 	sum := sha256.Sum256([]byte(username + "\x00" + key))
 	return "idem-" + hex.EncodeToString(sum[:10])
 }
-
-func (s *Server) ensureQueueCapacity(ctx context.Context, principal serviceauth.Principal, id string, idempotent bool) error {
-	if s.cfg.MaxQueuedJobsPerRequester <= 0 {
-		return nil
-	}
-	if idempotent {
-		var existing kovav1.KovaBuild
-		if err := s.reader.Get(ctx, client.ObjectKey{Namespace: s.cfg.Namespace, Name: id}, &existing); err == nil {
-			return nil
-		} else if !apierrors.IsNotFound(err) {
-			return err
-		}
-	}
-	var builds kovav1.KovaBuildList
-	if err := s.reader.List(ctx, &builds, client.InNamespace(s.cfg.Namespace), client.MatchingLabels{requesterLabel: requesterID(principal.Username)}); err != nil {
-		return err
-	}
-	queued := 0
-	for i := range builds.Items {
-		if builds.Items[i].Status.Phase == "" || builds.Items[i].Status.Phase == kovav1.PhaseQueued {
-			queued++
-		}
-	}
-	if queued >= s.cfg.MaxQueuedJobsPerRequester {
-		return &queueCapacityError{limit: s.cfg.MaxQueuedJobsPerRequester}
-	}
-	return nil
-}
-
-type queueCapacityError struct{ limit int }
-
-func (e *queueCapacityError) Error() string { return "requester queue limit is reached" }
 
 type configurationError struct{ message string }
 

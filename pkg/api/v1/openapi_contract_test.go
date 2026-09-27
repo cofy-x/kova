@@ -69,7 +69,7 @@ func TestOpenAPIContractMatchesPublicTypes(t *testing.T) {
 	})
 	assertStringEnum(t, object(t, object(t, object(t, schemas, "ErrorResponse"), "properties"), "code"), []string{
 		string(ErrorCodeConflict), string(ErrorCodeForbidden), string(ErrorCodeInternal), string(ErrorCodeInvalidRequest),
-		string(ErrorCodeLogsUnavailable), string(ErrorCodeNotFound), string(ErrorCodeQueueCapacityExceeded), string(ErrorCodeUnauthenticated),
+		string(ErrorCodeLogsUnavailable), string(ErrorCodeNotFound), string(ErrorCodeQueueAdmissionPending), string(ErrorCodeQueueCapacityExceeded), string(ErrorCodeUnauthenticated),
 	})
 	createProperties := object(t, object(t, schemas, "CreateBuildRequest"), "properties")
 	assertInteger(t, object(t, createProperties, "source_uri")["maxLength"], MaxSourceURILength)
@@ -91,7 +91,7 @@ func TestOpenAPIContractMatchesPublicTypes(t *testing.T) {
 		"ConflictError": ErrorCodeConflict, "ForbiddenError": ErrorCodeForbidden,
 		"InternalAPIError": ErrorCodeInternal, "InvalidRequestError": ErrorCodeInvalidRequest,
 		"LogsUnavailableError": ErrorCodeLogsUnavailable, "NotFoundError": ErrorCodeNotFound,
-		"QueueCapacityExceededError": ErrorCodeQueueCapacityExceeded, "UnauthenticatedError": ErrorCodeUnauthenticated,
+		"QueueAdmissionPendingError": ErrorCodeQueueAdmissionPending, "QueueCapacityExceededError": ErrorCodeQueueCapacityExceeded, "UnauthenticatedError": ErrorCodeUnauthenticated,
 	} {
 		assertErrorSchemaCode(t, object(t, schemas, schema), code)
 	}

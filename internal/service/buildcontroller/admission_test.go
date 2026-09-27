@@ -10,6 +10,7 @@ import (
 
 	kovav1 "github.com/cofy-x/kova/internal/apis/kova/v1alpha1"
 	"github.com/cofy-x/kova/internal/service/config"
+	"github.com/cofy-x/kova/internal/service/queueadmission"
 
 	corev1 "k8s.io/api/core/v1"
 	apiMeta "k8s.io/apimachinery/pkg/api/meta"
@@ -196,7 +197,166 @@ func queuedBuild(name, requester string, order int64, slots int) *kovav1.KovaBui
 func admissionConfig() config.Config {
 	return config.Config{
 		RunnerImage: "registry.local/kova:dev", BuildkitPlatformAddrs: map[string]string{"linux/amd64": "tcp://buildkit:9094"},
-		MaxActiveJobs: 2, MaxActiveJobsPerRequester: 1, WorkerSlots: 3, PollInterval: time.Millisecond,
+		MaxActiveJobs: 2, MaxActiveJobsPerRequester: 1, MaxQueuedJobs: 1000, MaxQueuedJobsPerRequester: 100,
+		WorkerSlots: 3, PollInterval: time.Millisecond,
+	}
+}
+
+func TestQueueIntentReleasesOnlyAfterActiveGrant(t *testing.T) {
+	scheme := testScheme(t)
+	base := crfake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&kovav1.KovaBuild{}).Build()
+	cfg := admissionConfig()
+	cfg.MaxActiveJobs, cfg.WorkerSlots = 1, 1
+	cfg.MaxQueuedJobs, cfg.MaxQueuedJobsPerRequester = 1, 1
+	store := queueadmission.Store{Client: base, Reader: base, Namespace: "jobs", GlobalLimit: 1, RequesterLimit: 1}
+	build := queuedBuild("a", "alice", 1, 1)
+	intent, fresh, err := store.Reserve(context.Background(), build)
+	if err != nil || !fresh {
+		t.Fatalf("queue reserve fresh=%t err=%v", fresh, err)
+	}
+	build.Annotations = map[string]string{queueadmission.IntentAnnotation: intent.Nonce}
+	if err := base.Create(context.Background(), build); err != nil {
+		t.Fatal(err)
+	}
+	r := KovaBuildReconciler{Client: base, APIReader: base, Scheme: scheme, Kube: &fakeKube{}, Cfg: cfg}
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "jobs", Name: "a"}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, found, err := store.Lookup(context.Background(), "a"); err != nil || found {
+		t.Fatalf("queue remained after active commit: found=%t err=%v", found, err)
+	}
+	_, active, err := r.readReservations(context.Background(), "jobs")
+	if err != nil || len(active.Active) != 1 {
+		t.Fatalf("active grant missing after queue release: %#v err=%v", active, err)
+	}
+	if _, fresh, err := store.Reserve(context.Background(), queuedBuild("b", "bob", 2, 1)); err != nil || !fresh {
+		t.Fatalf("queue slot was not released after activation: fresh=%t err=%v", fresh, err)
+	}
+}
+
+func TestActiveLedgerRejectsReplicaWithDifferentLimits(t *testing.T) {
+	scheme := testScheme(t)
+	a := queuedBuild("a", "alice", 1, 1)
+	b := queuedBuild("b", "bob", 2, 1)
+	base := crfake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&kovav1.KovaBuild{}).WithObjects(a, b).Build()
+	cfg := admissionConfig()
+	r1 := KovaBuildReconciler{Client: base, APIReader: base, Cfg: cfg}
+	if decision, err := r1.admission(context.Background(), a); err != nil || !decision.Admitted {
+		t.Fatalf("first replica admission=%#v err=%v", decision, err)
+	}
+	cfg.WorkerSlots++
+	r2 := KovaBuildReconciler{Client: base, APIReader: base, Cfg: cfg}
+	if _, err := r2.admission(context.Background(), b); err == nil {
+		t.Fatal("replica with different worker limit accepted a grant")
+	}
+}
+
+type failedQueueRelease struct{ client.Client }
+
+func (c failedQueueRelease) Update(ctx context.Context, obj client.Object, opts ...client.UpdateOption) error {
+	if cm, ok := obj.(*corev1.ConfigMap); ok && cm.Name == queueadmission.ConfigMapName {
+		return errors.New("injected queue release failure")
+	}
+	return c.Client.Update(ctx, obj, opts...)
+}
+
+func TestFailedQueueReleaseOvercountsUntilControllerRestart(t *testing.T) {
+	scheme := testScheme(t)
+	base := crfake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&kovav1.KovaBuild{}).Build()
+	cfg := admissionConfig()
+	cfg.MaxActiveJobs, cfg.WorkerSlots = 1, 1
+	cfg.MaxQueuedJobs, cfg.MaxQueuedJobsPerRequester = 1, 1
+	store := queueadmission.Store{Client: base, Reader: base, Namespace: "jobs", GlobalLimit: 1, RequesterLimit: 1}
+	build := queuedBuild("a", "alice", 1, 1)
+	intent, _, err := store.Reserve(context.Background(), build)
+	if err != nil {
+		t.Fatal(err)
+	}
+	build.Annotations = map[string]string{queueadmission.IntentAnnotation: intent.Nonce}
+	if err := base.Create(context.Background(), build); err != nil {
+		t.Fatal(err)
+	}
+	r1 := KovaBuildReconciler{Client: failedQueueRelease{Client: base}, APIReader: base, Scheme: scheme, Kube: &fakeKube{}, Cfg: cfg}
+	if _, err := r1.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "jobs", Name: "a"}}); err == nil {
+		t.Fatal("failed queue release unexpectedly created runner")
+	}
+	_, active, err := r1.readReservations(context.Background(), "jobs")
+	if err != nil || len(active.Active) != 1 {
+		t.Fatalf("active grant did not survive queue release failure: %#v err=%v", active, err)
+	}
+	if _, found, err := store.Lookup(context.Background(), "a"); err != nil || !found {
+		t.Fatalf("queue intent was prematurely freed: found=%t err=%v", found, err)
+	}
+	var pods corev1.PodList
+	if err := base.List(context.Background(), &pods); err != nil || len(pods.Items) != 0 {
+		t.Fatalf("runner created before queue transition: %d err=%v", len(pods.Items), err)
+	}
+	r2 := KovaBuildReconciler{Client: base, APIReader: base, Scheme: scheme, Kube: &fakeKube{}, Cfg: cfg}
+	if _, err := r2.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "jobs", Name: "a"}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, found, err := store.Lookup(context.Background(), "a"); err != nil || found {
+		t.Fatalf("restart did not finish queue release: found=%t err=%v", found, err)
+	}
+}
+
+func TestUnreservedHTTPBuildCannotReachActivePod(t *testing.T) {
+	scheme := testScheme(t)
+	build := queuedBuild("a", "alice", 1, 1)
+	build.Annotations = map[string]string{queueadmission.IntentAnnotation: "00112233445566778899aabbccddeeff"}
+	base := crfake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&kovav1.KovaBuild{}).WithObjects(build).Build()
+	r := KovaBuildReconciler{Client: base, APIReader: base, Scheme: scheme, Kube: &fakeKube{}, Cfg: admissionConfig()}
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "jobs", Name: "a"}}); !errors.Is(err, queueadmission.ErrDrift) {
+		t.Fatalf("missing queue intent did not fail closed: %v", err)
+	}
+	var current kovav1.KovaBuild
+	if err := base.Get(context.Background(), types.NamespacedName{Namespace: "jobs", Name: "a"}, &current); err != nil {
+		t.Fatal(err)
+	}
+	if !apiMeta.IsStatusConditionTrue(current.Status.Conditions, admissionRecoveryCondition) {
+		t.Fatal("queue ledger drift was not exposed through build status")
+	}
+	var pods corev1.PodList
+	if err := base.List(context.Background(), &pods); err != nil || len(pods.Items) != 0 {
+		t.Fatalf("runner escaped missing queue intent: %d err=%v", len(pods.Items), err)
+	}
+}
+
+func TestTerminalAndDeletionReleaseQueuedIntentAfterPodCheck(t *testing.T) {
+	for _, deleting := range []bool{false, true} {
+		t.Run(fmt.Sprintf("deleting-%t", deleting), func(t *testing.T) {
+			scheme := testScheme(t)
+			base := crfake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&kovav1.KovaBuild{}).Build()
+			store := queueadmission.Store{Client: base, Reader: base, Namespace: "jobs", GlobalLimit: 1, RequesterLimit: 1}
+			build := queuedBuild("a", "alice", 1, 1)
+			intent, _, err := store.Reserve(context.Background(), build)
+			if err != nil {
+				t.Fatal(err)
+			}
+			build.Annotations = map[string]string{queueadmission.IntentAnnotation: intent.Nonce}
+			if err := base.Create(context.Background(), build); err != nil {
+				t.Fatal(err)
+			}
+			cfg := admissionConfig()
+			cfg.MaxQueuedJobs, cfg.MaxQueuedJobsPerRequester = 1, 1
+			r := KovaBuildReconciler{Client: base, APIReader: base, Scheme: scheme, Kube: &fakeKube{}, Cfg: cfg}
+			if deleting {
+				if _, err := r.reconcileDelete(context.Background(), build); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				build.Status.Phase = kovav1.PhaseFailed
+				if err := base.Status().Update(context.Background(), build); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := r.reconcileTerminal(context.Background(), build); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, found, err := store.Lookup(context.Background(), "a"); err != nil || found {
+				t.Fatalf("queue entry not released after verified cleanup: found=%t err=%v", found, err)
+			}
+		})
 	}
 }
 

@@ -8,6 +8,7 @@ import (
 	"github.com/cofy-x/kova/internal/kube"
 	"github.com/cofy-x/kova/internal/observability"
 	"github.com/cofy-x/kova/internal/service/config"
+	"github.com/cofy-x/kova/internal/service/queueadmission"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -18,7 +19,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
 
-const cleanupFinalizer = "kova.cofy.dev/cleanup"
+const cleanupFinalizer = kovav1.CleanupFinalizer
 
 var (
 	jobQueueLatency = observability.DurationHistogram("kova.service.job.queue.duration", "Time from job creation to runner admission")
@@ -35,6 +36,13 @@ type KovaBuildReconciler struct {
 	Recorder record.EventRecorder
 	// APIReader bypasses the manager cache for capacity and recovery reads.
 	APIReader client.Reader
+}
+
+func (r *KovaBuildReconciler) queueStoreForNamespace(namespace string) queueadmission.Store {
+	return queueadmission.Store{
+		Client: r.Client, Reader: r.reader(), Namespace: namespace,
+		GlobalLimit: r.Cfg.MaxQueuedJobs, RequesterLimit: r.Cfg.MaxQueuedJobsPerRequester,
+	}
 }
 
 func (r *KovaBuildReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {

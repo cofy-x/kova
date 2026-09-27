@@ -110,6 +110,9 @@ func newTestServerWithRoot(t *testing.T, kube *fakeKube, root string) *Server {
 	if err := kovav1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
 	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
 	client := crfake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&kovav1.KovaBuild{}).Build()
 	authenticator, err := serviceauth.New(serviceauth.ModeStatic, "token", "test-user", nil)
 	if err != nil {
@@ -120,16 +123,18 @@ func newTestServerWithRoot(t *testing.T, kube *fakeKube, root string) *Server {
 
 func testConfig(root string) config.Config {
 	return config.Config{
-		Namespace:             "jobs",
-		RunnerImage:           "registry.local/kova:dev",
-		RunnerImagePullPolicy: "IfNotPresent",
-		BuildkitPlatformAddrs: map[string]string{"linux/amd64": "tcp://kova.kova.svc:9094"},
-		JobTTL:                time.Hour,
-		AuthToken:             "token",
-		AuthMode:              serviceauth.ModeStatic,
-		AuthStaticPrincipal:   "test-user",
-		WaitTimeout:           time.Second,
-		PollInterval:          time.Millisecond,
+		Namespace:                 "jobs",
+		RunnerImage:               "registry.local/kova:dev",
+		RunnerImagePullPolicy:     "IfNotPresent",
+		BuildkitPlatformAddrs:     map[string]string{"linux/amd64": "tcp://kova.kova.svc:9094"},
+		JobTTL:                    time.Hour,
+		AuthToken:                 "token",
+		AuthMode:                  serviceauth.ModeStatic,
+		AuthStaticPrincipal:       "test-user",
+		WaitTimeout:               time.Second,
+		PollInterval:              time.Millisecond,
+		MaxQueuedJobs:             1000,
+		MaxQueuedJobsPerRequester: 100,
 	}
 }
 

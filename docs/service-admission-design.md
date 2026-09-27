@@ -1,50 +1,29 @@
 # Service Admission Design
 
-Issue [#44](https://github.com/cofy-x/kova/issues/44) remains open.
-The current controller slice serializes active grants in a namespaced ConfigMap, `kova-service-admission`.
-Each grant records the build UID, requester, and worker-slot allocation through a resourceVersion compare-and-swap before runner Pod creation.
-The controller reads the ledger and queued builds directly from the API server, rather than from its informer cache.
-On first use it adopts active build status and matching runner Pods; a later active build or runner Pod missing from the ledger blocks new grants.
-An uncertain ledger write never authorizes a Pod: a retry or replacement leader first reads the recorded grant.
-Before every Pod Create, the controller persists a unique in-flight nonce in that grant and stamps it on the Pod.
-Only a definitive Create response or observation of the Pod bearing that nonce resolves the attempt.
-Terminal and deletion reconciliation retain the grant until the matching runner Pod is confirmed gone and no in-flight attempt remains.
-Ownership mismatch or malformed ledger state blocks release and requires operator investigation.
-An unresolved attempt sets `AdmissionRecoveryRequired=True` on the build and `recovery_required=true` in its HTTP representation; the ledger keeps the exact nonce as operator evidence.
+Issue [#44](https://github.com/cofy-x/kova/issues/44) remains open until the new protocol has been exercised against a real Kubernetes API server and the mandatory migration has been reviewed. Do not deploy this branch through an in-place rolling upgrade.
 
-This is a coherent controller-side safety improvement, not completion of #44.
-The HTTP create path still performs a read-then-create queued count, which can overaccept concurrent requests from one or multiple replicas.
-There is no global queued limit, and a caller creating `KovaBuild` directly bypasses the HTTP check.
-The Pod nonce protocol fences late Create calls made by this version of the controller; a prior binary does not follow it.
-Do not describe the configured values as proven strict limits for all high-concurrency and queue schedules.
+## Invariants and scope
 
-## Remaining implementation
+The Service has two independent, namespaced ConfigMap ledgers. Kubernetes `resourceVersion` compare-and-swap serializes each ledger's updates across concurrent reconciles and HTTP replicas. Every capacity read uses the direct API reader, not an informer cache. Ledger corruption or a replica configured with different limits fails closed. Deleting a ledger is an out-of-contract privileged operation and may erase evidence of an in-flight Create; never use deletion as recovery.
 
-1. Extend the authoritative ledger with queued intents, a global queued limit, per-requester counts, an immutable request digest, build UID, and explicit `pending`, `queued`, `active`, and `release-pending` states.
-   Every HTTP replica must reserve by compare-and-swap before it creates a CR; a duplicate idempotency key must reuse the same intent and compare its digest, even while the first Create is in flight.
-   A quota rejection must consistently return `queue_capacity_exceeded` with HTTP 429 and `Retry-After`.
-2. Make the API server reject a build without a matching admitted intent, including direct CR writes, or explicitly define and document direct CR writes outside the quota contract.
-   A fail-closed admission webhook is one possible route; its availability and upgrade behavior need their own tests.
-   A bare ledger plus a later CR Create cannot make an uncertain Create outcome safe to reclaim automatically: a late successful Create may otherwise arrive after its slot was released.
-3. Move a queued intent to active in one ledger compare-and-swap, preserving the existing Pod Create nonce fence.
-   Record and inspect unknown outcomes instead of expiring reservations by wall-clock time.
-4. Reconcile pending intents against authoritative CR and Pod reads, release queued counts only after an observed transition or confirmed deletion, and retain an explicit recovery-required state for outcomes that cannot be proved absent.
-   Exercise an operator resolution path for such cases; otherwise a safety-preserving reservation can consume capacity indefinitely.
-5. Test simultaneous Create calls from at least two API Server instances, both with the same requester and with different requesters.
-   Inject stale informer lists, write conflicts, successful writes with lost responses, process termination at each state boundary, leader replacement, late Pod Create responses, terminal cleanup failure, and deletion.
-   Assert both per-requester and global queued counts, active jobs, worker slots, round-robin fairness, idempotent responses, and stable 429 behavior.
+- `kova-service-admission` bounds active jobs, per-requester active jobs, and worker slots. Its limits are recorded in the ledger. The controller commits an active grant before attempting to create a runner Pod.
+- `kova-service-queue-admission` bounds *HTTP-submitted* queued intents globally (`maxQueuedJobs`, at most 1000) and per authenticated username (`maxQueuedJobsPerRequester`). The single CAS map holds short build IDs, SHA-256 requester/request digests, random intent nonces, and creation times. A 768 KiB serialized-state guard is below Kubernetes' 1 MiB ConfigMap limit. Conflicts receive bounded backoff; exhausted contention returns retryable HTTP 429 rather than spinning indefinitely.
+- Direct or administrator-created `KovaBuild` objects are **outside the HTTP queue quota**, including the global queued limit. They still need an active-ledger grant before runner Pod creation and are included in active/fair-share scheduling. No webhook currently prevents a privileged actor from bypassing the HTTP queue.
 
-Capacity configuration should be identical across Service replicas.
-Do not remove the ledger or force-delete its namespace while runners may exist.
-An unresolved Pod Create nonce may be removed only when the exact nonce is observed on its Pod or the original Create call has a definitive non-persisted outcome.
-Absence of a Pod, elapsed time, an expired leader lease, or a restarted controller is not such evidence.
-If neither fact can be established, retain the reservation and escalate the `AdmissionRecoveryRequired` condition rather than silently reclaiming capacity.
+An HTTP request CAS-reserves one queue intent before calling CR Create. Its unique nonce is stamped on the CR. Only the caller that created that exact intent may issue the CR Create, and it issues it once. A concurrent same-key request compares the immutable request digest, then returns the existing CR or `503 queue_admission_pending`; it never issues another Create while the intent is unresolved. An uncertain CAS response authorizes Create only if a direct read observes that caller's exact nonce. A definitive non-persisted Create rejection releases the intent; a timeout or server/transport error does not. The response and Go/Python SDK error expose `X-Kova-Build-ID`; `GET /v1/builds/{id}` returns the same pending error while the caller's intent exists without a CR. A missing CR, elapsed time, or process restart does not prove an API Create cannot still arrive.
 
-## Upgrade barrier
+The controller verifies the CR's nonce, requester, and immutable request digest before its first active grant. It commits the active grant **before** removing the matching queued intent. These two writes are not atomic; a crash between them conservatively counts the build in both ledgers. A retry completes queue release before Pod Create. Terminal and deleting builds release their queue intent only after runner Pod cleanup is verified. Queued CRs that fail before active admission release their intent through the terminal/deletion path. If ledger and CR disagree, the build receives `AdmissionRecoveryRequired=True` with reason `QueueIntentDrift`; no Pod is created.
 
-A mixed version has no shared reservation protocol and cannot enforce these bounds.
-Before enabling this controller, stop new HTTP submissions, let old active builds reach terminal state, confirm every old runner Pod is gone, and stop every old controller instance.
-Apply the updated CRD schema before starting the new controller, because recovery adds a second status condition.
-For migration to the fenced controller, use a new runner namespace and a fresh admission ledger after the old workload is drained; late Pod requests from an old binary are then confined to its old namespace.
-Only resume submissions after the old execution path is quiescent and the new instances share identical capacity settings.
-If old builds cannot drain, keep the old service isolated until their caller-owned immutable inputs can be resubmitted under the new service contract; do not copy an in-flight build into the new namespace or delete the old ledger as a shortcut.
+Before every Pod Create, the controller CAS-appends one in-flight nonce to its active grant and stamps that nonce on the Pod. A replacement leader cannot release the grant while the old Create might still reach the API server. A direct read observing the exact nonce resolves a lost ledger-Update response. Only a definitive Create success/AlreadyExists result or observation of a matching persisted Pod removes the marker. A retry first inspects an existing Pod and does not issue another Create while a prior nonce remains unresolved. Terminal/deletion cleanup retains the active grant until the Pod is confirmed gone and no in-flight nonce remains. An unresolved attempt sets `AdmissionRecoveryRequired=True` and public `recovery_required=true`.
+
+## Recovery and limits of proof
+
+These are safety-preserving reservations, not time leases. An intent or Pod nonce may remain held after a process crash. Its ledger entry records identity and time for an operator; the Service API reports pending CR creation or build recovery where a build exists. Release an uncertain queue intent only with evidence that its one CR Create was definitively rejected or that its matching persisted CR has completed the verified active/terminal transition. Release an uncertain Pod nonce only after the exact nonce is observed on its Pod or the original Pod Create has a definitive non-persisted result. Audit evidence must identify the exact nonce/request; absence from a List, a deadline, a terminated process, or a leader-lease expiration is insufficient. If evidence is unavailable, retain the reservation and escalate rather than silently reclaiming capacity. There is no automatic orphan-intent scavenger or destructive recovery endpoint.
+
+The HTTP queued limits do not count direct CR writers, do not span multiple runner namespaces, and assume all Service replicas share one namespace and identical configured caps. Both ledgers reject changed capacity settings; a limit change needs a drained namespace and an explicit migration rather than changing one replica in place. The active limits apply to direct CRs too. A privileged actor that edits/deletes either ConfigMap or alters a CR's queue-intent annotation can break the HTTP quota contract; protect those permissions. The queue ledger refuses first-time initialization when CRs already exist, but privileged deletion while only unobserved intents exist can erase their counts. The active ledger detects existing active builds and Pods on initial creation, but that adoption is a recovery defense, **not** permission for a mixed-version rollout.
+
+Deterministic tests cover two concurrent Service replicas with stale cached Lists, same-requester and global queue bursts, idempotency while full, CAS conflicts/lost responses, unknown persisted and unpersisted CR Create, leader restart, active/queue release failure, late Pod Create, terminal/deletion cleanup, and limit/configuration drift. Real-apiserver E2E, high-contention performance, and the migration drill remain required before claiming a deployed strict production quota.
+
+## Mandatory upgrade barrier
+
+Old binaries do not honor either queue intents or Pod Create nonces. Stop new submissions; let all old active and queued builds reach a documented terminal/deleted state; verify every old runner Pod is gone; then stop **every** old controller and HTTP Service instance. Do not allow an old leader to overlap the new process. Apply the updated CRD before starting the new Service. Start the new version in a **new runner namespace** with fresh ledgers and identical limits on all replicas, validate the new route, and only then resume submissions. This namespace boundary confines any late Pod request from an old binary to its old namespace. Do not delete a live ledger, copy in-flight CRs into the new namespace, or use an in-place rolling upgrade as a shortcut. If the old workload cannot drain, keep it isolated and have callers resubmit their immutable inputs under the new contract when safe.

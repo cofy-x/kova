@@ -30,6 +30,7 @@ type Config struct {
 	MaxBuildDuration          time.Duration
 	MaxActiveJobs             int
 	MaxActiveJobsPerRequester int
+	MaxQueuedJobs             int
 	MaxQueuedJobsPerRequester int
 	WorkerSlots               int
 	ControllerConcurrency     int

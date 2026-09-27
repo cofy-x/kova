@@ -18,12 +18,16 @@ const admissionRecoveryCondition = "AdmissionRecoveryRequired"
 
 func (r *KovaBuildReconciler) markAdmissionRecovery(ctx context.Context, build *kovav1.KovaBuild, pending int) error {
 	message := fmt.Sprintf("%d runner Pod create attempt(s) have an unknown outcome; capacity remains reserved", pending)
-	if current := apiMeta.FindStatusCondition(build.Status.Conditions, admissionRecoveryCondition); current != nil && current.Status == metav1.ConditionTrue && current.Reason == "PodCreateOutcomeUnknown" && current.Message == message {
+	return r.markAdmissionRecoveryReason(ctx, build, "PodCreateOutcomeUnknown", message)
+}
+
+func (r *KovaBuildReconciler) markAdmissionRecoveryReason(ctx context.Context, build *kovav1.KovaBuild, reason, message string) error {
+	if current := apiMeta.FindStatusCondition(build.Status.Conditions, admissionRecoveryCondition); current != nil && current.Status == metav1.ConditionTrue && current.Reason == reason && current.Message == message {
 		return nil
 	}
 	apiMeta.SetStatusCondition(&build.Status.Conditions, metav1.Condition{
 		Type: admissionRecoveryCondition, Status: metav1.ConditionTrue,
-		Reason: "PodCreateOutcomeUnknown", Message: message,
+		Reason: reason, Message: message,
 		ObservedGeneration: build.Generation,
 	})
 	if r.Recorder != nil {

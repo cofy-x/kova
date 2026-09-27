@@ -94,6 +94,7 @@ func TestCreateBuildDoesNotRetryAndReturnsTypedAPIError(t *testing.T) {
 		}
 		posts.Add(1)
 		w.Header().Set("Retry-After", "7")
+		w.Header().Set("X-Kova-Build-ID", "pending-build")
 		writeTestError(w, http.StatusTooManyRequests, apiv1.ErrorCodeQueueCapacityExceeded, true)
 	}))
 	defer server.Close()
@@ -109,7 +110,7 @@ func TestCreateBuildDoesNotRetryAndReturnsTypedAPIError(t *testing.T) {
 	if !errors.As(err, &apiErr) {
 		t.Fatalf("error is not APIError: %T %v", err, err)
 	}
-	if apiErr.StatusCode != http.StatusTooManyRequests || apiErr.Code != apiv1.ErrorCodeQueueCapacityExceeded || !apiErr.Retryable || apiErr.RetryAfter != 7*time.Second {
+	if apiErr.StatusCode != http.StatusTooManyRequests || apiErr.Code != apiv1.ErrorCodeQueueCapacityExceeded || apiErr.BuildID != "pending-build" || !apiErr.Retryable || apiErr.RetryAfter != 7*time.Second {
 		t.Fatalf("APIError=%#v", apiErr)
 	}
 	if posts.Load() != 1 {

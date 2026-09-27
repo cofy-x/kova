@@ -224,6 +224,7 @@ Worker replicas are shared BuildKit capacity. Direct CLI jobs set their own
 serviceDaemon:
   maxActiveJobs: 20
   maxActiveJobsPerRequester: 4
+  maxQueuedJobs: 1000
   maxQueuedJobsPerRequester: 100
   workerSlots: 40
 ```
@@ -233,13 +234,9 @@ slots without leaving usable capacity idle, and records each fixed allocation
 in job status. Runners resolve the headless Service into worker Pod IPs, avoid
 busy or cooling endpoints, and refresh DNS as replicas change.
 
-Active grants now use a durable Kubernetes admission ledger before Pod creation.
-The ledger is adopted from existing build status and runner Pods on first use, and admission stops if a live runner or active build lacks a reservation.
-Do not delete `kova-service-admission` while the Service is running.
-Before upgrading from a prior version, stop submissions, drain old active builds and runner Pods, stop old controller instances, apply the updated CRD, and start the new Service with a new runner namespace and fresh ledger.
-A mixed-version rollout cannot preserve the ledger invariant.
-The queued-build check is still best effort and has no global cap.
-See the [remaining admission work](../service-admission-design.md) before relying on these values as strict high-concurrency quotas.
+Active grants and HTTP queue intents use separate Kubernetes ConfigMap CAS ledgers. The active grant precedes Pod Create; a unique in-flight nonce fences a late old-leader Create. HTTP submission reserves one bounded queue intent before CR Create, and active grant commits before that intent is released. Do not delete either `kova-service-admission` or `kova-service-queue-admission` while the Service is running. Direct/admin CR writes are outside the HTTP queue quota, though active limits still apply. Unknown Create results may retain capacity until exact operator evidence resolves them.
+
+This protocol **requires a stop-and-drain upgrade**: stop submissions, finish/delete old queued and active builds, verify all old runner Pods are gone, stop every old controller and HTTP replica, apply the updated CRD, and start the new version with a new runner namespace and fresh ledgers. A mixed-version or in-place rolling upgrade can bypass the fence. See the [admission design and recovery rules](../service-admission-design.md); real-apiserver migration validation is still required before claiming a deployed strict quota.
 
 A Service that accepts both platforms maps each platform to an explicit BuildKit Service. The additional worker pool can be a separate Helm release with its Service endpoint listed in the Service release:
 

@@ -6,7 +6,7 @@ from datetime import timedelta
 class KovaAPIError(Exception):
     """A structured error returned by the Kova Service."""
 
-    __slots__ = ("code", "message", "retry_after", "retryable", "status_code")
+    __slots__ = ("build_id", "code", "message", "retry_after", "retryable", "status_code")
 
     def __init__(
         self,
@@ -16,12 +16,14 @@ class KovaAPIError(Exception):
         message: str,
         retryable: bool,
         retry_after: timedelta | None = None,
+        build_id: str | None = None,
     ) -> None:
         self.status_code = status_code
         self.code = code
         self.message = message
         self.retryable = retryable
         self.retry_after = retry_after
+        self.build_id = build_id
         super().__init__(message)
 
     def __str__(self) -> str:

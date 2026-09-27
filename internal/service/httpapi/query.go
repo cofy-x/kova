@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	kovav1 "github.com/cofy-x/kova/internal/apis/kova/v1alpha1"
+	"github.com/cofy-x/kova/internal/service/queueadmission"
 	apiv1 "github.com/cofy-x/kova/pkg/api/v1"
 
 	"github.com/labstack/echo/v4"
@@ -43,6 +44,14 @@ func (s *Server) handleListBuilds(c echo.Context) error {
 func (s *Server) handleGetBuild(c echo.Context) error {
 	build, err := s.getBuild(c.Request().Context(), c.Param("id"))
 	if apierrors.IsNotFound(err) {
+		intent, found, lookupErr := s.queueStore().Lookup(c.Request().Context(), c.Param("id"))
+		if lookupErr != nil {
+			return internalError(c, lookupErr)
+		}
+		principal := principalFromContext(c)
+		if found && (intent.RequesterHash == queueadmission.HashRequester(principal.Username) || s.authorize(c.Request().Context(), principal, "get", c.Param("id")) == nil) {
+			return queueAdmissionPending(c, c.Param("id"))
+		}
 		return notFound(c)
 	}
 	if err != nil {

@@ -153,7 +153,7 @@ def test_create_build_is_not_retried_and_token_is_secret(fake_service: FakeKovaS
             "retryable": True,
         },
         status=429,
-        headers={"Retry-After": "7"},
+        headers={"Retry-After": "7", "X-Kova-Build-ID": "pending-build"},
     )
     config = ClientConfig(base_url=fake_service.url, token="do-not-leak")
     assert "do-not-leak" not in repr(config)
@@ -165,6 +165,7 @@ def test_create_build_is_not_retried_and_token_is_secret(fake_service: FakeKovaS
     assert error.message == "requester queue limit is reached"
     assert error.retryable
     assert error.retry_after == timedelta(seconds=7)
+    assert error.build_id == "pending-build"
     assert "do-not-leak" not in str(error)
     assert sum(item[0:2] == ("POST", "/v1/builds") for item in fake_service.requests) == 1
 

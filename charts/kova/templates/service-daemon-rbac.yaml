@@ -43,7 +43,7 @@ rules:
     verbs: ["create", "patch"]
   - apiGroups: [""]
     resources: ["configmaps"]
-    resourceNames: ["kova-service-admission"]
+    resourceNames: ["kova-service-admission", "kova-service-queue-admission"]
     verbs: ["get", "update"]
   - apiGroups: [""]
     resources: ["configmaps"]

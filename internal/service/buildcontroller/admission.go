@@ -20,7 +20,7 @@ type admissionDecision struct {
 // admission commits a durable reservation before its caller may create a Pod.
 // The ConfigMap resourceVersion serializes grants across reconciles and leaders.
 func (r *KovaBuildReconciler) admission(ctx context.Context, build *kovav1.KovaBuild) (admissionDecision, error) {
-	for {
+	for retry := 0; retry < maxReservationCASAttempts; retry++ {
 		if err := ctx.Err(); err != nil {
 			return admissionDecision{}, err
 		}
@@ -42,6 +42,9 @@ func (r *KovaBuildReconciler) admission(ctx context.Context, build *kovav1.KovaB
 			}
 			return admissionDecision{Admitted: true, Allocation: existing.Slots}, nil
 		}
+		if err := r.queueStoreForNamespace(build.Namespace).VerifyForBuild(ctx, build); err != nil {
+			return admissionDecision{}, err
+		}
 		decision := decideAdmission(build, builds.Items, reservations.Active, r.Cfg.MaxActiveJobs, r.Cfg.MaxActiveJobsPerRequester, r.Cfg.WorkerSlots)
 		if !decision.Admitted {
 			return decision, nil
@@ -49,12 +52,16 @@ func (r *KovaBuildReconciler) admission(ctx context.Context, build *kovav1.KovaB
 		reservations.Active[key] = activeReservation{BuildName: build.Name, Requester: requesterKey(build), Slots: decision.Allocation}
 		if err := r.writeReservations(ctx, cm, reservations); err != nil {
 			if apierrors.IsConflict(err) || apierrors.IsAlreadyExists(err) {
+				if err := waitReservationCAS(ctx, retry); err != nil {
+					return admissionDecision{}, err
+				}
 				continue
 			}
 			return admissionDecision{}, err
 		}
 		return decision, nil
 	}
+	return admissionDecision{}, fmt.Errorf("active admission ledger is busy granting %s/%s", build.Namespace, build.Name)
 }
 
 func decideAdmission(build *kovav1.KovaBuild, builds []kovav1.KovaBuild, active map[string]activeReservation, maxJobs, maxRequesterJobs, workerSlots int) admissionDecision {

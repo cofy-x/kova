@@ -83,6 +83,7 @@ serviceDaemon:
   maxBuildDuration: 2h
   maxActiveJobs: 20
   maxActiveJobsPerRequester: 4
+  maxQueuedJobs: 1000
   maxQueuedJobsPerRequester: 100
   workerSlots: 20
   controllerConcurrency: 4

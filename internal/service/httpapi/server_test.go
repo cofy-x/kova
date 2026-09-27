@@ -15,6 +15,7 @@ import (
 	serviceauth "github.com/cofy-x/kova/internal/service/auth"
 	apiv1 "github.com/cofy-x/kova/pkg/api/v1"
 
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -148,6 +149,9 @@ func TestCreateBuildCreatesCRFromImmutableSource(t *testing.T) {
 	if build.Spec.Build.Format != "oci" || build.Spec.Build.Concurrency != 1 {
 		t.Fatalf("build options = %#v", build.Spec.Build)
 	}
+	if len(build.Finalizers) != 1 || build.Finalizers[0] != kovav1.CleanupFinalizer {
+		t.Fatalf("HTTP-created build lacks initial cleanup finalizer: %#v", build.Finalizers)
+	}
 	if len(build.Spec.Targets) != 1 || build.Spec.Targets[0].Target != "registry.local/example:dev" || build.Spec.Targets[0].Platform != "linux/amd64" {
 		t.Fatalf("build targets = %#v", build.Spec.Targets)
 	}
@@ -159,15 +163,14 @@ func TestCreateBuildCreatesCRFromImmutableSource(t *testing.T) {
 func TestCreateBuildRejectsRequesterQueueOverflow(t *testing.T) {
 	srv := newTestServer(t, &fakeKube{})
 	srv.cfg.MaxQueuedJobsPerRequester = 1
-	existing := &kovav1.KovaBuild{
-		ObjectMeta: metav1.ObjectMeta{Name: "queued", Namespace: "jobs", Labels: map[string]string{requesterLabel: requesterID("test-user")}},
-		Spec:       kovav1.KovaBuildSpec{Requester: kovav1.KovaBuildRequester{Username: "test-user"}},
-		Status:     kovav1.KovaBuildStatus{Phase: kovav1.PhaseQueued},
-	}
-	if err := srv.client.Create(context.Background(), existing); err != nil {
-		t.Fatal(err)
-	}
 	req := multipartBuildRequest(t, map[string]string{"format": "oci", "target": "registry.local/example:dev"})
+	req.Header.Set("Authorization", "Bearer token")
+	first := httptest.NewRecorder()
+	srv.routes().ServeHTTP(first, req)
+	if first.Code != http.StatusAccepted {
+		t.Fatalf("first status=%d body=%s", first.Code, first.Body.String())
+	}
+	req = multipartBuildRequest(t, map[string]string{"format": "oci", "target": "registry.local/example:other"})
 	req.Header.Set("Authorization", "Bearer token")
 	rec := httptest.NewRecorder()
 	srv.routes().ServeHTTP(rec, req)
@@ -459,6 +462,9 @@ func TestCreateBuildIdempotencyUsesStrongReaderAfterAlreadyExists(t *testing.T) 
 	root := t.TempDir()
 	scheme := runtime.NewScheme()
 	if err := kovav1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
 	}
 	strong := crfake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&kovav1.KovaBuild{}).Build()

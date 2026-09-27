@@ -61,6 +61,7 @@ func CLICommand() *cli.Command {
 			&cli.DurationFlag{Name: "max-build-duration", Value: 2 * time.Hour, Usage: "maximum time from runner admission to terminal build status"},
 			&cli.IntFlag{Name: "max-active-jobs", Value: 20, Usage: "maximum concurrently active service jobs"},
 			&cli.IntFlag{Name: "max-active-jobs-per-requester", Value: 4, Usage: "maximum concurrently active jobs for one authenticated requester"},
+			&cli.IntFlag{Name: "max-queued-jobs", Value: 1000, Usage: "maximum globally queued HTTP service jobs (1-1000)"},
 			&cli.IntFlag{Name: "max-queued-jobs-per-requester", Value: 100, Usage: "maximum queued jobs for one authenticated requester"},
 			&cli.IntFlag{Name: "worker-slots", Value: 20, Usage: "total build slots shared fairly across active jobs"},
 			&cli.IntFlag{Name: "controller-concurrency", Value: buildcontract.DefaultControllerConcurrency, Usage: "maximum concurrent KovaBuild reconciliations"},
@@ -100,6 +101,7 @@ func CLICommand() *cli.Command {
 			if err != nil {
 				return err
 			}
+			restConfig = singleAttemptWrites(restConfig)
 			kubeClient, err := kube.NewClientForConfig(restConfig)
 			if err != nil {
 				return err
@@ -136,6 +138,7 @@ func CLICommand() *cli.Command {
 				MaxBuildDuration:          c.Duration("max-build-duration"),
 				MaxActiveJobs:             c.Int("max-active-jobs"),
 				MaxActiveJobsPerRequester: c.Int("max-active-jobs-per-requester"),
+				MaxQueuedJobs:             c.Int("max-queued-jobs"),
 				MaxQueuedJobsPerRequester: c.Int("max-queued-jobs-per-requester"),
 				WorkerSlots:               c.Int("worker-slots"),
 				ControllerConcurrency:     c.Int("controller-concurrency"),
@@ -200,6 +203,12 @@ func validateCapacityConfig(cfg config.Config) error {
 	}
 	if cfg.MaxQueuedJobsPerRequester < 1 {
 		return fmt.Errorf("max-queued-jobs-per-requester must be at least 1")
+	}
+	if cfg.MaxQueuedJobs < 1 || cfg.MaxQueuedJobs > 1000 {
+		return fmt.Errorf("max-queued-jobs must be between 1 and 1000")
+	}
+	if cfg.MaxQueuedJobsPerRequester > cfg.MaxQueuedJobs {
+		return fmt.Errorf("max-queued-jobs-per-requester must not exceed max-queued-jobs")
 	}
 	if cfg.WorkerSlots < 1 {
 		return fmt.Errorf("worker-slots must be at least 1")

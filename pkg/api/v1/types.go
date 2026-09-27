@@ -128,6 +128,7 @@ const (
 	ErrorCodeNotFound              ErrorCode = "not_found"
 	ErrorCodeConflict              ErrorCode = "conflict"
 	ErrorCodeQueueCapacityExceeded ErrorCode = "queue_capacity_exceeded"
+	ErrorCodeQueueAdmissionPending ErrorCode = "queue_admission_pending"
 	ErrorCodeLogsUnavailable       ErrorCode = "logs_unavailable"
 	ErrorCodeInternal              ErrorCode = "internal"
 )

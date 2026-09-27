@@ -53,8 +53,13 @@ func conflict(c echo.Context, message string) error {
 	return writeAPIError(c, http.StatusConflict, apiv1.ErrorCodeConflict, message, false, 0)
 }
 
-func queueCapacityExceeded(c echo.Context) error {
-	return writeAPIError(c, http.StatusTooManyRequests, apiv1.ErrorCodeQueueCapacityExceeded, "requester queue limit is reached", true, 5*time.Second)
+func queueCapacityExceeded(c echo.Context, message string) error {
+	return writeAPIError(c, http.StatusTooManyRequests, apiv1.ErrorCodeQueueCapacityExceeded, message, true, 5*time.Second)
+}
+
+func queueAdmissionPending(c echo.Context, id string) error {
+	c.Response().Header().Set("X-Kova-Build-ID", id)
+	return writeAPIError(c, http.StatusServiceUnavailable, apiv1.ErrorCodeQueueAdmissionPending, "build creation outcome is pending; retry with the same idempotency key or inspect the build ID", true, 5*time.Second)
 }
 
 func logsUnavailable(c echo.Context, status int, message string, retryable bool) error {

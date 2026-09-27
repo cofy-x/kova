@@ -69,7 +69,7 @@ func TestRunnerObservabilityEnvUsesRunnerServiceName(t *testing.T) {
 
 func TestValidateCapacityConfigRejectsUnboundedWorkerSlots(t *testing.T) {
 	valid := config.Config{
-		MaxActiveJobs: 20, MaxActiveJobsPerRequester: 4, MaxQueuedJobsPerRequester: 100,
+		MaxActiveJobs: 20, MaxActiveJobsPerRequester: 4, MaxQueuedJobs: 1000, MaxQueuedJobsPerRequester: 100,
 		WorkerSlots: 20, ControllerConcurrency: buildcontract.DefaultControllerConcurrency,
 		PollRetryWindow: time.Minute, MaxBuildDuration: time.Hour,
 	}

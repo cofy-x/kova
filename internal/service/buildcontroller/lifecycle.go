@@ -10,6 +10,7 @@ import (
 	"github.com/cofy-x/kova/internal/buildcontract"
 	"github.com/cofy-x/kova/internal/runner"
 	"github.com/cofy-x/kova/internal/service/buildresult"
+	"github.com/cofy-x/kova/internal/service/queueadmission"
 	"github.com/cofy-x/kova/internal/service/runnerexec"
 
 	corev1 "k8s.io/api/core/v1"
@@ -40,17 +41,33 @@ func (r *KovaBuildReconciler) startBuild(ctx context.Context, build *kovav1.Kova
 	build = &current
 	decision, err := r.admission(ctx, build)
 	if err != nil {
+		if errors.Is(err, queueadmission.ErrDrift) {
+			if statusErr := r.markAdmissionRecoveryReason(ctx, build, "QueueIntentDrift", "queue intent does not match the build; active admission is blocked"); statusErr != nil {
+				return ctrl.Result{}, statusErr
+			}
+		}
 		return ctrl.Result{}, err
 	}
 	if !decision.Admitted {
 		capacityWaits.Add(ctx, 1)
 		build.Status.Phase = kovav1.PhaseQueued
+		apiMeta.RemoveStatusCondition(&build.Status.Conditions, admissionRecoveryCondition)
 		setPhaseCondition(build, kovav1.PhaseQueued, "WaitingForCapacity", decision.Message)
 		build.Status.ObservedGeneration = build.Generation
 		if err := r.Status().Update(ctx, build); err != nil {
 			return ctrl.Result{}, err
 		}
 		return ctrl.Result{RequeueAfter: r.Cfg.PollInterval}, nil
+	}
+	// The active grant is already durable. Removing its matching queued
+	// intent afterward can temporarily double-count capacity, never overbook.
+	if err := r.queueStoreForNamespace(build.Namespace).ReleaseForBuild(ctx, build); err != nil {
+		if errors.Is(err, queueadmission.ErrDrift) {
+			if statusErr := r.markAdmissionRecoveryReason(ctx, build, "QueueIntentDrift", "queue intent does not match the build; release is blocked"); statusErr != nil {
+				return ctrl.Result{}, statusErr
+			}
+		}
+		return ctrl.Result{}, err
 	}
 	podName := buildPodName(build.Name)
 	pod := runner.PreparePod(runner.ManifestOptions{
@@ -451,6 +468,14 @@ func (r *KovaBuildReconciler) reconcileTerminal(ctx context.Context, build *kova
 		}
 		return ctrl.Result{}, err
 	}
+	if err := r.queueStoreForNamespace(build.Namespace).ReleaseForBuild(ctx, build); err != nil {
+		if errors.Is(err, queueadmission.ErrDrift) {
+			if statusErr := r.markAdmissionRecoveryReason(ctx, build, "QueueIntentDrift", "queue intent does not match the build; release is blocked"); statusErr != nil {
+				return ctrl.Result{}, statusErr
+			}
+		}
+		return ctrl.Result{}, err
+	}
 	if err := r.clearAdmissionRecovery(ctx, build); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -475,6 +500,14 @@ func (r *KovaBuildReconciler) reconcileDelete(ctx context.Context, build *kovav1
 		var recovery *admissionRecoveryError
 		if errors.As(err, &recovery) {
 			if statusErr := r.markAdmissionRecovery(ctx, build, recovery.Pending); statusErr != nil {
+				return ctrl.Result{}, statusErr
+			}
+		}
+		return ctrl.Result{}, err
+	}
+	if err := r.queueStoreForNamespace(build.Namespace).ReleaseForBuild(ctx, build); err != nil {
+		if errors.Is(err, queueadmission.ErrDrift) {
+			if statusErr := r.markAdmissionRecoveryReason(ctx, build, "QueueIntentDrift", "queue intent does not match the build; release is blocked"); statusErr != nil {
 				return ctrl.Result{}, statusErr
 			}
 		}

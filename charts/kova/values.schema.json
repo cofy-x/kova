@@ -112,6 +112,7 @@
         "maxBuildDuration": { "type": "string" },
         "maxActiveJobs": { "type": "integer", "minimum": 1 },
         "maxActiveJobsPerRequester": { "type": "integer", "minimum": 1 },
+        "maxQueuedJobs": { "type": "integer", "minimum": 1, "maximum": 1000 },
         "maxQueuedJobsPerRequester": { "type": "integer", "minimum": 1 },
         "workerSlots": { "type": "integer", "minimum": 1 },
         "controllerConcurrency": { "type": "integer", "minimum": 1, "maximum": 32 },

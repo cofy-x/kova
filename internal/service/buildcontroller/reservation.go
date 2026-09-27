@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	kovav1 "github.com/cofy-x/kova/internal/apis/kova/v1alpha1"
 
@@ -17,9 +18,10 @@ import (
 )
 
 const (
-	reservationConfigMap = "kova-service-admission"
-	reservationDataKey   = "reservations.json"
-	podCreateAttemptKey  = "kova.cofy.dev/create-attempt"
+	reservationConfigMap      = "kova-service-admission"
+	reservationDataKey        = "reservations.json"
+	podCreateAttemptKey       = "kova.cofy.dev/create-attempt"
+	maxReservationCASAttempts = 16
 )
 
 type activeReservation struct {
@@ -30,8 +32,11 @@ type activeReservation struct {
 }
 
 type reservationState struct {
-	Version int                          `json:"version"`
-	Active  map[string]activeReservation `json:"active"`
+	Version         int                          `json:"version"`
+	MaxJobs         int                          `json:"maxJobs"`
+	MaxPerRequester int                          `json:"maxPerRequester"`
+	WorkerSlots     int                          `json:"workerSlots"`
+	Active          map[string]activeReservation `json:"active"`
 }
 
 type admissionRecoveryError struct {
@@ -61,11 +66,14 @@ func (r *KovaBuildReconciler) reader() client.Reader {
 
 func (r *KovaBuildReconciler) readReservations(ctx context.Context, namespace string) (*corev1.ConfigMap, reservationState, error) {
 	key := client.ObjectKey{Namespace: namespace, Name: reservationConfigMap}
-	for {
+	for retry := 0; retry < maxReservationCASAttempts; retry++ {
 		var cm corev1.ConfigMap
 		err := r.reader().Get(ctx, key, &cm)
 		if err == nil {
 			state, err := decodeReservations(&cm)
+			if err == nil {
+				err = r.validateReservationLimits(state)
+			}
 			return &cm, state, err
 		}
 		if !apierrors.IsNotFound(err) {
@@ -85,12 +93,16 @@ func (r *KovaBuildReconciler) readReservations(ctx context.Context, namespace st
 		}
 		if err := r.Create(ctx, &cm); err != nil {
 			if apierrors.IsAlreadyExists(err) {
+				if err := waitReservationCAS(ctx, retry); err != nil {
+					return nil, reservationState{}, err
+				}
 				continue
 			}
 			return nil, reservationState{}, err
 		}
 		return &cm, state, nil
 	}
+	return nil, reservationState{}, fmt.Errorf("active admission ledger is busy initializing in %s", namespace)
 }
 
 func decodeReservations(cm *corev1.ConfigMap) (reservationState, error) {
@@ -98,7 +110,7 @@ func decodeReservations(cm *corev1.ConfigMap) (reservationState, error) {
 	if err := json.Unmarshal([]byte(cm.Data[reservationDataKey]), &state); err != nil {
 		return reservationState{}, fmt.Errorf("admission ledger %s/%s is invalid: %w", cm.Namespace, cm.Name, err)
 	}
-	if state.Version != 1 || state.Active == nil {
+	if state.Version != 1 || state.Active == nil || state.MaxJobs < 0 || state.MaxPerRequester < 0 || state.WorkerSlots < 0 {
 		return reservationState{}, fmt.Errorf("admission ledger %s/%s has an unsupported state", cm.Namespace, cm.Name)
 	}
 	for key, entry := range state.Active {
@@ -116,8 +128,15 @@ func decodeReservations(cm *corev1.ConfigMap) (reservationState, error) {
 	return state, nil
 }
 
+func (r *KovaBuildReconciler) validateReservationLimits(state reservationState) error {
+	if state.MaxJobs != r.Cfg.MaxActiveJobs || state.MaxPerRequester != r.Cfg.MaxActiveJobsPerRequester || state.WorkerSlots != r.Cfg.WorkerSlots {
+		return fmt.Errorf("active admission ledger limits differ from this Service replica")
+	}
+	return nil
+}
+
 func (r *KovaBuildReconciler) seedReservations(ctx context.Context, namespace string) (reservationState, error) {
-	state := reservationState{Version: 1, Active: map[string]activeReservation{}}
+	state := reservationState{Version: 1, MaxJobs: r.Cfg.MaxActiveJobs, MaxPerRequester: r.Cfg.MaxActiveJobsPerRequester, WorkerSlots: r.Cfg.WorkerSlots, Active: map[string]activeReservation{}}
 	var builds kovav1.KovaBuildList
 	if err := r.reader().List(ctx, &builds, client.InNamespace(namespace)); err != nil {
 		return reservationState{}, err
@@ -173,9 +192,21 @@ func (r *KovaBuildReconciler) writeReservations(ctx context.Context, cm *corev1.
 	return r.Update(ctx, copy)
 }
 
+func waitReservationCAS(ctx context.Context, retry int) error {
+	delay := time.Duration(1<<min(retry, 5)) * time.Millisecond
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
 func (r *KovaBuildReconciler) releaseReservation(ctx context.Context, build *kovav1.KovaBuild) error {
 	key := client.ObjectKey{Namespace: build.Namespace, Name: reservationConfigMap}
-	for {
+	for retry := 0; retry < maxReservationCASAttempts; retry++ {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -185,6 +216,9 @@ func (r *KovaBuildReconciler) releaseReservation(ctx context.Context, build *kov
 		}
 		state, err := decodeReservations(&cm)
 		if err != nil {
+			return err
+		}
+		if err := r.validateReservationLimits(state); err != nil {
 			return err
 		}
 		entry, ok := state.Active[reservationKey(build)]
@@ -200,12 +234,16 @@ func (r *KovaBuildReconciler) releaseReservation(ctx context.Context, build *kov
 		delete(state.Active, reservationKey(build))
 		if err := r.writeReservations(ctx, &cm, state); err != nil {
 			if apierrors.IsConflict(err) {
+				if err := waitReservationCAS(ctx, retry); err != nil {
+					return err
+				}
 				continue
 			}
 			return err
 		}
 		return nil
 	}
+	return fmt.Errorf("active admission ledger is busy releasing %s/%s", build.Namespace, build.Name)
 }
 
 func newPodCreateAttempt() (string, error) {
@@ -223,7 +261,7 @@ func (r *KovaBuildReconciler) beginPodCreate(ctx context.Context, build *kovav1.
 	if err != nil {
 		return "", err
 	}
-	for {
+	for retry := 0; retry < maxReservationCASAttempts; retry++ {
 		if err := ctx.Err(); err != nil {
 			return "", err
 		}
@@ -242,6 +280,9 @@ func (r *KovaBuildReconciler) beginPodCreate(ctx context.Context, build *kovav1.
 		state.Active[reservationKey(build)] = entry
 		if err := r.writeReservations(ctx, cm, state); err != nil {
 			if apierrors.IsConflict(err) {
+				if err := waitReservationCAS(ctx, retry); err != nil {
+					return "", err
+				}
 				continue
 			}
 			// A lost Update response is not proof that the nonce was absent.
@@ -254,12 +295,13 @@ func (r *KovaBuildReconciler) beginPodCreate(ctx context.Context, build *kovav1.
 		}
 		return attempt, nil
 	}
+	return "", fmt.Errorf("active admission ledger is busy starting Pod create for %s/%s", build.Namespace, build.Name)
 }
 
 // completePodCreate is only called after a definitive Create success or
 // AlreadyExists response, or after observing the Pod with this exact nonce.
 func (r *KovaBuildReconciler) completePodCreate(ctx context.Context, build *kovav1.KovaBuild, attempt string) error {
-	for {
+	for retry := 0; retry < maxReservationCASAttempts; retry++ {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -285,6 +327,9 @@ func (r *KovaBuildReconciler) completePodCreate(ctx context.Context, build *kova
 		state.Active[reservationKey(build)] = entry
 		if err := r.writeReservations(ctx, cm, state); err != nil {
 			if apierrors.IsConflict(err) {
+				if err := waitReservationCAS(ctx, retry); err != nil {
+					return err
+				}
 				continue
 			}
 			if recorded, readErr := r.podCreateAttemptRecorded(ctx, build, attempt); readErr == nil && !recorded {
@@ -294,6 +339,7 @@ func (r *KovaBuildReconciler) completePodCreate(ctx context.Context, build *kova
 		}
 		return nil
 	}
+	return fmt.Errorf("active admission ledger is busy completing Pod create for %s/%s", build.Namespace, build.Name)
 }
 
 func (r *KovaBuildReconciler) podCreateAttemptRecorded(ctx context.Context, build *kovav1.KovaBuild, attempt string) (bool, error) {

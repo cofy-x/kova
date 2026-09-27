@@ -19,6 +19,7 @@ const (
 	Version = "v1alpha1"
 
 	CancellationRequestedAnnotation = "kova.cofy.dev/cancellation-requested-at"
+	CleanupFinalizer                = "kova.cofy.dev/cleanup"
 
 	PhaseQueued    = "Queued"
 	PhaseStarting  = "Starting"

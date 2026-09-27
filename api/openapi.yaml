@@ -60,6 +60,8 @@ paths:
           $ref: "#/components/responses/Conflict"
         "429":
           $ref: "#/components/responses/QueueCapacityExceeded"
+        "503":
+          $ref: "#/components/responses/QueueAdmissionPending"
         "500":
           $ref: "#/components/responses/InternalError"
     get:
@@ -105,6 +107,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/BuildJob"
+        "503":
+          $ref: "#/components/responses/QueueAdmissionPending"
         "401":
           $ref: "#/components/responses/Unauthenticated"
         "403":
@@ -248,7 +252,7 @@ components:
           schema:
             $ref: "#/components/schemas/ConflictError"
     QueueCapacityExceeded:
-      description: The caller has reached its bounded queued-build capacity.
+      description: The global or requester queued-build limit was reached, or admission CAS contention requires a retry.
       headers:
         Retry-After:
           $ref: "#/components/headers/RetryAfter"
@@ -256,6 +260,19 @@ components:
         application/json:
           schema:
             $ref: "#/components/schemas/QueueCapacityExceededError"
+    QueueAdmissionPending:
+      description: A queue intent exists but its CR Create outcome is not yet observable; the same intent must not issue a second Create.
+      headers:
+        Retry-After:
+          $ref: "#/components/headers/RetryAfter"
+        X-Kova-Build-ID:
+          description: Build ID whose queue intent is pending and must be investigated if it does not resolve.
+          schema:
+            type: string
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/QueueAdmissionPendingError"
     LogsUnavailable:
       description: Ephemeral logs are not currently or no longer available.
       content:
@@ -460,7 +477,7 @@ components:
       properties:
         code:
           type: string
-          enum: [invalid_request, unauthenticated, forbidden, not_found, conflict, queue_capacity_exceeded, logs_unavailable, internal]
+          enum: [invalid_request, unauthenticated, forbidden, not_found, conflict, queue_capacity_exceeded, queue_admission_pending, logs_unavailable, internal]
         message:
           type: string
         retryable:
@@ -517,6 +534,15 @@ components:
           properties:
             code:
               const: queue_capacity_exceeded
+            retryable:
+              const: true
+    QueueAdmissionPendingError:
+      allOf:
+        - $ref: "#/components/schemas/ErrorResponse"
+        - type: object
+          properties:
+            code:
+              const: queue_admission_pending
             retryable:
               const: true
     LogsUnavailableError:

@@ -11,6 +11,7 @@ import (
 	"github.com/cofy-x/kova/internal/observability"
 	serviceauth "github.com/cofy-x/kova/internal/service/auth"
 	"github.com/cofy-x/kova/internal/service/config"
+	"github.com/cofy-x/kova/internal/service/queueadmission"
 	"github.com/cofy-x/kova/internal/version"
 	apiv1 "github.com/cofy-x/kova/pkg/api/v1"
 
@@ -54,6 +55,13 @@ func NewServer(cfg config.Config, kube kubeAPI, crClient client.Client, crReader
 		crReader = crClient
 	}
 	return &Server{cfg: cfg, kube: kube, client: crClient, reader: crReader, auth: authenticator, authz: authorizer}
+}
+
+func (s *Server) queueStore() queueadmission.Store {
+	return queueadmission.Store{
+		Client: s.client, Reader: s.reader, Namespace: s.cfg.Namespace,
+		GlobalLimit: s.cfg.MaxQueuedJobs, RequesterLimit: s.cfg.MaxQueuedJobsPerRequester,
+	}
 }
 
 func (s *Server) Start(ctx context.Context) error {

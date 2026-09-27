@@ -237,7 +237,7 @@ curl -sS -X POST "$BASE/v1/builds" \
   }'
 ```
 
-The first request returns `202 Accepted`.
+The first request returns `202 Accepted` after an atomic queue-intent reservation.
 Repeating the same caller-scoped idempotency key with identical inputs returns the existing build; changing any immutable input returns `409 Conflict`.
 Unknown fields and mutable source references are rejected.
 
@@ -277,7 +277,7 @@ All Service API failures use a structured response:
 ```json
 {
   "code": "queue_capacity_exceeded",
-  "message": "requester queue limit is reached",
+  "message": "queue limit is reached",
   "retryable": true
 }
 ```
@@ -290,16 +290,14 @@ All Service API failures use a structured response:
 | `not_found` | 404 | False; the job may never have existed or its TTL may have expired. |
 | `conflict` | 409 | False; the idempotency key is bound to different immutable inputs. |
 | `queue_capacity_exceeded` | 429 | True; respect `Retry-After` before making a new idempotent submission attempt. |
+| `queue_admission_pending` | 503 | True; one CR Create has an unknown or not-yet-observed outcome. Retry with the **same** idempotency key or inspect the `X-Kova-Build-ID`; do not submit a new key to recover this intent. |
 | `logs_unavailable` | 404 or 410 | True before a runner starts and false after terminal cleanup begins. |
 | `internal` | 500 or 503 | True only for transient service failures; false for deterministic service configuration or stored-contract failures. Mutating retries still require an idempotency key. |
 
 Non-administrative responses do not include raw Kubernetes, runner, Pod, registry credential, or implementation errors.
 Detailed implementation failures remain in operator-controlled logs and Kubernetes status rather than the public error response.
 
-The current per-requester queued-build check is a best-effort API backpressure signal.
-Concurrent HTTP requests, including requests handled by different replicas, can pass the check together; there is no global queued-build cap yet.
-Do not treat `maxQueuedJobsPerRequester` or a missing 429 response as a strict quota.
-The remaining design and failure cases are recorded in the [Service admission design](service-admission-design.md).
+HTTP submissions reserve in a single CAS queue ledger before CR creation. It applies both `maxQueuedJobs` (global, at most 1000) and `maxQueuedJobsPerRequester` across Service replicas. Direct/admin-created CRs are **outside** these HTTP queue limits, but their runner admission still uses the active hard limit. Unknown CR Create results keep their intent; the authenticated caller can query `GET /v1/builds/<id>` for a pending error when no CR is visible. Both SDKs expose the Build ID on API errors. A pending intent may require operator recovery and must not be released merely because the CR is absent. The exact safety conditions and upgrade barrier are in the [Service admission design](service-admission-design.md).
 If an earlier runner Pod Create has an unknown outcome, the build reports `recovery_required=true` while its capacity remains reserved; an operator must resolve the recorded attempt before that slot can be reused.
 
 ## Helm Configuration
@@ -313,6 +311,7 @@ serviceDaemon:
     mode: tokenreview
   maxActiveJobs: 20
   maxActiveJobsPerRequester: 4
+  maxQueuedJobs: 1000
   maxQueuedJobsPerRequester: 100
   workerSlots: 40
   controllerConcurrency: 4

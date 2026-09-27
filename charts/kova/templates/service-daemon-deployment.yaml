@@ -78,6 +78,7 @@ spec:
             - --max-build-duration={{ .Values.serviceDaemon.maxBuildDuration }}
             - --max-active-jobs={{ .Values.serviceDaemon.maxActiveJobs }}
             - --max-active-jobs-per-requester={{ .Values.serviceDaemon.maxActiveJobsPerRequester }}
+            - --max-queued-jobs={{ .Values.serviceDaemon.maxQueuedJobs }}
             - --max-queued-jobs-per-requester={{ .Values.serviceDaemon.maxQueuedJobsPerRequester }}
             - --worker-slots={{ .Values.serviceDaemon.workerSlots }}
             - --controller-concurrency={{ .Values.serviceDaemon.controllerConcurrency }}
