@@ -11,6 +11,7 @@ import (
 
 	kovav1 "github.com/cofy-x/kova/internal/apis/kova/v1alpha1"
 	"github.com/cofy-x/kova/internal/service/config"
+	"github.com/cofy-x/kova/internal/service/queueadmission"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -87,20 +88,38 @@ func (r *KovaBuildReconciler) ensureLiveAdmissionBuild(ctx context.Context, buil
 
 func (r *KovaBuildReconciler) readReservations(ctx context.Context, namespace string) (*corev1.ConfigMap, reservationState, error) {
 	key := client.ObjectKey{Namespace: namespace, Name: reservationConfigMap}
+	var cm corev1.ConfigMap
+	if err := r.reader().Get(ctx, key, &cm); err != nil {
+		return nil, reservationState{}, err
+	}
+	state, err := decodeReservations(&cm)
+	if err == nil {
+		err = r.validateReservationLimits(state)
+	}
+	return &cm, state, err
+}
+
+func (r *KovaBuildReconciler) initializeReservations(ctx context.Context, namespace string) (*corev1.ConfigMap, reservationState, error) {
 	for retry := 0; retry < maxReservationCASAttempts; retry++ {
-		var cm corev1.ConfigMap
-		err := r.reader().Get(ctx, key, &cm)
+		cm, state, err := r.readReservations(ctx, namespace)
 		if err == nil {
-			state, err := decodeReservations(&cm)
-			if err == nil {
-				err = r.validateReservationLimits(state)
-			}
-			return &cm, state, err
+			return cm, state, nil
 		}
 		if !apierrors.IsNotFound(err) {
 			return nil, reservationState{}, err
 		}
-		state, err := r.seedReservations(ctx, namespace)
+		// On a fresh namespace the active ledger is created before the queue
+		// ledger. An existing queue ledger proves the active ledger existed
+		// before: even an empty CR/Pod List cannot disprove a late Pod Create
+		// using an in-flight nonce from that deleted ledger.
+		var queueCM corev1.ConfigMap
+		queueErr := r.reader().Get(ctx, client.ObjectKey{Namespace: namespace, Name: queueadmission.ConfigMapName}, &queueCM)
+		if queueErr == nil {
+			return nil, reservationState{}, fmt.Errorf("active admission ledger is absent while queue admission ledger exists in %s; inspect recovery evidence before migration", namespace)
+		} else if !apierrors.IsNotFound(queueErr) {
+			return nil, reservationState{}, queueErr
+		}
+		state, err = r.seedReservations(ctx, namespace)
 		if err != nil {
 			return nil, reservationState{}, err
 		}
@@ -108,11 +127,11 @@ func (r *KovaBuildReconciler) readReservations(ctx context.Context, namespace st
 		if err != nil {
 			return nil, reservationState{}, err
 		}
-		cm = corev1.ConfigMap{
+		cm = &corev1.ConfigMap{
 			ObjectMeta: metav1.ObjectMeta{Name: reservationConfigMap, Namespace: namespace},
 			Data:       map[string]string{reservationDataKey: string(data)},
 		}
-		if err := r.Create(ctx, &cm); err != nil {
+		if err := r.Create(ctx, cm); err != nil {
 			if apierrors.IsAlreadyExists(err) {
 				if err := waitReservationCAS(ctx, retry); err != nil {
 					return nil, reservationState{}, err
@@ -121,7 +140,7 @@ func (r *KovaBuildReconciler) readReservations(ctx context.Context, namespace st
 			}
 			return nil, reservationState{}, err
 		}
-		return &cm, state, nil
+		return cm, state, nil
 	}
 	return nil, reservationState{}, fmt.Errorf("active admission ledger is busy initializing in %s", namespace)
 }
@@ -130,7 +149,7 @@ func (r *KovaBuildReconciler) readReservations(ctx context.Context, namespace st
 // opens. Subsequent readiness checks are deliberately read-only.
 func EnsureAdmissionLedger(ctx context.Context, writer client.Client, reader client.Reader, namespace string, cfg config.Config) error {
 	r := &KovaBuildReconciler{Client: writer, APIReader: reader, Cfg: cfg}
-	_, _, err := r.readReservations(ctx, namespace)
+	_, _, err := r.initializeReservations(ctx, namespace)
 	return err
 }
 

@@ -69,6 +69,18 @@ func TestMissingQueueLedgerIsNotRecreatedOnServiceRestart(t *testing.T) {
 	}
 }
 
+func TestMissingActiveLedgerIsNotRecreatedOnServiceRestartEvenWhenEmpty(t *testing.T) {
+	srv := newTestServer(t, &fakeKube{})
+	deleteReadinessLedger(t, srv, "kova-service-admission")
+	if err := srv.initializeAdmission(context.Background()); err == nil {
+		t.Fatal("startup recreated a missing active ledger while queue ledger existed")
+	}
+	var cm corev1.ConfigMap
+	if err := srv.reader.Get(context.Background(), kubeObjectKey(srv.cfg.Namespace, "kova-service-admission"), &cm); !apierrors.IsNotFound(err) {
+		t.Fatalf("active ledger after refused restart: %v", err)
+	}
+}
+
 func readinessCode(srv *Server) int {
 	rec := httptest.NewRecorder()
 	srv.routes().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/readyz", nil))

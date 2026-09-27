@@ -101,9 +101,7 @@ func TestCleanupFenceDefeatsPausedAdmissionCAS(t *testing.T) {
 			base := crfake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&kovav1.KovaBuild{}).WithObjects(build).Build()
 			cfg := admissionConfig()
 			newLeader := KovaBuildReconciler{Client: base, APIReader: base, Scheme: scheme, Kube: &fakeKube{}, Cfg: cfg}
-			if _, _, err := newLeader.readReservations(ctx, "jobs"); err != nil {
-				t.Fatal(err)
-			}
+			initializeAdmissionForTest(t, &newLeader)
 			paused := &pausedActiveGrantUpdate{Client: base, entered: make(chan struct{}), release: make(chan struct{})}
 			oldLeader := KovaBuildReconciler{Client: paused, APIReader: base, Scheme: scheme, Kube: &fakeKube{}, Cfg: cfg}
 			request := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "jobs", Name: "a"}}
@@ -175,6 +173,7 @@ func TestCleanupRechecksPodAfterEarlierInFlightCreateCompletes(t *testing.T) {
 	build := queuedBuild("a", "alice", 1, 1)
 	base := crfake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&kovav1.KovaBuild{}).WithObjects(build).Build()
 	oldLeader := KovaBuildReconciler{Client: base, APIReader: base, Scheme: scheme, Kube: &fakeKube{podClient: base}, Cfg: admissionConfig()}
+	initializeAdmissionForTest(t, &oldLeader)
 	if decision, err := oldLeader.admission(ctx, build); err != nil || !decision.Admitted {
 		t.Fatalf("old grant=%#v err=%v", decision, err)
 	}
@@ -267,6 +266,7 @@ func TestPodCreateFenceSurvivesLostLedgerResponse(t *testing.T) {
 			base := crfake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&kovav1.KovaBuild{}).WithObjects(build).Build()
 			uncertain := &uncertainConfigMapUpdate{Client: base, failAt: failAt}
 			r := KovaBuildReconciler{Client: uncertain, APIReader: base, Scheme: scheme, Kube: &fakeKube{}, Cfg: admissionConfig()}
+			initializeAdmissionForTest(t, &r)
 			if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "jobs", Name: "a"}}); err != nil {
 				t.Fatal(err)
 			}
@@ -297,6 +297,7 @@ func TestRestartedControllerDoesNotRetryUnresolvedPodCreate(t *testing.T) {
 	build := queuedBuild("a", "alice", 1, 1)
 	base := crfake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&kovav1.KovaBuild{}).WithObjects(build).Build()
 	r := KovaBuildReconciler{Client: base, APIReader: base, Scheme: scheme, Kube: &fakeKube{}, Cfg: admissionConfig()}
+	initializeAdmissionForTest(t, &r)
 	if decision, err := r.admission(context.Background(), build); err != nil || !decision.Admitted {
 		t.Fatalf("initial admission = %#v, %v", decision, err)
 	}
@@ -359,6 +360,7 @@ func TestDefinitivePodCreateRejectionReleasesNonceAndCapacity(t *testing.T) {
 	build := queuedBuild("rejected", "alice", 1, 1)
 	base := crfake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&kovav1.KovaBuild{}).WithObjects(build).Build()
 	r := KovaBuildReconciler{Client: forbiddenPodCreate{Client: base}, APIReader: base, Scheme: scheme, Kube: &fakeKube{}, Cfg: admissionConfig()}
+	initializeAdmissionForTest(t, &r)
 	request := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "jobs", Name: build.Name}}
 	if _, err := r.Reconcile(ctx, request); err != nil {
 		t.Fatal(err)
@@ -448,6 +450,87 @@ func admissionConfig() config.Config {
 	}
 }
 
+func initializeAdmissionForTest(t *testing.T, r *KovaBuildReconciler) {
+	t.Helper()
+	if _, _, err := r.initializeReservations(context.Background(), "jobs"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestMissingActiveLedgerAfterStartupFailsClosed(t *testing.T) {
+	for _, mode := range []string{"admit", "fence", "terminal", "delete"} {
+		t.Run(mode, func(t *testing.T) {
+			ctx := context.Background()
+			base := crfake.NewClientBuilder().WithScheme(testScheme(t)).WithStatusSubresource(&kovav1.KovaBuild{}).Build()
+			cfg := admissionConfig()
+			queue := queueadmission.Store{Client: base, Reader: base, Namespace: "jobs", GlobalLimit: cfg.MaxQueuedJobs, RequesterLimit: cfg.MaxQueuedJobsPerRequester}
+			r := KovaBuildReconciler{Client: base, APIReader: base, Cfg: cfg}
+			initializeAdmissionForTest(t, &r)
+			if err := queue.EnsureInitialized(ctx); err != nil {
+				t.Fatal(err)
+			}
+			build := queuedBuild("a", "alice", 1, 1)
+			if err := base.Create(ctx, build); err != nil {
+				t.Fatal(err)
+			}
+			if mode == "terminal" {
+				build.Status.Phase = kovav1.PhaseFailed
+				if err := base.Status().Update(ctx, build); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var cm corev1.ConfigMap
+			key := client.ObjectKey{Namespace: "jobs", Name: reservationConfigMap}
+			if err := base.Get(ctx, key, &cm); err != nil {
+				t.Fatal(err)
+			}
+			if err := base.Delete(ctx, &cm); err != nil {
+				t.Fatal(err)
+			}
+			var err error
+			switch mode {
+			case "admit":
+				_, err = r.admission(ctx, build)
+			case "fence":
+				err = r.fenceReservation(ctx, build)
+			case "terminal":
+				_, err = r.reconcileTerminal(ctx, build)
+			case "delete":
+				_, err = r.reconcileDelete(ctx, build)
+			}
+			if !apierrors.IsNotFound(err) {
+				t.Fatalf("missing active ledger did not block %s: %v", mode, err)
+			}
+			if err := base.Get(ctx, key, &cm); !apierrors.IsNotFound(err) {
+				t.Fatalf("%s recreated missing active ledger: %v", mode, err)
+			}
+			var pods corev1.PodList
+			if err := base.List(ctx, &pods, client.InNamespace("jobs")); err != nil || len(pods.Items) != 0 {
+				t.Fatalf("%s created runner Pod: %d, err=%v", mode, len(pods.Items), err)
+			}
+			if err := EnsureAdmissionLedger(ctx, base, base, "jobs", cfg); err == nil {
+				t.Fatalf("startup recreated missing active ledger while build exists after %s", mode)
+			}
+		})
+	}
+}
+
+func TestStartupCreatesActiveLedgerInEmptyNamespace(t *testing.T) {
+	ctx := context.Background()
+	base := crfake.NewClientBuilder().WithScheme(testScheme(t)).Build()
+	cfg := admissionConfig()
+	queue := queueadmission.Store{Client: base, Reader: base, Namespace: "jobs", GlobalLimit: cfg.MaxQueuedJobs, RequesterLimit: cfg.MaxQueuedJobsPerRequester}
+	if err := EnsureAdmissionLedger(ctx, base, base, "jobs", cfg); err != nil {
+		t.Fatal(err)
+	}
+	if err := queue.EnsureInitialized(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckAdmissionLedger(ctx, base, "jobs", cfg); err != nil {
+		t.Fatal(err)
+	}
+}
+
 type countingStatusClient struct {
 	client.Client
 	writes int
@@ -475,6 +558,7 @@ func TestUnchangedCapacityWaitDoesNotRewriteBuildStatus(t *testing.T) {
 	cfg.MaxActiveJobs, cfg.WorkerSlots = 1, 1
 	counted := &countingStatusClient{Client: base}
 	r := KovaBuildReconciler{Client: counted, APIReader: base, Cfg: cfg}
+	initializeAdmissionForTest(t, &r)
 	if decision, err := r.admission(context.Background(), a); err != nil || !decision.Admitted {
 		t.Fatalf("blocker admission = %#v, err=%v", decision, err)
 	}
@@ -499,6 +583,9 @@ func TestQueueIntentReleasesOnlyAfterActiveGrant(t *testing.T) {
 	cfg := admissionConfig()
 	cfg.MaxActiveJobs, cfg.WorkerSlots = 1, 1
 	cfg.MaxQueuedJobs, cfg.MaxQueuedJobsPerRequester = 1, 1
+	if err := EnsureAdmissionLedger(context.Background(), base, base, "jobs", cfg); err != nil {
+		t.Fatal(err)
+	}
 	store := queueadmission.Store{Client: base, Reader: base, Namespace: "jobs", GlobalLimit: 1, RequesterLimit: 1}
 	if err := store.EnsureInitialized(context.Background()); err != nil {
 		t.Fatal(err)
@@ -535,6 +622,7 @@ func TestActiveLedgerRejectsReplicaWithDifferentLimits(t *testing.T) {
 	base := crfake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&kovav1.KovaBuild{}).WithObjects(a, b).Build()
 	cfg := admissionConfig()
 	r1 := KovaBuildReconciler{Client: base, APIReader: base, Cfg: cfg}
+	initializeAdmissionForTest(t, &r1)
 	if decision, err := r1.admission(context.Background(), a); err != nil || !decision.Admitted {
 		t.Fatalf("first replica admission=%#v err=%v", decision, err)
 	}
@@ -560,6 +648,9 @@ func TestFailedQueueReleaseOvercountsUntilControllerRestart(t *testing.T) {
 	cfg := admissionConfig()
 	cfg.MaxActiveJobs, cfg.WorkerSlots = 1, 1
 	cfg.MaxQueuedJobs, cfg.MaxQueuedJobsPerRequester = 1, 1
+	if err := EnsureAdmissionLedger(context.Background(), base, base, "jobs", cfg); err != nil {
+		t.Fatal(err)
+	}
 	store := queueadmission.Store{Client: base, Reader: base, Namespace: "jobs", GlobalLimit: 1, RequesterLimit: 1}
 	if err := store.EnsureInitialized(context.Background()); err != nil {
 		t.Fatal(err)
@@ -603,6 +694,7 @@ func TestUnreservedHTTPBuildCannotReachActivePod(t *testing.T) {
 	build.Annotations = map[string]string{queueadmission.IntentAnnotation: "00112233445566778899aabbccddeeff"}
 	base := crfake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&kovav1.KovaBuild{}).WithObjects(build).Build()
 	r := KovaBuildReconciler{Client: base, APIReader: base, Scheme: scheme, Kube: &fakeKube{}, Cfg: admissionConfig()}
+	initializeAdmissionForTest(t, &r)
 	if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "jobs", Name: "a"}}); !errors.Is(err, queueadmission.ErrDrift) {
 		t.Fatalf("missing queue intent did not fail closed: %v", err)
 	}
@@ -624,6 +716,10 @@ func TestTerminalAndDeletionReleaseQueuedIntentAfterPodCheck(t *testing.T) {
 		t.Run(fmt.Sprintf("deleting-%t", deleting), func(t *testing.T) {
 			scheme := testScheme(t)
 			base := crfake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&kovav1.KovaBuild{}).Build()
+			cfg := admissionConfig()
+			cfg.MaxQueuedJobs, cfg.MaxQueuedJobsPerRequester = 1, 1
+			r := KovaBuildReconciler{Client: base, APIReader: base, Scheme: scheme, Kube: &fakeKube{}, Cfg: cfg}
+			initializeAdmissionForTest(t, &r)
 			store := queueadmission.Store{Client: base, Reader: base, Namespace: "jobs", GlobalLimit: 1, RequesterLimit: 1}
 			if err := store.EnsureInitialized(context.Background()); err != nil {
 				t.Fatal(err)
@@ -637,9 +733,6 @@ func TestTerminalAndDeletionReleaseQueuedIntentAfterPodCheck(t *testing.T) {
 			if err := base.Create(context.Background(), build); err != nil {
 				t.Fatal(err)
 			}
-			cfg := admissionConfig()
-			cfg.MaxQueuedJobs, cfg.MaxQueuedJobsPerRequester = 1, 1
-			r := KovaBuildReconciler{Client: base, APIReader: base, Scheme: scheme, Kube: &fakeKube{}, Cfg: cfg}
 			if deleting {
 				if _, err := r.reconcileDelete(context.Background(), build); err != nil {
 					t.Fatal(err)
@@ -675,6 +768,7 @@ func TestConcurrentReconcilesReserveBeforePodWithStaleCache(t *testing.T) {
 	// A manager cache stuck at an empty List cannot affect admission or counts.
 	r1 := KovaBuildReconciler{Client: emptyCachedBuildList{base}, APIReader: base, Scheme: scheme, Kube: &fakeKube{}, Cfg: admissionConfig()}
 	r2 := KovaBuildReconciler{Client: emptyCachedBuildList{base}, APIReader: base, Scheme: scheme, Kube: &fakeKube{}, Cfg: admissionConfig()}
+	initializeAdmissionForTest(t, &r1)
 	var wg sync.WaitGroup
 	errCh := make(chan error, len(builds))
 	for i, build := range builds {
@@ -762,6 +856,7 @@ func TestReservationSurvivesUnknownWriteAndRestart(t *testing.T) {
 	cfg.MaxActiveJobs, cfg.WorkerSlots = 1, 1
 	uncertain := &uncertainConfigMapUpdate{Client: base}
 	r1 := KovaBuildReconciler{Client: uncertain, APIReader: base, Scheme: scheme, Kube: &fakeKube{}, Cfg: cfg}
+	initializeAdmissionForTest(t, &r1)
 	if _, err := r1.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "jobs", Name: "a"}}); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("first reconcile error = %v", err)
 	}
@@ -826,6 +921,7 @@ func TestPodCreateUnknownResultAndStatusFailureHoldCapacity(t *testing.T) {
 				writer = &statusFailureClient{Client: base, writer: &failedStartingStatus{SubResourceWriter: base.Status()}}
 			}
 			r1 := KovaBuildReconciler{Client: writer, APIReader: base, Scheme: scheme, Kube: &fakeKube{}, Cfg: cfg}
+			initializeAdmissionForTest(t, &r1)
 			if _, err := r1.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "jobs", Name: "a"}}); mode == "status-update" && err == nil {
 				t.Fatal("injected status failure did not reach reconcile")
 			}
@@ -879,9 +975,7 @@ func TestMissingReservationForLivePodFailsClosed(t *testing.T) {
 	b := queuedBuild("b", "bob", 2, 1)
 	base := crfake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&kovav1.KovaBuild{}).WithObjects(a, b).Build()
 	r := KovaBuildReconciler{Client: base, APIReader: base, Scheme: scheme, Kube: &fakeKube{}, Cfg: admissionConfig()}
-	if _, _, err := r.readReservations(context.Background(), "jobs"); err != nil {
-		t.Fatal(err)
-	}
+	initializeAdmissionForTest(t, &r)
 	if err := base.Create(context.Background(), testRunnerPod(a)); err != nil {
 		t.Fatal(err)
 	}
@@ -899,6 +993,7 @@ func TestFailedPodCleanupRetainsReservation(t *testing.T) {
 	base := crfake.NewClientBuilder().WithScheme(testScheme(t)).WithStatusSubresource(&kovav1.KovaBuild{}).WithObjects(build, testRunnerPod(build)).Build()
 	kube := &fakeKube{podClient: base, deleteErr: errors.New("injected delete failure")}
 	r := KovaBuildReconciler{Client: base, APIReader: base, Kube: kube, Cfg: admissionConfig()}
+	initializeAdmissionForTest(t, &r)
 	if _, state, err := r.readReservations(context.Background(), "jobs"); err != nil || len(state.Active) != 1 {
 		t.Fatalf("initial ledger = %#v, err=%v", state, err)
 	}
@@ -930,6 +1025,7 @@ func TestLateOldLeaderPodCreateCannotEscapeReservation(t *testing.T) {
 	cfg.MaxActiveJobs, cfg.WorkerSlots = 1, 1
 	oldLeader := KovaBuildReconciler{Client: base, APIReader: base, Scheme: scheme, Kube: &fakeKube{}, Cfg: cfg}
 	newLeader := KovaBuildReconciler{Client: base, APIReader: base, Scheme: scheme, Kube: &fakeKube{podClient: base}, Cfg: cfg}
+	initializeAdmissionForTest(t, &oldLeader)
 	if decision, err := oldLeader.admission(context.Background(), a); err != nil || !decision.Admitted {
 		t.Fatalf("old leader reservation = %#v, err=%v", decision, err)
 	}

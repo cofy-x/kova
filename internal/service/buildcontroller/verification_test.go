@@ -78,6 +78,7 @@ func TestVerificationRetriesTransientExportAfterControllerRestartWithoutRepost(t
 	}}
 	cfg := config.Config{VerificationAttemptTimeout: time.Second, VerificationWindow: time.Minute, RegistryPlainHTTP: []string{host}}
 	r := KovaBuildReconciler{Client: client, Scheme: testScheme(t), Kube: kubeClient, Cfg: cfg}
+	initializeAdmissionForTest(t, &r)
 	key := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: build.Namespace, Name: build.Name}}
 	if _, err := r.Reconcile(context.Background(), key); err != nil {
 		t.Fatal(err)
@@ -120,6 +121,7 @@ func TestVerificationFailsImmediatelyOnPlatformMismatch(t *testing.T) {
 	client := crfake.NewClientBuilder().WithScheme(testScheme(t)).WithStatusSubresource(&kovav1.KovaBuild{}).WithObjects(build, testRunnerPod(build)).Build()
 	kubeClient := &fakeKube{podClient: client, execFn: func(kube.ExecOptions) error { t.Fatal("digest receipt should skip runner export"); return nil }}
 	r := KovaBuildReconciler{Client: client, Scheme: testScheme(t), Kube: kubeClient, Cfg: config.Config{RegistryPlainHTTP: []string{host}}}
+	initializeAdmissionForTest(t, &r)
 	if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: build.Namespace, Name: build.Name}}); err != nil {
 		t.Fatal(err)
 	}
@@ -141,6 +143,7 @@ func TestCancellationOfVerifyingBuildSkipsRunnerAndDeletesPod(t *testing.T) {
 	client := crfake.NewClientBuilder().WithScheme(testScheme(t)).WithStatusSubresource(&kovav1.KovaBuild{}).WithObjects(build, testRunnerPod(build)).Build()
 	kubeClient := &fakeKube{podClient: client, execFn: func(kube.ExecOptions) error { t.Fatal("cancelled verification must not call runner"); return nil }}
 	r := KovaBuildReconciler{Client: client, Scheme: testScheme(t), Kube: kubeClient}
+	initializeAdmissionForTest(t, &r)
 	if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: build.Namespace, Name: build.Name}}); err != nil {
 		t.Fatal(err)
 	}
@@ -161,6 +164,7 @@ func TestVerificationDeadlineFailsPendingOutputWithoutRunnerPost(t *testing.T) {
 	client := crfake.NewClientBuilder().WithScheme(testScheme(t)).WithStatusSubresource(&kovav1.KovaBuild{}).WithObjects(build, testRunnerPod(build)).Build()
 	kubeClient := &fakeKube{podClient: client, execFn: func(kube.ExecOptions) error { t.Fatal("expired verification must not call runner"); return nil }}
 	r := KovaBuildReconciler{Client: client, Scheme: testScheme(t), Kube: kubeClient}
+	initializeAdmissionForTest(t, &r)
 	if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: build.Namespace, Name: build.Name}}); err != nil {
 		t.Fatal(err)
 	}
@@ -184,6 +188,7 @@ func TestExpiredVerificationKeepsSuccessfulReceiptWhenPodCleanupFails(t *testing
 		return nil
 	}}
 	r := KovaBuildReconciler{Client: client, Scheme: testScheme(t), Kube: kubeClient}
+	initializeAdmissionForTest(t, &r)
 	key := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: build.Namespace, Name: build.Name}}
 	if _, err := r.Reconcile(context.Background(), key); err != nil {
 		t.Fatal(err)
@@ -258,6 +263,7 @@ func TestHungVerificationLeavesReconcileCapacityForOtherCompletionsAndAdmission(
 		VerificationAttemptTimeout: 2 * time.Second, VerificationWindow: time.Minute,
 		ControllerConcurrency: 2, MaxActiveJobs: 3, MaxActiveJobsPerRequester: 3, WorkerSlots: 3,
 	}}
+	initializeAdmissionForTest(t, &r)
 	firstCtx, cancelFirst := context.WithCancel(context.Background())
 	defer cancelFirst()
 	firstDone := make(chan error, 1)

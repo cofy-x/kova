@@ -138,6 +138,7 @@ func TestReconcilerCreatesRunnerWithImmutableSourceFetcher(t *testing.T) {
 			RunnerNodeSelector:    map[string]string{"kova.cofy.io/source-node": "true"},
 		},
 	}
+	initializeAdmissionForTest(t, &reconciler)
 
 	if _, err := reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "jobs", Name: "abc"}}); err != nil {
 		t.Fatal(err)
@@ -198,6 +199,7 @@ func TestReconcilerMaterializesHTTPSSource(t *testing.T) {
 	}
 	client := crfake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&kovav1.KovaBuild{}).WithObjects(build).Build()
 	reconciler := KovaBuildReconciler{Client: client, Scheme: scheme, Kube: &fakeKube{}, Cfg: config.Config{RunnerImage: "registry.local/kova:dev", BuildkitPlatformAddrs: map[string]string{"linux/amd64": "tcp://kova.kova.svc:9094"}}}
+	initializeAdmissionForTest(t, &reconciler)
 	_, err := reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "jobs", Name: "pending"}})
 	if err != nil {
 		t.Fatal(err)
@@ -228,6 +230,7 @@ func TestReconcilerFailsWithoutRequestedPlatformCapacity(t *testing.T) {
 	reconciler := KovaBuildReconciler{Client: crClient, Scheme: scheme, Kube: &fakeKube{}, Cfg: config.Config{
 		RunnerImage: "registry.local/kova:dev", BuildkitPlatformAddrs: map[string]string{"linux/amd64": "tcp://kova.kova.svc:9094"},
 	}}
+	initializeAdmissionForTest(t, &reconciler)
 	if _, err := reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "jobs", Name: "no-arm64"}}); err != nil {
 		t.Fatal(err)
 	}
@@ -418,6 +421,7 @@ func TestReconcilerDeleteCleansPodAndFinalizer(t *testing.T) {
 	client := crfake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&kovav1.KovaBuild{}).WithObjects(build, testRunnerPod(build)).Build()
 	kube := &fakeKube{podClient: client}
 	reconciler := KovaBuildReconciler{Client: client, Scheme: scheme, Kube: kube}
+	initializeAdmissionForTest(t, &reconciler)
 
 	if _, err := reconciler.reconcileDelete(context.Background(), build); err != nil {
 		t.Fatal(err)
@@ -445,6 +449,7 @@ func TestTerminalBuildDeletesRunnerButRetainsResultForTTL(t *testing.T) {
 	crClient := crfake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(build, testRunnerPod(build)).Build()
 	kube := &fakeKube{podClient: crClient}
 	reconciler := KovaBuildReconciler{Client: crClient, Kube: kube, Cfg: config.Config{JobTTL: time.Hour}}
+	initializeAdmissionForTest(t, &reconciler)
 	result, err := reconciler.reconcileTerminal(context.Background(), build)
 	if err != nil {
 		t.Fatal(err)
@@ -467,6 +472,7 @@ func TestTerminalBuildDeletesRunnerEvenWithoutTTL(t *testing.T) {
 	crClient := crfake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(build, testRunnerPod(build)).Build()
 	kube := &fakeKube{podClient: crClient}
 	reconciler := KovaBuildReconciler{Client: crClient, Kube: kube}
+	initializeAdmissionForTest(t, &reconciler)
 	if _, err := reconciler.reconcileTerminal(context.Background(), build); err != nil {
 		t.Fatal(err)
 	}
@@ -484,6 +490,7 @@ func TestTerminalBuildRetriesRunnerDeleteFailure(t *testing.T) {
 	}
 	crClient := crfake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(build, testRunnerPod(build)).Build()
 	reconciler := KovaBuildReconciler{Client: crClient, Kube: &fakeKube{deleteErr: errors.New("delete failed")}}
+	initializeAdmissionForTest(t, &reconciler)
 	if _, err := reconciler.reconcileTerminal(context.Background(), build); err == nil {
 		t.Fatal("expected runner cleanup error to retry reconciliation")
 	}
@@ -502,6 +509,7 @@ func TestReconcilerDeleteKeepsFinalizerWhenPodDeleteFails(t *testing.T) {
 	client := crfake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&kovav1.KovaBuild{}).WithObjects(build, testRunnerPod(build)).Build()
 	kube := &fakeKube{deleteErr: errors.New("delete failed")}
 	reconciler := KovaBuildReconciler{Client: client, Scheme: scheme, Kube: kube}
+	initializeAdmissionForTest(t, &reconciler)
 
 	if _, err := reconciler.reconcileDelete(context.Background(), build); err == nil {
 		t.Fatal("expected error")
@@ -550,6 +558,7 @@ func TestAdmissionIsFIFOAndCapacityAware(t *testing.T) {
 	}
 	client := crfake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&kovav1.KovaBuild{}).WithObjects(older, newer, active).Build()
 	reconciler := KovaBuildReconciler{Client: client, Cfg: config.Config{MaxActiveJobs: 2, WorkerSlots: 8}}
+	initializeAdmissionForTest(t, &reconciler)
 
 	decision, err := reconciler.admission(context.Background(), older)
 	if err != nil || !decision.Admitted || decision.Allocation != 5 {
@@ -574,6 +583,7 @@ func TestAdmissionRoundRobinsRequesters(t *testing.T) {
 	}
 	crClient := crfake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&kovav1.KovaBuild{}).WithObjects(objects...).Build()
 	reconciler := KovaBuildReconciler{Client: crClient, Cfg: config.Config{MaxActiveJobs: 2, WorkerSlots: 2}}
+	initializeAdmissionForTest(t, &reconciler)
 
 	decision, err := reconciler.admission(context.Background(), builds[2])
 	if err != nil || !decision.Admitted {
@@ -594,6 +604,7 @@ func TestReconcilerProcessesCancellationRequest(t *testing.T) {
 	crClient := crfake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&kovav1.KovaBuild{}).WithObjects(build, testRunnerPod(build)).Build()
 	kube := &fakeKube{podClient: crClient}
 	reconciler := KovaBuildReconciler{Client: crClient, Scheme: scheme, Kube: kube}
+	initializeAdmissionForTest(t, &reconciler)
 
 	if _, err := reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "jobs", Name: "cancel"}}); err != nil {
 		t.Fatal(err)

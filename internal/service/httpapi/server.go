@@ -88,32 +88,48 @@ func (s *Server) Start(ctx context.Context) error {
 
 func (s *Server) initializeAdmission(ctx context.Context) error {
 	queue := s.queueStore()
-	if err := queue.CheckReady(ctx); err != nil {
-		if !apierrors.IsNotFound(err) {
-			return err
+	activeErr := s.checkActiveAdmissionLedger(ctx)
+	queueErr := queue.CheckReady(ctx)
+	if activeErr == nil {
+		if queueErr == nil {
+			return nil
 		}
-		// The active ledger is a durable marker that this namespace has run
-		// the new Service before. Recreating a missing queue ledger there could
-		// erase an unknown CR Create intent even when no CR is visible yet.
-		activeErr := buildcontroller.CheckAdmissionLedger(ctx, s.reader, s.cfg.Namespace, s.cfg)
-		if activeErr == nil {
-			// A concurrent replica may have completed first-start initialization
-			// between our two direct reads.
-			if err := queue.CheckReady(ctx); err != nil {
-				return fmt.Errorf("queue admission ledger is absent while active admission ledger exists: %w", err)
+		if !apierrors.IsNotFound(queueErr) {
+			return queueErr
+		}
+		// Another replica may be between first-start active and queue
+		// creation. Observe briefly, but never create the missing queue here:
+		// it may instead have been deleted with an unknown CR Create intent.
+		for retry := 0; retry < 10; retry++ {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(100 * time.Millisecond):
 			}
-		} else if apierrors.IsNotFound(activeErr) {
-			if err := queue.EnsureInitialized(ctx); err != nil {
+			if err := queue.CheckReady(ctx); err == nil {
+				return nil
+			} else if !apierrors.IsNotFound(err) {
 				return err
 			}
-		} else {
-			return activeErr
 		}
+		return fmt.Errorf("queue admission ledger is absent while active admission ledger exists in %s; inspect recovery evidence before migration", s.cfg.Namespace)
 	}
+	if !apierrors.IsNotFound(activeErr) {
+		return activeErr
+	}
+	if queueErr == nil {
+		return fmt.Errorf("active admission ledger is absent while queue admission ledger exists in %s; inspect recovery evidence before migration", s.cfg.Namespace)
+	}
+	if !apierrors.IsNotFound(queueErr) {
+		return queueErr
+	}
+	// Active-first creation makes either ledger a marker that prevents silent
+	// replacement of the other after startup. A crash in this short bootstrap
+	// window requires an explicit, audited empty-namespace recovery.
 	if err := buildcontroller.EnsureAdmissionLedger(ctx, s.client, s.reader, s.cfg.Namespace, s.cfg); err != nil {
 		return err
 	}
-	return nil
+	return queue.EnsureInitialized(ctx)
 }
 
 func (s *Server) checkAdmissionLedgers(ctx context.Context) error {

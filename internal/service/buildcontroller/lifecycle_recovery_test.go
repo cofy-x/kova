@@ -410,12 +410,17 @@ func TestBuildDurationExpiryDeletesPodAndReleasesSlot(t *testing.T) {
 	crClient := crfake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&kovav1.KovaBuild{}).WithObjects(build, queued).Build()
 	kubeClient := &fakeKube{}
 	r := KovaBuildReconciler{Client: crClient, Scheme: scheme, Kube: kubeClient, Cfg: config.Config{MaxBuildDuration: time.Minute, MaxActiveJobs: 1, WorkerSlots: 1}}
+	initializeAdmissionForTest(t, &r)
 	if _, err := r.pollBuild(context.Background(), build); err != nil {
 		t.Fatal(err)
 	}
 	stored := storedLifecycleBuild(t, crClient, "expired")
 	if stored.Status.Phase != kovav1.PhaseFailed || stored.Status.Reason != "BuildTimedOut" || len(kubeClient.deleted) != 1 {
 		t.Fatalf("status=%#v deleted=%#v", stored.Status, kubeClient.deleted)
+	}
+	// A terminal reconcile confirms cleanup before releasing the active grant.
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "jobs", Name: "expired"}}); err != nil {
+		t.Fatal(err)
 	}
 	decision, err := r.admission(context.Background(), queued)
 	if err != nil || !decision.Admitted {
@@ -431,6 +436,7 @@ func TestBuildDurationExpiryKeepsSlotUntilPodCleanupSucceeds(t *testing.T) {
 	crClient := crfake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&kovav1.KovaBuild{}).WithObjects(build).Build()
 	kubeClient := &fakeKube{deleteErr: errors.New("delete temporarily unavailable")}
 	r := KovaBuildReconciler{Client: crClient, Scheme: scheme, Kube: kubeClient, Cfg: config.Config{MaxBuildDuration: time.Minute}}
+	initializeAdmissionForTest(t, &r)
 	if _, err := r.pollBuild(context.Background(), build); err == nil {
 		t.Fatal("expected cleanup failure to retry reconciliation")
 	}
@@ -487,6 +493,7 @@ func TestDelayedDeadlineReconcilePreservesCompletedBuild(t *testing.T) {
 				return nil
 			}}
 			r := KovaBuildReconciler{Client: crClient, Scheme: scheme, Kube: kubeClient, Cfg: config.Config{MaxBuildDuration: time.Minute, RegistryPlainHTTP: []string{host}}}
+			initializeAdmissionForTest(t, &r)
 			var reconcileErr error
 			if phase == kovav1.PhaseStarting {
 				_, reconcileErr = r.submitWhenReady(context.Background(), build)
