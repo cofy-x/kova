@@ -234,7 +234,7 @@ while (( SECONDS < deadline )); do
   if challenger=$(kctl -n "${namespace}" get kovabuild "${challenger_id}" -o json 2>/dev/null) &&
      jq -e --arg key "${challenger_key}" --arg uri "${source_uri}" \
        '.spec.idempotencyKey == $key and .spec.source.uri == $uri and .status.phase == "Queued" and
-        any(.status.conditions[]?; .type == "Ready" and .reason == "WaitingForCapacity")' <<<"${challenger}" >/dev/null; then
+        any(.status.conditions[]?; .type == "Ready" and .reason == "WaitingForCapacity" and .message == "waiting for an active job slot")' <<<"${challenger}" >/dev/null; then
     break
   fi
   sleep 1
@@ -254,7 +254,7 @@ assert_cap_held() {
     '.items[] | select(.metadata.name == $id) | .spec.idempotencyKey == $key and .status.phase == "Starting"' <<<"${builds}" >/dev/null || die "${stage}: blocker changed phase or identity"
   jq -e --arg id "${challenger_id}" --arg key "${challenger_key}" \
     '.items[] | select(.metadata.name == $id) | .spec.idempotencyKey == $key and .status.phase == "Queued" and
-     any(.status.conditions[]?; .type == "Ready" and .reason == "WaitingForCapacity")' <<<"${builds}" >/dev/null || die "${stage}: challenger is no longer waiting for capacity"
+     any(.status.conditions[]?; .type == "Ready" and .reason == "WaitingForCapacity" and .message == "waiting for an active job slot")' <<<"${builds}" >/dev/null || die "${stage}: challenger is no longer waiting for the global active job slot"
   jq -e --arg id "${blocker_id}" --arg uid "${runner_uid}" --arg nonce "${runner_nonce}" \
     '.items | length == 1 and .[0].metadata.name == ("kova-job-" + $id) and .[0].metadata.uid == $uid and
      .[0].metadata.annotations["kova.cofy.dev/create-attempt"] == $nonce and .[0].status.phase == "Pending"' <<<"${runners}" >/dev/null || die "${stage}: runner Pod was duplicated, replaced, or became runnable"
