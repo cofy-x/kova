@@ -24,6 +24,7 @@ import (
 type Client struct {
 	Kube                  kube.API
 	BuildkitPlatformAddrs map[string]string
+	RegistryPlainHTTP     []string
 }
 
 var ErrInvalidBuildStatus = errors.New("invalid runner build status")
@@ -128,7 +129,7 @@ func (c Client) SubmitBuild(ctx context.Context, build *kovav1.KovaBuild, source
 	err := c.Kube.Exec(ctx, build.Namespace, build.Status.RunnerPodName, kube.ExecOptions{
 		Stdout:  &stdout,
 		Stderr:  &stderr,
-		Command: daemonclient.TransportCommand("POST", daemonclient.BuildPath, BuildQuery(build, c.BuildkitPlatformAddrs), sourcePath),
+		Command: daemonclient.TransportCommand("POST", daemonclient.BuildPath, BuildQuery(build, c.BuildkitPlatformAddrs, c.RegistryPlainHTTP), sourcePath),
 	})
 	if stdout.overflow {
 		return fmt.Errorf("submit build: %w", ErrRunnerResponseTooLarge)
@@ -196,7 +197,7 @@ func (c Client) Post(ctx context.Context, build *kovav1.KovaBuild, path string, 
 	return out.Bytes(), nil
 }
 
-func BuildQuery(build *kovav1.KovaBuild, platformAddrs map[string]string) string {
+func BuildQuery(build *kovav1.KovaBuild, platformAddrs map[string]string, plainHTTPRegistries []string) string {
 	values := url.Values{}
 	values.Set("request-id", RequestID(build))
 	platforms := make([]string, 0, len(platformAddrs))
@@ -206,6 +207,9 @@ func BuildQuery(build *kovav1.KovaBuild, platformAddrs map[string]string) string
 	sort.Strings(platforms)
 	for _, platform := range platforms {
 		values.Add("platform-addr", platform+"="+platformAddrs[platform])
+	}
+	for _, registry := range plainHTTPRegistries {
+		values.Add("registry-plain-http", registry)
 	}
 	opts := build.Spec.Build
 	setString(values, "format", opts.Format)

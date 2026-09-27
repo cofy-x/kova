@@ -16,6 +16,8 @@ func TestBuildQueryEncodesFlagsVarsAndTarget(t *testing.T) {
 		"--platform=linux/amd64",
 		"--var", "KOVA_IMAGE_REGISTRY=host.docker.internal:5001",
 		"--var=NAME=value with spaces",
+		"--registry-plain-http", "kind-registry:5000",
+		"--registry-plain-http=proxy.kova.svc.cluster.local:5000",
 		"localhost:5001/example/simple:dev",
 	})
 	if err != nil {
@@ -36,6 +38,9 @@ func TestBuildQueryEncodesFlagsVarsAndTarget(t *testing.T) {
 	assertQueryValue(t, values, "platform", "linux/amd64")
 	if got := values["var"]; len(got) != 2 || got[0] != "KOVA_IMAGE_REGISTRY=host.docker.internal:5001" || got[1] != "NAME=value with spaces" {
 		t.Fatalf("unexpected var values: %#v", got)
+	}
+	if got := values["registry-plain-http"]; len(got) != 2 || got[0] != "kind-registry:5000" || got[1] != "proxy.kova.svc.cluster.local:5000" {
+		t.Fatalf("plain HTTP registries = %#v", got)
 	}
 }
 
@@ -88,6 +93,12 @@ func TestBuildQueryRejectsDaemonManagedFlags(t *testing.T) {
 	}
 	if _, err := BuildQuery([]string{"--registry", "example.com"}); err == nil {
 		t.Fatal("expected error for removed registry flag")
+	}
+}
+
+func TestBuildQueryRejectsMissingPlainHTTPRegistry(t *testing.T) {
+	if _, err := BuildQuery([]string{"--registry-plain-http"}); err == nil {
+		t.Fatal("expected missing registry host to fail")
 	}
 }
 

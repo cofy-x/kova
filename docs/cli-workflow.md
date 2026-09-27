@@ -130,6 +130,14 @@ kova --name quickstart \
 Batch archives follow the same layout: every top-level image directory contains a `Dockerfile` and `metadata.json` with a unique tagged target and a canonical `platform` field.
 Shared environments should publish the archive with `kova source push` and submit it through the Service instead of managing a runner directly.
 
+Build output registries use HTTPS by default. For a development registry that
+intentionally serves plain HTTP, pass its exact `host[:port]` with repeatable
+`kova build --registry-plain-http host:port`; this also applies to the Nydus
+conversion's source pull and final push. Configure the BuildKit worker's
+registry separately for its OCI push. Service-submitted builds instead inherit
+the operator's `serviceDaemon.registryPlainHTTP` allowlist; callers cannot
+weaken registry transport through a job request.
+
 When preheating through Dragonfly, registries use HTTPS by default. Development registries that intentionally serve plain HTTP must be named explicitly with repeatable `kova preheat --registry-plain-http host:port`; `--insecure-skip-verify` only controls TLS certificate verification.
 
 The runner daemon unpacks the zip, resolves the `kova` headless Service to

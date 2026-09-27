@@ -37,6 +37,7 @@ type Options struct {
 	DragonflySchedulerAddr     string
 	PreheatInsecureSkipVerify  bool
 	PreheatPlainHTTPRegistries []string
+	RegistryPlainHTTP          []string
 	DockerConfigPath           string
 	Interval                   int
 	WithFail                   bool

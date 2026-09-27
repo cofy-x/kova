@@ -40,7 +40,10 @@ Service deployments reuse the runner image pull Secret to authenticate output
 descriptor verification by default. Set `serviceDaemon.registrySecret` when
 those credentials differ. The same Secret authorizes OCI source pulls.
 Plain HTTP registries must be listed explicitly in
-`serviceDaemon.registryPlainHTTP` and are intended only for development.
+`serviceDaemon.registryPlainHTTP` and are intended only for development. The
+exact host allowlist is passed to source fetch, runner-side Nydus conversion,
+and Service result verification; the BuildKit worker still needs its own
+registry configuration for OCI pushes. Other registries remain HTTPS-only.
 
 The chart does not provision object storage or a shared PVC.
 Runner Pods use job-local `emptyDir` storage for digest-verified source bundles.

@@ -97,6 +97,34 @@ func TestNydusConversionPinsThisBuildsOCISource(t *testing.T) {
 	}
 }
 
+func TestNydusConversionUsesExplicitPlainHTTPRegistry(t *testing.T) {
+	dir := installFakeBuildCommands(t)
+	t.Setenv("FAKE_BUILDKIT_DIGEST", "sha256:"+strings.Repeat("a", 64))
+	t.Setenv("FAKE_NYDUS_DIGEST", "sha256:"+strings.Repeat("b", 64))
+	argsPath := filepath.Join(dir, "nydus-args")
+	t.Setenv("FAKE_NYDUS_ARGS", argsPath)
+	var output bytes.Buffer
+	_, err := runBuildCommands(context.Background(), source.Spec{
+		Target:   "kova-digest-fault-proxy.kova.svc.cluster.local:5000/example:dev_nydus_v3",
+		Platform: "linux/amd64", Format: source.BuildFormatNydus,
+	}, &scheduler.Addr{Addr: "tcp://buildkitd:9094"}, Options{
+		RegistryPlainHTTP: []string{"kova-digest-fault-proxy.kova.svc.cluster.local:5000"},
+	}, &output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	args, err := os.ReadFile(argsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := " " + strings.Join(strings.Fields(string(args)), " ") + " "
+	for _, want := range []string{" --source-insecure ", " --target-insecure ", " --plain-http "} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("expected %q in Nydusify args %q", want, joined)
+		}
+	}
+}
+
 func TestNydusConversionRejectsMissingPushDigest(t *testing.T) {
 	dir := installFakeBuildCommands(t)
 	t.Setenv("FAKE_BUILDKIT_DIGEST", "sha256:"+strings.Repeat("a", 64))
@@ -150,6 +178,7 @@ func TestNydusConvertArgs(t *testing.T) {
 	args := nydusConvertArgs(
 		"host.docker.internal:5001/example:dev",
 		"host.docker.internal:5001/example:dev_nydus_v3",
+		nil,
 	)
 	joined := strings.Join(args, " ")
 	for _, want := range []string{
@@ -171,11 +200,36 @@ func TestNydusConvertArgsKeepsHTTPSRegistriesStrict(t *testing.T) {
 	args := nydusConvertArgs(
 		"registry.example.com/example:dev",
 		"registry.example.com/example:dev_nydus_v3",
+		nil,
 	)
 	joined := strings.Join(args, " ")
 	for _, notWant := range []string{"--source-insecure", "--target-insecure", "--plain-http"} {
 		if strings.Contains(joined, notWant) {
 			t.Fatalf("did not expect %q in args %q", notWant, joined)
 		}
+	}
+}
+
+func TestNydusConvertArgsMatchesOnlyExactConfiguredRegistry(t *testing.T) {
+	allowed := []string{"proxy.kova.svc.cluster.local:5000"}
+	for _, tc := range []struct {
+		name          string
+		registry      string
+		wantPlainHTTP bool
+	}{
+		{name: "exact host and port", registry: "proxy.kova.svc.cluster.local:5000", wantPlainHTTP: true},
+		{name: "different port", registry: "proxy.kova.svc.cluster.local:5001"},
+		{name: "host suffix", registry: "proxy.kova.svc.cluster.local.evil:5000"},
+		{name: "unlisted cluster host", registry: "other.kova.svc.cluster.local:5000"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			args := nydusConvertArgs(tc.registry+"/example:dev", tc.registry+"/example:dev_nydus_v3", allowed)
+			joined := " " + strings.Join(args, " ") + " "
+			for _, flag := range []string{" --source-insecure ", " --target-insecure ", " --plain-http "} {
+				if strings.Contains(joined, flag) != tc.wantPlainHTTP {
+					t.Fatalf("flag %q in args %q; want plain HTTP %t", flag, joined, tc.wantPlainHTTP)
+				}
+			}
+		})
 	}
 }

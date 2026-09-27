@@ -125,7 +125,7 @@ func runNydusify(ctx context.Context, sourceRef, target string, opts Options, ou
 	if err := metadata.Close(); err != nil {
 		return "", fmt.Errorf("close Nydusify metadata file: %w", err)
 	}
-	args := append(nydusConvertArgs(sourceRef, target), "--output-json", metadataPath)
+	args := append(nydusConvertArgs(sourceRef, target, opts.RegistryPlainHTTP), "--output-json", metadataPath)
 	if err := runCommand(ctx, opts.Verbose, outputBuf, "nydusify", args...); err != nil {
 		return "", err
 	}
@@ -210,7 +210,7 @@ func buildCommandArgs(spec source.Spec, addr *scheduler.Addr) []string {
 	return args
 }
 
-func nydusConvertArgs(sourceTarget, nydusTarget string) []string {
+func nydusConvertArgs(sourceTarget, nydusTarget string, plainHTTPRegistries []string) []string {
 	args := []string{
 		"convert",
 		"--source", sourceTarget,
@@ -218,8 +218,8 @@ func nydusConvertArgs(sourceTarget, nydusTarget string) []string {
 		"--fs-version", "5",
 		"--nydus-image", "/usr/bin/nydus-image",
 	}
-	sourcePlainHTTP := registryUsesPlainHTTP(sourceTarget)
-	targetPlainHTTP := registryUsesPlainHTTP(nydusTarget)
+	sourcePlainHTTP := registryUsesPlainHTTP(sourceTarget, plainHTTPRegistries)
+	targetPlainHTTP := registryUsesPlainHTTP(nydusTarget, plainHTTPRegistries)
 	if sourcePlainHTTP {
 		args = append(args, "--source-insecure")
 	}
@@ -232,13 +232,19 @@ func nydusConvertArgs(sourceTarget, nydusTarget string) []string {
 	return args
 }
 
-func registryUsesPlainHTTP(target string) bool {
+func registryUsesPlainHTTP(target string, plainHTTPRegistries []string) bool {
 	normalized := strings.TrimPrefix(strings.TrimPrefix(strings.TrimSpace(target), "docker://"), "oci://")
 	firstSlash := strings.IndexByte(normalized, '/')
 	if firstSlash <= 0 {
 		return false
 	}
-	host := normalized[:firstSlash]
+	registry := normalized[:firstSlash]
+	for _, configured := range plainHTTPRegistries {
+		if strings.EqualFold(strings.TrimSpace(configured), registry) {
+			return true
+		}
+	}
+	host := registry
 	if idx := strings.IndexByte(host, ':'); idx >= 0 {
 		host = host[:idx]
 	}

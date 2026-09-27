@@ -206,7 +206,7 @@ func (r *KovaBuildReconciler) cancelBuild(ctx context.Context, build *kovav1.Kov
 }
 
 func (r *KovaBuildReconciler) submitWhenReady(ctx context.Context, build *kovav1.KovaBuild) (ctrl.Result, error) {
-	client := runnerexec.Client{Kube: r.Kube, BuildkitPlatformAddrs: r.Cfg.BuildkitPlatformAddrs}
+	client := runnerexec.Client{Kube: r.Kube, BuildkitPlatformAddrs: r.Cfg.BuildkitPlatformAddrs, RegistryPlainHTTP: r.Cfg.RegistryPlainHTTP}
 	if expired, result, err := r.reconcileExpiredBuild(ctx, build, client); expired {
 		return result, err
 	}

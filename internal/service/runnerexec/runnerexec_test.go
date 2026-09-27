@@ -28,7 +28,7 @@ func TestBuildQueryUsesSortedExplicitPlatformPools(t *testing.T) {
 	raw := BuildQuery(&kovav1.KovaBuild{ObjectMeta: metav1.ObjectMeta{UID: "build-uid"}, Spec: kovav1.KovaBuildSpec{Build: kovav1.KovaBuildOptions{Format: "oci", Concurrency: 2}}}, map[string]string{
 		"linux/arm64": "tcp://arm64.example:9094",
 		"linux/amd64": "tcp://amd64.example:9094",
-	})
+	}, []string{"kind-registry:5000", "kova-digest-fault-proxy.kova.svc.cluster.local:5000"})
 	values, err := url.ParseQuery(raw)
 	if err != nil {
 		t.Fatal(err)
@@ -43,6 +43,36 @@ func TestBuildQueryUsesSortedExplicitPlatformPools(t *testing.T) {
 	}
 	if values.Get("request-id") != "build-uid" {
 		t.Fatalf("request ID = %q", values.Get("request-id"))
+	}
+	if got := values["registry-plain-http"]; len(got) != 2 || got[0] != "kind-registry:5000" || got[1] != "kova-digest-fault-proxy.kova.svc.cluster.local:5000" {
+		t.Fatalf("plain HTTP registries = %#v", got)
+	}
+}
+
+func TestSubmitBuildForwardsPlainHTTPRegistriesToDaemon(t *testing.T) {
+	build := &kovav1.KovaBuild{ObjectMeta: metav1.ObjectMeta{Namespace: "jobs", Name: "example", UID: "build-uid"}, Status: kovav1.KovaBuildStatus{RunnerPodName: "runner"}}
+	client := Client{
+		RegistryPlainHTTP: []string{"proxy.kova.svc.cluster.local:5000"},
+		Kube: fakeExecKube{exec: func(options kube.ExecOptions) error {
+			var query string
+			for i, arg := range options.Command {
+				if arg == "--query" && i+1 < len(options.Command) {
+					query = options.Command[i+1]
+				}
+			}
+			values, err := url.ParseQuery(query)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := values["registry-plain-http"]; len(got) != 1 || got[0] != "proxy.kova.svc.cluster.local:5000" {
+				t.Fatalf("daemon query registries = %#v", got)
+			}
+			_, _ = io.WriteString(options.Stdout, `{"status":"running"}`)
+			return nil
+		}},
+	}
+	if err := client.SubmitBuild(context.Background(), build, "/source"); err != nil {
+		t.Fatal(err)
 	}
 }
 
