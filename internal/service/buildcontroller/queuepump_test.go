@@ -246,6 +246,45 @@ func TestAdmissionPumpSaturatedDepthSkipsFullListsAndTimers(t *testing.T) {
 	assertNoWake(t, p)
 }
 
+func TestAdmissionPumpSaturatedDeepQueueQuietAuditDoesNotScanQueue(t *testing.T) {
+	ctx := context.Background()
+	cfg := admissionConfig()
+	cfg.MaxActiveJobs, cfg.WorkerSlots = 1, 1
+	blocker := queuedBuild("blocker", "active", 1, 1)
+	p, r, base := pumpFixture(t, cfg, blocker)
+	for i := 0; i < 1000; i++ {
+		build := queuedBuild(fmt.Sprintf("queued-%04d", i), "requester", int64(i+2), 1)
+		if err := base.Create(ctx, build); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if decision, err := r.admission(ctx, blocker); err != nil || !decision.Admitted {
+		t.Fatalf("blocker grant=%#v err=%v", decision, err)
+	}
+	var active kovav1.KovaBuild
+	if err := base.Get(ctx, client.ObjectKeyFromObject(blocker), &active); err != nil {
+		t.Fatal(err)
+	}
+	active.Status.Phase = kovav1.PhaseStarting
+	if err := base.Status().Update(ctx, &active); err != nil {
+		t.Fatal(err)
+	}
+	counter := &pumpReadCounter{Reader: base}
+	p.Reader = counter
+	for i := 0; i < 10; i++ {
+		result, err := p.Reconcile(ctx, pumpRequest(admissionAuditRequestName))
+		if err != nil || result.RequeueAfter != 0 {
+			t.Fatalf("quiet audit %d result=%#v err=%v", i, result, err)
+		}
+	}
+	if counter.activeGets != 10 || counter.buildGets != 10 || counter.queueGets != 0 ||
+		counter.buildLists != 0 || counter.podLists != 0 {
+		t.Fatalf("quiet audits scanned deep queue: active=%d build=%d queue=%d buildLists=%d podLists=%d",
+			counter.activeGets, counter.buildGets, counter.queueGets, counter.buildLists, counter.podLists)
+	}
+	assertNoWake(t, p)
+}
+
 func TestAdmissionPumpAuditBoundsLargeActiveGrantScanAndWakesOnlyUnfinished(t *testing.T) {
 	ctx := context.Background()
 	cfg := admissionConfig()
