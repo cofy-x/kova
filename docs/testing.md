@@ -137,7 +137,8 @@ The live benchmark reads `kova-e2e-token/token` from this same verified Kind clu
 The setup should record the exact Helm install values above, Kind config SHA-256 and pinned node image digest, Kind node UIDs, and deployed Pod image IDs alongside the Docker image IDs.
 The benchmark's `identity.json` records the clean checkout commit, each role's Docker object/index digest, Linux/amd64 manifest/config digest chain and revision, the image IDs preloaded on both Kind nodes, actual Service/worker Pod image IDs, and exact Kind kubeconfig fingerprint.
 Preflight streams a platform-filtered local Docker OCI export with bounded metadata, verifies index→manifest→config digests, and compares its config digest with each node's CRI image ID; the OCI index/object ID alone is not comparable with a CRI config ID.
-It also resolves each Pod imageID through that node's CRI and checks the runner image is preloaded on both nodes despite never creating a runner container.
+For each Pod it queries CRI by the exact deployed tag (some Kind CRI builds cannot look up the import repoDigest shown in Pod status), requires that tag to resolve only to the verified config digest, and requires the Pod imageID to equal that config digest or one of the image's exact CRI repoDigests.
+It also checks the runner image is preloaded on both nodes despite never creating a runner container.
 If the runtime does not expose comparable CRI IDs/digests, preflight stops instead of assuming the cached image is current.
 No setup command above pushes to the local or cloud registry, and no HK ACK context is used.
 

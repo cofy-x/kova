@@ -572,17 +572,15 @@ def kind_runtime_image_fact(node: str, reference: str) -> dict:
         not isinstance(item, str) for item in repo_digests
     ):
         fail(f"Kind node {node} returned malformed CRI repo digests for {reference}")
-    return {"image_id": image_id, "repo_digests": repo_digests}
+    repo_tags = status.get("repoTags") or []
+    if repo_tags != [reference]:
+        fail(f"Kind node {node} has an ambiguous or mismatched CRI tag for {reference}")
+    return {"image_id": image_id, "repo_tags": repo_tags, "repo_digests": repo_digests}
 
 
-def sha256_reference(value: str) -> str:
-    match = re.search(r"(?:@|^)sha256:([0-9a-f]{64})$", value)
-    if match is None:
-        fail("Pod imageID has no comparable SHA-256 digest")
-    return "sha256:" + match.group(1)
-
-
-def deployed_image_fact(pod: dict, container_name: str, expected_id: str) -> dict:
+def deployed_image_fact(
+    pod: dict, container_name: str, expected_reference: str, expected_id: str
+) -> dict:
     pod_name = pod.get("metadata", {}).get("name")
     node = pod.get("spec", {}).get("nodeName")
     if not isinstance(node, str) or node not in (
@@ -590,27 +588,36 @@ def deployed_image_fact(pod: dict, container_name: str, expected_id: str) -> dic
         f"{CLUSTER}-worker",
     ):
         fail(f"Pod {pod_name} is not scheduled on a verified Kind node")
+    spec_containers = [
+        item
+        for item in pod.get("spec", {}).get("containers", [])
+        if item.get("name") == container_name
+    ]
+    if len(spec_containers) != 1 or spec_containers[0].get("image") != expected_reference:
+        fail(f"Pod {pod_name} spec does not use the reviewed {container_name} image tag")
     containers = [
         item
         for item in pod.get("status", {}).get("containerStatuses", [])
         if item.get("name") == container_name
     ]
-    if len(containers) != 1 or not isinstance(containers[0].get("imageID"), str):
+    if (
+        len(containers) != 1
+        or containers[0].get("image") != expected_reference
+        or not isinstance(containers[0].get("imageID"), str)
+    ):
         fail(f"Pod {pod_name} has no exact {container_name} image identity")
     pod_image_id = containers[0]["imageID"]
-    runtime = kind_runtime_image_fact(node, pod_image_id)
+    runtime = kind_runtime_image_fact(node, expected_reference)
     if runtime["image_id"] != expected_id:
         fail(f"Pod {pod_name} runs an image other than the reviewed local Docker image")
-    comparable = {runtime["image_id"]} | {
-        sha256_reference(digest) for digest in runtime["repo_digests"]
-    }
-    if sha256_reference(pod_image_id) not in comparable:
-        fail(f"Pod {pod_name} imageID is not in the matching CRI image's digests")
+    if pod_image_id != runtime["image_id"] and pod_image_id not in runtime["repo_digests"]:
+        fail(f"Pod {pod_name} imageID is not in the matching CRI image's exact digests")
     return {
         "pod": pod_name,
         "node": node,
         "pod_image_id": pod_image_id,
         "runtime_image_id": runtime["image_id"],
+        "runtime_repo_tags": runtime["repo_tags"],
         "runtime_repo_digests": runtime["repo_digests"],
     }
 
@@ -1141,11 +1148,19 @@ def preflight() -> dict:
         fail("worker Pod is not exactly one Ready Pod")
     deployed_images = {
         "service": [
-            deployed_image_fact(pod, "kova-service", image_facts["controller"]["config_digest"])
+            deployed_image_fact(
+                pod,
+                "kova-service",
+                image_facts["controller"]["reference"],
+                image_facts["controller"]["config_digest"],
+            )
             for pod in pods
         ],
         "worker": deployed_image_fact(
-            worker_pods[0], worker_containers[0]["name"], image_facts["worker"]["config_digest"]
+            worker_pods[0],
+            worker_containers[0]["name"],
+            image_facts["worker"]["reference"],
+            image_facts["worker"]["config_digest"],
         ),
     }
     if kjson("get", "kovabuilds", "--all-namespaces", "-o", "json")["items"]:

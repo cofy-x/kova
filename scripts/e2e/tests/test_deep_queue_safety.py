@@ -138,6 +138,37 @@ def preflight_fact(value: dict) -> dict:
 
 
 class DeepQueueSafetyTest(unittest.TestCase):
+    def test_pod_image_id_can_be_exact_cri_repo_digest_or_config_digest(self) -> None:
+        reference = "localhost:5002/kova:controller-dev"
+        config_digest = "sha256:" + "a" * 64
+        imported_digest = "docker.io/library/import-test@sha256:" + "b" * 64
+        pod = {
+            "metadata": {"name": "kova-service-test"},
+            "spec": {
+                "nodeName": "kova-deep-queue-worker",
+                "containers": [{"name": "kova-service", "image": reference}],
+            },
+            "status": {
+                "containerStatuses": [
+                    {"name": "kova-service", "image": reference, "imageID": imported_digest}
+                ]
+            },
+        }
+        runtime = {
+            "image_id": config_digest,
+            "repo_tags": [reference],
+            "repo_digests": [imported_digest],
+        }
+        with patch.object(BENCH, "kind_runtime_image_fact", return_value=runtime) as inspection:
+            fact = BENCH.deployed_image_fact(pod, "kova-service", reference, config_digest)
+            self.assertEqual(fact["pod_image_id"], imported_digest)
+            inspection.assert_called_once_with("kova-deep-queue-worker", reference)
+            pod["status"]["containerStatuses"][0]["imageID"] = config_digest
+            BENCH.deployed_image_fact(pod, "kova-service", reference, config_digest)
+            pod["status"]["containerStatuses"][0]["imageID"] = "sha256:" + "c" * 64
+            with self.assertRaises(BENCH.BenchError):
+                BENCH.deployed_image_fact(pod, "kova-service", reference, config_digest)
+
     def test_platform_config_digest_is_verified_separately_from_index_object(self) -> None:
         archive, manifest_digest, config_digest = oci_archive()
         object_index_digest = "sha256:" + "f" * 64
