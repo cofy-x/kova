@@ -49,7 +49,7 @@ and environment policy in the consuming workspace rather than this repository.
 | `make e2e` | Low-level zip-stream OCI build, push, export, and host pull. | `examples/simple`, `.work/result.jsonl` |
 | `make e2e-helm-quickstart` | Packages the chart, installs it into an ephemeral minimal kind cluster, runs the authenticated Service workflow, and deletes the cluster on exit. Set `KEEP_KIND_CLUSTER=true` to retain a cluster created by the test, or `REUSE_KIND_CLUSTER=true` to explicitly use a caller-owned cluster that the test will not delete. | Helm archive, `examples/simple`, `.work/result-service.jsonl` |
 | `make e2e-service-admission` | Read-only admission preflight by default; with `ADMISSION_E2E_MODE=run` and a test token, checks two Service Pods on an existing dedicated `kova-admission-*` Kind cluster, then sends a 40-way HTTP burst, preserves run-scoped request/response receipts, and cleans up only its exact CR IDs. Requires preinstalled active=1, global queue=3, requester queue=2, and `never=true` runner selector. | Existing dedicated Kind cluster; no install or cluster-wide cleanup |
-| `make e2e-service-admission-failover` | Read-only preflight by default; live mode replaces only the verified current Service leader Pod, then proves a successor reconciles a new queued build without duplicating the original runner or active grant. Preserves run-scoped receipts on success and failure; exact two-CR cleanup only on success. | Same empty, dedicated two-replica Kind admission cluster and caps as above |
+| `make e2e-service-admission-failover` | Read-only preflight by default; normal live mode proves leader handoff while a challenger remains queued. An explicit `ADMISSION_FAILOVER_PROMOTION=true` fixture additionally releases the exact blocker and verifies the challenger acquires the sole active grant and Pending runner. Receipts survive ambiguous outcomes. | Same empty, dedicated two-replica Kind admission caps; promotion is restricted further to the sole `kova-admission-pump` Kind on `wayne-hk-kvm`. |
 | `make e2e-service-admission-ledger-loss` | Read-only preflight by default; live mode deliberately deletes only the exact active admission ConfigMap in a disposable dedicated Kind cluster, then proves both Service replicas return 503 for readiness and new submissions without creating a CR. Optional exact follower Pod replacement proves startup does not silently recreate the ledger. Preserves receipts and never repairs the fault. | Same empty, dedicated two-replica Kind admission cluster and caps as above; retire cluster after live mode |
 | `make e2e-service-admission-deep-queue` | Read-only preflight by default; live mode holds one unschedulable blocker, grows a real API-server-backed queue through 100, 500, and 1000 CRs, records independent HTTP/API/resource receipts, and performs exact-ID cleanup only after every stage passes. | The only Kind cluster must be `kova-deep-queue`, with two ready Service replicas, empty ledgers/workloads, active=1, queued global/requester=1000, and `never=true` runner selector. |
 | `make e2e-service-partial-output` | Read-only preflight by default; live mode executes a real two-target OCI+Nydus runner build whose later target fails in BuildKit, then checks final `Failed` and the first target's exact digest-pinned partial receipts. | Existing empty `kova-partial-output-41` Kind on `wayne-hk-kvm`; run-scoped source/output tags and private receipts under `.work/partial-output/`. |
@@ -92,6 +92,41 @@ SERVICE_AUTH_TOKEN=service-e2e-token make e2e-service-admission-ledger-loss
 
 This test does not establish production availability or a safe ledger recovery procedure.
 Do not restore the deleted ConfigMap from a blank template: an apparently empty namespace cannot prove that no admission or Pod-create operation had an unknown outcome.
+
+## Admission Handoff and Capacity-Release Fixture
+
+The existing `make e2e-service-admission-failover` check and normal live path retain the #44 behavior: a replacement leader must reconcile a challenger to `Queued/WaitingForCapacity` while the original blocker still owns the one active grant.
+The optional #46 promotion path runs only on `wayne-hk-kvm` against the sole disposable Kind cluster named `kova-admission-pump`, with the same exact active=1, global queue=3, requester queue=2, two-Service-replica, `never=true` fixture.
+It additionally requires `--wait=2h` and `--max-build-duration=2h`, two Ready nodes, the `kova-e2e-token/token` Secret reference on the Deployment, and empty workloads/ledgers before any write.
+Check mode remains read-only and does not decode the Secret payload:
+
+```bash
+KIND_CLUSTER=kova-admission-pump KIND_KUBECONFIG=.kind/kova-admission-pump.kubeconfig \
+ADMISSION_FAILOVER_PROMOTION=true make e2e-service-admission-failover
+```
+
+Only after the check and exact fixture identity have been reviewed, start the opt-in live path with an explicit cluster/namespace/Deployment acknowledgement:
+
+```bash
+KIND_CLUSTER=kova-admission-pump KIND_KUBECONFIG=.kind/kova-admission-pump.kubeconfig \
+ADMISSION_E2E_MODE=run ADMISSION_FAILOVER_PROMOTION=true \
+ADMISSION_FAILOVER_PROMOTION_ACK=kova-admission-pump/kova/kova-service \
+make e2e-service-admission-failover
+```
+
+The opt-in path reads the bearer only from the dedicated Kind Secret into short-lived process memory; it ignores any inherited `SERVICE_AUTH_TOKEN` and never puts the bearer in a command argument or receipt.
+The default #44 live path still accepts its original `SERVICE_AUTH_TOKEN` input, but passes it to curl via stdin configuration rather than curl arguments.
+Both paths create a fresh fake source URI and no registry tag; the unschedulable `never=true` runner never executes a build.
+The opt-in path deletes the verified leader Pod using an atomic UID precondition, proves handoff and stable queue retention, then deletes only the exact blocker CR with an atomic UID precondition.
+It uses a 120-second poll deadline with individually bounded API reads for the challenger UID to become the sole `Starting` grant and sole unscheduled `Pending` runner, with the queue intent gone and the original runner absent.
+The observed release-to-grant delay does not, by itself, prove that the ConfigMap watch woke the controller because the admission pump also has a bounded periodic audit fallback.
+Only after a second identity check does it UID-delete the challenger and use another 120-second poll deadline for both ledgers, all CRs, and runner Pods to empty.
+It then keeps a read-only, at-least-120-second empty-state observation, sampling all-namespace CR/runner emptiness and exact ledger/Lease/Service identities every ten seconds while saving API Server `apiserver_request_total` series at both ends.
+This 3/2-cap empty-cluster window is an idle baseline, not a substitute for a quiet 1000-build deep-queue measurement; the Service's local metrics endpoint is disabled in the normal admission fixture and is not silently enabled here.
+Any 409, timeout, unknown write result, identity drift, extra workload, or incomplete cleanup stops the test and preserves the run-scoped receipts and objects for review; do not manually delete a ledger or guess at a retry.
+This isolated fixture is not a production availability or latency SLA.
+
+Pure-local safety checks run with `python3 -m unittest scripts.e2e.tests.test_admission_failover_io -v`, `bash -n scripts/e2e/e2e-service-admission-failover.sh`, and `make lint-scripts`.
 
 ## Deep-Queue Admission Benchmark
 
