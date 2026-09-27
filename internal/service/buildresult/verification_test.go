@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync/atomic"
@@ -96,6 +97,71 @@ func TestVerifyReceiptsPinsDigestDespiteSameTagOverwrite(t *testing.T) {
 	transient, hard := VerifyRemoteReceipts(context.Background(), results, []string{host}, 16)
 	if digestA == digestB || transient != "" || hard || results[0].State != "succeeded" || results[0].PushedDigest != digestA {
 		t.Fatalf("digestA=%q digestB=%q transient=%q hard=%v results=%#v", digestA, digestB, transient, hard, results)
+	}
+}
+
+func TestVerifyReceiptsNeverFallsBackToOverwrittenTagWhenPushedDigestUnavailable(t *testing.T) {
+	t.Setenv("DOCKER_CONFIG", t.TempDir())
+	registryHandler := registry.New()
+	var digestA string
+	var blockOldDigest atomic.Bool
+	var digestReads, tagReads atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if blockOldDigest.Load() {
+			switch r.URL.Path {
+			case "/v2/team/image/manifests/" + digestA:
+				digestReads.Add(1)
+				http.NotFound(w, r)
+				return
+			case "/v2/team/image/manifests/shared":
+				tagReads.Add(1)
+			}
+		}
+		registryHandler.ServeHTTP(w, r)
+	}))
+	defer server.Close()
+	host := strings.TrimPrefix(server.URL, "http://")
+	ref, err := name.NewTag(host+"/team/image:shared", name.Insecure)
+	if err != nil {
+		t.Fatal(err)
+	}
+	imageA, pushedDigest := imageForPlatform(t, "amd64", "build-a")
+	imageB, digestB := imageForPlatform(t, "amd64", "build-b")
+	digestA = pushedDigest
+	if digestA == digestB {
+		t.Fatal("test images must have different manifest digests")
+	}
+	if err := remote.Write(ref, imageA); err != nil {
+		t.Fatal(err)
+	}
+	if err := remote.Write(ref, imageB); err != nil {
+		t.Fatal(err)
+	}
+	current, err := remote.Get(ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.Descriptor.Digest.String() != digestB {
+		t.Fatalf("tag digest = %s, want competing build's %s", current.Descriptor.Digest, digestB)
+	}
+
+	// A registry may stop serving A by digest after B overwrites the tag.
+	// Retrying A is safe; resolving the mutable tag would silently report B.
+	blockOldDigest.Store(true)
+	results := []kovav1.BuildVerificationResult{{Format: "oci", Image: ref.Name(), Platform: "linux/amd64", PushedDigest: digestA, State: "pending"}}
+	transient, hard := VerifyRemoteReceipts(context.Background(), results, []string{host}, 16)
+	if transient == "" || hard || results[0].State != "pending" || results[0].PushedDigest != digestA {
+		t.Fatalf("transient=%q hard=%v results=%#v, want A pending", transient, hard, results)
+	}
+	if digestReads.Load() == 0 || tagReads.Load() != 0 {
+		t.Fatalf("digest reads=%d tag reads=%d, want only digest-pinned reads", digestReads.Load(), tagReads.Load())
+	}
+	blockOldDigest.Store(false)
+	transient, hard = VerifyRemoteReceipts(context.Background(), results, []string{host}, 16)
+	outputs := VerificationOutputs(results)
+	if transient != "" || hard || results[0].State != "succeeded" ||
+		len(outputs) != 1 || outputs[0].ManifestDigest != digestA {
+		t.Fatalf("recovery transient=%q hard=%v results=%#v outputs=%#v, want A verified", transient, hard, results, outputs)
 	}
 }
 
