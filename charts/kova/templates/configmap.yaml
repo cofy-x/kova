@@ -1,9 +1,15 @@
 {{- $cache := .Values.worker.cache -}}
-{{- if ge (int $cache.reservedSpaceGB) (int $cache.maxUsedSpaceGB) -}}
+{{- $maxGB := int64 $cache.maxUsedSpaceGB -}}
+{{- $reservedGB := int64 $cache.reservedSpaceGB -}}
+{{- $minFreeGB := int64 $cache.minFreeSpaceGB -}}
+{{- if or (lt $maxGB 2) (gt $maxGB 1048576) (lt $reservedGB 1) (gt $reservedGB 1048576) (lt $minFreeGB 1) (gt $minFreeGB 1048576) -}}
+{{- fail "worker.cache GB values must be positive and at most 1048576 (1PiB)" -}}
+{{- end -}}
+{{- if ge $reservedGB $maxGB -}}
 {{- fail "worker.cache.reservedSpaceGB must be smaller than worker.cache.maxUsedSpaceGB" -}}
 {{- end -}}
 {{- /* BuildKit v0.31.2 interprets its GB suffix as binary GiB-sized units. */ -}}
-{{- $maxBytes := mul (int64 $cache.maxUsedSpaceGB) 1073741824 -}}
+{{- $maxBytes := mul $maxGB 1073741824 -}}
 {{- $cacheVolumes := 0 -}}
 {{- range .Values.worker.volumes -}}
 {{- if eq .name "lib-buildkit" -}}
