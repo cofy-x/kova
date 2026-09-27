@@ -184,7 +184,8 @@ Receipts are kept separately for the blocker, each 100/500/1000 stage, and exact
 On success, only the recorded queued CRs and blocker CR are deleted through a loopback Kubernetes API proxy with each exact CR UID as an atomic DeleteOptions precondition; the Kind cluster, local registry, and all registry tags remain untouched.
 If a submission or measurement fails before exact cleanup starts, no CR or ledger cleanup is attempted because an uncertain HTTP Create may still be in flight.
 If a deletion or its verification fails after exact cleanup starts, some recorded CRs may already have been deleted; the script stops and preserves the delete-batch receipts for operator inspection rather than guessing at a repair.
-The existing controller does **not** expose per-reconcile latency p95/p99 to this black-box script: POST latency and queue-status convergence are separate measurements and must not be reported as reconcile latency.
+The default controller does **not** expose per-reconcile latency p95/p99 to this black-box script: POST latency and queue-status convergence are separate measurements and must not be reported as reconcile latency.
+For a future diagnostic rerun, the Service can opt in to loopback-only controller-runtime metrics with `serviceDaemon.metricsBindAddress=127.0.0.1:8081`; the endpoint is disabled by default and the black-box script does not yet scrape it. Record per-Pod histogram buckets before and after each stage and compute deltas rather than treating a lifetime cumulative histogram as one stage. First verify loopback collection in the isolated Kind; do not expose the unauthenticated metrics listener through a cluster Service.
 This bounded Kind profile is a design diagnostic, not production SLO or SLA evidence.
 
 ## Isolated Source-Capacity Acceptance

@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -70,14 +72,18 @@ func CLICommand() *cli.Command {
 			&cli.IntFlag{Name: "max-queued-jobs-per-requester", Value: 100, Usage: "maximum queued jobs for one authenticated requester"},
 			&cli.IntFlag{Name: "worker-slots", Value: 20, Usage: "total build slots shared fairly across active jobs"},
 			&cli.IntFlag{Name: "controller-concurrency", Value: buildcontract.DefaultControllerConcurrency, Usage: "maximum concurrent KovaBuild reconciliations"},
-			&cli.IntFlag{Name: "kube-client-qps", Value: 20, Usage: "shared per-Service-Pod Kubernetes API QPS budget (1-100)"},
-			&cli.IntFlag{Name: "kube-client-burst", Value: 40, Usage: "shared per-Service-Pod Kubernetes API burst budget (at least QPS, at most 200)"},
+			&cli.IntFlag{Name: "kube-client-qps", Value: 20, Usage: "per-traffic-class, per-Service-Pod Kubernetes API QPS budget (1-100)"},
+			&cli.IntFlag{Name: "kube-client-burst", Value: 40, Usage: "per-traffic-class, per-Service-Pod Kubernetes API burst budget (at least QPS, at most 200)"},
+			&cli.StringFlag{Name: "metrics-bind-address", Value: "0", Usage: "disabled by default; optional loopback controller-runtime Prometheus metrics address"},
 			&cli.BoolFlag{Name: "leader-elect", Value: true, Usage: "enable controller-runtime leader election"},
 			&cli.StringFlag{Name: "leader-election-namespace", Usage: "namespace used for controller leader election leases; defaults to --namespace"},
 		},
 		Action: func(c *cli.Context) error {
 			ctrl.SetLogger(ctrlzap.New(ctrlzap.UseDevMode(false), ctrlzap.WriteTo(os.Stderr)))
 			if err := validateKubeClientRateLimit(c.Int("kube-client-qps"), c.Int("kube-client-burst")); err != nil {
+				return err
+			}
+			if err := validateMetricsBindAddress(c.String("metrics-bind-address"), c.String("listen")); err != nil {
 				return err
 			}
 			runnerNodeSelector, err := parseNodeSelector(c.StringSlice("runner-node-selector"))
@@ -188,7 +194,7 @@ func CLICommand() *cli.Command {
 			mgr, err := ctrl.NewManager(restConfig, ctrl.Options{
 				Scheme:                  scheme,
 				Cache:                   cache.Options{DefaultNamespaces: map[string]cache.Config{cfg.Namespace: {}}},
-				Metrics:                 metricsserver.Options{BindAddress: "0"},
+				Metrics:                 metricsserver.Options{BindAddress: c.String("metrics-bind-address")},
 				LeaderElection:          c.Bool("leader-elect"),
 				LeaderElectionConfig:    leaderConfig,
 				LeaderElectionID:        "kova-service.kova.cofy.dev",
@@ -224,6 +230,24 @@ func validateKubeClientRateLimit(qps, burst int) error {
 	}
 	if burst < qps || burst > 200 {
 		return fmt.Errorf("kube-client-burst must be between kube-client-qps and 200")
+	}
+	return nil
+}
+
+func validateMetricsBindAddress(address, serviceAddress string) error {
+	if address == "0" {
+		return nil
+	}
+	host, port, err := net.SplitHostPort(address)
+	if err != nil || host != "127.0.0.1" {
+		return fmt.Errorf("metrics-bind-address must be 0 or 127.0.0.1:<port>")
+	}
+	number, err := strconv.Atoi(port)
+	if err != nil || number < 1 || number > 65535 {
+		return fmt.Errorf("metrics-bind-address port must be between 1 and 65535")
+	}
+	if _, servicePort, err := net.SplitHostPort(serviceAddress); err == nil && servicePort == port {
+		return fmt.Errorf("metrics-bind-address must use a different port from the Service HTTP listener")
 	}
 	return nil
 }

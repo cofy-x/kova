@@ -89,6 +89,7 @@ spec:
             - --controller-concurrency={{ .Values.serviceDaemon.controllerConcurrency }}
             - --kube-client-qps={{ .Values.serviceDaemon.kubeClientQPS }}
             - --kube-client-burst={{ .Values.serviceDaemon.kubeClientBurst }}
+            - --metrics-bind-address={{ .Values.serviceDaemon.metricsBindAddress }}
             - --leader-elect={{ .Values.serviceDaemon.leaderElect }}
             - --leader-election-namespace={{ include "kova.namespace" . }}
           ports:

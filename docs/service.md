@@ -360,6 +360,8 @@ Leader-election leases and direct `/readyz` checks each keep a separate 5 QPS/10
 Runner exec streams do not use the REST token bucket; active-job and runner concurrency limits bound those connections separately.
 Tune them only after measuring queue convergence and API-server 429/5xx rates on the target cluster, and budget across all Service replicas rather than treating the values as cluster-wide limits.
 
+The controller-runtime Prometheus endpoint is disabled by default (`metricsBindAddress: "0"`). A controlled diagnostic run may bind it only to `127.0.0.1:<port>` inside each Service Pod. It is not published through the Service, and Kova rejects wildcard or non-loopback bind addresses because this endpoint has no built-in authentication. Collect the low-cardinality `controller_runtime_reconcile_time_seconds` histogram separately from HTTP POST latency and queue-status convergence; histogram p95/p99 do not include workqueue wait or client-side submission time.
+
 Registry credentials are the only storage credentials needed by Kova.
 The same Docker config can authorize source pulls, output pushes, and controller-side manifest verification:
 

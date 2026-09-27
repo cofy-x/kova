@@ -94,6 +94,9 @@ serviceDaemon:
   # retain separate small budgets. Budget the sum across all replicas.
   kubeClientQPS: 20
   kubeClientBurst: 40
+  # Disabled unless explicitly enabled for a controlled diagnostic run.
+  # Loopback-only: never expose unauthenticated controller metrics by Service.
+  metricsBindAddress: "0"
   leaderElect: true
   runnerNamespace: ""
   runnerImagePullSecret: ""

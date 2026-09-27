@@ -122,6 +122,22 @@ func TestValidateKubeClientRateLimit(t *testing.T) {
 	}
 }
 
+func TestValidateMetricsBindAddress(t *testing.T) {
+	for _, address := range []string{"0", "127.0.0.1:1", "127.0.0.1:8081", "127.0.0.1:65535"} {
+		if err := validateMetricsBindAddress(address, ":8080"); err != nil {
+			t.Fatalf("address %q rejected: %v", address, err)
+		}
+	}
+	for _, address := range []string{"", ":8081", "0.0.0.0:8081", "localhost:8081", "[::1]:8081", "127.0.0.1:0", "127.0.0.1:65536", "127.0.0.1:not-a-port"} {
+		if err := validateMetricsBindAddress(address, ":8080"); err == nil {
+			t.Fatalf("unsafe or invalid metrics address %q accepted", address)
+		}
+	}
+	if err := validateMetricsBindAddress("127.0.0.1:8080", ":8080"); err == nil {
+		t.Fatal("metrics listener shared the Service HTTP port")
+	}
+}
+
 func TestKubeClientRateLimitIsSharedAcrossConfigCopies(t *testing.T) {
 	config := &rest.Config{}
 	leader, readiness, http := configureKubeClientRateLimits(config, 1, 2)
