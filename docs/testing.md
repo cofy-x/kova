@@ -52,6 +52,7 @@ and environment policy in the consuming workspace rather than this repository.
 | `make e2e-service-admission-failover` | Read-only preflight by default; live mode replaces only the verified current Service leader Pod, then proves a successor reconciles a new queued build without duplicating the original runner or active grant. Preserves run-scoped receipts on success and failure; exact two-CR cleanup only on success. | Same empty, dedicated two-replica Kind admission cluster and caps as above |
 | `make e2e-service-admission-ledger-loss` | Read-only preflight by default; live mode deliberately deletes only the exact active admission ConfigMap in a disposable dedicated Kind cluster, then proves both Service replicas return 503 for readiness and new submissions without creating a CR. Optional exact follower Pod replacement proves startup does not silently recreate the ledger. Preserves receipts and never repairs the fault. | Same empty, dedicated two-replica Kind admission cluster and caps as above; retire cluster after live mode |
 | `make e2e-service-admission-deep-queue` | Read-only preflight by default; live mode holds one unschedulable blocker, grows a real API-server-backed queue through 100, 500, and 1000 CRs, records independent HTTP/API/resource receipts, and performs exact-ID cleanup only after every stage passes. | The only Kind cluster must be `kova-deep-queue`, with two ready Service replicas, empty ledgers/workloads, active=1, queued global/requester=1000, and `never=true` runner selector. |
+| `make e2e-service-partial-output` | Read-only preflight by default; live mode executes a real two-target OCI+Nydus runner build whose later target fails in BuildKit, then checks final `Failed` and the first target's exact digest-pinned partial receipts. | Existing empty `kova-partial-output-41` Kind on `wayne-hk-kvm`; run-scoped source/output tags and private receipts under `.work/partial-output/`. |
 | `make e2e-source-capacity` | Read-only preflight by default; live mode publishes one 128 MiB incompressible immutable source, builds one OCI output, verifies its digest and host pull, and samples Kind node/runner state. Preserves run-scoped receipts and tags; never deletes the cluster or registry content. | Existing empty, dedicated `kova-source-capacity` Kind quickstart cluster and localhost registry |
 | `make e2e-service` | RBAC isolation, immutable OCI source publication, pre-build target-and-platform contract failure, platform-scoped worker dispatch, safe caller retry, verified output platform and manifest digest, ephemeral logs, TTL cleanup, and host pull. | `examples/simple`, `.work/result-service.jsonl` |
 | `make e2e-crd-upgrade` | Isolated pre-retry CRD to current CRD/controller migration, including live status pruning/persistence, a quiescence gate, and an injected old Starting runner that must fail before POST. | Public `v0.1.0-rc.9` chart and role images, dedicated Kind cluster and registry |
@@ -219,6 +220,45 @@ It rejects existing source/output tags for its random run ID, then saves the sou
 The expected outcome is one succeeded build with a verified manifest digest and a host pull of `localhost:5002/kova-examples/source-capacity:<run-id>` yielding that same digest.
 On failure it retains all evidence and any exact-run KovaBuild and registry tags for inspection; no cluster-wide or repository-wide cleanup runs.
 After evidence review, remove only the named `kova-source-capacity` Kind cluster and its kubeconfig if no longer needed; review run-scoped source/output tags before any registry cleanup.
+
+## Isolated Partial-Output Receipt Acceptance (#41)
+
+This is a sequential Kind acceptance for the real runner path, not a soak or a production SLA claim.
+Run it only on `wayne-hk-kvm` after the other Kind test has finished and released its cluster.
+The script itself never creates or deletes Kind, installs Helm, pushes role images, or deletes registry content.
+Its default mode is read-only and requires a clean Kova checkout, a Linux CLI whose version matches the checkout's 12-character commit, candidate role-image tags and labels from that commit, the dedicated kubeconfig matching the only live Kind cluster, and exact Pod-to-CRI `repoDigests` identity.
+It also requires two healthy nodes, eight free Pod slots per node, empty KovaBuild/runner and admission ledgers, the `FailedVerifying` CRD enum, and the test-owned `kova-e2e-token/token` Secret reference.
+
+Prepare a disposable two-node quickstart with reviewed candidate images, `SERVICE_AUTH_SECRET=kova-e2e-token`, and unique setup tags. The quickstart's short JobTTL allows its own builds to expire; afterwards, upgrade only the test release to `serviceDaemon.jobTTL=2h` before the partial-output preflight. Keep the checkout clean after the image/CLI build and verify the Service still has `--max-build-duration=2h` and `--verification-window=5m`.
+
+```bash
+REV=$(git rev-parse --short=12 HEAD)
+SETUP_RUN=partial-41-setup-$(date -u +%Y%m%dt%H%M%sz)
+QUICKSTART_KIND_CLUSTER=kova-partial-output-41 KEEP_KIND_CLUSTER=true \
+  CONTROLLER_IMAGE="localhost:5002/kova:controller-$REV" \
+  RUNNER_IMAGE="localhost:5002/kova:runner-$REV" \
+  WORKER_IMAGE="localhost:5002/kova:worker-$REV" COMMIT="$REV" \
+  SERVICE_AUTH_SECRET=kova-e2e-token SERVICE_JOB_TTL=60s \
+  SERVICE_TARGET="kind-registry:5000/kova-examples/$SETUP_RUN:dev" \
+  SERVICE_PULL_TARGET="localhost:5002/kova-examples/$SETUP_RUN:dev" \
+  SOURCE_REPOSITORY="localhost:5002/kova-sources/$SETUP_RUN:dev" \
+  make e2e-helm-quickstart
+helm upgrade kova ./charts/kova --kubeconfig .kind/kova-partial-output-41.kubeconfig \
+  -n kova --reuse-values --wait --set-string serviceDaemon.jobTTL=2h
+PARTIAL_OUTPUT_EXPECTED_REVISION="$REV" make e2e-service-partial-output
+```
+
+Only after that read-only check passes, explicitly acknowledge the exact cluster and revision. The script reads the token from the exact Kubernetes Secret into process memory; do not put the token in the SSH command or a long-lived environment variable. Use a persistent remote session; SIGINT, SIGTERM, and SIGHUP enter the bounded exact-UID stop path, but SIGKILL cannot be recovered by the process.
+
+```bash
+PARTIAL_OUTPUT_EXPECTED_REVISION="$REV" PARTIAL_OUTPUT_MODE=run \
+  PARTIAL_OUTPUT_ACK="kova-partial-output-41/kova/$REV" \
+  make e2e-service-partial-output
+```
+
+The fixture ZIP has two top-level image directories with valid `{target,platform}` metadata. `a-pass` is lexically first and completes both OCI and Nydus with `concurrency=1`; `z-fail` has a deliberately missing Dockerfile `COPY` source, which fails only during BuildKit execution. The only accepted result is final `Failed/BuildFailed`, with two first-target `status.outputs` whose manifest digests equal their durable runner `pushedDigest` receipts and the exact registry tags; the later target must have failed verification results and no tags. A 20-minute overall deadline, five-minute failed-verification window, host memory/disk and node pressure/Pod guards, and runtime-image checks stop abnormal runs. This tests the ordinary partial-failure path; controller fault tests separately cover transient registry/export errors, leader restart, and terminal status-write ambiguity.
+
+Private evidence is saved under `.work/partial-output/<run-id>/`: the source archive and digest, run-scoped tag names, projected status/runner/node/ledger samples, bounded runner log excerpts, public job/results, registry digest comparisons, and exact CR deletion receipt. Unknown objects are recorded by name/UID only, and an exact token reflected in a response blocks its write. On success the script deletes only its own KovaBuild using an API-server UID precondition; on an abnormal nonterminal result it attempts the same exact stop and reports if that cannot be proven. All source/output tags, the registry, Kind cluster, and receipts remain for review. Never use repository-wide or digest-wide registry deletion to clean these tags; review exact run receipts first.
 
 ## CRD Upgrade Smoke
 
