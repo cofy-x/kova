@@ -75,6 +75,15 @@ its result is subject to the new controller's verification contract and may
 fail. Investigate and resolve unexpected old builds rather than bypassing the
 drain gate or deleting their status to make it pass.
 
+The admission-ledger protocol also requires a fresh runner namespace. Old
+Service replicas do not honor its queue intents or Pod Create nonces, and a
+late old request may still reach the API server after the old Pod exits. Keep
+the Service Deployment in its existing namespace, but set
+`serviceDaemon.runnerNamespace` to a previously absent namespace for the new
+release. All new replicas must use the same limits and runner namespace.
+Do not copy old KovaBuilds or ledgers into it, or roll old and new Service Pods
+together.
+
 Freeze all Service submitters first. While the old controller is still running,
 wait for all KovaBuilds and their runner Pods to be removed. Preserve any
 needed terminal receipts outside Kova, then wait through the configured
@@ -100,7 +109,13 @@ kubectl -n "${NAMESPACE}" rollout status deployment/kova-service
 ./scripts/deployment/verify-kovabuild-crd.sh
 ./scripts/deployment/probe-kovabuild-status.sh --expect-persisted
 ./scripts/deployment/verify-kovabuild-drained.sh
-# Now run the helm upgrade shown above, then:
+# Create an unused namespace and set serviceDaemon.runnerNamespace to it in
+# the Helm upgrade values; do not reuse the old runner namespace.
+export NEW_RUNNER_NAMESPACE=kova-runner-v2
+kubectl create namespace "${NEW_RUNNER_NAMESPACE}"
+# Now run the helm upgrade shown above with:
+# --set-string "serviceDaemon.runnerNamespace=${NEW_RUNNER_NAMESPACE}"
+# Then verify the new Service and resume submissions:
 kubectl -n "${NAMESPACE}" rollout status deployment/kova-service
 ```
 

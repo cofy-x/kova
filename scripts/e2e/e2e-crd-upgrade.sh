@@ -120,6 +120,7 @@ created_resources=true
 
 BASELINE_CHART=${BASELINE_CHART} \
 BASELINE_VALUES=${ROOT}/deploy/crd-upgrade-baseline-values.yaml \
+SERVICE_RUNNER_NAMESPACE=kova-upgraded \
 BASELINE_CONTROLLER_IMAGE=ghcr.io/cofy-x/kova:controller-${BASELINE_VERSION} \
 BASELINE_RUNNER_IMAGE=ghcr.io/cofy-x/kova:runner-${BASELINE_VERSION} \
 BASELINE_WORKER_IMAGE=ghcr.io/cofy-x/kova:worker-${BASELINE_VERSION} \
