@@ -260,12 +260,12 @@ Each successful output contains `format`, `platform`, the mutable pushed `image`
 The Service removes the explicit tag, preserves registry ports and nested repositories, validates the SHA-256 digest, and returns a canonical `repository@sha256:...` reference.
 Clients must not construct this reference themselves.
 Registry descriptor checks use bounded parallelism.
-Kova resolves the digest-pinned single-platform manifest, reads its image configuration, and requires its OS and architecture to match the request; it never verifies platform through the mutable tag.
+Kova resolves the digest-pinned single-platform manifest, reads its image configuration, and requires its OS and architecture to match the request; it never verifies platform through the mutable tag. Each registry verification HTTP response is limited to 4 MiB, including manifests and image configurations; larger artifacts are rejected rather than loaded into controller memory.
 For OCI outputs, Kova records the digest returned by that build's BuildKit push.
 For Nydus outputs, the source-pinned Nydusify converter records the descriptor digest after that build's target push succeeds.
 Both formats fail verification if the push metadata omits a valid digest; a later lookup of the mutable tag cannot replace that digest.
 Runner completion and exact push receipts are persisted before registry verification. Each attempt has a 10-second default deadline and at most 16 pending outputs, with no more than four registry requests in flight. Transient export/registry failures retry with capped backoff inside a separate five-minute default verification window; an immutable digest or platform mismatch fails immediately. The controller never submits a completed runner again, including after restart or leader handoff.
-Only two controller reconciles perform verification I/O at once under the default four-reconcile setting, leaving admission capacity for other jobs. The runner Pod remains available during verification and is removed before terminal status; cancellation or deletion also removes it. The Kubernetes active deadline includes the verification window, while the build-execution deadline still ends at `maxBuildDuration`.
+Only two controller reconciles perform verification I/O at once under the default four-reconcile setting, leaving admission capacity for other jobs. The runner Pod remains available during verification. Once all receipts are verified, Kova persists terminal status before Pod deletion; admission capacity stays reserved until terminal cleanup confirms the Pod is gone. Cancellation or deletion also removes the Pod. The Kubernetes active deadline includes the verification window, while the build-execution deadline still ends at `maxBuildDuration`.
 If one of several registries fails, the job is `Failed` while already verified output digests remain in status.
 Registry pushes are not transactional and Kova does not roll them back.
 
