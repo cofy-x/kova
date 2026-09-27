@@ -59,16 +59,29 @@ func (a subjectAccessReview) Authorize(ctx context.Context, principal Principal,
 		},
 	}, metav1.CreateOptions{})
 	if err != nil {
-		return fmt.Errorf("review access: %w", err)
+		// A transport failure is not an RBAC denial. Keep the raw reviewer error
+		// out of the public path because it may contain principal details.
+		return fmt.Errorf("SubjectAccessReview request failed: %w", ErrReviewUnavailable)
 	}
-	if !review.Status.Allowed {
-		reason := strings.TrimSpace(review.Status.Reason)
-		if reason == "" {
-			reason = "access denied"
+	if review == nil {
+		return fmt.Errorf("SubjectAccessReview returned no decision: %w", ErrReviewUnavailable)
+	}
+	// Kubernetes can report an EvaluationError together with a conclusive
+	// allow or deny. Only an unresolved evaluation must become unavailable.
+	if review.Status.Allowed {
+		if review.Status.Denied {
+			return fmt.Errorf("SubjectAccessReview returned contradictory decision: %w", ErrReviewUnavailable)
 		}
-		return fmt.Errorf("%s", reason)
+		return nil
 	}
-	return nil
+	if !review.Status.Denied && strings.TrimSpace(review.Status.EvaluationError) != "" {
+		return fmt.Errorf("SubjectAccessReview could not determine access: %w", ErrReviewUnavailable)
+	}
+	reason := strings.TrimSpace(review.Status.Reason)
+	if reason == "" {
+		reason = "access denied"
+	}
+	return fmt.Errorf("%s", reason)
 }
 
 func principalExtra(extra map[string][]string) map[string]authorizationv1.ExtraValue {

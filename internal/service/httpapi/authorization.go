@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net/http"
 
@@ -32,6 +33,9 @@ func (s *Server) authMiddleware(next echo.HandlerFunc) echo.HandlerFunc {
 		}
 		principal, err := s.auth.Authenticate(c.Request().Context(), token)
 		if err != nil {
+			if errors.Is(err, serviceauth.ErrReviewUnavailable) {
+				return reviewUnavailable(c)
+			}
 			authDenied.Add(c.Request().Context(), 1)
 			return writeAPIError(c, http.StatusUnauthorized, apiv1.ErrorCodeUnauthenticated, "authentication failed", false, 0)
 		}
@@ -68,8 +72,17 @@ func (s *Server) authorizeBuild(ctx context.Context, principal serviceauth.Princ
 	}
 	if err := s.authorize(ctx, principal, verb, build.Name); err == nil {
 		return nil
+	} else if errors.Is(err, serviceauth.ErrReviewUnavailable) {
+		return err
 	}
 	return fmt.Errorf("access denied")
+}
+
+func authorizationFailure(c echo.Context, err error) error {
+	if errors.Is(err, serviceauth.ErrReviewUnavailable) {
+		return reviewUnavailable(c)
+	}
+	return forbidden(c)
 }
 
 func forbidden(c echo.Context) error {

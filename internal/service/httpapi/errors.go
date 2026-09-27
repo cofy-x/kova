@@ -49,6 +49,12 @@ func serviceUnavailable(c echo.Context, err error) error {
 	return writeAPIError(c, http.StatusServiceUnavailable, apiv1.ErrorCodeInternal, "service is not ready", true, 5*time.Second)
 }
 
+func reviewUnavailable(c echo.Context) error {
+	// Count outages without per-request log amplification or credential detail.
+	reviewUnavailableCount.Add(c.Request().Context(), 1)
+	return writeAPIError(c, http.StatusServiceUnavailable, apiv1.ErrorCodeInternal, "identity review is unavailable", true, 5*time.Second)
+}
+
 func conflict(c echo.Context, message string) error {
 	return writeAPIError(c, http.StatusConflict, apiv1.ErrorCodeConflict, message, false, 0)
 }

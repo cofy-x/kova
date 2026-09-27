@@ -15,6 +15,16 @@ TokenReview mode submits SubjectAccessReview requests for the virtual `servicebu
 Only the controller ServiceAccount writes actual `KovaBuild` resources, so callers cannot bypass ownership or idempotency through the public API.
 The chart creates unbound `kova-service-submitter` and `kova-service-admin` Roles; each environment owns their RoleBindings.
 
+In `tokenreview` mode, every authenticated `/v1/*` request makes one Kubernetes TokenReview; Kova does not cache a positive authentication decision or extend token validity after revocation.
+Create and list requests, and non-owner per-build requests, also make a SubjectAccessReview; an authenticated build owner can read or manage that build without a redundant review.
+These calls share the per-Service-Pod HTTP Kubernetes client budget with admission and build reads; account for both authentication and authorization calls when setting `kubeClientQPS`, `kubeClientBurst`, and Service replica count.
+A definitively invalid bearer or denied policy returns non-retryable 401 or 403.
+If Kubernetes cannot check a token or cannot determine authorization, the request remains denied and returns retryable 503 with `Retry-After: 5`; the response never exposes the bearer or reviewer details.
+An uncertain list authorization does not silently fall back to an owner-only list.
+When a build CR is absent, Kova reviews a non-owner lookup even if no queue intent exists, so an unavailable authorizer returns the same 503 for both cases rather than revealing whether a queued build ID exists.
+This costs one additional SubjectAccessReview for non-owner CR misses; a matching queued owner returns its pending status without that review.
+The `kova.service.identity.review_unavailable` metric counts unresolved authentication and authorization reviews separately from definitive denial counters.
+
 `/healthz` is unauthenticated liveness.
 `/readyz` directly verifies Kubernetes API access to `KovaBuild` plus both admission ConfigMaps, including their schema and this replica's capacity limits.
 The Service initializes both ledgers before opening its HTTP listener; if a ledger is missing, malformed, or configured differently later, readiness returns 503 without silently repairing it.

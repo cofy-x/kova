@@ -21,7 +21,7 @@ import (
 func (s *Server) handleCreateBuild(c echo.Context) error {
 	principal := principalFromContext(c)
 	if err := s.authorize(c.Request().Context(), principal, "create", ""); err != nil {
-		return forbidden(c)
+		return authorizationFailure(c, err)
 	}
 	if strings.TrimSpace(s.cfg.RunnerImage) == "" {
 		return internalContractError(c, &configurationError{message: "runner image is required"})

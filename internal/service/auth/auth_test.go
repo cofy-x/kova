@@ -2,6 +2,9 @@ package auth
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"strings"
 	"testing"
 
 	authenticationv1 "k8s.io/api/authentication/v1"
@@ -50,6 +53,38 @@ func TestTokenReviewAuthentication(t *testing.T) {
 	}
 	if _, err := authenticator.Authenticate(context.Background(), "invalid"); err == nil {
 		t.Fatal("expected unauthenticated review to fail")
+	}
+}
+
+func TestTokenReviewDistinguishesDenialFromUnavailable(t *testing.T) {
+	tests := []struct {
+		name        string
+		review      *authenticationv1.TokenReview
+		err         error
+		unavailable bool
+	}{
+		{name: "transport error", err: fmt.Errorf("secret-token-must-not-leak"), unavailable: true},
+		{name: "nil review", unavailable: true},
+		{name: "status error", review: &authenticationv1.TokenReview{Status: authenticationv1.TokenReviewStatus{Error: "secret-token-must-not-leak"}}, unavailable: true},
+		{name: "invalid token", review: &authenticationv1.TokenReview{}, unavailable: false},
+		{name: "malformed authenticated review", review: &authenticationv1.TokenReview{Status: authenticationv1.TokenReviewStatus{Authenticated: true}}, unavailable: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			authenticator, err := New(ModeTokenReview, "", "", reviewerFunc(func(context.Context, *authenticationv1.TokenReview, metav1.CreateOptions) (*authenticationv1.TokenReview, error) {
+				return test.review, test.err
+			}))
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = authenticator.Authenticate(context.Background(), "secret-token-must-not-leak")
+			if err == nil || errors.Is(err, ErrReviewUnavailable) != test.unavailable {
+				t.Fatalf("unavailable=%t err=%v", test.unavailable, err)
+			}
+			if err != nil && test.unavailable && strings.Contains(err.Error(), "secret-token-must-not-leak") {
+				t.Fatal("reviewer error leaked")
+			}
+		})
 	}
 }
 

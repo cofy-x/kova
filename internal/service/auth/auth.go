@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"crypto/subtle"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -15,6 +16,11 @@ const (
 	ModeStatic      = "static"
 	ModeUnsafeNone  = "unsafe-none"
 )
+
+// ErrReviewUnavailable means Kubernetes could not determine an authentication
+// or authorization decision. Callers must fail closed without treating it as
+// a definitive credential or policy denial.
+var ErrReviewUnavailable = errors.New("identity review unavailable")
 
 type Authenticator interface {
 	Authenticate(context.Context, string) (Principal, error)
@@ -65,13 +71,17 @@ func (a tokenReview) Authenticate(ctx context.Context, token string) (Principal,
 		Spec: authenticationv1.TokenReviewSpec{Token: token},
 	}, metav1.CreateOptions{})
 	if err != nil {
-		return Principal{}, fmt.Errorf("review bearer token: %w", err)
+		// Do not forward a reviewer error: it may contain credential material.
+		return Principal{}, fmt.Errorf("TokenReview request failed: %w", ErrReviewUnavailable)
 	}
-	if !review.Status.Authenticated || review.Status.Error != "" {
+	if review == nil || strings.TrimSpace(review.Status.Error) != "" {
+		return Principal{}, fmt.Errorf("TokenReview could not check token: %w", ErrReviewUnavailable)
+	}
+	if !review.Status.Authenticated {
 		return Principal{}, fmt.Errorf("bearer token was not authenticated")
 	}
 	if strings.TrimSpace(review.Status.User.Username) == "" {
-		return Principal{}, fmt.Errorf("authenticated token has no username")
+		return Principal{}, fmt.Errorf("authenticated TokenReview has no username: %w", ErrReviewUnavailable)
 	}
 	extra := make(map[string][]string, len(review.Status.User.Extra))
 	for key, values := range review.Status.User.Extra {

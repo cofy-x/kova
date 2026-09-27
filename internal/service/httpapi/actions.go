@@ -21,7 +21,7 @@ func (s *Server) handleCancelBuild(c echo.Context) error {
 		return internalError(c, err)
 	}
 	if err := s.authorizeBuild(c.Request().Context(), principalFromContext(c), "delete", build); err != nil {
-		return forbidden(c)
+		return authorizationFailure(c, err)
 	}
 	// FailedVerifying has a fixed runner-failure outcome but is still
 	// collecting bounded partial receipts. A cancellation request cannot
@@ -60,7 +60,7 @@ func (s *Server) handleRunnerAction(c echo.Context, action, contentType string) 
 		return internalError(c, err)
 	}
 	if err := s.authorizeBuild(c.Request().Context(), principalFromContext(c), "update", build); err != nil {
-		return forbidden(c)
+		return authorizationFailure(c, err)
 	}
 	out, err := s.runner().Post(c.Request().Context(), build, action, c.QueryString())
 	if err != nil {

@@ -37,9 +37,10 @@ type Server struct {
 }
 
 var (
-	authDenied   = observability.Int64Counter("kova.service.auth.denied", "Rejected service API authentication attempts")
-	authzDenied  = observability.Int64Counter("kova.service.authorization.denied", "Rejected service API authorization attempts")
-	buildCancels = observability.Int64Counter("kova.service.job.cancellations", "Accepted job cancellations")
+	authDenied             = observability.Int64Counter("kova.service.auth.denied", "Rejected service API authentication attempts")
+	authzDenied            = observability.Int64Counter("kova.service.authorization.denied", "Rejected service API authorization attempts")
+	reviewUnavailableCount = observability.Int64Counter("kova.service.identity.review_unavailable", "Service API identity review outcomes that Kubernetes could not determine")
+	buildCancels           = observability.Int64Counter("kova.service.job.cancellations", "Accepted job cancellations")
 )
 
 const (

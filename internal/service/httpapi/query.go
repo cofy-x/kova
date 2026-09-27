@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	kovav1 "github.com/cofy-x/kova/internal/apis/kova/v1alpha1"
+	serviceauth "github.com/cofy-x/kova/internal/service/auth"
 	"github.com/cofy-x/kova/internal/service/queueadmission"
 	apiv1 "github.com/cofy-x/kova/pkg/api/v1"
 
@@ -52,6 +53,11 @@ func (s *Server) handleListBuilds(c echo.Context) error {
 		options = append(options, client.Continue(token))
 	}
 	if err := s.authorize(c.Request().Context(), principal, "list", ""); err != nil {
+		if errors.Is(err, serviceauth.ErrReviewUnavailable) {
+			// A failed admin review is not a definitive denial. Do not
+			// silently substitute an owner-only response for an unknown result.
+			return reviewUnavailable(c)
+		}
 		options = append(options, client.MatchingLabels{requesterLabel: requesterID(principal.Username)})
 	}
 	var builds kovav1.KovaBuildList
@@ -73,8 +79,18 @@ func (s *Server) handleGetBuild(c echo.Context) error {
 			return internalError(c, lookupErr)
 		}
 		principal := principalFromContext(c)
-		if found && (intent.RequesterHash == queueadmission.HashRequester(principal.Username) || s.authorize(c.Request().Context(), principal, "get", c.Param("id")) == nil) {
+		if found && intent.RequesterHash == queueadmission.HashRequester(principal.Username) {
 			return queueAdmissionPending(c, c.Param("id"))
+		}
+		// Review all other misses, including absent queue intents, so an
+		// unavailable authorizer cannot disclose queue-intent existence through
+		// a 503 for one guessed build ID and a 404 for another.
+		if authzErr := s.authorize(c.Request().Context(), principal, "get", c.Param("id")); authzErr == nil {
+			if found {
+				return queueAdmissionPending(c, c.Param("id"))
+			}
+		} else if errors.Is(authzErr, serviceauth.ErrReviewUnavailable) {
+			return reviewUnavailable(c)
 		}
 		return notFound(c)
 	}
@@ -82,7 +98,7 @@ func (s *Server) handleGetBuild(c echo.Context) error {
 		return internalError(c, err)
 	}
 	if err := s.authorizeBuild(c.Request().Context(), principalFromContext(c), "get", build); err != nil {
-		return forbidden(c)
+		return authorizationFailure(c, err)
 	}
 	return c.JSON(http.StatusOK, buildJobFromCR(build, s.cfg))
 }
@@ -96,7 +112,7 @@ func (s *Server) handleBuildLogs(c echo.Context) error {
 		return internalError(c, err)
 	}
 	if err := s.authorizeBuild(c.Request().Context(), principalFromContext(c), "get", build); err != nil {
-		return forbidden(c)
+		return authorizationFailure(c, err)
 	}
 	tail, err := strconv.ParseInt(strings.TrimSpace(defaultString(c.QueryParam("tail_lines"), "100")), 10, 64)
 	if err != nil || tail < 0 || tail > apiv1.MaxLogTailLines {
