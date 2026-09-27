@@ -1,0 +1,49 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kova-fair-alice
+  namespace: kova
+  labels:
+    kova.cofy.dev/e2e: admission-fairness
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kova-fair-bob
+  namespace: kova
+  labels:
+    kova.cofy.dev/e2e: admission-fairness
+automountServiceAccountToken: false
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: kova-fair-alice-submitter
+  namespace: kova
+  labels:
+    kova.cofy.dev/e2e: admission-fairness
+subjects:
+  - kind: ServiceAccount
+    name: kova-fair-alice
+    namespace: kova
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: kova-service-submitter
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: kova-fair-bob-submitter
+  namespace: kova
+  labels:
+    kova.cofy.dev/e2e: admission-fairness
+subjects:
+  - kind: ServiceAccount
+    name: kova-fair-bob
+    namespace: kova
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: kova-service-submitter

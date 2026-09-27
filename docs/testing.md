@@ -50,6 +50,7 @@ and environment policy in the consuming workspace rather than this repository.
 | `make e2e-helm-quickstart` | Packages the chart, installs it into an ephemeral minimal kind cluster, runs the authenticated Service workflow, and deletes the cluster on exit. Set `KEEP_KIND_CLUSTER=true` to retain a cluster created by the test, or `REUSE_KIND_CLUSTER=true` to explicitly use a caller-owned cluster that the test will not delete. | Helm archive, `examples/simple`, `.work/result-service.jsonl` |
 | `make e2e-service-admission` | Read-only admission preflight by default; with `ADMISSION_E2E_MODE=run` and a test token, checks two Service Pods on an existing dedicated `kova-admission-*` Kind cluster, then sends a 40-way HTTP burst, preserves run-scoped request/response receipts, and cleans up only its exact CR IDs. Requires preinstalled active=1, global queue=3, requester queue=2, and `never=true` runner selector. | Existing dedicated Kind cluster; no install or cluster-wide cleanup |
 | `make e2e-service-admission-failover` | Read-only preflight by default; normal live mode proves leader handoff while a challenger remains queued. An explicit `ADMISSION_FAILOVER_PROMOTION=true` fixture additionally releases the exact blocker and verifies the challenger acquires the sole active grant and Pending runner. Receipts survive ambiguous outcomes. | Same empty, dedicated two-replica Kind admission caps; promotion is restricted further to the sole `kova-admission-pump` Kind on `wayne-hk-kvm`. |
+| `make e2e-service-admission-fairness` | Read-only preflight by default; opt-in live mode uses two TokenReview-authenticated callers to prove requester and global queue caps, durable fair rotation across leader handoff, and exact UID cleanup. | Sole dedicated `kova-admission-fairness` Kind on `wayne-hk-kvm`; run receipts under `/data/forge-artifacts/kova-admission-fairness/`. |
 | `make e2e-service-admission-ledger-loss` | Read-only preflight by default; live mode deliberately deletes only the exact active admission ConfigMap in a disposable dedicated Kind cluster, then proves both Service replicas return 503 for readiness and new submissions without creating a CR. Optional exact follower Pod replacement proves startup does not silently recreate the ledger. Preserves receipts and never repairs the fault. | Same empty, dedicated two-replica Kind admission cluster and caps as above; retire cluster after live mode |
 | `make e2e-service-admission-deep-queue` | Read-only preflight by default; live mode holds one unschedulable blocker, grows a real API-server-backed queue through 100, 500, and 1000 CRs, records independent HTTP/API/resource receipts, and performs exact-ID cleanup only after every stage passes. | The only Kind cluster must be `kova-deep-queue`, with two ready Service replicas, empty ledgers/workloads, active=1, queued global/requester=1000, and `never=true` runner selector. |
 | `make e2e-service-partial-output` | Read-only preflight by default; live mode executes a real two-target OCI+Nydus runner build whose later target fails in BuildKit, then checks final `Failed` and the first target's exact digest-pinned partial receipts. | Existing empty `kova-partial-output-41` Kind on `wayne-hk-kvm`; run-scoped source/output tags and private receipts under `.work/partial-output/`. |
@@ -65,6 +66,74 @@ and environment policy in the consuming workspace rather than this repository.
 
 Tune the concurrent check with `EXAMPLE_COUNT`, `BUILD_CONCURRENCY`, and
 `MIN_BUILDKIT_NODE_IPS`.
+
+## Two-Requester Admission Fairness on Kind
+
+Issue #44's existing static-token admission tests have one authenticated username, so they cannot prove fairness or the global HTTP queue cap across two requesters.
+This fixture uses two short TokenRequest bearers for the test-only `kova-fair-alice` and `kova-fair-bob` ServiceAccounts.
+It runs only on `wayne-hk-kvm` after other Kind work has finished; the host must have exactly one Kind cluster, named `kova-admission-fairness`.
+The script does not create the cluster, change Helm values, apply RBAC, edit either admission ledger, or push images.
+
+Prepare a clean candidate checkout and build the three role images with revision tags on the KVM host using the existing image entrypoint.
+After the exact tags are present locally, create the two-node Kind, push/load only those three candidate tags from KVM, install the current CRD and chart with `deploy/quickstart-kind-values.yaml` followed by `deploy/admission-fairness-kind-values.yaml`, and apply `deploy/admission-fairness-rbac.yaml`.
+The chart must be installed with TokenReview authentication from its first Service startup, two Service replicas, active job/worker cap 1, global queue cap 3, requester queue cap 2, a two-hour build deadline, and the unmatched `never=true` runner selector.
+For example, after confirming `kind get clusters` is empty on KVM:
+
+```bash
+fair_revision=$(git rev-parse --short=12 HEAD)
+CONTROLLER_IMAGE=localhost:5002/kova:controller-${fair_revision} \
+  RUNNER_IMAGE=localhost:5002/kova:runner-${fair_revision} \
+  WORKER_IMAGE=localhost:5002/kova:worker-${fair_revision} \
+  IMAGE_PLATFORM=linux/amd64 make image
+KIND_CLUSTER=kova-admission-fairness KIND_CONFIG=deploy/quickstart-kind-cluster.yaml \
+  KIND_WORKERS=1 KIND_KUBECONFIG=.kind/kova-admission-fairness.kubeconfig \
+  CONTROLLER_IMAGE=localhost:5002/kova:controller-${fair_revision} \
+  RUNNER_IMAGE=localhost:5002/kova:runner-${fair_revision} \
+  WORKER_IMAGE=localhost:5002/kova:worker-${fair_revision} make kind-load
+helm show crds charts/kova | kubectl --kubeconfig .kind/kova-admission-fairness.kubeconfig apply -f -
+helm upgrade --install kova charts/kova \
+  --kubeconfig .kind/kova-admission-fairness.kubeconfig --namespace kova \
+  --create-namespace --wait --timeout 180s \
+  -f deploy/quickstart-kind-values.yaml -f deploy/admission-fairness-kind-values.yaml \
+  --set-string images.controller.tag=controller-${fair_revision} \
+  --set-string images.runner.tag=runner-${fair_revision} \
+  --set-string images.worker.tag=worker-${fair_revision} \
+  --set-string worker.platform=linux/amd64
+kubectl --kubeconfig .kind/kova-admission-fairness.kubeconfig \
+  apply -f deploy/admission-fairness-rbac.yaml
+make e2e-service-admission-fairness
+```
+
+Review the read-only check before opting into the run:
+
+```bash
+ADMISSION_FAIRNESS_ACK=kova-admission-fairness/kova/kova-service \
+  ADMISSION_FAIRNESS_MODE=run make e2e-service-admission-fairness
+```
+
+The Make target reads the `ADMISSION_FAIRNESS_MODE` environment variable: `check` is the default, `run` submits work, and `recover` requires `ADMISSION_FAIRNESS_RUN_DIR`.
+The live sequence holds an unschedulable Alice build, fills Alice's two queue slots, verifies Alice's next request receives 429 while a global slot remains, fills the last slot with Bob, then verifies Bob's next request receives 429 at the global cap.
+It deletes the exact leader Pod with a Kubernetes UID precondition while all three requests remain queued, then releases one verified build at a time and requires the single active grant to rotate Alice → Bob → Alice → Bob → Alice even though Alice has older queued work.
+Each stage preserves requester, CR UID, queue nonce, active grant, fairness cursor, runner Pod ownership, Lease, and timing receipts.
+The preflight also binds the locally built OCI config digest to the Kind CRI image and both Service Pod image IDs; subsequent observations recheck the pinned config on each Service Pod.
+The submissions are separated beyond Kubernetes' creation-timestamp precision and the run proves Bob's request was newer than Alice's backlog before testing fair promotion.
+All runners remain Pending, so no source or output tag is published.
+
+An uncertain POST, unknown CR/Pod, drifted identity, unresolved Pod Create nonce, or timed-out transition stops the run and preserves its evidence directory without deleting a ledger or another workload.
+Inspect `state.json` and the saved stage receipts before recovery.
+Only recorded accepted CR UIDs can be removed by the guarded recovery path; a POST with no proven result must be investigated manually.
+If every candidate and cluster identity is accounted for, use:
+
+```bash
+ADMISSION_FAIRNESS_ACK=kova-admission-fairness/kova/kova-service \
+  ADMISSION_FAIRNESS_MODE=recover \
+  ADMISSION_FAIRNESS_RUN_DIR=/data/forge-artifacts/kova-admission-fairness/fairness-20260927t120000z-0123abcd \
+  make e2e-service-admission-fairness
+```
+
+Replace the example run directory with the exact directory printed by the failed run.
+
+The five grants and four release timings are functional evidence, not a latency distribution or production SLA.
 
 ## Admission Ledger-Loss Fault Acceptance
 

@@ -1,0 +1,25 @@
+# Overlay on quickstart-kind-values.yaml for a dedicated, disposable fixture.
+# Image repositories and revision tags are supplied by the KVM setup command.
+images:
+  controller:
+    pullPolicy: Never
+  runner:
+    pullPolicy: Never
+  worker:
+    pullPolicy: Never
+
+serviceDaemon:
+  enabled: true
+  replicas: 2
+  authentication:
+    mode: tokenreview
+  jobTTL: 2h
+  wait: 2h
+  maxBuildDuration: 2h
+  maxActiveJobs: 1
+  maxActiveJobsPerRequester: 1
+  maxQueuedJobs: 3
+  maxQueuedJobsPerRequester: 2
+  workerSlots: 1
+  runnerNodeSelector:
+    never: "true"
