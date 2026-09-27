@@ -586,20 +586,20 @@ def run_probe(args: argparse.Namespace, directory: Path, state: dict, baseline: 
         health_samples += wait_owned(
             state, directory, baseline, min(deadline, time.monotonic() + 60)
         )
-        before_owner = read.api_metrics()
+        before_owner = read.api_metrics(allow_unseen=True)
         save(directory, "apiserver-before-owner.json", before_owner)
         owner, health, owner_elapsed = request_phase(
             state, directory, baseline, tokens, "a", args.owner_requests, args.qps, deadline
         )
         health_samples += health
-        after_owner = read.api_metrics()
+        after_owner = read.api_metrics(allow_unseen=True)
         save(directory, "apiserver-after-owner.json", after_owner)
         owner_reviews = review_deltas(before_owner, after_owner, len(owner), 0)
         nonowner, health, nonowner_elapsed = request_phase(
             state, directory, baseline, tokens, "b", args.nonowner_requests, args.qps, deadline
         )
         health_samples += health
-        after_nonowner = read.api_metrics()
+        after_nonowner = read.api_metrics(allow_unseen=True)
         save(directory, "apiserver-after-nonowner.json", after_nonowner)
         nonowner_reviews = review_deltas(after_owner, after_nonowner, len(nonowner), len(nonowner))
         view, final_health = observe_owned(state, baseline)
@@ -769,7 +769,7 @@ def main() -> int:
                 "candidate commit is not exact",
             )
             fresh_preflight(args.candidate_commit)
-            read.api_metrics()
+            read.api_metrics(allow_unseen=True)
             print(f"auth-owner: fresh read-only TokenReview preflight passed: {fair.CLUSTER}")
             return 0
         require(socket.gethostname() == "wayne-hk-kvm", "live probe is restricted to wayne-hk-kvm")
@@ -808,7 +808,7 @@ def main() -> int:
                     "candidate commit is not exact",
                 )
                 identity, baseline = fresh_preflight(args.candidate_commit)
-                read.api_metrics()
+                read.api_metrics(allow_unseen=True)
                 run_id = (
                     "owner-get-"
                     + datetime.now(timezone.utc).strftime("%Y%m%dt%H%M%Sz")  # noqa: UP017

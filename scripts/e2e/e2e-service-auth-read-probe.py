@@ -259,13 +259,15 @@ def bounded_metrics_text() -> str:
             process.wait(timeout=5)
 
 
-def api_metrics() -> dict:
-    """Keep only exact TokenReview/SAR counter series; never persist raw /metrics."""
+def api_metrics(*, allow_unseen: bool = False) -> dict:
+    """Keep review counters; a fresh fixture may not have emitted them yet."""
     raw = bounded_metrics_text()
     series: dict[tuple[tuple[str, str], ...], float] = {}
+    request_family_seen = False
     for line in raw.splitlines():
         if not line.startswith("apiserver_request_total{"):
             continue
+        request_family_seen = True
         try:
             label_text, value_text = line.split("}", 1)
             labels = dict(LABEL.findall(label_text))
@@ -279,7 +281,9 @@ def api_metrics() -> dict:
         require(key not in series, "API counter series is duplicated")
         series[key] = value
     resources = {(dict(key).get("group"), dict(key).get("resource")) for key in series}
-    require(resources == REVIEW_RESOURCES, "TokenReview or SAR API counter is unavailable")
+    require(request_family_seen, "API server request counter family is unavailable")
+    if not allow_unseen:
+        require(resources == REVIEW_RESOURCES, "TokenReview or SAR API counter is unavailable")
     return {
         "at": timestamp(),
         "series": [{"labels": dict(key), "value": value} for key, value in sorted(series.items())],

@@ -180,6 +180,7 @@ The owner GET path needs a real authenticated owner and an existing `KovaBuild`.
 Do not reuse the ordinary quickstart Service E2E fixture: that entrypoint explicitly installs static authentication, so it cannot prove TokenReview or SubjectAccessReview behavior.
 Use a newly created, sole `kova-admission-fairness` Kind with the two-replica TokenReview overlay and its two test ServiceAccounts; the script neither creates nor deletes the Kind cluster.
 The default `check` requires a fresh, empty fairness cursor, zero builds/runners and empty admission ledgers, both exact candidate image bindings, two Ready Service Pods, healthy nodes, Pod/memory/CPU headroom, and no virtual `get servicebuilds` RBAC for either principal.
+On a new API server the TokenReview/SAR counter series may not exist yet; this probe accepts an absent review series only when the general API request counter family is present, treats its baseline as zero, and still requires exact review deltas after requests.
 The RBAC check impersonates each ServiceAccount username, exact UID, and its standard authenticated and ServiceAccount groups; a name-only impersonation is insufficient to prove denial.
 Supply the full SHA of the commit used to build the deployed controller image, even when the checkout contains a later script-only commit:
 

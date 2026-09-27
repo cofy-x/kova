@@ -181,6 +181,16 @@ class AuthReadProbeTest(unittest.TestCase):
             with self.assertRaisesRegex(PROBE.fair.SafetyError, "unavailable"):
                 PROBE.api_metrics()
 
+    def test_metric_parser_allows_unseen_reviews_only_on_fresh_fixture(self) -> None:
+        raw = 'apiserver_request_total{group="",resource="pods",verb="GET",code="200"} 100'
+        with patch.object(PROBE, "bounded_metrics_text", return_value=raw):
+            self.assertEqual(PROBE.api_metrics(allow_unseen=True)["series"], [])
+            with self.assertRaisesRegex(PROBE.fair.SafetyError, "unavailable"):
+                PROBE.api_metrics()
+        with patch.object(PROBE, "bounded_metrics_text", return_value="unrelated_metric 1"):
+            with self.assertRaisesRegex(PROBE.fair.SafetyError, "counter family"):
+                PROBE.api_metrics(allow_unseen=True)
+
     def test_empty_get_never_returns_or_persists_bearer(self) -> None:
         def response(request, *, timeout):
             self.assertEqual(request.get_method(), "GET")
