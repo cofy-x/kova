@@ -53,6 +53,11 @@ func (r *KovaBuildReconciler) finish(ctx context.Context, build *kovav1.KovaBuil
 	build.Status.PollFailureSince = nil
 	build.Status.PollFailureCount = 0
 	setPhaseCondition(build, phase, build.Status.Reason, build.Status.Message)
+	// A failed status write is retried, possibly by another leader. Publish
+	// completion signals only after the durable terminal receipt exists.
+	if err := r.Status().Update(ctx, build); err != nil {
+		return err
+	}
 	if r.Recorder != nil {
 		eventType := corev1.EventTypeNormal
 		if phase == kovav1.PhaseFailed {
@@ -64,7 +69,7 @@ func (r *KovaBuildReconciler) finish(ctx context.Context, build *kovav1.KovaBuil
 	if build.Status.StartedAt != nil {
 		jobDuration.RecordDuration(ctx, time.Since(build.Status.StartedAt.Time), attribute.String("kova.phase", phase))
 	}
-	return r.Status().Update(ctx, build)
+	return nil
 }
 
 func defaultMessage(message, fallback string) string {
