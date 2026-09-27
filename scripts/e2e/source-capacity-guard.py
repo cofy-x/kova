@@ -284,7 +284,7 @@ def validate_build(build: dict, contract: dict) -> str:
         or options.get("vars") != ["KOVA_MARKER=capacity"]
         or options.get("failFast", False) is not False
         or options.get("verbose", False) is not False
-        or options.get("oomCooldown", "") != ""
+        or options.get("oomCooldown") != "2m0s"
     ):
         fail("KovaBuild execution options drifted; no deletion attempted")
     return uid

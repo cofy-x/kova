@@ -280,7 +280,7 @@ jq -n --arg run_id "${run_id}" --arg expected_job_id "${expected_job_id}" \
 submission_possible=true
 KOVA_SERVICE_TOKEN=${token} run_supervised timeout -k 10s 30s "${root}/bin/kova" --service-url "${base}" \
   job submit --source-digest "${source_digest}" --target "${target}" \
-  --platform linux/amd64 --format oci --timeout 900 --var KOVA_MARKER=capacity \
+  --platform linux/amd64 --format oci --timeout 900 --oom-cooldown 2m --var KOVA_MARKER=capacity \
   --idempotency-key "${run_id}" "${source_uri}" >"${run_dir}/job.json"
 job_id=$(jq -r '.id // empty' "${run_dir}/job.json")
 [[ ${job_id} == "${expected_job_id}" ]] || die "Service did not return the expected idempotent build ID"

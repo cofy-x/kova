@@ -79,6 +79,7 @@ def build() -> dict:
                 "concurrency": 1,
                 "timeout": 900,
                 "vars": ["KOVA_MARKER=capacity"],
+                "oomCooldown": "2m0s",
                 "failFast": False,
             },
         },
@@ -210,6 +211,17 @@ class ExactStopTests(unittest.TestCase):
                 "spec",
                 "build",
                 {"format": "oci", "concurrency": 1, "timeout": 900, "vars": ["OTHER=1"]},
+            ),
+            (
+                "spec",
+                "build",
+                {
+                    "format": "oci",
+                    "concurrency": 1,
+                    "timeout": 900,
+                    "vars": ["KOVA_MARKER=capacity"],
+                    "oomCooldown": "45s",
+                },
             ),
         ):
             changed = build()
