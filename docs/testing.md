@@ -50,6 +50,7 @@ and environment policy in the consuming workspace rather than this repository.
 | `make e2e-helm-quickstart` | Packages the chart, installs it into an ephemeral minimal kind cluster, runs the authenticated Service workflow, and deletes the cluster on exit. Set `KEEP_KIND_CLUSTER=true` to retain a cluster created by the test, or `REUSE_KIND_CLUSTER=true` to explicitly use a caller-owned cluster that the test will not delete. | Helm archive, `examples/simple`, `.work/result-service.jsonl` |
 | `make e2e-service-admission` | Read-only admission preflight by default; with `ADMISSION_E2E_MODE=run` and a test token, checks two Service Pods on an existing dedicated `kova-admission-*` Kind cluster, then sends a 40-way HTTP burst and cleans up only its exact CR IDs. Requires preinstalled active=1, global queue=3, requester queue=2, and `never=true` runner selector. | Existing dedicated Kind cluster; no install or cluster-wide cleanup |
 | `make e2e-service-admission-failover` | Read-only preflight by default; live mode replaces only the verified current Service leader Pod, then proves a successor reconciles a new queued build without duplicating the original runner or active grant. Preserves run-scoped receipts on success and failure; exact two-CR cleanup only on success. | Same empty, dedicated two-replica Kind admission cluster and caps as above |
+| `make e2e-service-admission-ledger-loss` | Read-only preflight by default; live mode deliberately deletes only the exact active admission ConfigMap in a disposable dedicated Kind cluster, then proves both Service replicas return 503 for readiness and new submissions without creating a CR. Optional exact follower Pod replacement proves startup does not silently recreate the ledger. Preserves receipts and never repairs the fault. | Same empty, dedicated two-replica Kind admission cluster and caps as above; retire cluster after live mode |
 | `make e2e-source-capacity` | Read-only preflight by default; live mode publishes one 128 MiB incompressible immutable source, builds one OCI output, verifies its digest and host pull, and samples Kind node/runner state. Preserves run-scoped receipts and tags; never deletes the cluster or registry content. | Existing empty, dedicated `kova-source-capacity` Kind quickstart cluster and localhost registry |
 | `make e2e-service` | RBAC isolation, immutable OCI source publication, pre-build target-and-platform contract failure, platform-scoped worker dispatch, safe caller retry, verified output platform and manifest digest, ephemeral logs, TTL cleanup, and host pull. | `examples/simple`, `.work/result-service.jsonl` |
 | `make e2e-crd-upgrade` | Isolated pre-retry CRD to current CRD/controller migration, including live status pruning/persistence, a quiescence gate, and an injected old Starting runner that must fail before POST. | Public `v0.1.0-rc.9` chart and role images, dedicated Kind cluster and registry |
@@ -62,6 +63,33 @@ and environment policy in the consuming workspace rather than this repository.
 
 Tune the concurrent check with `EXAMPLE_COUNT`, `BUILD_CONCURRENCY`, and
 `MIN_BUILDKIT_NODE_IPS`.
+
+## Admission Ledger-Loss Fault Acceptance
+
+Use only an existing disposable `kova-admission-*` Kind cluster after the ordinary two-replica admission preflight passes.
+The script additionally matches the kubeconfig server and credentials to the live Kind cluster, requires that it be the only Kind cluster on the host, checks for zero KovaBuilds and runner Pods across all namespaces, and verifies each Service Pod's ReplicaSet and Deployment ownership.
+Check mode is read-only:
+
+```bash
+KIND_CLUSTER=kova-admission-44 KIND_KUBECONFIG=.kind/kova-admission-44.kubeconfig make e2e-service-admission-ledger-loss
+```
+
+Live mode is an intentional fault injection.
+It requires an explicit acknowledgement naming the exact disposable cluster, namespace, and ConfigMap.
+It keeps receipts under `/tmp/kova-admission-ledger-loss.*`, leaves `kova-service-admission` absent, and never attempts to recreate the ledger or clean up the cluster.
+The optional restart deletes only one verified Service follower Pod; leave it disabled unless startup recovery is part of the acceptance being run.
+Stop after any unexpected response or cloud error, inspect the receipts, and retire only the test-owned Kind cluster after evidence has been saved.
+
+```bash
+ADMISSION_E2E_MODE=run \
+ADMISSION_LEDGER_LOSS_ACK=kova-admission-44/kova/kova-service-admission \
+ADMISSION_LEDGER_LOSS_RESTART=true \
+KIND_CLUSTER=kova-admission-44 KIND_KUBECONFIG=.kind/kova-admission-44.kubeconfig \
+SERVICE_AUTH_TOKEN=service-e2e-token make e2e-service-admission-ledger-loss
+```
+
+This test does not establish production availability or a safe ledger recovery procedure.
+Do not restore the deleted ConfigMap from a blank template: an apparently empty namespace cannot prove that no admission or Pod-create operation had an unknown outcome.
 
 ## Isolated Source-Capacity Acceptance
 
