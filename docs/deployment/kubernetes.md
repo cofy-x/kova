@@ -93,6 +93,7 @@ kubectl -n "${NAMESPACE}" rollout status deployment/kova-service
 
 # Apply and verify the CRD as shown above while the old Service remains stopped.
 ./scripts/deployment/verify-kovabuild-crd.sh
+./scripts/deployment/probe-kovabuild-status.sh --expect-persisted
 ./scripts/deployment/verify-kovabuild-drained.sh
 # Now run the helm upgrade shown above, then:
 kubectl -n "${NAMESPACE}" rollout status deployment/kova-service
@@ -112,9 +113,13 @@ when the release uses `fullnameOverride`.
 
 Apply the CRD for every selected release before the Helm upgrade. Helm creates
 objects from `crds/` during initial installation but does not upgrade them.
-For releases with bounded status retries, verify that the live CRD exposes the
-`pollFailureSince` and `pollFailureCount` status fields before starting the new controller.
-An older schema can prune the retry window from status and prevent bounded recovery.
+For releases with bounded status retries, verify both the live CRD schema and
+an actual `/status` write/read round trip for `pollFailureSince` and
+`pollFailureCount` before starting the new controller. The schema check alone
+does not prove that the API serving path has picked up the new schema; an older
+serving schema can prune the retry window and prevent bounded recovery. The
+probe uses a dedicated, previously absent namespace and removes it afterward.
+Keep the old Service stopped and direct submissions frozen through both checks.
 The optional `BASELINE_CHART` path in `scripts/e2e/e2e-service.sh` exercises this
 order with an older chart before upgrading to the current controller; run
 `./scripts/deployment/test-verify-kovabuild-crd.sh` for a cluster-free gate test.
