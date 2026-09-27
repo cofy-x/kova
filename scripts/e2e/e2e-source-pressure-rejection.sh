@@ -18,6 +18,7 @@ ack=${SOURCE_PRESSURE_E2E_ACK:-}
 run_dir=
 current_fixture=
 success=false
+active_pid=
 
 die() { echo "error: $*" >&2; exit 1; }
 note() { echo "source-pressure-e2e: $*" >&2; }
@@ -69,7 +70,12 @@ check_identity() {
 }
 finish() {
   local status=$?
-  trap - EXIT
+  trap - EXIT HUP INT TERM
+  trap '' HUP INT TERM
+  if [[ -n ${active_pid} ]]; then
+    kill "${active_pid}" 2>/dev/null || true
+    wait "${active_pid}" 2>/dev/null || true
+  fi
   if [[ -n ${run_dir} ]]; then
     if [[ ${success} == true && ${status} == 0 ]]; then
       note "PASS: all rejection receipts at ${run_dir}; no test source tags or KovaBuilds created"
@@ -79,7 +85,14 @@ finish() {
   fi
   exit "${status}"
 }
+wait_active() {
+  local status=0
+  wait "${active_pid}" || status=$?
+  active_pid=
+  return "${status}"
+}
 trap finish EXIT
+trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
@@ -133,11 +146,15 @@ for case_name in symlink-parent dockerfile-limit expanded-limit compressed-limit
     expanded-limit) file_limit_kib=65536 ;;
     compressed-limit) file_limit_kib=526336 ;;
   esac
-  if (ulimit -f "${file_limit_kib}";
-    /usr/bin/time -v -o "${run_dir}/${case_name}.generate.time.txt" \
-      timeout --signal=TERM --kill-after=5s 180s python3 "${root}/scripts/e2e/source-pressure-fixtures.py" \
-        --case "${case_name}" --output "${current_fixture}" --tag "${tag}" \
-        >"${run_dir}/${case_name}.generate.stdout" 2>"${run_dir}/${case_name}.generate.stderr"); then
+  (
+    ulimit -f "${file_limit_kib}"
+    exec timeout --signal=TERM --kill-after=5s 180s /usr/bin/time -v \
+      -o "${run_dir}/${case_name}.generate.time.txt" \
+      python3 "${root}/scripts/e2e/source-pressure-fixtures.py" \
+        --case "${case_name}" --output "${current_fixture}" --tag "${tag}"
+  ) >"${run_dir}/${case_name}.generate.stdout" 2>"${run_dir}/${case_name}.generate.stderr" &
+  active_pid=$!
+  if wait_active; then
     :
   else
     die "fixture generation failed or exceeded 180s for ${case_name}"
@@ -162,12 +179,16 @@ for case_name in symlink-parent dockerfile-limit expanded-limit compressed-limit
 
   # The source destination is hard-coded to the local Kind registry. A buggy
   # client may unexpectedly create the tag, so verify absence even on failure.
-  if (ulimit -f 540672;
-    /usr/bin/time -v -o "${run_dir}/${case_name}.time.txt" \
-      timeout --signal=TERM --kill-after=5s 90s "${root}/bin/kova" source push \
+  (
+    ulimit -f 540672
+    exec timeout --signal=TERM --kill-after=5s 90s /usr/bin/time -v \
+      -o "${run_dir}/${case_name}.time.txt" \
+      "${root}/bin/kova" source push \
         --repository "${registry}/${repository}:${tag}" --registry-plain-http "${registry}" \
-        "${current_fixture}" >"${run_dir}/${case_name}.push.stdout" \
-        2>"${run_dir}/${case_name}.push.stderr"); then
+        "${current_fixture}"
+  ) >"${run_dir}/${case_name}.push.stdout" 2>"${run_dir}/${case_name}.push.stderr" &
+  active_pid=$!
+  if wait_active; then
     code=0
   else
     code=$?

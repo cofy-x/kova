@@ -241,6 +241,7 @@ QUICKSTART_KIND_CLUSTER=kova-source-capacity KEEP_KIND_CLUSTER=true \
   CONTROLLER_IMAGE="localhost:5002/kova:controller-$REV" \
   RUNNER_IMAGE="localhost:5002/kova:runner-$REV" \
   WORKER_IMAGE="localhost:5002/kova:worker-$REV" \
+  SERVICE_AUTH_SECRET=kova-e2e-token \
   SERVICE_TARGET="kind-registry:5000/kova-examples/source-capacity-setup:$SETUP_RUN" \
   SERVICE_PULL_TARGET="localhost:5002/kova-examples/source-capacity-setup:$SETUP_RUN" \
   SOURCE_REPOSITORY="localhost:5002/kova-sources/source-capacity-setup:$SETUP_RUN" \
@@ -248,20 +249,36 @@ QUICKSTART_KIND_CLUSTER=kova-source-capacity KEEP_KIND_CLUSTER=true \
 ```
 
 The quickstart must complete and its terminal KovaBuilds must expire before the source-capacity preflight can pass.
+The generic quickstart default `kova-service-auth` Secret name is insufficient for this isolated fixture; use `SERVICE_AUTH_SECRET=kova-e2e-token` as shown above.
 The preflight verifies that the host has only the named Kind cluster, that its dedicated kubeconfig exactly matches the live Kind credentials/server, that both nodes and Kova deployments are healthy, that the registry image/port/network are exact, and that no KovaBuild or runner Pod is active. It also requires a clean checkout, same-revision Linux CLI, exact role image tags and OCI revision labels, and matching local Linux/amd64 image config IDs, ready Pod image IDs, and Kind CRI image identities. The live mode repeats these identity checks after source publication and checks both `source-fetch` and `runner` containers on the exact owned runner Pod.
 It makes no cluster changes.
 
 ```bash
 make e2e-source-capacity
-SOURCE_CAPACITY_E2E_MODE=run SERVICE_AUTH_TOKEN=service-e2e-token make e2e-source-capacity
+SOURCE_CAPACITY_E2E_MODE=run make e2e-source-capacity
 ```
 
 The live mode requires at least 20 GiB free disk, 1 GiB free temporary storage, and 8 GiB available RAM.
-It uses the quickstart's `service-e2e-token` only through the process environment, never a command argument or evidence file.
+It requires the exact disposable `kova-e2e-token/token` Secret reference and fixed quickstart credential, reads the token into process memory, and rejects inherited Service tokens; do not put any token in an SSH command or evidence file.
 It rejects existing source/output tags for its random run ID, then saves the source receipt, exact job ID, terminal and result receipts, live runner log and Pod samples, node health and Docker resource samples, events, and host-pull digest under `.work/source-capacity/<run-id>/`.
+Runner and job log stdout/stderr evidence retains at most 1 MiB/64 KiB per capture, with explicit head/tail truncation, full-stream SHA-256 and byte counts, child exit status, and signal outcome in `*.capture.json`; the terminal job/results receipts, not a truncated log, determine acceptance.
 The expected outcome is one succeeded build with a verified manifest digest and a host pull of `localhost:5002/kova-examples/source-capacity:<run-id>` yielding that same digest.
 After a submission might have reached the Service, failure or HUP/INT/TERM triggers a supervised stop of only the deterministic run ID. The stop checks the saved Kind identity and the complete KovaBuild source, requester, target, and options contract, verifies runner ownership, then sends a Kubernetes API DELETE with an atomic CR UID precondition. It waits for the exact CR, runner, and admission ledgers to clear. It never deletes the Kind cluster or registry tags. A missing CR after a timed-out submit is **uncertain**, not proof of no write; a changed identity, foreign build/Pod, API error, or non-converged cleanup also fails closed and preserves `stop.err`, `stop-outcome.json` (when available), and all other receipts. Inspect the exact run before retrying or clearing tags; a known failed run may be retried with `python3 scripts/e2e/source-capacity-guard.py stop .work/source-capacity/<run-id>` after checking the same dedicated cluster identity. SIGKILL and host loss cannot run the trap, so the operator must inspect the exact ID before a new run.
 After evidence review, remove only the named `kova-source-capacity` Kind cluster and its kubeconfig if no longer needed; review run-scoped source/output tags before any registry cleanup.
+
+The source-pressure companion uses the same empty dedicated Kind and exact candidate preflight, but does not submit a build.
+Run its default read-only check first, then explicitly acknowledge the isolated registry repository:
+
+```bash
+./scripts/e2e/e2e-source-pressure-rejection.sh
+SOURCE_PRESSURE_E2E_MODE=run \
+  SOURCE_PRESSURE_E2E_ACK=kova-source-capacity/kova/kova-sources/source-pressure-rejection \
+  ./scripts/e2e/e2e-source-pressure-rejection.sh
+```
+
+It requires 20 GiB workspace/Docker disk, 2 GiB temporary disk, and 8 GiB memory headroom, then expects four malformed or oversized archives to be rejected before publication with each exact run tag absent.
+Run it in a persistent session; HUP/INT/TERM fail the campaign and retain its private `.work/source-pressure-rejection/<run-id>/` evidence.
+Passing these two tests does not establish kubelet eviction behavior or oversized-source failure during Service-side immutable fetch, so those gates remain separate.
 
 ## Isolated Partial-Output Receipt Acceptance (#41)
 

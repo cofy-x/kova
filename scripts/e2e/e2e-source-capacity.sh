@@ -18,7 +18,8 @@ registry_name=kind-registry
 registry_host=localhost:5002
 cluster_registry=kind-registry:5000
 registry_image=registry:2@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373
-token=${SERVICE_AUTH_TOKEN:-}
+token=
+test_secret_uid=
 expected_kubeconfig=
 port_forward_pid=
 sampler_pid=
@@ -28,6 +29,7 @@ run_dir=
 job_id=
 submission_possible=false
 guard=${root}/scripts/e2e/source-capacity-guard.py
+log_capture=${root}/scripts/e2e/capture-bounded-logs.py
 
 die() { echo "error: $*" >&2; exit 1; }
 note() { echo "source-capacity-e2e: $*" >&2; }
@@ -46,6 +48,29 @@ admission_empty() {
   queue=$(kctl -n "${namespace}" get configmap kova-service-queue-admission -o json)
   jq -e '.data["reservations.json"] | fromjson | .active == {}' <<<"${active}" >/dev/null || die "active admission ledger is not empty"
   jq -e '.data["queue.json"] | fromjson | .intents == {}' <<<"${queue}" >/dev/null || die "queue admission ledger is not empty"
+}
+check_test_auth() {
+  local secret observed_uid observed_token
+  jq -e '.spec.template.spec.containers |
+    [.[] | select(.name == "kova-service") | .env[]? |
+      select(.name == "KOVA_SERVICE_AUTH_TOKEN") | .valueFrom.secretKeyRef] ==
+    [{"name":"kova-e2e-token","key":"token"}]' <<<"${service}" >/dev/null ||
+    die "Service is not bound to the exact disposable Kind token Secret"
+  secret=$(kctl -n "${namespace}" get secret kova-e2e-token -o json)
+  jq -e '.metadata.name == "kova-e2e-token" and .metadata.namespace == "kova" and
+    .type == "Opaque" and (.metadata.uid | type == "string" and length > 0) and
+    (.data.token | type == "string" and length > 0)' <<<"${secret}" >/dev/null ||
+    die "disposable Kind token Secret identity or data differs"
+  observed_uid=$(jq -r '.metadata.uid' <<<"${secret}")
+  observed_token=$(jq -r '.data.token | @base64d' <<<"${secret}") ||
+    die "disposable Kind token cannot be decoded"
+  [[ ${observed_token} == service-e2e-token ]] ||
+    die "disposable Kind token value differs from the fixed test credential"
+  if [[ -n ${test_secret_uid} && ${observed_uid} != "${test_secret_uid}" ]]; then
+    die "disposable Kind token Secret UID changed during the run"
+  fi
+  test_secret_uid=${observed_uid}
+  token=${observed_token}
 }
 
 cleanup() {
@@ -134,6 +159,9 @@ jq -e --arg namespace "${namespace}" --arg registry "${cluster_registry}" '
   ["--namespace=" + $namespace, "--auth-mode=static", "--auth-static-principal=kova:e2e", "--registry-plain-http=" + $registry] |
   all(. as $arg | ($args | index($arg)) != null)
 ' <<<"${service}" >/dev/null || die "Service is not the isolated authenticated quickstart configuration"
+[[ ! ${SERVICE_AUTH_TOKEN+x} && ! ${KOVA_SERVICE_TOKEN+x} ]] ||
+  die "do not pass a Service token in the environment; the test reads its exact disposable Kind Secret"
+check_test_auth
 jq -e '.items | length == 0' <<<"$(kctl get kovabuilds -A -o json)" >/dev/null || die "another KovaBuild exists; do not overlap tests"
 jq -e '.items | length == 0' <<<"$(kctl get pods -A -l app.kubernetes.io/name=kova-runner -o json)" >/dev/null || die "a runner Pod exists; do not overlap tests"
 admission_empty
@@ -144,10 +172,9 @@ note "read-only preflight passed: ${cluster}, 2/2 Ready nodes, empty KovaBuild/r
 python3 "${guard}" check >/dev/null || die "candidate checkout/CLI/image/Pod CRI identity preflight failed"
 if [[ ${mode} == check ]]; then
   note "candidate revision and all role Pod/CRI identities passed; no cluster writes performed"
-  note "set SOURCE_CAPACITY_E2E_MODE=run and SERVICE_AUTH_TOKEN to execute"
+  note "set SOURCE_CAPACITY_E2E_MODE=run to execute with the exact disposable Kind Secret"
   exit 0
 fi
-[[ -n ${token} ]] || die "SERVICE_AUTH_TOKEN is required in live mode"
 free_kib=$(df -Pk "${root}" | awk 'NR == 2 {print $4}')
 available_mem_kib=$(awk '/^MemAvailable:/ {print $2}' /proc/meminfo)
 tmp_free_kib=$(df -Pk "${TMPDIR:-/tmp}" | awk 'NR == 2 {print $4}')
@@ -221,6 +248,8 @@ jq -e '.items | length == 2 and all(.[];
 jq -e '.items | length == 0' <<<"$(kctl get kovabuilds -A -o json)" >/dev/null || die "another KovaBuild started while the source was prepared"
 jq -e '.items | length == 0' <<<"$(kctl get pods -A -l app.kubernetes.io/name=kova-runner -o json)" >/dev/null || die "a runner Pod started while the source was prepared"
 admission_empty
+service=$(kctl -n "${namespace}" get deployment "${release}-service" -o json)
+check_test_auth
 python3 "${guard}" check "${run_dir}/candidate-images.json" >/dev/null || die "candidate role image/Pod CRI identity changed during source publication"
 
 # The dynamic local port avoids colliding with unrelated development services.
@@ -287,8 +316,11 @@ sampler_pid=$!
     if (( SECONDS >= log_deadline )); then echo 'runner Pod did not appear within 5 minutes' >&2; exit 1; fi
     sleep 1
   done
-  kubectl --kubeconfig "${kubeconfig}" -n "${namespace}" logs -f "pod/kova-job-${job_id}" \
-    -c runner --timestamps --pod-running-timeout=120s >"${run_dir}/runner-follow.log" 2>"${run_dir}/runner-follow.err"
+  KOVA_E2E_REDACT_TOKEN=${token} exec python3 "${log_capture}" \
+    --stdout "${run_dir}/runner-follow.log" --stderr "${run_dir}/runner-follow.err" \
+    --receipt "${run_dir}/runner-follow.capture.json" -- \
+    kubectl --kubeconfig "${kubeconfig}" -n "${namespace}" logs -f "pod/kova-job-${job_id}" \
+      -c runner --timestamps --pod-running-timeout=120s
 ) &
 log_follower_pid=$!
 run_supervised timeout -k 10s 4m python3 "${guard}" runner "${run_dir}" >/dev/null || die "runner source-fetch/main image identity was not proven"
@@ -301,12 +333,19 @@ if [[ ${wait_ok} == true ]]; then
   KOVA_SERVICE_TOKEN=${token} run_supervised timeout -k 10s 30s "${root}/bin/kova" --service-url "${base}" \
     job results "${job_id}" >"${run_dir}/results.json" 2>"${run_dir}/results.err" || results_ok=false
 fi
-KOVA_SERVICE_TOKEN=${token} run_supervised timeout -k 10s 30s "${root}/bin/kova" --service-url "${base}" \
-  job logs --tail 2000 "${job_id}" >"${run_dir}/job-logs.txt" 2>"${run_dir}/job-logs.err" || true
+KOVA_SERVICE_TOKEN=${token} KOVA_E2E_REDACT_TOKEN=${token} \
+  run_supervised timeout -k 10s 30s python3 "${log_capture}" \
+    --stdout "${run_dir}/job-logs.txt" --stderr "${run_dir}/job-logs.err" \
+    --receipt "${run_dir}/job-logs.capture.json" -- \
+    "${root}/bin/kova" --service-url "${base}" job logs --tail 2000 "${job_id}" || true
 kctl -n "${namespace}" get kovabuild "${job_id}" -o json >"${run_dir}/kovabuild.json" 2>"${run_dir}/kovabuild.err" || true
 kctl -n "${namespace}" get pod "kova-job-${job_id}" -o json >"${run_dir}/runner-pod.json" 2>"${run_dir}/runner-pod.err" || true
 kctl -n "${namespace}" get events --field-selector "involvedObject.name=kova-job-${job_id}" -o json >"${run_dir}/runner-events.json" 2>"${run_dir}/runner-events.err" || true
-kctl -n "${namespace}" logs "pod/kova-job-${job_id}" --all-containers --timestamps >"${run_dir}/runner-logs.txt" 2>"${run_dir}/runner-logs.err" || true
+KOVA_E2E_REDACT_TOKEN=${token} python3 "${log_capture}" \
+  --stdout "${run_dir}/runner-logs.txt" --stderr "${run_dir}/runner-logs.err" \
+  --receipt "${run_dir}/runner-logs.capture.json" -- \
+  kubectl --kubeconfig "${kubeconfig}" --request-timeout=15s -n "${namespace}" \
+    logs "pod/kova-job-${job_id}" --all-containers --timestamps || true
 kctl get nodes -o json >"${run_dir}/nodes-final.json" || die "cannot read final Kind node health"
 if [[ ${wait_ok} != true ]]; then die "job wait did not return a terminal receipt; inspect ${run_dir}"; fi
 if [[ ${results_ok} != true ]]; then die "job results did not return a durable output receipt; inspect ${run_dir}"; fi
