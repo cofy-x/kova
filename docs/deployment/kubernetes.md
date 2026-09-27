@@ -40,6 +40,16 @@ export KOVA_VERSION=vX.Y.Z
 
 helm show crds oci://ghcr.io/cofy-x/charts/kova \
   --version "${KOVA_VERSION#v}" | kubectl apply -f -
+kubectl wait --for=condition=Established crd/kovabuilds.kova.cofy.dev --timeout=60s
+KOVA_RETRY_SCHEMA="$(kubectl get crd kovabuilds.kova.cofy.dev \
+  -o jsonpath='{.spec.versions[?(@.name=="v1alpha1")].schema.openAPIV3Schema.properties.status.properties.pollFailureSince.type}{" "}{.spec.versions[?(@.name=="v1alpha1")].schema.openAPIV3Schema.properties.status.properties.pollFailureCount.type}')"
+test "$KOVA_RETRY_SCHEMA" = 'string integer'
+```
+
+For releases with bounded status retries, proceed only if the schema check exits zero.
+Then upgrade the controller:
+
+```bash
 helm upgrade --install kova oci://ghcr.io/cofy-x/charts/kova \
   --version "${KOVA_VERSION#v}" \
   --namespace kova \
@@ -50,6 +60,9 @@ helm upgrade --install kova oci://ghcr.io/cofy-x/charts/kova \
 
 Apply the CRD for every selected release before the Helm upgrade. Helm creates
 objects from `crds/` during initial installation but does not upgrade them.
+For releases with bounded status retries, verify that the live CRD exposes the
+`pollFailureSince` and `pollFailureCount` status fields before starting the new controller.
+An older schema can prune the retry window from status and prevent bounded recovery.
 
 Replace `vX.Y.Z` with an exact tag from the
 [GitHub release page](https://github.com/cofy-x/kova/releases). Keep the same

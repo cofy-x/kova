@@ -16,6 +16,7 @@ import (
 	"github.com/cofy-x/kova/internal/daemonclient"
 	"github.com/cofy-x/kova/internal/kube"
 	"github.com/cofy-x/kova/internal/runner"
+	utilexec "k8s.io/client-go/util/exec"
 )
 
 type Client struct {
@@ -24,6 +25,7 @@ type Client struct {
 }
 
 var ErrInvalidBuildStatus = errors.New("invalid runner build status")
+var ErrSourceInspectTransport = errors.New("source inspect transport failed")
 
 func (c Client) SourceTargets(ctx context.Context, build *kovav1.KovaBuild, sourcePath string) ([]buildcontract.TargetSpec, error) {
 	var stdout, stderr bytes.Buffer
@@ -33,7 +35,12 @@ func (c Client) SourceTargets(ctx context.Context, build *kovav1.KovaBuild, sour
 		Command: []string{"kovad", "source", "inspect", "--input", sourcePath},
 	})
 	if err != nil {
-		return nil, ExecError("inspect source contract", stderr.Bytes(), err)
+		wrapped := ExecError("inspect source contract", stderr.Bytes(), err)
+		var exitErr utilexec.ExitError
+		if errors.As(err, &exitErr) && exitErr.Exited() {
+			return nil, wrapped
+		}
+		return nil, fmt.Errorf("%w: %w", ErrSourceInspectTransport, wrapped)
 	}
 	var contract struct {
 		Targets []buildcontract.TargetSpec `json:"targets"`

@@ -3,7 +3,9 @@ package buildcontroller
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -11,6 +13,11 @@ import (
 	kovav1 "github.com/cofy-x/kova/internal/apis/kova/v1alpha1"
 	"github.com/cofy-x/kova/internal/kube"
 	"github.com/cofy-x/kova/internal/service/config"
+	"github.com/google/go-containerregistry/pkg/name"
+	"github.com/google/go-containerregistry/pkg/registry"
+	"github.com/google/go-containerregistry/pkg/v1/empty"
+	"github.com/google/go-containerregistry/pkg/v1/mutate"
+	"github.com/google/go-containerregistry/pkg/v1/remote"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -143,6 +150,49 @@ func TestSubmitTreatsLostPostResponseAsUncertainUntilRunnerIsObserved(t *testing
 	stored := storedLifecycleBuild(t, crClient, "lost-response")
 	if stored.Status.Phase != kovav1.PhaseRunning || submits != 1 || len(kubeClient.deleted) != 0 {
 		t.Fatalf("status=%#v submits=%d deleted=%#v", stored.Status, submits, kubeClient.deleted)
+	}
+}
+
+func TestSubmitRetriesSourceInspectTransportFailure(t *testing.T) {
+	scheme := testScheme(t)
+	build := lifecycleBuild("inspect-retry", kovav1.PhaseStarting)
+	started := metav1.Now()
+	build.Status.StartedAt = &started
+	crClient := crfake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&kovav1.KovaBuild{}).WithObjects(build, readyLifecyclePod(build.Status.RunnerPodName)).Build()
+	inspects := 0
+	submits := 0
+	kubeClient := &fakeKube{execFn: func(opts kube.ExecOptions) error {
+		command := strings.Join(opts.Command, " ")
+		switch {
+		case strings.Contains(command, "--method GET"):
+			_, _ = io.WriteString(opts.Stdout, `{"status":"idle"}`)
+		case strings.Contains(command, "source inspect"):
+			inspects++
+			if inspects == 1 {
+				return errors.New("temporary SPDY disconnect")
+			}
+			_, _ = io.WriteString(opts.Stdout, `{"targets":[{"target":"registry.example/demo:dev","platform":"linux/amd64"}]}`)
+		case strings.Contains(command, "--method POST"):
+			submits++
+			_, _ = io.WriteString(opts.Stdout, `{"status":"running","requestId":"uid-inspect-retry"}`)
+		}
+		return nil
+	}}
+	r := KovaBuildReconciler{Client: crClient, Scheme: scheme, Kube: kubeClient, Cfg: config.Config{PollRetryWindow: time.Minute, MaxBuildDuration: time.Hour}}
+	first, err := r.submitWhenReady(context.Background(), build)
+	if err != nil || first.RequeueAfter <= 0 {
+		t.Fatalf("first attempt result=%#v err=%v", first, err)
+	}
+	stored := storedLifecycleBuild(t, crClient, "inspect-retry")
+	if stored.Status.Phase != kovav1.PhaseStarting || stored.Status.PollFailureSince == nil || submits != 0 {
+		t.Fatalf("first attempt status=%#v submits=%d", stored.Status, submits)
+	}
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "jobs", Name: "inspect-retry"}}); err != nil {
+		t.Fatal(err)
+	}
+	stored = storedLifecycleBuild(t, crClient, "inspect-retry")
+	if stored.Status.Phase != kovav1.PhaseRunning || stored.Status.PollFailureSince != nil || inspects != 2 || submits != 1 {
+		t.Fatalf("recovered status=%#v inspects=%d submits=%d", stored.Status, inspects, submits)
 	}
 }
 
@@ -321,5 +371,70 @@ func TestBuildDurationExpiryKeepsSlotUntilPodCleanupSucceeds(t *testing.T) {
 	}
 	if got := storedLifecycleBuild(t, crClient, "cleanup-failed").Status.Phase; got != kovav1.PhaseRunning {
 		t.Fatalf("phase before cleanup = %s", got)
+	}
+}
+
+func TestDelayedDeadlineReconcilePreservesCompletedBuild(t *testing.T) {
+	t.Setenv("DOCKER_CONFIG", t.TempDir())
+	registryServer := httptest.NewServer(registry.New())
+	defer registryServer.Close()
+	host := strings.TrimPrefix(registryServer.URL, "http://")
+	ref, err := name.NewTag(host+"/demo:dev", name.Insecure)
+	if err != nil {
+		t.Fatal(err)
+	}
+	imageConfig, err := empty.Image.ConfigFile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	imageConfig.OS = "linux"
+	imageConfig.Architecture = "amd64"
+	image, err := mutate.ConfigFile(empty.Image, imageConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := remote.Write(ref, image); err != nil {
+		t.Fatal(err)
+	}
+	wantDigest, err := image.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, phase := range []string{kovav1.PhaseStarting, kovav1.PhaseRunning} {
+		t.Run(phase, func(t *testing.T) {
+			scheme := testScheme(t)
+			build := lifecycleBuild("late-complete", phase)
+			build.Spec.Targets = buildTargets(ref.Name())
+			started := metav1.NewTime(time.Now().Add(-2 * time.Minute))
+			build.Status.StartedAt = &started
+			crClient := crfake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&kovav1.KovaBuild{}).WithObjects(build).Build()
+			kubeClient := &fakeKube{execFn: func(opts kube.ExecOptions) error {
+				command := strings.Join(opts.Command, " ")
+				switch {
+				case strings.Contains(command, "--method GET"):
+					_, _ = fmt.Fprintf(opts.Stdout, `{"status":"completed","requestId":%q}`, string(build.UID))
+				case strings.Contains(command, "/api/v1/export"):
+					_, _ = fmt.Fprintf(opts.Stdout, "{\"target\":%q,\"success\":true}\n", ref.Name())
+				default:
+					t.Fatalf("unexpected runner command: %s", command)
+				}
+				return nil
+			}}
+			r := KovaBuildReconciler{Client: crClient, Scheme: scheme, Kube: kubeClient, Cfg: config.Config{MaxBuildDuration: time.Minute, RegistryPlainHTTP: []string{host}}}
+			var reconcileErr error
+			if phase == kovav1.PhaseStarting {
+				_, reconcileErr = r.submitWhenReady(context.Background(), build)
+			} else {
+				_, reconcileErr = r.pollBuild(context.Background(), build)
+			}
+			if reconcileErr != nil {
+				t.Fatal(reconcileErr)
+			}
+			stored := storedLifecycleBuild(t, crClient, "late-complete")
+			if stored.Status.Phase != kovav1.PhaseSucceeded || stored.Status.Reason != "Completed" || len(stored.Status.Outputs) != 1 || stored.Status.Outputs[0].ManifestDigest != wantDigest.String() || len(kubeClient.deleted) != 0 {
+				t.Fatalf("status=%#v deleted=%#v", stored.Status, kubeClient.deleted)
+			}
+		})
 	}
 }

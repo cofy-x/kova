@@ -17,6 +17,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	utilexec "k8s.io/client-go/util/exec"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	crfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -322,7 +323,7 @@ func TestSubmitWhenReadyValidatesExactSourceTargetSetBeforeBuild(t *testing.T) {
 		{name: "missing", inspection: `{"targets":[]}`, wantReason: "InvalidTargets"},
 		{name: "different", inspection: `{"targets":[{"target":"registry.example/b:dev","platform":"linux/amd64"}]}`, wantReason: "InvalidTargets"},
 		{name: "different-platform", inspection: `{"targets":[{"target":"registry.example/a:dev","platform":"linux/arm64"},{"target":"registry.example/b:dev","platform":"linux/amd64"}]}`, wantReason: "InvalidTargets"},
-		{name: "duplicate", inspectionErr: errors.New("duplicate target"), wantReason: "InvalidSource"},
+		{name: "duplicate", inspectionErr: utilexec.CodeExitError{Err: errors.New("duplicate target"), Code: 1}, wantReason: "InvalidSource"},
 		{name: "same-set-different-order", inspection: `{"targets":[{"target":"registry.example/b:dev","platform":"linux/amd64"},{"target":"registry.example/a:dev","platform":"linux/amd64"}]}`, wantBuild: true},
 	}
 	for _, tt := range tests {
