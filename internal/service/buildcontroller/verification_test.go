@@ -56,9 +56,9 @@ func TestVerificationRetriesTransientExportAfterControllerRestartWithoutRepost(t
 	host, ref, digest := testVerifiedImage(t, "amd64")
 	build := lifecycleBuild("resume-verification", kovav1.PhaseRunning)
 	build.Spec.Targets = buildTargets(ref)
-	client := crfake.NewClientBuilder().WithScheme(testScheme(t)).WithStatusSubresource(&kovav1.KovaBuild{}).WithObjects(build).Build()
+	client := crfake.NewClientBuilder().WithScheme(testScheme(t)).WithStatusSubresource(&kovav1.KovaBuild{}).WithObjects(build, testRunnerPod(build)).Build()
 	exports, buildPosts := 0, 0
-	kubeClient := &fakeKube{execFn: func(opts kube.ExecOptions) error {
+	kubeClient := &fakeKube{podClient: client, execFn: func(opts kube.ExecOptions) error {
 		command := strings.Join(opts.Command, " ")
 		switch {
 		case strings.Contains(command, "--method GET"):
@@ -117,8 +117,8 @@ func TestVerificationFailsImmediatelyOnPlatformMismatch(t *testing.T) {
 	build.Status.VerificationStartedAt = &now
 	build.Status.VerificationDeadlineAt = &deadline
 	build.Status.VerificationResults = []kovav1.BuildVerificationResult{{Format: "oci", Image: ref, Platform: "linux/amd64", PushedDigest: digest, State: "pending"}}
-	client := crfake.NewClientBuilder().WithScheme(testScheme(t)).WithStatusSubresource(&kovav1.KovaBuild{}).WithObjects(build).Build()
-	kubeClient := &fakeKube{execFn: func(kube.ExecOptions) error { t.Fatal("digest receipt should skip runner export"); return nil }}
+	client := crfake.NewClientBuilder().WithScheme(testScheme(t)).WithStatusSubresource(&kovav1.KovaBuild{}).WithObjects(build, testRunnerPod(build)).Build()
+	kubeClient := &fakeKube{podClient: client, execFn: func(kube.ExecOptions) error { t.Fatal("digest receipt should skip runner export"); return nil }}
 	r := KovaBuildReconciler{Client: client, Scheme: testScheme(t), Kube: kubeClient, Cfg: config.Config{RegistryPlainHTTP: []string{host}}}
 	if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: build.Namespace, Name: build.Name}}); err != nil {
 		t.Fatal(err)
@@ -132,8 +132,8 @@ func TestVerificationFailsImmediatelyOnPlatformMismatch(t *testing.T) {
 func TestCancellationOfVerifyingBuildSkipsRunnerAndDeletesPod(t *testing.T) {
 	build := lifecycleBuild("cancel-verification", kovav1.PhaseVerifying)
 	build.Annotations = map[string]string{kovav1.CancellationRequestedAnnotation: "2026-01-01T00:00:00Z"}
-	client := crfake.NewClientBuilder().WithScheme(testScheme(t)).WithStatusSubresource(&kovav1.KovaBuild{}).WithObjects(build).Build()
-	kubeClient := &fakeKube{execFn: func(kube.ExecOptions) error { t.Fatal("cancelled verification must not call runner"); return nil }}
+	client := crfake.NewClientBuilder().WithScheme(testScheme(t)).WithStatusSubresource(&kovav1.KovaBuild{}).WithObjects(build, testRunnerPod(build)).Build()
+	kubeClient := &fakeKube{podClient: client, execFn: func(kube.ExecOptions) error { t.Fatal("cancelled verification must not call runner"); return nil }}
 	r := KovaBuildReconciler{Client: client, Scheme: testScheme(t), Kube: kubeClient}
 	if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: build.Namespace, Name: build.Name}}); err != nil {
 		t.Fatal(err)
@@ -152,8 +152,8 @@ func TestVerificationDeadlineFailsPendingOutputWithoutRunnerPost(t *testing.T) {
 	build.Status.VerificationDeadlineAt = &deadline
 	build.Status.VerificationLastError = "registry temporarily unavailable"
 	build.Status.VerificationResults = []kovav1.BuildVerificationResult{{Format: "oci", Image: build.Spec.Targets[0].Target, Platform: "linux/amd64", State: "pending"}}
-	client := crfake.NewClientBuilder().WithScheme(testScheme(t)).WithStatusSubresource(&kovav1.KovaBuild{}).WithObjects(build).Build()
-	kubeClient := &fakeKube{execFn: func(kube.ExecOptions) error { t.Fatal("expired verification must not call runner"); return nil }}
+	client := crfake.NewClientBuilder().WithScheme(testScheme(t)).WithStatusSubresource(&kovav1.KovaBuild{}).WithObjects(build, testRunnerPod(build)).Build()
+	kubeClient := &fakeKube{podClient: client, execFn: func(kube.ExecOptions) error { t.Fatal("expired verification must not call runner"); return nil }}
 	r := KovaBuildReconciler{Client: client, Scheme: testScheme(t), Kube: kubeClient}
 	if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: build.Namespace, Name: build.Name}}); err != nil {
 		t.Fatal(err)

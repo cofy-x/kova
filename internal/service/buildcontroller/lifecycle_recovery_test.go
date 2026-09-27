@@ -473,8 +473,8 @@ func TestDelayedDeadlineReconcilePreservesCompletedBuild(t *testing.T) {
 			build.Spec.Targets = buildTargets(ref.Name())
 			started := metav1.NewTime(time.Now().Add(-2 * time.Minute))
 			build.Status.StartedAt = &started
-			crClient := crfake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&kovav1.KovaBuild{}).WithObjects(build).Build()
-			kubeClient := &fakeKube{execFn: func(opts kube.ExecOptions) error {
+			crClient := crfake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&kovav1.KovaBuild{}).WithObjects(build, testRunnerPod(build)).Build()
+			kubeClient := &fakeKube{podClient: crClient, execFn: func(opts kube.ExecOptions) error {
 				command := strings.Join(opts.Command, " ")
 				switch {
 				case strings.Contains(command, "--method GET"):
