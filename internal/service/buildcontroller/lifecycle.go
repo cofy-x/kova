@@ -540,6 +540,15 @@ func (r *KovaBuildReconciler) reconcileDelete(ctx context.Context, build *kovav1
 	if err := r.deleteRunnerAndConfirm(ctx, build); err != nil {
 		return ctrl.Result{}, err
 	}
+	// The deleting CR can remain visible until its finalizer is removed. Make
+	// its terminal status durable before releasing active capacity, otherwise
+	// admission can observe a Starting/Running CR with no reservation and
+	// mistake routine cleanup for an orphaned runner.
+	if !isTerminalPhase(build.Status.Phase) {
+		if err := r.finish(ctx, build, kovav1.PhaseCancelled, "Deleted", "build was deleted"); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
 	if err := r.releaseReservation(ctx, build); err != nil {
 		var recovery *admissionRecoveryError
 		if errors.As(err, &recovery) {
