@@ -24,24 +24,35 @@ type Exporter interface {
 }
 
 type RegistryResolver interface {
-	Resolve(context.Context, string, []string) (string, string, error)
+	Resolve(context.Context, string, string, []string) (string, string, error)
 }
 
 type remoteRegistryResolver struct{}
 
-func (remoteRegistryResolver) Resolve(ctx context.Context, target string, plainHTTPRegistries []string) (string, string, error) {
+func (remoteRegistryResolver) Resolve(ctx context.Context, target, pushedDigest string, plainHTTPRegistries []string) (string, string, error) {
 	ref, err := name.ParseReference(target, referenceOptions(target, plainHTTPRegistries)...)
 	if err != nil {
 		return "", "", err
 	}
-	descriptor, err := remote.Get(ref, remote.WithContext(ctx), remote.WithAuthFromKeychain(authn.DefaultKeychain))
-	if err != nil {
-		return "", "", fmt.Errorf("resolve pushed descriptor: %w", err)
+	if pushedDigest == "" {
+		// Nydusify v2.4.4 does not report its pushed digest. Its legacy
+		// tag lookup remains until the converter can return an exact digest.
+		descriptor, err := remote.Get(ref, remote.WithContext(ctx), remote.WithAuthFromKeychain(authn.DefaultKeychain))
+		if err != nil {
+			return "", "", fmt.Errorf("resolve pushed descriptor: %w", err)
+		}
+		pushedDigest = descriptor.Descriptor.Digest.String()
 	}
-	digest := descriptor.Descriptor.Digest.String()
-	digestRef, err := name.NewDigest(ref.Context().Name()+"@"+digest, referenceOptions(target, plainHTTPRegistries)...)
+	digestRef, err := name.NewDigest(ref.Context().Name()+"@"+pushedDigest, referenceOptions(target, plainHTTPRegistries)...)
 	if err != nil {
 		return "", "", fmt.Errorf("parse pushed digest reference: %w", err)
+	}
+	descriptor, err := remote.Get(digestRef, remote.WithContext(ctx), remote.WithAuthFromKeychain(authn.DefaultKeychain))
+	if err != nil {
+		return "", "", fmt.Errorf("resolve pushed descriptor by digest: %w", err)
+	}
+	if descriptor.Descriptor.Digest.String() != pushedDigest {
+		return "", "", fmt.Errorf("resolved manifest digest %s does not match pushed digest %s", descriptor.Descriptor.Digest, pushedDigest)
 	}
 	image, err := remote.Image(digestRef, remote.WithContext(ctx), remote.WithAuthFromKeychain(authn.DefaultKeychain))
 	if err != nil {
@@ -55,7 +66,7 @@ func (remoteRegistryResolver) Resolve(ctx context.Context, target string, plainH
 	if err != nil {
 		return "", "", fmt.Errorf("pushed image has unsupported platform: %w", err)
 	}
-	return digest, platform, nil
+	return pushedDigest, platform, nil
 }
 
 type Result struct {
@@ -99,7 +110,11 @@ func resolveWithRegistry(ctx context.Context, exporter Exporter, registry Regist
 		formats[result.Format] = entries
 	}
 
-	pending := make([]int, 0, len(expected))
+	type verification struct {
+		index  int
+		digest string
+	}
+	pending := make([]verification, 0, len(expected))
 	for index := range expected {
 		if err := formatErrors[expected[index].Format]; err != nil {
 			expected[index].Status, expected[index].Error = "failed", err.Error()
@@ -114,7 +129,11 @@ func resolveWithRegistry(ctx context.Context, exporter Exporter, registry Regist
 			expected[index].Status, expected[index].Error = "failed", entry.Reason
 			continue
 		}
-		pending = append(pending, index)
+		if expected[index].Format == string(source.BuildFormatOCI) && entry.ManifestDigest == "" {
+			expected[index].Status, expected[index].Error = "failed", "build result is missing the pushed manifest digest"
+			continue
+		}
+		pending = append(pending, verification{index: index, digest: entry.ManifestDigest})
 	}
 
 	limit := int(build.Status.AllocatedConcurrency)
@@ -130,14 +149,15 @@ func resolveWithRegistry(ctx context.Context, exporter Exporter, registry Regist
 	if limit > len(pending) {
 		limit = len(pending)
 	}
-	jobs := make(chan int)
+	jobs := make(chan verification)
 	var wg sync.WaitGroup
 	for worker := 0; worker < limit; worker++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			for index := range jobs {
-				digest, platform, err := registry.Resolve(ctx, expected[index].Repository, plainHTTPRegistries)
+			for job := range jobs {
+				index := job.index
+				digest, platform, err := registry.Resolve(ctx, expected[index].Repository, job.digest, plainHTTPRegistries)
 				if err != nil {
 					expected[index].Status, expected[index].Error = "failed", err.Error()
 					continue
@@ -152,8 +172,8 @@ func resolveWithRegistry(ctx context.Context, exporter Exporter, registry Regist
 			}
 		}()
 	}
-	for _, index := range pending {
-		jobs <- index
+	for _, job := range pending {
+		jobs <- job
 	}
 	close(jobs)
 	wg.Wait()

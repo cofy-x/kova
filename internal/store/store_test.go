@@ -56,3 +56,18 @@ func TestEntryUnmarshalJSONRejectsNegativeElapsed(t *testing.T) {
 		t.Fatal("expected negative elapsed error")
 	}
 }
+
+func TestEntryPreservesPushedManifestDigestInJSON(t *testing.T) {
+	want := Entry{Target: "registry.example/app:dev", Success: true, ManifestDigest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+	data, err := json.Marshal(want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got Entry
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.ManifestDigest != want.ManifestDigest {
+		t.Fatalf("manifest digest = %q, want %q", got.ManifestDigest, want.ManifestDigest)
+	}
+}

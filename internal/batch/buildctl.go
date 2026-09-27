@@ -3,6 +3,7 @@ package batch
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -15,6 +16,8 @@ import (
 	"github.com/cofy-x/kova/internal/scheduler"
 	"github.com/cofy-x/kova/internal/source"
 	"github.com/cofy-x/kova/internal/store"
+	"github.com/google/go-containerregistry/pkg/name"
+	"github.com/google/go-containerregistry/pkg/v1"
 
 	"go.opentelemetry.io/otel/attribute"
 )
@@ -60,18 +63,19 @@ func executeBuild(ctx context.Context, spec source.Spec, addr *scheduler.Addr, o
 	defer buildCancel()
 
 	var outputBuf bytes.Buffer
-	err := runBuildCommands(buildCtx, spec, addr, opts, &outputBuf)
+	digest, err := runBuildCommands(buildCtx, spec, addr, opts, &outputBuf)
 	buildErr = err
 	finishedAt := time.Now()
 	elapsed := finishedAt.Sub(startedAt)
 
 	entry := store.Entry{
-		StartedAt:  startedAt.Format(time.RFC3339),
-		FinishedAt: finishedAt.Format(time.RFC3339),
-		Elapsed:    logging.FormatElapsed(elapsed),
-		Target:     spec.Target,
-		NodeIP:     nodeIP,
-		Success:    err == nil,
+		StartedAt:      startedAt.Format(time.RFC3339),
+		FinishedAt:     finishedAt.Format(time.RFC3339),
+		Elapsed:        logging.FormatElapsed(elapsed),
+		Target:         spec.Target,
+		NodeIP:         nodeIP,
+		ManifestDigest: digest,
+		Success:        err == nil,
 	}
 
 	if err != nil {
@@ -91,17 +95,56 @@ func executeBuild(ctx context.Context, spec source.Spec, addr *scheduler.Addr, o
 	return entry
 }
 
-func runBuildCommands(ctx context.Context, spec source.Spec, addr *scheduler.Addr, opts Options, outputBuf *bytes.Buffer) error {
+func runBuildCommands(ctx context.Context, spec source.Spec, addr *scheduler.Addr, opts Options, outputBuf *bytes.Buffer) (string, error) {
 	if source.FormatIsOCI(spec.Format) {
-		return runCommand(ctx, opts.Verbose, outputBuf, "buildctl", buildCommandArgs(spec, addr)...)
+		return runBuildctl(ctx, spec, addr, opts, outputBuf)
 	}
 
 	ociSpec := spec
 	ociSpec.Target = source.StripNydusV3Suffix(spec.Target)
-	if err := runCommand(ctx, opts.Verbose, outputBuf, "buildctl", buildCommandArgs(ociSpec, addr)...); err != nil {
-		return err
+	ociDigest, err := runBuildctl(ctx, ociSpec, addr, opts, outputBuf)
+	if err != nil {
+		return "", err
 	}
-	return runCommand(ctx, opts.Verbose, outputBuf, "nydusify", nydusConvertArgs(ociSpec.Target, spec.Target)...)
+	ref, err := name.ParseReference(ociSpec.Target, name.WeakValidation)
+	if err != nil {
+		return "", fmt.Errorf("parse Nydus source reference: %w", err)
+	}
+	// Conversion must consume this build's OCI image, even if another job
+	// overwrites the intermediate tag before nydusify starts pulling it.
+	sourceRef := ref.Context().Name() + "@" + ociDigest
+	return "", runCommand(ctx, opts.Verbose, outputBuf, "nydusify", nydusConvertArgs(sourceRef, spec.Target)...)
+}
+
+func runBuildctl(ctx context.Context, spec source.Spec, addr *scheduler.Addr, opts Options, outputBuf *bytes.Buffer) (string, error) {
+	metadata, err := os.CreateTemp("", "kova-buildctl-metadata-*.json")
+	if err != nil {
+		return "", fmt.Errorf("create BuildKit metadata file: %w", err)
+	}
+	metadataPath := metadata.Name()
+	defer os.Remove(metadataPath)
+	if err := metadata.Close(); err != nil {
+		return "", fmt.Errorf("close BuildKit metadata file: %w", err)
+	}
+	args := append(buildCommandArgs(spec, addr), "--metadata-file", metadataPath)
+	if err := runCommand(ctx, opts.Verbose, outputBuf, "buildctl", args...); err != nil {
+		return "", err
+	}
+	data, err := os.ReadFile(metadataPath)
+	if err != nil {
+		return "", fmt.Errorf("read BuildKit metadata: %w", err)
+	}
+	var pushed struct {
+		Digest string `json:"containerimage.digest"`
+	}
+	if err := json.Unmarshal(data, &pushed); err != nil {
+		return "", fmt.Errorf("parse BuildKit metadata: %w", err)
+	}
+	hash, err := v1.NewHash(pushed.Digest)
+	if err != nil || hash.Algorithm != "sha256" {
+		return "", fmt.Errorf("BuildKit did not report a valid pushed manifest digest")
+	}
+	return hash.String(), nil
 }
 
 func runCommand(ctx context.Context, verbose bool, outputBuf *bytes.Buffer, name string, args ...string) error {
