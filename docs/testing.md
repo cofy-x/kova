@@ -95,7 +95,7 @@ Do not restore the deleted ConfigMap from a blank template: an apparently empty 
 ## Deep-Queue Admission Benchmark
 
 Use only a disposable, otherwise idle Linux Kind cluster named `kova-deep-queue` with a single worker and its exact `.kind/kova-deep-queue.kubeconfig`.
-Prepare the candidate chart and two same-image Service replicas before this test, with `serviceDaemon.maxActiveJobs=1`, `maxActiveJobsPerRequester=1`, `workerSlots=1`, `maxQueuedJobs=1000`, `maxQueuedJobsPerRequester=1000`, `pollInterval=5s`, `wait=2h`, `maxBuildDuration=2h`, static principal `kova:e2e`, leader election, and `runnerNodeSelector.never=true`.
+Prepare the candidate chart and two same-image Service replicas before this test, with `serviceDaemon.maxActiveJobs=1`, `maxActiveJobsPerRequester=1`, `workerSlots=1`, `maxQueuedJobs=1000`, `maxQueuedJobsPerRequester=1000`, `kubeClientQPS=20`, `kubeClientBurst=40`, `pollInterval=5s`, `wait=2h`, `maxBuildDuration=2h`, static principal `kova:e2e`, leader election, and `runnerNodeSelector.never=true`.
 The two-hour `wait` is essential: the default three-minute wait would fail the Pending blocker and could allow a queued build to acquire a runner during a later stage.
 These caps are a stress fixture, not recommended production defaults.
 Do not use quickstart's build/tag setup for this benchmark if preserving the existing local registry is required; the benchmark itself neither contacts the registry nor creates source/output tags.
@@ -125,7 +125,9 @@ helm install kova charts/kova --kubeconfig .kind/kova-deep-queue.kubeconfig -n k
   --set-string serviceDaemon.authentication.staticPrincipal=kova:e2e \
   --set serviceDaemon.maxActiveJobs=1 --set serviceDaemon.maxActiveJobsPerRequester=1 \
   --set serviceDaemon.workerSlots=1 --set serviceDaemon.maxQueuedJobs=1000 \
-  --set serviceDaemon.maxQueuedJobsPerRequester=1000 --set serviceDaemon.pollInterval=5s \
+  --set serviceDaemon.maxQueuedJobsPerRequester=1000 \
+  --set serviceDaemon.kubeClientQPS=20 --set serviceDaemon.kubeClientBurst=40 \
+  --set serviceDaemon.pollInterval=5s \
   --set serviceDaemon.wait=2h --set serviceDaemon.maxBuildDuration=2h \
   --set-string serviceDaemon.runnerNodeSelector.never=true
 kubectl --kubeconfig .kind/kova-deep-queue.kubeconfig -n kova \

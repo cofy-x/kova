@@ -249,6 +249,8 @@ def single_service_args(deployment: dict) -> tuple[str, str]:
         "--worker-slots=1",
         "--max-queued-jobs=1000",
         "--max-queued-jobs-per-requester=1000",
+        "--kube-client-qps=20",
+        "--kube-client-burst=40",
         "--runner-node-selector=never=true",
         "--auth-mode=static",
         "--auth-static-principal=kova:e2e",
