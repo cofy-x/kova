@@ -18,10 +18,30 @@ func TestGeneratedCRDMatchesBoundedBuildContract(t *testing.T) {
 		t.Fatal(err)
 	}
 	versions := document["spec"].(map[string]any)["versions"].([]any)
-	schema := versions[0].(map[string]any)["schema"].(map[string]any)["openAPIV3Schema"].(map[string]any)
+	version := versions[0].(map[string]any)
+	if version["name"] != "v1alpha1" {
+		t.Fatalf("first CRD version = %v, want v1alpha1", version["name"])
+	}
+	subresources, ok := version["subresources"].(map[string]any)
+	if !ok {
+		t.Fatal("CRD is missing subresources")
+	}
+	if _, ok := subresources["status"]; !ok {
+		t.Fatal("CRD is missing the status subresource")
+	}
+	schema := version["schema"].(map[string]any)["openAPIV3Schema"].(map[string]any)
 	properties := schema["properties"].(map[string]any)
 	spec := properties["spec"].(map[string]any)["properties"].(map[string]any)
 	status := properties["status"].(map[string]any)["properties"].(map[string]any)
+	for field, want := range map[string]map[string]any{
+		"pollFailureSince": {"type": "string", "format": "date-time"},
+		"pollFailureCount": {"type": "integer", "format": "int32"},
+	} {
+		got, ok := status[field].(map[string]any)
+		if !ok || got["type"] != want["type"] || got["format"] != want["format"] {
+			t.Fatalf("status.%s schema = %#v, want %#v", field, got, want)
+		}
+	}
 	targets := spec["targets"].(map[string]any)
 	outputs := status["outputs"].(map[string]any)
 	build := spec["build"].(map[string]any)["properties"].(map[string]any)

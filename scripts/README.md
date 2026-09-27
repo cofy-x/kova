@@ -13,6 +13,13 @@ the categorized paths below.
 
 - `docs/check.sh`: validate relative links in public and contributor Markdown.
 
+## Deployment
+
+- `deployment/verify-kovabuild-crd.sh`: block a controller upgrade until the
+  live KovaBuild CRD is Established and its retry status fields have the expected schema.
+- `deployment/test-verify-kovabuild-crd.sh`: exercise the upgrade gate against
+  new, old, incompatible, and unavailable mock CRDs without a cluster.
+
 ## CI
 
 - `ci/public-go-consumer.sh`: compile a clean external module against the local public Go SDK or an exact release tag, and verify versioned `go install` for releases.
@@ -39,7 +46,9 @@ the categorized paths below.
 - `kind/kind-registry.sh`: create or attach the local Docker registry.
 - `kind/kind-create.sh`: create the local kind cluster.
 - `kind/kind-load.sh`: load the Kova image into kind.
-- `kind/deploy-kind.sh`: deploy Kova into the local kind cluster.
+- `kind/deploy-kind.sh`: apply and verify the current KovaBuild CRD before
+  upgrading the local controller; historical-chart tests explicitly skip the
+  current retry-schema gate.
 - `kind/diagnose-kind.sh`: print local kind, registry, Kova, Dragonfly/Nydus,
   runtime smoke, and result summaries.
 - `kind/clean-kind.sh`: delete local kind resources.

@@ -57,16 +57,19 @@ if [[ -n "${BASELINE_CHART}" ]]; then
     CONTROLLER_IMAGE=${BASELINE_CONTROLLER_IMAGE} \
     RUNNER_IMAGE=${BASELINE_RUNNER_IMAGE} \
     WORKER_IMAGE=${BASELINE_WORKER_IMAGE} \
+    VERIFY_RETRY_CRD_SCHEMA=false \
     "${ROOT}/scripts/kind/deploy-kind.sh"
   baseline_revision=$(helm history "${RELEASE_NAME}" \
     --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" \
     --namespace "${NAMESPACE}" -o json | jq -r 'last.revision')
+  helm show crds "${KOVA_CHART}" | \
+    kubectl --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" apply -f -
+  KUBECONFIG="${ROOT}/${KIND_KUBECONFIG}" \
+    "${ROOT}/scripts/deployment/verify-kovabuild-crd.sh"
 else
   "${ROOT}/scripts/kind/deploy-kind.sh"
 fi
 
-helm show crds "${KOVA_CHART}" | \
-  kubectl --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" apply -f -
 kubectl --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" -n "${NAMESPACE}" \
   delete kovabuild --all --ignore-not-found --wait=false || true
 kubectl --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" -n "${NAMESPACE}" \

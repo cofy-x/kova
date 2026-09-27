@@ -56,6 +56,7 @@ HELM_REGISTRY_CONFIG="${work_dir}/registry.json" \
   helm pull "oci://ghcr.io/${REPOSITORY%/*}/charts/kova" \
   --version "${VERSION#v}" --destination "${work_dir}/chart"
 
+# Historical releases may predate retry status fields; this smoke never upgrades to this checkout's controller.
 CONTROLLER_IMAGE="ghcr.io/${REPOSITORY}:controller-${VERSION}" \
 RUNNER_IMAGE="ghcr.io/${REPOSITORY}:runner-${VERSION}" \
 WORKER_IMAGE="ghcr.io/${REPOSITORY}:worker-${VERSION}" \
@@ -65,6 +66,7 @@ E2E_SERVICE_BUILD_CLI=false \
 E2E_SERVICE_BUILD_IMAGE=false \
 KIND_LOAD_IMAGES=false \
 START_OBSERVABILITY=false \
+VERIFY_RETRY_CRD_SCHEMA=false \
 KIND_CLUSTER=kova-release-smoke \
 KIND_CONFIG=deploy/quickstart-kind-cluster.yaml \
 KIND_KUBECONFIG=.kind/kova-release-smoke.kubeconfig \
