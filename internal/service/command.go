@@ -112,15 +112,19 @@ func CLICommand() *cli.Command {
 				return err
 			}
 			restConfig = singleAttemptWrites(restConfig)
-			// Lease renewal must not queue behind a saturated build-control
-			// client. Keep its small independent budget before assigning the
-			// shared hot-path limiter to the other clients.
-			leaderConfig, readinessConfig := configureKubeClientRateLimits(restConfig, c.Int("kube-client-qps"), c.Int("kube-client-burst"))
-			kubeClient, err := kube.NewClientForConfig(restConfig)
+			// The controller can saturate its API budget while a deep queue is
+			// reconciling. HTTP admission, readiness, and lease renewal must not
+			// wait for that backlog. All four budgets are per Service Pod.
+			leaderConfig, readinessConfig, httpConfig := configureKubeClientRateLimits(restConfig, c.Int("kube-client-qps"), c.Int("kube-client-burst"))
+			controllerKubeClient, err := kube.NewClientForConfig(restConfig)
 			if err != nil {
 				return err
 			}
-			clientset, err := kubernetes.NewForConfig(restConfig)
+			httpKubeClient, err := kube.NewClientForConfig(httpConfig)
+			if err != nil {
+				return err
+			}
+			clientset, err := kubernetes.NewForConfig(httpConfig)
 			if err != nil {
 				return err
 			}
@@ -128,6 +132,10 @@ func CLICommand() *cli.Command {
 			utilruntime.Must(corev1.AddToScheme(scheme))
 			utilruntime.Must(kovav1.AddToScheme(scheme))
 			readinessReader, err := ctrlclient.New(readinessConfig, ctrlclient.Options{Scheme: scheme})
+			if err != nil {
+				return err
+			}
+			httpClient, err := ctrlclient.New(httpConfig, ctrlclient.Options{Scheme: scheme})
 			if err != nil {
 				return err
 			}
@@ -193,14 +201,14 @@ func CLICommand() *cli.Command {
 				Client:    mgr.GetClient(),
 				APIReader: mgr.GetAPIReader(),
 				Scheme:    mgr.GetScheme(),
-				Kube:      kubeClient,
+				Kube:      controllerKubeClient,
 				Cfg:       cfg,
 				Recorder:  mgr.GetEventRecorderFor("kova-service"),
 			}).SetupWithManager(mgr); err != nil {
 				return err
 			}
 			go func() {
-				if err := httpapi.NewServer(cfg, kubeClient, mgr.GetClient(), mgr.GetAPIReader(), readinessReader, authenticator, authorizer).Start(ctx); err != nil {
+				if err := httpapi.NewServer(cfg, httpKubeClient, httpClient, httpClient, readinessReader, authenticator, authorizer).Start(ctx); err != nil {
 					logging.Errorf("Kova Service HTTP server stopped: %v", err)
 					stop()
 				}
@@ -223,18 +231,20 @@ func validateKubeClientRateLimit(qps, burst int) error {
 func configureKubeClientRateLimit(config *rest.Config, qps, burst int) {
 	config.QPS = float32(qps)
 	config.Burst = burst
-	// Reuse one limiter across kube.Client, auth clientset, and the controller
-	// manager. Separate clientsets silently multiply a per-client limit.
+	// Clients in one traffic class must share a limiter; otherwise every
+	// clientset silently multiplies that class's intended budget.
 	config.RateLimiter = flowcontrol.NewTokenBucketRateLimiter(config.QPS, burst)
 }
 
-func configureKubeClientRateLimits(config *rest.Config, qps, burst int) (*rest.Config, *rest.Config) {
+func configureKubeClientRateLimits(config *rest.Config, qps, burst int) (*rest.Config, *rest.Config, *rest.Config) {
 	leaderConfig := rest.CopyConfig(config)
 	readinessConfig := rest.CopyConfig(config)
+	httpConfig := rest.CopyConfig(config)
 	configureKubeClientRateLimit(leaderConfig, 5, 10)
 	configureKubeClientRateLimit(readinessConfig, 5, 10)
+	configureKubeClientRateLimit(httpConfig, qps, burst)
 	configureKubeClientRateLimit(config, qps, burst)
-	return leaderConfig, readinessConfig
+	return leaderConfig, readinessConfig, httpConfig
 }
 
 func validateCapacityConfig(cfg config.Config) error {

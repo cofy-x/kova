@@ -124,7 +124,7 @@ func TestValidateKubeClientRateLimit(t *testing.T) {
 
 func TestKubeClientRateLimitIsSharedAcrossConfigCopies(t *testing.T) {
 	config := &rest.Config{}
-	leader, readiness := configureKubeClientRateLimits(config, 1, 2)
+	leader, readiness, http := configureKubeClientRateLimits(config, 1, 2)
 	first := rest.CopyConfig(config)
 	second := rest.CopyConfig(config)
 	if first.QPS != 1 || first.Burst != 2 || first.RateLimiter != second.RateLimiter {
@@ -144,6 +144,12 @@ func TestKubeClientRateLimitIsSharedAcrossConfigCopies(t *testing.T) {
 	}
 	if !readiness.RateLimiter.TryAccept() {
 		t.Fatal("a saturated build-control limiter blocked readiness traffic")
+	}
+	if http.QPS != 1 || http.Burst != 2 || http.RateLimiter != rest.CopyConfig(http).RateLimiter || http.RateLimiter == first.RateLimiter || http.RateLimiter == readiness.RateLimiter || http.RateLimiter == leader.RateLimiter {
+		t.Fatal("HTTP admission does not have an independent Kubernetes API budget")
+	}
+	if !http.RateLimiter.TryAccept() || !http.RateLimiter.TryAccept() || http.RateLimiter.TryAccept() {
+		t.Fatal("HTTP admission client copies do not enforce their shared budget")
 	}
 }
 

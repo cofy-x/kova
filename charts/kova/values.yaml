@@ -89,9 +89,9 @@ serviceDaemon:
   maxQueuedJobsPerRequester: 100
   workerSlots: 20
   controllerConcurrency: 4
-  # Each Service Pod limits its build-control Kubernetes REST clients together.
-  # Lease renewal and readiness retain separate small budgets. Increase only
-  # with an API-server budget and measured deep-queue convergence.
+  # Each Service Pod gives build-controller and HTTP admission independent
+  # Kubernetes REST budgets at these values. Lease renewal and readiness
+  # retain separate small budgets. Budget the sum across all replicas.
   kubeClientQPS: 20
   kubeClientBurst: 40
   leaderElect: true

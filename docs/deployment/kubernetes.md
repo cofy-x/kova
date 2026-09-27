@@ -253,6 +253,8 @@ serviceDaemon:
   kubeClientBurst: 40
 ```
 
+The two Kova Service client traffic classes (build controller and HTTP admission) each use this per-Pod QPS/burst budget; leader leases and readiness have separate 5/10 budgets. These values are not a cluster-wide cap, so include all replicas and classes in the API-server budget.
+
 The controller interleaves queued jobs by requester, allocates available worker
 slots without leaving usable capacity idle, and records each fixed allocation
 in job status. Runners resolve the headless Service into worker Pod IPs, avoid
