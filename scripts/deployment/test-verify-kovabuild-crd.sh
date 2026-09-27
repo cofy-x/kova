@@ -15,6 +15,11 @@ kubectl() {
       [[ "${2:-}" == crd && "${3:-}" == kovabuilds.kova.cofy.dev && "${4:-}" == -o && "${5:-}" == jsonpath=* ]] || return 2
       [[ "${5}" == *'pollFailureSince.type'* && "${5}" == *'pollFailureSince.format'* && \
         "${5}" == *'pollFailureCount.type'* && "${5}" == *'pollFailureCount.format'* ]] || return 2
+      if [[ "${5}" == *'verificationStartedAt.type'* ]]; then
+        [[ "${5}" == *'verificationResults.maxItems'* && "${5}" == *'phase.enum'* ]] || return 2
+      else
+        [[ "${5}" != *'phase.enum'* ]] || return 2
+      fi
       [[ "${MOCK_GET_FAILURE:-}" != 1 ]] || return 1
       printf '%s' "${MOCK_SCHEMA:-}"
       ;;
@@ -44,14 +49,17 @@ assert_blocked() {
   fi
 }
 
-assert_pass 'new CRD schema' 'string|date-time|integer|int32' current
-assert_pass 'legacy CRD schema' '|||' --expect-legacy
-assert_blocked 'old CRD schema' '|||' 0 0
-assert_blocked 'wrong retry timestamp format' 'string||integer|int32' 0 0
-assert_blocked 'wrong retry count type' 'string|date-time|string|int32' 0 0
-assert_blocked 'CRD not Established' 'string|date-time|integer|int32' 1 0
-assert_blocked 'CRD read failed' 'string|date-time|integer|int32' 0 1
-if output=$(MOCK_SCHEMA='string|date-time|integer|int32' KUBECTL=kubectl \
+current_schema='string|date-time|integer|int32|Queued,Starting,Running,Verifying,Succeeded,Failed,Cancelled,|string|date-time|string|date-time|string|date-time|integer|int32|string|array|200|^sha256:[a-f0-9]{64}$|pending,succeeded,failed,'
+legacy_schema='|||'
+assert_pass 'new CRD schema' "${current_schema}" current
+assert_pass 'legacy CRD schema' "${legacy_schema}" --expect-legacy
+assert_blocked 'old CRD schema' "${legacy_schema}" 0 0
+assert_blocked 'missing Verifying phase' "${current_schema/Verifying,/}" 0 0
+assert_blocked 'unbounded receipt array' "${current_schema/array|200|/array|201|}" 0 0
+assert_blocked 'wrong retry timestamp format' "${current_schema/string|date-time|integer|int32/string||integer|int32}" 0 0
+assert_blocked 'CRD not Established' "${current_schema}" 1 0
+assert_blocked 'CRD read failed' "${current_schema}" 0 1
+if output=$(MOCK_SCHEMA="${current_schema}" KUBECTL=kubectl \
   "${CHECK}" --expect-legacy 2>&1); then
   echo "error: new CRD unexpectedly passed legacy check: ${output}" >&2
   exit 1

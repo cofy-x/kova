@@ -101,7 +101,7 @@ A caller retry is a new request using the same immutable source contract, normal
 Queued builds are interleaved by authenticated requester and admitted against global, per-requester, and worker-slot limits.
 Requested concurrency is between 1 and 100 and cannot exceed the logical target count.
 Controller reconciles run concurrently, while a process-local admission lock preserves fair-share and slot accounting.
-Registry descriptor verification is independently bounded to at most eight concurrent requests and never exceeds the admitted build concurrency.
+Service result verification is a durable `Verifying` phase. Each bounded attempt checks at most 16 concrete outputs with at most four registry requests; a separate overall deadline and persisted retry time survive controller restarts. At most two default controller reconciles do verification I/O concurrently, preserving admission progress. Completed runners are never re-submitted.
 Worker pools are keyed by canonical platform and backed by ordinary BuildKit endpoints. Kubernetes worker placement uses only the standard `kubernetes.io/os` and `kubernetes.io/arch` labels; no cloud-provider label or platform database is required.
 
 Controller and runner containers run as UID/GID 65532 with all capabilities dropped and the runtime-default seccomp profile.

@@ -81,6 +81,8 @@ serviceDaemon:
   pollInterval: 5s
   pollRetryWindow: 1m
   maxBuildDuration: 2h
+  verificationAttemptTimeout: 10s
+  verificationWindow: 5m
   maxActiveJobs: 20
   maxActiveJobsPerRequester: 4
   maxQueuedJobs: 1000

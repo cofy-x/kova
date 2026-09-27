@@ -76,6 +76,8 @@ spec:
             - --poll-interval={{ .Values.serviceDaemon.pollInterval }}
             - --poll-retry-window={{ .Values.serviceDaemon.pollRetryWindow }}
             - --max-build-duration={{ .Values.serviceDaemon.maxBuildDuration }}
+            - --verification-attempt-timeout={{ .Values.serviceDaemon.verificationAttemptTimeout }}
+            - --verification-window={{ .Values.serviceDaemon.verificationWindow }}
             - --max-active-jobs={{ .Values.serviceDaemon.maxActiveJobs }}
             - --max-active-jobs-per-requester={{ .Values.serviceDaemon.maxActiveJobsPerRequester }}
             - --max-queued-jobs={{ .Values.serviceDaemon.maxQueuedJobs }}

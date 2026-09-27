@@ -60,7 +60,7 @@ func TestOpenAPIContractMatchesPublicTypes(t *testing.T) {
 	assertStringEnum(t, object(t, object(t, object(t, schemas, "VersionInfo"), "properties"), "api_version"), []string{APIVersion})
 	assertStringEnum(t, object(t, object(t, object(t, schemas, "BuildJob"), "properties"), "status"), []string{
 		string(JobStatusCancelled), string(JobStatusFailed), string(JobStatusQueued),
-		string(JobStatusRunning), string(JobStatusStarting), string(JobStatusSucceeded),
+		string(JobStatusRunning), string(JobStatusStarting), string(JobStatusSucceeded), string(JobStatusVerifying),
 	})
 	assertStringEnum(t, object(t, object(t, object(t, schemas, "BuildJob"), "properties"), "failure_code"), []string{
 		string(BuildFailureCancelled), string(BuildFailureExecutionFailed), string(BuildFailureInvalidSource),

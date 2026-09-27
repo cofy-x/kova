@@ -384,7 +384,7 @@ components:
           type: string
         status:
           type: string
-          enum: [queued, starting, running, succeeded, failed, cancelled]
+          enum: [queued, starting, running, verifying, succeeded, failed, cancelled]
         error:
           type: string
         failure_code:
@@ -419,6 +419,27 @@ components:
         allocated_concurrency:
           type: integer
           format: int32
+        verification_started_at:
+          type: string
+          format: date-time
+        verification_deadline_at:
+          type: string
+          format: date-time
+        verification_next_attempt_at:
+          type: string
+          format: date-time
+        verification_attempts:
+          type: integer
+          format: int32
+        verification_last_error:
+          type: string
+          maxLength: 2048
+        verification_pending:
+          type: integer
+        verification_succeeded:
+          type: integer
+        verification_failed:
+          type: integer
     BuildOutput:
       type: object
       additionalProperties: false

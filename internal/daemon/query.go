@@ -217,7 +217,7 @@ func buildOptionsFromQuery(q url.Values, defaultAddrs string, resultDB string, l
 }
 
 func exportOptionsFromQuery(q url.Values, resultDB string) (batch.Options, error) {
-	if err := validateQueryKeys(q, "oci", "with-fail", "target"); err != nil {
+	if err := validateQueryKeys(q, "oci", "with-fail", "summary", "target"); err != nil {
 		return batch.Options{}, err
 	}
 	oci, err := queryBoolStrict(q, "oci", false)
@@ -225,6 +225,10 @@ func exportOptionsFromQuery(q url.Values, resultDB string) (batch.Options, error
 		return batch.Options{}, err
 	}
 	withFail, err := queryBoolStrict(q, "with-fail", false)
+	if err != nil {
+		return batch.Options{}, err
+	}
+	summary, err := queryBoolStrict(q, "summary", false)
 	if err != nil {
 		return batch.Options{}, err
 	}
@@ -236,6 +240,7 @@ func exportOptionsFromQuery(q url.Values, resultDB string) (batch.Options, error
 		FromResultPath: resultDB,
 		OCI:            oci,
 		WithFail:       withFail,
+		SummaryOnly:    summary,
 		ExportTargets:  targets,
 	}, nil
 }

@@ -252,6 +252,7 @@ POST /v1/builds/<id>/cancel
 ```
 
 Job responses contain the public execution state and a stable `failure_code` for terminal failures.
+After the runner completes, `verifying` is a durable nonterminal state; the response includes verification start/deadline/next-attempt times, attempt count, last error, and pending/succeeded/failed output counts.
 They do not expose runner Pod names, Kubernetes namespaces, or internal BuildKit addresses.
 List pages are limited to 500 jobs, and log requests are limited to the last 10,000 lines.
 
@@ -263,6 +264,8 @@ Kova resolves the digest-pinned single-platform manifest, reads its image config
 For OCI outputs, Kova records the digest returned by that build's BuildKit push.
 For Nydus outputs, the source-pinned Nydusify converter records the descriptor digest after that build's target push succeeds.
 Both formats fail verification if the push metadata omits a valid digest; a later lookup of the mutable tag cannot replace that digest.
+Runner completion and exact push receipts are persisted before registry verification. Each attempt has a 10-second default deadline and at most 16 pending outputs, with no more than four registry requests in flight. Transient export/registry failures retry with capped backoff inside a separate five-minute default verification window; an immutable digest or platform mismatch fails immediately. The controller never submits a completed runner again, including after restart or leader handoff.
+Only two controller reconciles perform verification I/O at once under the default four-reconcile setting, leaving admission capacity for other jobs. The runner Pod remains available during verification and is removed before terminal status; cancellation or deletion also removes it. The Kubernetes active deadline includes the verification window, while the build-execution deadline still ends at `maxBuildDuration`.
 If one of several registries fails, the job is `Failed` while already verified output digests remain in status.
 Registry pushes are not transactional and Kova does not roll them back.
 
@@ -317,6 +320,8 @@ serviceDaemon:
   controllerConcurrency: 4
   pollRetryWindow: 1m
   maxBuildDuration: 2h
+  verificationAttemptTimeout: 10s
+  verificationWindow: 5m
 
 worker:
   platform: linux/amd64
@@ -327,6 +332,7 @@ The Service retries temporary runner status and source-inspect transport errors 
 At the limit the controller cancels the runner, deletes its Pod, and reports a failed build so its active slot can be reused.
 The runner Pod also has a Kubernetes active deadline, which stops a hung build if the controller is temporarily unavailable.
 When the controller reconciles after the deadline, it first makes a bounded status check; a reachable terminal runner state is processed and verified, while an active or unobservable runner is timed out.
+The separate verification window starts when a completed runner is durably observed. If it expires, pending outputs fail with `result_verification_failed`; verified digests remain available as partial results. Adjust the window for registry consistency and the number of concrete outputs, not to extend build execution.
 
 Registry credentials are the only storage credentials needed by Kova.
 The same Docker config can authorize source pulls, output pushes, and controller-side manifest verification:

@@ -37,4 +37,5 @@ type Options struct {
 	DockerConfigPath           string
 	Interval                   int
 	WithFail                   bool
+	SummaryOnly                bool
 }

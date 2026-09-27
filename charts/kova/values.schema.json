@@ -110,6 +110,8 @@
         "pollInterval": { "type": "string" },
         "pollRetryWindow": { "type": "string" },
         "maxBuildDuration": { "type": "string" },
+        "verificationAttemptTimeout": { "type": "string" },
+        "verificationWindow": { "type": "string" },
         "maxActiveJobs": { "type": "integer", "minimum": 1 },
         "maxActiveJobsPerRequester": { "type": "integer", "minimum": 1 },
         "maxQueuedJobs": { "type": "integer", "minimum": 1, "maximum": 1000 },

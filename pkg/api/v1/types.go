@@ -61,6 +61,7 @@ const (
 	JobStatusQueued    JobStatus = "queued"
 	JobStatusStarting  JobStatus = "starting"
 	JobStatusRunning   JobStatus = "running"
+	JobStatusVerifying JobStatus = "verifying"
 	JobStatusSucceeded JobStatus = "succeeded"
 	JobStatusFailed    JobStatus = "failed"
 	JobStatusCancelled JobStatus = "cancelled"
@@ -80,22 +81,30 @@ const (
 )
 
 type BuildJob struct {
-	ID                    string           `json:"id"`
-	Status                JobStatus        `json:"status"`
-	Error                 string           `json:"error,omitempty"`
-	FailureCode           BuildFailureCode `json:"failure_code,omitempty"`
-	CreatedAt             time.Time        `json:"created_at"`
-	StartedAt             *time.Time       `json:"started_at,omitempty"`
-	FinishedAt            *time.Time       `json:"finished_at,omitempty"`
-	ExpiresAt             *time.Time       `json:"expires_at,omitempty"`
-	SourceDigest          string           `json:"source_digest,omitempty"`
-	SourceURI             string           `json:"source_uri,omitempty"`
-	IdempotencyKey        string           `json:"idempotency_key,omitempty"`
-	Requester             string           `json:"requester"`
-	CancellationRequested bool             `json:"cancellation_requested,omitempty"`
-	RecoveryRequired      bool             `json:"recovery_required,omitempty"`
-	RequestedConcurrency  int              `json:"requested_concurrency,omitempty"`
-	AllocatedConcurrency  int32            `json:"allocated_concurrency,omitempty"`
+	ID                        string           `json:"id"`
+	Status                    JobStatus        `json:"status"`
+	Error                     string           `json:"error,omitempty"`
+	FailureCode               BuildFailureCode `json:"failure_code,omitempty"`
+	CreatedAt                 time.Time        `json:"created_at"`
+	StartedAt                 *time.Time       `json:"started_at,omitempty"`
+	FinishedAt                *time.Time       `json:"finished_at,omitempty"`
+	ExpiresAt                 *time.Time       `json:"expires_at,omitempty"`
+	SourceDigest              string           `json:"source_digest,omitempty"`
+	SourceURI                 string           `json:"source_uri,omitempty"`
+	IdempotencyKey            string           `json:"idempotency_key,omitempty"`
+	Requester                 string           `json:"requester"`
+	CancellationRequested     bool             `json:"cancellation_requested,omitempty"`
+	RecoveryRequired          bool             `json:"recovery_required,omitempty"`
+	RequestedConcurrency      int              `json:"requested_concurrency,omitempty"`
+	AllocatedConcurrency      int32            `json:"allocated_concurrency,omitempty"`
+	VerificationStartedAt     *time.Time       `json:"verification_started_at,omitempty"`
+	VerificationDeadlineAt    *time.Time       `json:"verification_deadline_at,omitempty"`
+	VerificationNextAttemptAt *time.Time       `json:"verification_next_attempt_at,omitempty"`
+	VerificationAttempts      int32            `json:"verification_attempts,omitempty"`
+	VerificationLastError     string           `json:"verification_last_error,omitempty"`
+	VerificationPending       int              `json:"verification_pending,omitempty"`
+	VerificationSucceeded     int              `json:"verification_succeeded,omitempty"`
+	VerificationFailed        int              `json:"verification_failed,omitempty"`
 }
 
 type BuildOutput struct {

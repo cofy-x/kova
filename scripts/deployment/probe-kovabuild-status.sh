@@ -56,26 +56,36 @@ spec:
     concurrency: 1
 EOF
 
-patch='{"status":{"pollFailureSince":"2026-01-02T03:04:05Z","pollFailureCount":3}}'
+legacy_patch='{"status":{"pollFailureSince":"2026-01-02T03:04:05Z","pollFailureCount":3,"verificationStartedAt":"2026-01-02T03:04:05Z","verificationDeadlineAt":"2026-01-02T03:09:05Z","verificationNextAttemptAt":"2026-01-02T03:04:06Z","verificationAttempts":2,"verificationLastError":"temporary registry error","verificationResults":[{"format":"oci","image":"registry.invalid/example:probe","platform":"linux/amd64","pushedDigest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","state":"pending"}]}}'
+current_patch='{"status":{"phase":"Verifying","pollFailureSince":"2026-01-02T03:04:05Z","pollFailureCount":3,"verificationStartedAt":"2026-01-02T03:04:05Z","verificationDeadlineAt":"2026-01-02T03:09:05Z","verificationNextAttemptAt":"2026-01-02T03:04:06Z","verificationAttempts":2,"verificationLastError":"temporary registry error","verificationResults":[{"format":"oci","image":"registry.invalid/example:probe","platform":"linux/amd64","pushedDigest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","state":"pending"}]}}'
 if [[ "${MODE}" == '--expect-pruned' ]]; then
   "${KUBECTL}" -n "${probe_namespace}" patch kovabuild retry-status-probe \
-    --type=merge --subresource=status -p "${patch}" >/dev/null
+    --type=merge --subresource=status -p "${legacy_patch}" >/dev/null
   observed=$("${KUBECTL}" -n "${probe_namespace}" get kovabuild retry-status-probe -o json)
-  if ! jq -e '(.status.pollFailureSince == null) and (.status.pollFailureCount == null)' \
+  if ! jq -e '(.status.pollFailureSince == null) and (.status.pollFailureCount == null) and
+      (.status.verificationStartedAt == null) and (.status.verificationDeadlineAt == null) and
+      (.status.verificationNextAttemptAt == null) and (.status.verificationAttempts == null) and
+      (.status.verificationLastError == null) and (.status.verificationResults == null)' \
     <<<"${observed}" >/dev/null; then
     echo 'error: legacy CRD unexpectedly persisted retry status fields' >&2
     exit 1
   fi
-  echo 'legacy CRD pruned retry status fields as expected'
+  echo 'legacy CRD pruned retry and verification status fields as expected'
 else
   # CRD schema updates can take a short time to reach the serving API path.
   for ((attempt = 1; attempt <= PROBE_ATTEMPTS; attempt++)); do
     if "${KUBECTL}" -n "${probe_namespace}" patch kovabuild retry-status-probe \
-      --type=merge --subresource=status -p "${patch}" >/dev/null 2>&1; then
+      --type=merge --subresource=status -p "${current_patch}" >/dev/null 2>&1; then
       if observed=$("${KUBECTL}" -n "${probe_namespace}" get kovabuild retry-status-probe -o json); then
-        if jq -e '.status.pollFailureSince == "2026-01-02T03:04:05Z" and .status.pollFailureCount == 3' \
+        if jq -e '.status.phase == "Verifying" and .status.pollFailureSince == "2026-01-02T03:04:05Z" and
+            .status.pollFailureCount == 3 and .status.verificationStartedAt == "2026-01-02T03:04:05Z" and
+            .status.verificationDeadlineAt == "2026-01-02T03:09:05Z" and
+            .status.verificationNextAttemptAt == "2026-01-02T03:04:06Z" and
+            .status.verificationAttempts == 2 and .status.verificationLastError == "temporary registry error" and
+            .status.verificationResults[0].pushedDigest == "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" and
+            .status.verificationResults[0].state == "pending"' \
           <<<"${observed}" >/dev/null; then
-          echo 'current CRD persisted retry status fields'
+          echo 'current CRD persisted retry and verification status fields'
           exit 0
         fi
       fi

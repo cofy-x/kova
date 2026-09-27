@@ -45,10 +45,10 @@ helm show crds oci://ghcr.io/cofy-x/charts/kova \
 ./scripts/deployment/verify-kovabuild-crd.sh
 ```
 
-Run the CRD gate from the matching Kova checkout, using the same `KUBECONFIG` as
-the Helm upgrade. It blocks when the CRD is not Established, cannot be read,
-or lacks the `v1alpha1` status fields with
-`pollFailureSince: string/date-time` and `pollFailureCount: integer/int32`.
+Run the gate from the matching Kova checkout, using the same `KUBECONFIG` as
+the Helm upgrade. Proceed only if it exits zero; it blocks when the CRD is not
+Established, cannot be read, or lacks the `v1alpha1` status retry fields,
+`Verifying` phase, and bounded verification receipt/timing schema.
 Then upgrade the controller:
 
 ```bash
@@ -136,13 +136,14 @@ The example scale command assumes the chart's default fullname; adjust it and
 
 Apply the CRD for every selected release before the Helm upgrade. Helm creates
 objects from `crds/` during initial installation but does not upgrade them.
-For releases with bounded status retries, verify both the live CRD schema and
-an actual `/status` write/read round trip for `pollFailureSince` and
-`pollFailureCount` before starting the new controller. The schema check alone
-does not prove that the API serving path has picked up the new schema; an older
-serving schema can prune the retry window and prevent bounded recovery. The
-probe uses a dedicated, previously absent namespace and removes it afterward.
-Keep the old Service stopped and direct submissions frozen through both checks.
+Verify both the live CRD schema and an actual `/status` write/read round trip
+for `pollFailureSince`, `pollFailureCount`, `Verifying`, and all bounded
+verification timing/receipt fields before starting the new controller. The
+schema check alone does not prove that the API serving path has picked up the
+new schema; an older serving schema can prune retry/deadline/receipt state and
+prevent bounded recovery. The probe uses a dedicated, previously absent
+namespace and removes it afterward. Keep the old Service stopped and direct
+submissions frozen through both checks.
 The optional `BASELINE_CHART` path in `scripts/e2e/e2e-service.sh` exercises this
 order with an older chart before upgrading to the current controller; run
 `./scripts/deployment/test-verify-kovabuild-crd.sh` for a cluster-free gate test.

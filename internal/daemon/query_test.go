@@ -87,6 +87,13 @@ func TestExportOptionsFromQueryAcceptsExactTargets(t *testing.T) {
 	}
 }
 
+func TestExportOptionsFromQueryAcceptsBoundedSummary(t *testing.T) {
+	opts, err := exportOptionsFromQuery(url.Values{"summary": []string{"true"}, "with-fail": []string{"true"}}, "/tmp/result.lmdb")
+	if err != nil || !opts.SummaryOnly || !opts.WithFail {
+		t.Fatalf("opts=%#v err=%v", opts, err)
+	}
+}
+
 func TestPreheatOptionsFromQueryRequiresScheduler(t *testing.T) {
 	_, err := preheatOptionsFromQuery(url.Values{}, "/tmp/result.lmdb")
 	if err == nil || !strings.Contains(err.Error(), "dragonfly-scheduler-addr") {

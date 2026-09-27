@@ -89,8 +89,9 @@ func (r *KovaBuildReconciler) startBuild(ctx context.Context, build *kovav1.Kova
 		},
 	})
 	if r.Cfg.MaxBuildDuration > 0 {
-		seconds := int64(r.Cfg.MaxBuildDuration / time.Second)
-		if r.Cfg.MaxBuildDuration%time.Second != 0 {
+		podDuration := r.Cfg.MaxBuildDuration + r.verificationWindow()
+		seconds := int64(podDuration / time.Second)
+		if podDuration%time.Second != 0 {
 			seconds++
 		}
 		pod.Spec.ActiveDeadlineSeconds = &seconds
@@ -169,7 +170,9 @@ func (r *KovaBuildReconciler) cancelBuild(ctx context.Context, build *kovav1.Kov
 	if build.Status.Phase == kovav1.PhaseRunning && build.Status.RunnerPodName != "" {
 		// Cancellation remains effective when the daemon is already unavailable;
 		// deleting the runner Pod is the authoritative stop operation.
-		_ = (runnerexec.Client{Kube: r.Kube, BuildkitPlatformAddrs: r.Cfg.BuildkitPlatformAddrs}).CancelBuild(ctx, build)
+		cancelCtx, stop := context.WithTimeout(ctx, r.verificationAttemptTimeout())
+		_ = (runnerexec.Client{Kube: r.Kube, BuildkitPlatformAddrs: r.Cfg.BuildkitPlatformAddrs}).CancelBuild(cancelCtx, build)
+		stop()
 	}
 	if err := r.deleteRunnerAndConfirm(ctx, build); err != nil {
 		return ctrl.Result{}, err
@@ -328,23 +331,18 @@ func (r *KovaBuildReconciler) finishObservedBuild(ctx context.Context, build *ko
 	build.Status.PollFailureSince = nil
 	build.Status.PollFailureCount = 0
 	if success {
-		build.Status.Phase = kovav1.PhaseSucceeded
-	} else if state.Status == "cancelled" {
-		build.Status.Phase = kovav1.PhaseCancelled
-	} else {
-		build.Status.Phase = kovav1.PhaseFailed
-	}
-	resolved := buildresult.Resolve(ctx, client, build, r.Cfg.RegistryPlainHTTP)
-	build.Status.Outputs = buildresult.Outputs(resolved)
-	if success && !buildresult.AllSucceeded(resolved) {
-		return ctrl.Result{}, r.finish(ctx, build, kovav1.PhaseFailed, "ResultVerificationFailed", "one or more build results could not be verified")
-	}
-	if success {
-		return ctrl.Result{}, r.finish(ctx, build, kovav1.PhaseSucceeded, "Completed", "")
+		return r.beginVerification(ctx, build)
 	}
 	if state.Status == "cancelled" {
 		return ctrl.Result{}, r.finish(ctx, build, kovav1.PhaseCancelled, "Cancelled", state.Error)
 	}
+	// A failed runner is already terminal. Keep its best-effort partial outputs,
+	// but never let export/registry I/O hold a reconciler indefinitely.
+	resolveCtx, cancel := context.WithTimeout(ctx, r.verificationAttemptTimeout())
+	defer cancel()
+	build.Status.Phase = kovav1.PhaseFailed
+	resolved := buildresult.Resolve(resolveCtx, client, build, r.Cfg.RegistryPlainHTTP)
+	build.Status.Outputs = buildresult.Outputs(resolved)
 	return ctrl.Result{}, r.finish(ctx, build, kovav1.PhaseFailed, "BuildFailed", state.Error)
 }
 
@@ -531,7 +529,9 @@ func (r *KovaBuildReconciler) deleteRunnerAndConfirm(ctx context.Context, build 
 			return err
 		}
 	}
-	if err := r.Kube.DeletePod(ctx, build.Namespace, buildPodName(build.Name)); err != nil {
+	deleteCtx, cancel := context.WithTimeout(ctx, r.verificationAttemptTimeout())
+	defer cancel()
+	if err := r.Kube.DeletePod(deleteCtx, build.Namespace, buildPodName(build.Name)); err != nil {
 		return err
 	}
 	stillPresent, err := r.getOwnedPod(ctx, build)

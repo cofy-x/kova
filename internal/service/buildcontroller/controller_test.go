@@ -166,7 +166,7 @@ func TestReconcilerCreatesRunnerWithImmutableSourceFetcher(t *testing.T) {
 	if len(pod.Spec.Volumes) == 0 || pod.Spec.Volumes[0].EmptyDir == nil {
 		t.Fatalf("unexpected volumes: %#v", pod.Spec.Volumes)
 	}
-	if pod.Spec.ActiveDeadlineSeconds == nil || *pod.Spec.ActiveDeadlineSeconds != 3600 {
+	if pod.Spec.ActiveDeadlineSeconds == nil || *pod.Spec.ActiveDeadlineSeconds != 3900 {
 		t.Fatalf("runner active deadline = %v", pod.Spec.ActiveDeadlineSeconds)
 	}
 	if len(pod.Spec.Containers[0].VolumeMounts) == 0 || pod.Spec.Containers[0].VolumeMounts[0].MountPath != "/var/lib/kova/source" {

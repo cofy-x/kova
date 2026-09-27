@@ -72,6 +72,7 @@ func TestValidateCapacityConfigRejectsUnboundedWorkerSlots(t *testing.T) {
 		MaxActiveJobs: 20, MaxActiveJobsPerRequester: 4, MaxQueuedJobs: 1000, MaxQueuedJobsPerRequester: 100,
 		WorkerSlots: 20, ControllerConcurrency: buildcontract.DefaultControllerConcurrency,
 		PollRetryWindow: time.Minute, MaxBuildDuration: time.Hour,
+		VerificationAttemptTimeout: 10 * time.Second, VerificationWindow: 5 * time.Minute,
 	}
 	if err := validateCapacityConfig(valid); err != nil {
 		t.Fatal(err)
@@ -85,6 +86,16 @@ func TestValidateCapacityConfigRejectsUnboundedWorkerSlots(t *testing.T) {
 	withoutBuildLimit.MaxBuildDuration = 0
 	if err := validateCapacityConfig(withoutBuildLimit); err == nil {
 		t.Fatal("expected max-build-duration=0 to be rejected")
+	}
+	withoutVerificationAttempt := valid
+	withoutVerificationAttempt.VerificationAttemptTimeout = 0
+	if err := validateCapacityConfig(withoutVerificationAttempt); err == nil {
+		t.Fatal("expected verification-attempt-timeout=0 to be rejected")
+	}
+	tooShortVerificationWindow := valid
+	tooShortVerificationWindow.VerificationWindow = time.Second
+	if err := validateCapacityConfig(tooShortVerificationWindow); err == nil {
+		t.Fatal("expected verification-window shorter than attempt timeout to be rejected")
 	}
 	valid.WorkerSlots = 0
 	if err := validateCapacityConfig(valid); err == nil {

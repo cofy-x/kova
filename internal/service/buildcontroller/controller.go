@@ -2,6 +2,7 @@ package buildcontroller
 
 import (
 	"context"
+	"sync"
 
 	kovav1 "github.com/cofy-x/kova/internal/apis/kova/v1alpha1"
 	"github.com/cofy-x/kova/internal/buildcontract"
@@ -35,7 +36,9 @@ type KovaBuildReconciler struct {
 	Cfg      config.Config
 	Recorder record.EventRecorder
 	// APIReader bypasses the manager cache for capacity and recovery reads.
-	APIReader client.Reader
+	APIReader         client.Reader
+	verificationOnce  sync.Once
+	verificationSlots chan struct{}
 }
 
 func (r *KovaBuildReconciler) queueStoreForNamespace(namespace string) queueadmission.Store {
@@ -83,6 +86,8 @@ func (r *KovaBuildReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return r.submitWhenReady(ctx, &build)
 	case kovav1.PhaseRunning:
 		return r.pollBuild(ctx, &build)
+	case kovav1.PhaseVerifying:
+		return r.reconcileVerifying(ctx, &build)
 	default:
 		return ctrl.Result{RequeueAfter: r.Cfg.PollInterval}, nil
 	}

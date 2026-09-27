@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"sort"
 	"strconv"
@@ -26,6 +27,36 @@ type Client struct {
 
 var ErrInvalidBuildStatus = errors.New("invalid runner build status")
 var ErrSourceInspectTransport = errors.New("source inspect transport failed")
+var ErrExportTooLarge = errors.New("runner export exceeds 1 MiB limit")
+
+const maxExportBytes = 1 << 20
+const maxExportErrorBytes = 64 << 10
+
+type boundedExportBuffer struct {
+	bytes.Buffer
+	overflow bool
+}
+
+func (b *boundedExportBuffer) Write(data []byte) (int, error) {
+	remaining := maxExportBytes - b.Len()
+	if len(data) > remaining {
+		_, _ = b.Buffer.Write(data[:remaining])
+		b.overflow = true
+		return remaining, ErrExportTooLarge
+	}
+	return b.Buffer.Write(data)
+}
+
+var _ io.Writer = (*boundedExportBuffer)(nil)
+
+type boundedExportErrorBuffer struct{ bytes.Buffer }
+
+func (b *boundedExportErrorBuffer) Write(data []byte) (int, error) {
+	if remaining := maxExportErrorBytes - b.Len(); remaining > 0 {
+		_, _ = b.Buffer.Write(data[:min(remaining, len(data))])
+	}
+	return len(data), nil
+}
 
 func (c Client) SourceTargets(ctx context.Context, build *kovav1.KovaBuild, sourcePath string) ([]buildcontract.TargetSpec, error) {
 	var stdout, stderr bytes.Buffer
@@ -101,7 +132,8 @@ func (c Client) CancelBuild(ctx context.Context, build *kovav1.KovaBuild) error 
 }
 
 func (c Client) Post(ctx context.Context, build *kovav1.KovaBuild, path string, query string) ([]byte, error) {
-	var out, stderr bytes.Buffer
+	var out boundedExportBuffer
+	var stderr boundedExportErrorBuffer
 	err := c.Kube.Exec(ctx, build.Namespace, build.Status.RunnerPodName, kube.ExecOptions{
 		Stdout:  &out,
 		Stderr:  &stderr,
@@ -109,6 +141,9 @@ func (c Client) Post(ctx context.Context, build *kovav1.KovaBuild, path string, 
 	})
 	if err != nil {
 		return nil, ExecError(path, stderr.Bytes(), err)
+	}
+	if out.overflow {
+		return nil, ErrExportTooLarge
 	}
 	return out.Bytes(), nil
 }

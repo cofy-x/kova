@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -29,24 +30,31 @@ type RegistryResolver interface {
 
 type remoteRegistryResolver struct{}
 
+// ErrDefinitive means that retrying the same immutable pushed digest cannot
+// make the receipt valid. Transport and availability errors are retryable.
+var ErrDefinitive = errors.New("definitive result verification failure")
+
 func (remoteRegistryResolver) Resolve(ctx context.Context, target, pushedDigest string, plainHTTPRegistries []string) (string, string, error) {
 	if pushedDigest == "" {
 		return "", "", fmt.Errorf("build result is missing the pushed manifest digest")
 	}
 	ref, err := name.ParseReference(target, referenceOptions(target, plainHTTPRegistries)...)
 	if err != nil {
-		return "", "", err
+		return "", "", fmt.Errorf("%w: invalid output reference: %v", ErrDefinitive, err)
 	}
 	digestRef, err := name.NewDigest(ref.Context().Name()+"@"+pushedDigest, referenceOptions(target, plainHTTPRegistries)...)
 	if err != nil {
-		return "", "", fmt.Errorf("parse pushed digest reference: %w", err)
+		return "", "", fmt.Errorf("%w: parse pushed digest reference: %v", ErrDefinitive, err)
 	}
 	descriptor, err := remote.Get(digestRef, remote.WithContext(ctx), remote.WithAuthFromKeychain(authn.DefaultKeychain))
 	if err != nil {
 		return "", "", fmt.Errorf("resolve pushed descriptor by digest: %w", err)
 	}
 	if descriptor.Descriptor.Digest.String() != pushedDigest {
-		return "", "", fmt.Errorf("resolved manifest digest %s does not match pushed digest %s", descriptor.Descriptor.Digest, pushedDigest)
+		return "", "", fmt.Errorf("%w: resolved manifest digest %s does not match pushed digest %s", ErrDefinitive, descriptor.Descriptor.Digest, pushedDigest)
+	}
+	if !descriptor.MediaType.IsImage() {
+		return "", "", fmt.Errorf("%w: pushed descriptor is not a single-platform image manifest (%s)", ErrDefinitive, descriptor.MediaType)
 	}
 	image, err := remote.Image(digestRef, remote.WithContext(ctx), remote.WithAuthFromKeychain(authn.DefaultKeychain))
 	if err != nil {
@@ -54,11 +62,11 @@ func (remoteRegistryResolver) Resolve(ctx context.Context, target, pushedDigest 
 	}
 	config, err := image.ConfigFile()
 	if err != nil {
-		return "", "", fmt.Errorf("read pushed image platform: %w", err)
+		return "", "", fmt.Errorf("%w: read pushed image platform: %v", ErrDefinitive, err)
 	}
 	platform, err := buildcontract.NormalizePlatform(config.OS + "/" + config.Architecture)
 	if err != nil {
-		return "", "", fmt.Errorf("pushed image has unsupported platform: %w", err)
+		return "", "", fmt.Errorf("%w: pushed image has unsupported platform: %v", ErrDefinitive, err)
 	}
 	return pushedDigest, platform, nil
 }

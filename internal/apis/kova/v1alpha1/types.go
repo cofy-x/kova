@@ -24,6 +24,7 @@ const (
 	PhaseQueued    = "Queued"
 	PhaseStarting  = "Starting"
 	PhaseRunning   = "Running"
+	PhaseVerifying = "Verifying"
 	PhaseSucceeded = "Succeeded"
 	PhaseFailed    = "Failed"
 	PhaseCancelled = "Cancelled"
@@ -113,7 +114,7 @@ type KovaBuildOptions struct {
 }
 
 type KovaBuildStatus struct {
-	// +kubebuilder:validation:Enum=Queued;Starting;Running;Succeeded;Failed;Cancelled
+	// +kubebuilder:validation:Enum=Queued;Starting;Running;Verifying;Succeeded;Failed;Cancelled
 	Phase                string `json:"phase,omitempty"`
 	ObservedGeneration   int64  `json:"observedGeneration,omitempty"`
 	AllocatedConcurrency int32  `json:"allocatedConcurrency,omitempty"`
@@ -122,11 +123,19 @@ type KovaBuildStatus struct {
 	// +kubebuilder:validation:MaxLength=128
 	Reason string `json:"reason,omitempty"`
 	// +kubebuilder:validation:MaxLength=2048
-	Message          string       `json:"message,omitempty"`
-	StartedAt        *metav1.Time `json:"startedAt,omitempty"`
-	FinishedAt       *metav1.Time `json:"finishedAt,omitempty"`
-	PollFailureSince *metav1.Time `json:"pollFailureSince,omitempty"`
-	PollFailureCount int32        `json:"pollFailureCount,omitempty"`
+	Message                   string       `json:"message,omitempty"`
+	StartedAt                 *metav1.Time `json:"startedAt,omitempty"`
+	FinishedAt                *metav1.Time `json:"finishedAt,omitempty"`
+	PollFailureSince          *metav1.Time `json:"pollFailureSince,omitempty"`
+	PollFailureCount          int32        `json:"pollFailureCount,omitempty"`
+	VerificationStartedAt     *metav1.Time `json:"verificationStartedAt,omitempty"`
+	VerificationDeadlineAt    *metav1.Time `json:"verificationDeadlineAt,omitempty"`
+	VerificationNextAttemptAt *metav1.Time `json:"verificationNextAttemptAt,omitempty"`
+	VerificationAttempts      int32        `json:"verificationAttempts,omitempty"`
+	// +kubebuilder:validation:MaxLength=2048
+	VerificationLastError string `json:"verificationLastError,omitempty"`
+	// +kubebuilder:validation:MaxItems=200
+	VerificationResults []BuildVerificationResult `json:"verificationResults,omitempty"`
 	// +kubebuilder:validation:MaxItems=200
 	Outputs []BuildOutput `json:"outputs,omitempty"`
 	// +listType=map
@@ -145,6 +154,24 @@ type BuildOutput struct {
 	ManifestDigest string `json:"manifestDigest"`
 	// +kubebuilder:validation:Enum=linux/amd64;linux/arm64
 	Platform string `json:"platform"`
+}
+
+// BuildVerificationResult is a bounded, durable receipt for one concrete output.
+// PushedDigest is evidence from the runner's exact push, not a mutable tag lookup.
+type BuildVerificationResult struct {
+	// +kubebuilder:validation:Enum=oci;nydus
+	Format string `json:"format"`
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=512
+	Image string `json:"image"`
+	// +kubebuilder:validation:Enum=linux/amd64;linux/arm64
+	Platform string `json:"platform"`
+	// +kubebuilder:validation:Pattern=`^sha256:[a-f0-9]{64}$`
+	PushedDigest string `json:"pushedDigest,omitempty"`
+	// +kubebuilder:validation:Enum=pending;succeeded;failed
+	State string `json:"state"`
+	// +kubebuilder:validation:MaxLength=2048
+	Error string `json:"error,omitempty"`
 }
 
 // +kubebuilder:object:root=true

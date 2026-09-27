@@ -36,6 +36,30 @@ func buildJobFromCR(build *kovav1.KovaBuild, cfg config.Config) apiv1.BuildJob {
 		expires := t.Add(cfg.JobTTL)
 		job.ExpiresAt = &expires
 	}
+	if build.Status.VerificationStartedAt != nil {
+		t := build.Status.VerificationStartedAt.Time
+		job.VerificationStartedAt = &t
+	}
+	if build.Status.VerificationDeadlineAt != nil {
+		t := build.Status.VerificationDeadlineAt.Time
+		job.VerificationDeadlineAt = &t
+	}
+	if build.Status.VerificationNextAttemptAt != nil && build.Status.Phase == kovav1.PhaseVerifying {
+		t := build.Status.VerificationNextAttemptAt.Time
+		job.VerificationNextAttemptAt = &t
+	}
+	job.VerificationAttempts = build.Status.VerificationAttempts
+	job.VerificationLastError = build.Status.VerificationLastError
+	for _, result := range build.Status.VerificationResults {
+		switch result.State {
+		case "pending":
+			job.VerificationPending++
+		case "succeeded":
+			job.VerificationSucceeded++
+		case "failed":
+			job.VerificationFailed++
+		}
+	}
 	return job
 }
 
@@ -82,6 +106,8 @@ func httpStatus(phase string) apiv1.JobStatus {
 		return apiv1.JobStatusStarting
 	case kovav1.PhaseRunning:
 		return apiv1.JobStatusRunning
+	case kovav1.PhaseVerifying:
+		return apiv1.JobStatusVerifying
 	case kovav1.PhaseSucceeded:
 		return apiv1.JobStatusSucceeded
 	case kovav1.PhaseFailed:

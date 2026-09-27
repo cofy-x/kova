@@ -59,6 +59,8 @@ func CLICommand() *cli.Command {
 			&cli.DurationFlag{Name: "poll-interval", Value: 5 * time.Second, Usage: "build status polling interval"},
 			&cli.DurationFlag{Name: "poll-retry-window", Value: time.Minute, Usage: "maximum time to retry runner status errors while the Pod remains available"},
 			&cli.DurationFlag{Name: "max-build-duration", Value: 2 * time.Hour, Usage: "maximum time from runner admission to terminal build status"},
+			&cli.DurationFlag{Name: "verification-attempt-timeout", Value: 10 * time.Second, Usage: "maximum time for one result export or registry verification round"},
+			&cli.DurationFlag{Name: "verification-window", Value: 5 * time.Minute, Usage: "overall result verification window after runner completion"},
 			&cli.IntFlag{Name: "max-active-jobs", Value: 20, Usage: "maximum concurrently active service jobs"},
 			&cli.IntFlag{Name: "max-active-jobs-per-requester", Value: 4, Usage: "maximum concurrently active jobs for one authenticated requester"},
 			&cli.IntFlag{Name: "max-queued-jobs", Value: 1000, Usage: "maximum globally queued HTTP service jobs (1-1000)"},
@@ -116,32 +118,34 @@ func CLICommand() *cli.Command {
 			ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 			defer stop()
 			cfg := config.Config{
-				Listen:                    c.String("listen"),
-				Namespace:                 c.String("namespace"),
-				RunnerImage:               strings.TrimSpace(c.String("runner-image")),
-				RunnerImagePullPolicy:     c.String("runner-image-pull-policy"),
-				RunnerImagePullSecret:     c.String("runner-image-pull-secret"),
-				RunnerNodeSelector:        runnerNodeSelector,
-				RunnerEnv:                 runnerObservabilityEnv(),
-				RunnerResources:           runnerResources,
-				SourceFetchResources:      sourceFetchResources,
-				SourceVolumeSizeLimit:     &sourceVolumeSizeLimit,
-				RegistryPlainHTTP:         plainHTTPRegistries,
-				BuildkitPlatformAddrs:     platformAddrs,
-				JobTTL:                    c.Duration("job-ttl"),
-				AuthToken:                 c.String("auth-token"),
-				AuthMode:                  strings.TrimSpace(c.String("auth-mode")),
-				AuthStaticPrincipal:       strings.TrimSpace(c.String("auth-static-principal")),
-				WaitTimeout:               c.Duration("wait"),
-				PollInterval:              c.Duration("poll-interval"),
-				PollRetryWindow:           c.Duration("poll-retry-window"),
-				MaxBuildDuration:          c.Duration("max-build-duration"),
-				MaxActiveJobs:             c.Int("max-active-jobs"),
-				MaxActiveJobsPerRequester: c.Int("max-active-jobs-per-requester"),
-				MaxQueuedJobs:             c.Int("max-queued-jobs"),
-				MaxQueuedJobsPerRequester: c.Int("max-queued-jobs-per-requester"),
-				WorkerSlots:               c.Int("worker-slots"),
-				ControllerConcurrency:     c.Int("controller-concurrency"),
+				Listen:                     c.String("listen"),
+				Namespace:                  c.String("namespace"),
+				RunnerImage:                strings.TrimSpace(c.String("runner-image")),
+				RunnerImagePullPolicy:      c.String("runner-image-pull-policy"),
+				RunnerImagePullSecret:      c.String("runner-image-pull-secret"),
+				RunnerNodeSelector:         runnerNodeSelector,
+				RunnerEnv:                  runnerObservabilityEnv(),
+				RunnerResources:            runnerResources,
+				SourceFetchResources:       sourceFetchResources,
+				SourceVolumeSizeLimit:      &sourceVolumeSizeLimit,
+				RegistryPlainHTTP:          plainHTTPRegistries,
+				BuildkitPlatformAddrs:      platformAddrs,
+				JobTTL:                     c.Duration("job-ttl"),
+				AuthToken:                  c.String("auth-token"),
+				AuthMode:                   strings.TrimSpace(c.String("auth-mode")),
+				AuthStaticPrincipal:        strings.TrimSpace(c.String("auth-static-principal")),
+				WaitTimeout:                c.Duration("wait"),
+				PollInterval:               c.Duration("poll-interval"),
+				PollRetryWindow:            c.Duration("poll-retry-window"),
+				MaxBuildDuration:           c.Duration("max-build-duration"),
+				VerificationAttemptTimeout: c.Duration("verification-attempt-timeout"),
+				VerificationWindow:         c.Duration("verification-window"),
+				MaxActiveJobs:              c.Int("max-active-jobs"),
+				MaxActiveJobsPerRequester:  c.Int("max-active-jobs-per-requester"),
+				MaxQueuedJobs:              c.Int("max-queued-jobs"),
+				MaxQueuedJobsPerRequester:  c.Int("max-queued-jobs-per-requester"),
+				WorkerSlots:                c.Int("worker-slots"),
+				ControllerConcurrency:      c.Int("controller-concurrency"),
 			}
 			if err := validateCapacityConfig(cfg); err != nil {
 				return err
@@ -194,6 +198,15 @@ func validateCapacityConfig(cfg config.Config) error {
 	}
 	if cfg.MaxBuildDuration <= 0 {
 		return fmt.Errorf("max-build-duration must be positive")
+	}
+	if cfg.VerificationAttemptTimeout <= 0 || cfg.VerificationAttemptTimeout > time.Minute {
+		return fmt.Errorf("verification-attempt-timeout must be between 1ns and 1m")
+	}
+	if cfg.VerificationWindow < cfg.VerificationAttemptTimeout || cfg.VerificationWindow > time.Hour {
+		return fmt.Errorf("verification-window must be between verification-attempt-timeout and 1h")
+	}
+	if cfg.MaxBuildDuration > time.Duration(1<<63-1)-cfg.VerificationWindow {
+		return fmt.Errorf("max-build-duration plus verification-window overflows")
 	}
 	if cfg.MaxActiveJobs < 1 {
 		return fmt.Errorf("max-active-jobs must be at least 1")

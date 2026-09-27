@@ -239,6 +239,7 @@ spec:
                 - Queued
                 - Starting
                 - Running
+                - Verifying
                 - Succeeded
                 - Failed
                 - Cancelled
@@ -256,6 +257,61 @@ spec:
                 maxLength: 253
                 type: string
               startedAt:
+                format: date-time
+                type: string
+              verificationAttempts:
+                format: int32
+                type: integer
+              verificationDeadlineAt:
+                format: date-time
+                type: string
+              verificationLastError:
+                maxLength: 2048
+                type: string
+              verificationNextAttemptAt:
+                format: date-time
+                type: string
+              verificationResults:
+                items:
+                  description: |-
+                    BuildVerificationResult is a bounded, durable receipt for one concrete output.
+                    PushedDigest is evidence from the runner's exact push, not a mutable tag lookup.
+                  properties:
+                    error:
+                      maxLength: 2048
+                      type: string
+                    format:
+                      enum:
+                      - oci
+                      - nydus
+                      type: string
+                    image:
+                      maxLength: 512
+                      minLength: 1
+                      type: string
+                    platform:
+                      enum:
+                      - linux/amd64
+                      - linux/arm64
+                      type: string
+                    pushedDigest:
+                      pattern: ^sha256:[a-f0-9]{64}$
+                      type: string
+                    state:
+                      enum:
+                      - pending
+                      - succeeded
+                      - failed
+                      type: string
+                  required:
+                  - format
+                  - image
+                  - platform
+                  - state
+                  type: object
+                maxItems: 200
+                type: array
+              verificationStartedAt:
                 format: date-time
                 type: string
             type: object

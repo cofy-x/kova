@@ -13,6 +13,7 @@ class JobStatus(str, Enum):
     QUEUED = "queued"
     STARTING = "starting"
     RUNNING = "running"
+    VERIFYING = "verifying"
     SUCCEEDED = "succeeded"
     FAILED = "failed"
     CANCELLED = "cancelled"
@@ -136,6 +137,14 @@ class BuildJob:
     recovery_required: bool = False
     requested_concurrency: int | None = None
     allocated_concurrency: int | None = None
+    verification_started_at: datetime | None = None
+    verification_deadline_at: datetime | None = None
+    verification_next_attempt_at: datetime | None = None
+    verification_attempts: int | None = None
+    verification_last_error: str | None = None
+    verification_pending: int | None = None
+    verification_succeeded: int | None = None
+    verification_failed: int | None = None
 
     @classmethod
     def from_dict(cls, value: JSON) -> BuildJob:
@@ -158,6 +167,14 @@ class BuildJob:
             recovery_required=_optional_bool(value, "recovery_required") or False,
             requested_concurrency=_optional_int(value, "requested_concurrency"),
             allocated_concurrency=_optional_int(value, "allocated_concurrency"),
+            verification_started_at=_optional_datetime(value, "verification_started_at"),
+            verification_deadline_at=_optional_datetime(value, "verification_deadline_at"),
+            verification_next_attempt_at=_optional_datetime(value, "verification_next_attempt_at"),
+            verification_attempts=_optional_int(value, "verification_attempts"),
+            verification_last_error=_optional_string(value, "verification_last_error"),
+            verification_pending=_optional_int(value, "verification_pending"),
+            verification_succeeded=_optional_int(value, "verification_succeeded"),
+            verification_failed=_optional_int(value, "verification_failed"),
         )
 
 
@@ -252,6 +269,14 @@ _BUILD_JOB_FIELDS = {
     "recovery_required",
     "requested_concurrency",
     "allocated_concurrency",
+    "verification_started_at",
+    "verification_deadline_at",
+    "verification_next_attempt_at",
+    "verification_attempts",
+    "verification_last_error",
+    "verification_pending",
+    "verification_succeeded",
+    "verification_failed",
 }
 _DIGEST = re.compile(r"^sha256:[a-f0-9]{64}$")
 _IMMUTABLE_REFERENCE = re.compile(r"^.+@sha256:[a-f0-9]{64}$")

@@ -145,7 +145,7 @@ func (r *KovaBuildReconciler) seedReservations(ctx context.Context, namespace st
 	for i := range builds.Items {
 		build := &builds.Items[i]
 		byName[build.Name] = build
-		if build.Status.Phase == kovav1.PhaseStarting || build.Status.Phase == kovav1.PhaseRunning {
+		if build.Status.Phase == kovav1.PhaseStarting || build.Status.Phase == kovav1.PhaseRunning || build.Status.Phase == kovav1.PhaseVerifying {
 			state.Active[reservationKey(build)] = activeReservation{BuildName: build.Name, Requester: requesterKey(build), Slots: allocatedConcurrency(build)}
 		}
 	}
@@ -373,7 +373,7 @@ func (r *KovaBuildReconciler) ensureNoUnreservedRunner(ctx context.Context, name
 	for i := range builds {
 		build := &builds[i]
 		byName[build.Name] = build
-		if build.Status.Phase == kovav1.PhaseStarting || build.Status.Phase == kovav1.PhaseRunning {
+		if build.Status.Phase == kovav1.PhaseStarting || build.Status.Phase == kovav1.PhaseRunning || build.Status.Phase == kovav1.PhaseVerifying {
 			covered, err := r.reservationCovered(ctx, namespace, state, build)
 			if err != nil {
 				return err

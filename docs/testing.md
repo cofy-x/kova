@@ -67,23 +67,24 @@ It refuses to reuse an existing cluster, registry, or kubeconfig.
 The default pinned old baseline is the public `v0.1.0-rc.9` chart at
 `oci://ghcr.io/cofy-x/charts/kova` and its matching
 `ghcr.io/cofy-x/kova:{controller,runner,worker}-v0.1.0-rc.9` images.
-That CRD lacks `status.pollFailureSince` and `status.pollFailureCount`.
+That CRD lacks `status.pollFailureSince`, `status.pollFailureCount`, and durable verification fields.
 The candidate chart, CLI, and images come from the current checkout.
 Only the candidate images are pushed, to the test-owned localhost registry;
 the old GHCR role images are pulled, never pushed.
-The baseline chart runs with its default Service daemon disabled, so the new
-controller starts only after the CRD and status round-trip checks pass.
+The baseline chart starts its old Service, then the test scales it to zero and
+waits for its Pod to disappear before the new CRD and status checks.
 
-The smoke installs the old chart, verifies that Kubernetes prunes both retry
+The smoke installs the old chart, verifies that Kubernetes prunes retry and verification
 status fields in an isolated probe namespace, applies the current CRD, waits
-for Established, proves those fields now persist through `/status`, and checks
-that the old release is drained before upgrading. It then deliberately injects
-an old `Starting` KovaBuild with a ready `v0.1.0-rc.9` runner and confirms that
-the drain gate blocks it. This isolated negative fixture bypasses the gate to
-verify that the new controller fails it with `RunnerProtocolIncompatible`
-before issuing a build POST. The test removes that fixture before running the
-authenticated Service E2E with current images. Production upgrades must never
-bypass the drain gate; see the [upgrade runbook](deployment/kubernetes.md#cross-version-service-upgrade).
+for Established, proves the new retry fields, verification receipts, and
+`Verifying` phase persist through `/status`, and checks the old release is
+drained. It then deliberately injects an old `Starting` KovaBuild and idle
+`v0.1.0-rc.9` runner into the old namespace, proving the drain gate blocks
+that state. The new controller starts only in a fresh runner namespace and
+must leave the old fixture untouched before the test removes it. Finally it
+runs authenticated OCI/Nydus Service E2E with current images. Production
+upgrades must never bypass the drain gate; see the
+[upgrade runbook](deployment/kubernetes.md#cross-version-service-upgrade).
 The baseline rollout and Service E2E use the existing `BASELINE_CHART` path.
 
 It owns only Kind cluster `kova-crd-upgrade`, registry container
