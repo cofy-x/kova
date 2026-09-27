@@ -132,7 +132,8 @@ kubectl --kubeconfig .kind/kova-deep-queue.kubeconfig -n kova \
   create rolebinding kova-e2e-submitter --role=kova-service-submitter --user=kova:e2e
 ```
 
-Use a test-only `SERVICE_AUTH_TOKEN` already present in the process environment; do not paste its value into commands, Helm values, receipts, or Git.
+Provision a strong, test-only `SERVICE_AUTH_TOKEN` in the setup shell's environment for the one-time Secret creation, then unset it; do not paste its value into commands, Helm values, receipts, or Git.
+The live benchmark reads `kova-e2e-token/token` from this same verified Kind cluster directly into process memory after locked preflight, so the long-running launcher needs no token file or command-line argument.
 The setup should record the exact Helm install values above, Kind config SHA-256 and pinned node image digest, Kind node UIDs, and deployed Pod image IDs alongside the Docker image IDs.
 The benchmark's `identity.json` records the clean checkout commit, three local role SHA-256 image IDs/revisions, the image IDs preloaded on both Kind nodes, actual Service/worker Pod image IDs, and exact Kind kubeconfig fingerprint.
 Preflight resolves each Pod imageID through that node's CRI and requires its image ID to equal the local Docker object; it also checks the runner image is preloaded on both nodes despite never creating a runner container.
@@ -145,13 +146,26 @@ The default entrypoint reads the cluster, kubeconfig identity, ledgers, readines
 make e2e-service-admission-deep-queue
 ```
 
-The deliberate live run requires an exact acknowledgement and a test token:
+For an SSH-disconnect-safe live run on `wayne-hk-kvm`, use the dedicated launcher after the read-only check passes; `start` creates a private `0700` control directory, `0600` PID/log/launch receipts, and a detached controller that holds the host lock for preflight and the full run.
+The launcher records the exact clean candidate commit, Kind config SHA-256, and pinned tool binary SHA-256 values.
+It does not accept or log a token.
 
 ```bash
-DEEP_QUEUE_E2E_MODE=run \
-DEEP_QUEUE_E2E_ACK=kova-deep-queue/kova/kova-service \
-SERVICE_AUTH_TOKEN=service-e2e-token \
-make e2e-service-admission-deep-queue
+python3 scripts/e2e/deep-queue-launcher.py start
+python3 scripts/e2e/deep-queue-launcher.py status /data/forge-artifacts/kova-deep-queue/control-<exact-id>
+python3 scripts/e2e/deep-queue-launcher.py stop /data/forge-artifacts/kova-deep-queue/control-<exact-id>
+```
+
+The `start` JSON prints the exact control directory, PID, and private log path. `status` shows the PID's original process start time, run receipt directory, build counts/phases, Service replica count, and any final result; the log remains on the KVM host for `tail -f`.
+`stop` sends SIGTERM to only that PID and waits for the benchmark to confirm a stop. If the controller already died or its automatic stop was unconfirmed, it invokes the run-receipt-bound manual stop; it never sends SIGKILL or deletes CRs.
+For independent read-only inspection or exact manual stop when the launcher is unavailable:
+
+```bash
+DEEP_QUEUE_E2E_MODE=status DEEP_QUEUE_E2E_RUN_DIR=/data/forge-workspace/kova/.work/deep-queue/<exact-run-id> \
+  python3 scripts/e2e/e2e-service-admission-deep-queue.py
+DEEP_QUEUE_E2E_MODE=stop DEEP_QUEUE_E2E_ACK=kova-deep-queue/kova/kova-service \
+  DEEP_QUEUE_E2E_RUN_DIR=/data/forge-workspace/kova/.work/deep-queue/<exact-run-id> \
+  python3 scripts/e2e/e2e-service-admission-deep-queue.py
 ```
 
 Only the first, test-owned blocker may have a runner Pod object; its owner UID, `never=true` selector, `Pending` phase, absent node assignment, and single active grant are checked throughout.
@@ -159,9 +173,11 @@ Every queued CR must remain runner-less, with a matching queue-intent nonce.
 Each stage waits for all CRs to reach `Queued`, then measures 30 seconds of API request rates by verb/resource (including the benchmark's own read-only probes), Service Pod and Kind node CPU/memory, readiness, and HTTP POST throughput/p50/p95/p99.
 The host must retain 8 GiB available memory and 20 GiB free workspace/Docker disk; each Kind node must remain Ready without pressure, below 80% allocatable CPU, and above 2 GiB available memory; each Service Pod must remain below 2 vCPU and 2 GiB working memory; measured API traffic must stay below 1200 requests/s with no 429 or 5xx.
 Missing metrics, transport errors, limits, identity drift, unrecorded CRs, ledger disagreement, or incomplete cleanup stop the benchmark immediately and preserve the cluster for inspection.
+After any attempted POST, a failure or SIGINT/SIGTERM/SIGHUP triggers an exact-identity, UID/resourceVersion-tested JSON Patch scaling only the dedicated Service Deployment from two replicas to zero; the result distinguishes `confirmed` from `unconfirmed` and records whether all Service Pods disappeared.
+If API access or identity checks make that stop unconfirmed, do not leave the cluster unattended or start another Kind test; use the exact manual stop and inspect the run evidence.
 
 Receipts are kept separately for the blocker, each 100/500/1000 stage, and exact-ID cleanup under `.work/deep-queue/<run-id>/`.
-On success, only the recorded queued CRs and blocker CR are deleted; the Kind cluster, local registry, and all registry tags remain untouched.
+On success, only the recorded queued CRs and blocker CR are deleted through a loopback Kubernetes API proxy with each exact CR UID as an atomic DeleteOptions precondition; the Kind cluster, local registry, and all registry tags remain untouched.
 If a submission or measurement fails before exact cleanup starts, no CR or ledger cleanup is attempted because an uncertain HTTP Create may still be in flight.
 If a deletion or its verification fails after exact cleanup starts, some recorded CRs may already have been deleted; the script stops and preserves the delete-batch receipts for operator inspection rather than guessing at a repair.
 The existing controller does **not** expose per-reconcile latency p95/p99 to this black-box script: POST latency and queue-status convergence are separate measurements and must not be reported as reconcile latency.
