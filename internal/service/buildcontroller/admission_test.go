@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -24,6 +25,22 @@ import (
 )
 
 type emptyCachedBuildList struct{ client.Client }
+
+type admissionListCounter struct {
+	client.Reader
+	builds int
+	pods   int
+}
+
+func (r *admissionListCounter) List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
+	switch list.(type) {
+	case *kovav1.KovaBuildList:
+		r.builds++
+	case *corev1.PodList:
+		r.pods++
+	}
+	return r.Reader.List(ctx, list, opts...)
+}
 
 func (c emptyCachedBuildList) List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
 	if builds, ok := list.(*kovav1.KovaBuildList); ok {
@@ -845,6 +862,129 @@ func TestIneligibleQueuedBuildDoesNotConsumeVirtualFairShare(t *testing.T) {
 				t.Fatalf("wrong active reservation after %s queued build: %#v err=%v", mode, ledger.Active, err)
 			}
 		})
+	}
+}
+
+func TestSaturatedAdmissionSkipsFullListsAtDepth(t *testing.T) {
+	for _, depth := range []int{100, 500, 1000} {
+		t.Run(fmt.Sprintf("queued-%d", depth), func(t *testing.T) {
+			blocker := queuedBuild("blocker", "active", 1, 1)
+			objects := []client.Object{blocker}
+			for i := 0; i < depth; i++ {
+				objects = append(objects, queuedBuild(fmt.Sprintf("queued-%04d", i), fmt.Sprintf("requester-%d", i), int64(i+2), 1))
+			}
+			base := crfake.NewClientBuilder().WithScheme(testScheme(t)).WithStatusSubresource(&kovav1.KovaBuild{}).WithObjects(objects...).Build()
+			cfg := admissionConfig()
+			cfg.MaxActiveJobs, cfg.WorkerSlots = 1, 1
+			r := KovaBuildReconciler{Client: base, APIReader: base, Cfg: cfg}
+			initializeAdmissionForTest(t, &r)
+			if decision, err := r.admission(context.Background(), blocker); err != nil || !decision.Admitted {
+				t.Fatalf("blocker grant=%#v err=%v", decision, err)
+			}
+			counter := &admissionListCounter{Reader: base}
+			r.APIReader = counter
+			for i := 0; i < 5; i++ {
+				candidate := objects[1+i%depth].(*kovav1.KovaBuild)
+				decision, err := r.admission(context.Background(), candidate)
+				if err != nil || decision.Admitted || decision.Message != "waiting for an active job slot" {
+					t.Fatalf("saturated decision=%#v err=%v", decision, err)
+				}
+			}
+			if counter.builds != 0 || counter.pods != 0 {
+				t.Fatalf("saturated polls performed full Lists: builds=%d pods=%d", counter.builds, counter.pods)
+			}
+		})
+	}
+}
+
+func TestSaturatedAdmissionMatchesFullDecision(t *testing.T) {
+	candidate := queuedBuild("candidate", "alice", 2, 1)
+	for _, tc := range []struct {
+		name             string
+		requester        string
+		maxJobs          int
+		maxRequesterJobs int
+		workerSlots      int
+		wantMessage      string
+	}{
+		{name: "active-jobs", requester: "bob", maxJobs: 1, maxRequesterJobs: 2, workerSlots: 2, wantMessage: "waiting for an active job slot"},
+		{name: "worker-slots", requester: "bob", maxJobs: 2, maxRequesterJobs: 2, workerSlots: 1, wantMessage: "waiting for worker capacity"},
+		{name: "requester-jobs", requester: "alice", maxJobs: 2, maxRequesterJobs: 1, workerSlots: 2, wantMessage: "waiting for fair-share capacity"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			active := map[string]activeReservation{"blocker": {BuildName: "blocker", Requester: tc.requester, Slots: 1}}
+			fast, saturated := saturatedAdmission(candidate, active, tc.maxJobs, tc.maxRequesterJobs, tc.workerSlots)
+			full := decideAdmission(candidate, []kovav1.KovaBuild{*candidate}, active, tc.maxJobs, tc.maxRequesterJobs, tc.workerSlots)
+			if !saturated || fast != full || fast.Message != tc.wantMessage {
+				t.Fatalf("fast=%#v saturated=%t full=%#v", fast, saturated, full)
+			}
+		})
+	}
+}
+
+func TestSaturatedAdmissionKeepsQueueDriftFailClosed(t *testing.T) {
+	ctx := context.Background()
+	base := crfake.NewClientBuilder().WithScheme(testScheme(t)).WithStatusSubresource(&kovav1.KovaBuild{}).Build()
+	cfg := admissionConfig()
+	cfg.MaxActiveJobs, cfg.WorkerSlots = 1, 1
+	r := KovaBuildReconciler{Client: base, APIReader: base, Cfg: cfg}
+	initializeAdmissionForTest(t, &r)
+	store := queueadmission.Store{Client: base, Reader: base, Namespace: "jobs", GlobalLimit: cfg.MaxQueuedJobs, RequesterLimit: cfg.MaxQueuedJobsPerRequester}
+	if err := store.EnsureInitialized(ctx); err != nil {
+		t.Fatal(err)
+	}
+	blocker := queuedBuild("blocker", "active", 1, 1)
+	drift := queuedBuild("drift", "other", 2, 1)
+	drift.Annotations = map[string]string{queueadmission.IntentAnnotation: "00112233445566778899aabbccddeeff"}
+	for _, build := range []*kovav1.KovaBuild{blocker, drift} {
+		if err := base.Create(ctx, build); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if decision, err := r.admission(ctx, blocker); err != nil || !decision.Admitted {
+		t.Fatalf("blocker grant=%#v err=%v", decision, err)
+	}
+	counter := &admissionListCounter{Reader: base}
+	r.APIReader = counter
+	if _, err := r.admission(ctx, drift); !errors.Is(err, queueadmission.ErrDrift) {
+		t.Fatalf("saturated admission hid queue intent drift: %v", err)
+	}
+	if counter.builds != 0 || counter.pods != 0 {
+		t.Fatalf("drift check performed full Lists: builds=%d pods=%d", counter.builds, counter.pods)
+	}
+}
+
+func TestSaturatedAdmissionChecksOrphanBeforeNextGrant(t *testing.T) {
+	ctx := context.Background()
+	blocker := queuedBuild("blocker", "active", 1, 1)
+	next := queuedBuild("next", "other", 2, 1)
+	base := crfake.NewClientBuilder().WithScheme(testScheme(t)).WithStatusSubresource(&kovav1.KovaBuild{}).WithObjects(blocker, next).Build()
+	cfg := admissionConfig()
+	cfg.MaxActiveJobs, cfg.WorkerSlots = 1, 1
+	r := KovaBuildReconciler{Client: base, APIReader: base, Cfg: cfg}
+	initializeAdmissionForTest(t, &r)
+	if decision, err := r.admission(ctx, blocker); err != nil || !decision.Admitted {
+		t.Fatalf("blocker grant=%#v err=%v", decision, err)
+	}
+	orphan := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "orphan", Namespace: "jobs", Labels: map[string]string{"kova.cofy.dev/build-id": "missing"}}}
+	if err := base.Create(ctx, orphan); err != nil {
+		t.Fatal(err)
+	}
+	if decision, err := r.admission(ctx, next); err != nil || decision.Admitted {
+		t.Fatalf("saturated next grant=%#v err=%v", decision, err)
+	}
+	if err := r.fenceReservation(ctx, blocker); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.releaseReservation(ctx, blocker); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.admission(ctx, next); err == nil || !strings.Contains(err.Error(), "no matching KovaBuild owner") {
+		t.Fatalf("unreserved orphan did not block next grant: %v", err)
+	}
+	_, state, err := r.readReservations(ctx, "jobs")
+	if err != nil || len(state.Active) != 0 {
+		t.Fatalf("orphan path wrote a new grant: %#v err=%v", state.Active, err)
 	}
 }
 

@@ -32,6 +32,18 @@ func (r *KovaBuildReconciler) admission(ctx context.Context, build *kovav1.KovaB
 			return admissionDecision{}, err
 		}
 		key := reservationKey(build)
+		// A new grant is impossible while a durable limit is exhausted. Check
+		// the queue intent before waiting, but defer the namespace-wide CR and
+		// Pod scans until capacity may actually be granted. A concurrent release
+		// can only delay this build until its next reconcile, never overbook it.
+		if _, existing := reservations.Active[key]; !existing {
+			if err := r.queueStoreForNamespace(build.Namespace).VerifyForBuild(ctx, build); err != nil {
+				return admissionDecision{}, err
+			}
+			if blocked, saturated := saturatedAdmission(build, reservations.Active, r.Cfg.MaxActiveJobs, r.Cfg.MaxActiveJobsPerRequester, r.Cfg.WorkerSlots); saturated {
+				return blocked, nil
+			}
+		}
 		var builds kovav1.KovaBuildList
 		if err := r.reader().List(ctx, &builds, client.InNamespace(build.Namespace)); err != nil {
 			return admissionDecision{}, err
@@ -47,9 +59,6 @@ func (r *KovaBuildReconciler) admission(ctx context.Context, build *kovav1.KovaB
 				return admissionDecision{}, fmt.Errorf("%w: %s/%s grant is closing", errAdmissionClosed, build.Namespace, build.Name)
 			}
 			return admissionDecision{Admitted: true, Allocation: existing.Slots}, nil
-		}
-		if err := r.queueStoreForNamespace(build.Namespace).VerifyForBuild(ctx, build); err != nil {
-			return admissionDecision{}, err
 		}
 		decision := decideAdmission(build, builds.Items, reservations.Active, r.Cfg.MaxActiveJobs, r.Cfg.MaxActiveJobsPerRequester, r.Cfg.WorkerSlots)
 		if !decision.Admitted {
@@ -68,6 +77,28 @@ func (r *KovaBuildReconciler) admission(ctx context.Context, build *kovav1.KovaB
 		return decision, nil
 	}
 	return admissionDecision{}, fmt.Errorf("active admission ledger is busy granting %s/%s", build.Namespace, build.Name)
+}
+
+func saturatedAdmission(build *kovav1.KovaBuild, active map[string]activeReservation, maxJobs, maxRequesterJobs, workerSlots int) (admissionDecision, bool) {
+	if maxJobs > 0 && len(active) >= maxJobs {
+		return admissionDecision{Message: "waiting for an active job slot"}, true
+	}
+	usedSlots := 0
+	activeForRequester := 0
+	requester := requesterKey(build)
+	for _, reservation := range active {
+		usedSlots += reservation.Slots
+		if reservation.Requester == requester {
+			activeForRequester++
+		}
+	}
+	if workerSlots > 0 && usedSlots >= workerSlots {
+		return admissionDecision{Message: "waiting for worker capacity"}, true
+	}
+	if maxRequesterJobs > 0 && activeForRequester >= maxRequesterJobs {
+		return admissionDecision{Message: "waiting for fair-share capacity"}, true
+	}
+	return admissionDecision{}, false
 }
 
 func decideAdmission(build *kovav1.KovaBuild, builds []kovav1.KovaBuild, active map[string]activeReservation, maxJobs, maxRequesterJobs, workerSlots int) admissionDecision {
