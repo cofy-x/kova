@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -54,6 +55,41 @@ func TestReadinessAndSubmissionRequireValidAdmissionLedgers(t *testing.T) {
 				t.Fatalf("unready service created %d builds", len(builds.Items))
 			}
 		})
+	}
+}
+
+type unavailableReadinessReader struct {
+	client.Reader
+	failOperation string
+}
+
+func (r unavailableReadinessReader) List(ctx context.Context, list client.ObjectList, options ...client.ListOption) error {
+	if r.failOperation == "list" {
+		return errors.New("dedicated readiness list unavailable")
+	}
+	return r.Reader.List(ctx, list, options...)
+}
+
+func (r unavailableReadinessReader) Get(ctx context.Context, key client.ObjectKey, object client.Object, options ...client.GetOption) error {
+	if r.failOperation == "get" {
+		return errors.New("dedicated readiness ledger get unavailable")
+	}
+	return r.Reader.Get(ctx, key, object, options...)
+}
+
+func TestReadinessUsesDedicatedReaderWithoutChangingAdmissionReader(t *testing.T) {
+	srv := newTestServer(t, &fakeKube{})
+	if got := readinessCode(srv); got != http.StatusOK {
+		t.Fatalf("initial readiness status = %d", got)
+	}
+	for _, operation := range []string{"list", "get"} {
+		srv.readinessReader = unavailableReadinessReader{Reader: srv.reader, failOperation: operation}
+		if got := readinessCode(srv); got != http.StatusServiceUnavailable {
+			t.Fatalf("readiness did not use its dedicated %s reader: %d", operation, got)
+		}
+		if err := srv.checkAdmissionLedgers(context.Background()); err != nil {
+			t.Fatalf("hot admission reader was changed by readiness %s failure: %v", operation, err)
+		}
 	}
 }
 

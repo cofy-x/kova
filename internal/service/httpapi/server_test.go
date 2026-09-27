@@ -506,7 +506,7 @@ func TestCreateBuildIdempotencyUsesStrongReaderAfterAlreadyExists(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := NewServer(testConfig(root), &fakeKube{}, cached, strong, authenticator, serviceauth.AllowAllAuthorizer{})
+	srv := NewServer(testConfig(root), &fakeKube{}, cached, strong, nil, authenticator, serviceauth.AllowAllAuthorizer{})
 	if err := srv.initializeAdmission(context.Background()); err != nil {
 		t.Fatal(err)
 	}

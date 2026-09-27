@@ -123,7 +123,7 @@ func newTestServerWithConfig(t *testing.T, kube *fakeKube, cfg config.Config) *S
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := NewServer(cfg, kube, client, client, authenticator, serviceauth.AllowAllAuthorizer{})
+	srv := NewServer(cfg, kube, client, client, nil, authenticator, serviceauth.AllowAllAuthorizer{})
 	if err := srv.initializeAdmission(context.Background()); err != nil {
 		t.Fatal(err)
 	}

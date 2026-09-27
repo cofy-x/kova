@@ -32,6 +32,7 @@ import (
 	"k8s.io/client-go/util/flowcontrol"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
+	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 	ctrlzap "sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 )
@@ -114,7 +115,7 @@ func CLICommand() *cli.Command {
 			// Lease renewal must not queue behind a saturated build-control
 			// client. Keep its small independent budget before assigning the
 			// shared hot-path limiter to the other clients.
-			leaderConfig := configureKubeClientRateLimits(restConfig, c.Int("kube-client-qps"), c.Int("kube-client-burst"))
+			leaderConfig, readinessConfig := configureKubeClientRateLimits(restConfig, c.Int("kube-client-qps"), c.Int("kube-client-burst"))
 			kubeClient, err := kube.NewClientForConfig(restConfig)
 			if err != nil {
 				return err
@@ -126,6 +127,10 @@ func CLICommand() *cli.Command {
 			scheme := runtime.NewScheme()
 			utilruntime.Must(corev1.AddToScheme(scheme))
 			utilruntime.Must(kovav1.AddToScheme(scheme))
+			readinessReader, err := ctrlclient.New(readinessConfig, ctrlclient.Options{Scheme: scheme})
+			if err != nil {
+				return err
+			}
 			ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 			defer stop()
 			cfg := config.Config{
@@ -195,7 +200,7 @@ func CLICommand() *cli.Command {
 				return err
 			}
 			go func() {
-				if err := httpapi.NewServer(cfg, kubeClient, mgr.GetClient(), mgr.GetAPIReader(), authenticator, authorizer).Start(ctx); err != nil {
+				if err := httpapi.NewServer(cfg, kubeClient, mgr.GetClient(), mgr.GetAPIReader(), readinessReader, authenticator, authorizer).Start(ctx); err != nil {
 					logging.Errorf("Kova Service HTTP server stopped: %v", err)
 					stop()
 				}
@@ -223,11 +228,13 @@ func configureKubeClientRateLimit(config *rest.Config, qps, burst int) {
 	config.RateLimiter = flowcontrol.NewTokenBucketRateLimiter(config.QPS, burst)
 }
 
-func configureKubeClientRateLimits(config *rest.Config, qps, burst int) *rest.Config {
+func configureKubeClientRateLimits(config *rest.Config, qps, burst int) (*rest.Config, *rest.Config) {
 	leaderConfig := rest.CopyConfig(config)
+	readinessConfig := rest.CopyConfig(config)
 	configureKubeClientRateLimit(leaderConfig, 5, 10)
+	configureKubeClientRateLimit(readinessConfig, 5, 10)
 	configureKubeClientRateLimit(config, qps, burst)
-	return leaderConfig
+	return leaderConfig, readinessConfig
 }
 
 func validateCapacityConfig(cfg config.Config) error {

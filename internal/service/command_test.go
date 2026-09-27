@@ -124,7 +124,7 @@ func TestValidateKubeClientRateLimit(t *testing.T) {
 
 func TestKubeClientRateLimitIsSharedAcrossConfigCopies(t *testing.T) {
 	config := &rest.Config{}
-	leader := configureKubeClientRateLimits(config, 1, 2)
+	leader, readiness := configureKubeClientRateLimits(config, 1, 2)
 	first := rest.CopyConfig(config)
 	second := rest.CopyConfig(config)
 	if first.QPS != 1 || first.Burst != 2 || first.RateLimiter != second.RateLimiter {
@@ -138,6 +138,12 @@ func TestKubeClientRateLimitIsSharedAcrossConfigCopies(t *testing.T) {
 	}
 	if !leader.RateLimiter.TryAccept() {
 		t.Fatal("a saturated build-control limiter blocked leader-election traffic")
+	}
+	if readiness.QPS != 5 || readiness.Burst != 10 || readiness.RateLimiter == first.RateLimiter || readiness.RateLimiter == leader.RateLimiter {
+		t.Fatal("readiness probes do not have an independent API budget")
+	}
+	if !readiness.RateLimiter.TryAccept() {
+		t.Fatal("a saturated build-control limiter blocked readiness traffic")
 	}
 }
 

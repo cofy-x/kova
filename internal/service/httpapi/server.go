@@ -27,12 +27,13 @@ type kubeAPI interface {
 }
 
 type Server struct {
-	cfg    config.Config
-	kube   kubeAPI
-	client client.Client
-	reader client.Reader
-	auth   serviceauth.Authenticator
-	authz  serviceauth.Authorizer
+	cfg             config.Config
+	kube            kubeAPI
+	client          client.Client
+	reader          client.Reader
+	readinessReader client.Reader
+	auth            serviceauth.Authenticator
+	authz           serviceauth.Authorizer
 }
 
 var (
@@ -47,7 +48,7 @@ const (
 	serviceIdleTimeout       = time.Minute
 )
 
-func NewServer(cfg config.Config, kube kubeAPI, crClient client.Client, crReader client.Reader, authenticator serviceauth.Authenticator, authorizer serviceauth.Authorizer) *Server {
+func NewServer(cfg config.Config, kube kubeAPI, crClient client.Client, crReader client.Reader, readinessReader client.Reader, authenticator serviceauth.Authenticator, authorizer serviceauth.Authorizer) *Server {
 	if cfg.Listen == "" {
 		cfg.Listen = ":8080"
 	}
@@ -63,12 +64,19 @@ func NewServer(cfg config.Config, kube kubeAPI, crClient client.Client, crReader
 	if crReader == nil {
 		crReader = crClient
 	}
-	return &Server{cfg: cfg, kube: kube, client: crClient, reader: crReader, auth: authenticator, authz: authorizer}
+	if readinessReader == nil {
+		readinessReader = crReader
+	}
+	return &Server{cfg: cfg, kube: kube, client: crClient, reader: crReader, readinessReader: readinessReader, auth: authenticator, authz: authorizer}
 }
 
 func (s *Server) queueStore() queueadmission.Store {
+	return s.queueStoreWithReader(s.reader)
+}
+
+func (s *Server) queueStoreWithReader(reader client.Reader) queueadmission.Store {
 	return queueadmission.Store{
-		Client: s.client, Reader: s.reader, Namespace: s.cfg.Namespace,
+		Client: s.client, Reader: reader, Namespace: s.cfg.Namespace,
 		GlobalLimit: s.cfg.MaxQueuedJobs, RequesterLimit: s.cfg.MaxQueuedJobsPerRequester,
 	}
 }
@@ -152,10 +160,14 @@ func (s *Server) initializeAdmission(ctx context.Context) error {
 }
 
 func (s *Server) checkAdmissionLedgers(ctx context.Context) error {
-	if err := s.queueStore().CheckReady(ctx); err != nil {
+	return s.checkAdmissionLedgersWithReader(ctx, s.reader)
+}
+
+func (s *Server) checkAdmissionLedgersWithReader(ctx context.Context, reader client.Reader) error {
+	if err := s.queueStoreWithReader(reader).CheckReady(ctx); err != nil {
 		return err
 	}
-	return s.checkActiveAdmissionLedger(ctx)
+	return buildcontroller.CheckAdmissionLedger(ctx, reader, s.cfg.Namespace, s.cfg)
 }
 
 func (s *Server) checkActiveAdmissionLedger(ctx context.Context) error {
@@ -178,10 +190,10 @@ func (s *Server) routes() *echo.Echo {
 	})
 	e.GET("/readyz", func(c echo.Context) error {
 		var builds kovav1.KovaBuildList
-		if err := s.reader.List(c.Request().Context(), &builds, client.InNamespace(s.cfg.Namespace), client.Limit(1)); err != nil {
+		if err := s.readinessReader.List(c.Request().Context(), &builds, client.InNamespace(s.cfg.Namespace), client.Limit(1)); err != nil {
 			return serviceUnavailable(c, err)
 		}
-		if err := s.checkAdmissionLedgers(c.Request().Context()); err != nil {
+		if err := s.checkAdmissionLedgersWithReader(c.Request().Context(), s.readinessReader); err != nil {
 			return serviceUnavailable(c, err)
 		}
 		return c.JSON(http.StatusOK, apiv1.ReadyStatus{Status: "ready"})
