@@ -30,6 +30,7 @@ job_id=
 submission_possible=false
 guard=${root}/scripts/e2e/source-capacity-guard.py
 log_capture=${root}/scripts/e2e/capture-bounded-logs.py
+evidence_guard=${root}/scripts/e2e/source-capacity-evidence.py
 
 die() { echo "error: $*" >&2; exit 1; }
 note() { echo "source-capacity-e2e: $*" >&2; }
@@ -286,25 +287,76 @@ job_id=$(jq -r '.id // empty' "${run_dir}/job.json")
 printf '%s\n' "${job_id}" >"${run_dir}/job-id.txt"
 note "submitted ${job_id}; sampling Kind state and verifying runner image identities"
 
+controller_pid=$BASHPID
+[[ ! -e ${run_dir}/sampler.stop && ! -L ${run_dir}/sampler.stop ]] || die "sampler stop marker already exists"
+sampler_fail() {
+  printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" >>"${run_dir}/sampler-errors.txt"
+  kill -TERM "${controller_pid}" 2>/dev/null || true
+  return 1
+}
 sample() {
-  local now
+  local now node_json node_sample runner_json runner_sample docker_json
   now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-  kctl get nodes -o json 2>/dev/null |
-    jq -c --arg at "${now}" '{at:$at,nodes:[.items[] | {name:.metadata.name,
-      conditions:[.status.conditions[]? | select(.type == "Ready" or .type == "DiskPressure" or .type == "MemoryPressure" or .type == "PIDPressure") | {type,status,reason}]}]}' \
-    >>"${run_dir}/node-health.jsonl" || true
-  if kctl -n "${namespace}" get pod "kova-job-${job_id}" -o json 2>/dev/null |
-    jq -c --arg at "${now}" '{at:$at,name:.metadata.name,uid:.metadata.uid,node:.spec.nodeName,
-      phase:.status.phase,reason:.status.reason,containerStatuses:[.status.containerStatuses[]? | {name,ready,restartCount,state}]}' \
-    >>"${run_dir}/runner-pod-samples.jsonl"; then :; else
-    jq -cn --arg at "${now}" '{at:$at,missing:true}' >>"${run_dir}/runner-pod-samples.jsonl"
+  if ! node_json=$(kctl get nodes -o json 2>/dev/null); then
+    sampler_fail "node collection failed"
   fi
-  docker stats --no-stream --format '{{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.MemPerc}}\t{{.PIDs}}\t{{.BlockIO}}' \
-    "${cluster}-control-plane" "${cluster}-worker" 2>/dev/null |
-    awk -v at="${now}" '{print at "\t" $0}' >>"${run_dir}/node-docker-stats.tsv" || true
+  if ! node_sample=$(jq -c --arg at "${now}" '{at:$at,nodes:[.items[] | {name:.metadata.name,
+      conditions:[.status.conditions[]? | select(.type == "Ready" or .type == "DiskPressure" or .type == "MemoryPressure" or .type == "PIDPressure") | {type,status,reason}]}]}' \
+    <<<"${node_json}"); then
+    sampler_fail "node sample parse failed"
+  fi
+  printf '%s\n' "${node_sample}" >>"${run_dir}/node-health.jsonl"
+  if ! jq -e --arg control "${cluster}-control-plane" --arg worker "${cluster}-worker" '
+    def has($type; $status): [.conditions[] | select(.type == $type and .status == $status)] | length == 1;
+    (.nodes | length == 2) and
+    ([.nodes[].name] | sort) == ([$control, $worker] | sort) and
+    all(.nodes[]; (.conditions | length == 4) and has("Ready"; "True") and
+      has("DiskPressure"; "False") and has("MemoryPressure"; "False") and
+      has("PIDPressure"; "False"))
+  ' <<<"${node_sample}" >/dev/null; then
+    sampler_fail "node became unready or pressured during the build"
+  fi
+  if ! runner_json=$(kctl -n "${namespace}" get pod "kova-job-${job_id}" --ignore-not-found -o json 2>/dev/null); then
+    sampler_fail "runner collection failed"
+  elif [[ -z ${runner_json} ]]; then
+    jq -cn --arg at "${now}" '{at:$at,missing:true}' >>"${run_dir}/runner-pod-samples.jsonl"
+  elif ! runner_sample=$(jq -c --arg at "${now}" '{at:$at,name:.metadata.name,uid:.metadata.uid,node:.spec.nodeName,
+      phase:.status.phase,reason:.status.reason,
+      initContainerStatuses:[.status.initContainerStatuses[]? | {name,ready,restartCount,state}],
+      containerStatuses:[.status.containerStatuses[]? | {name,ready,restartCount,state}]}' \
+      <<<"${runner_json}"); then
+    sampler_fail "runner sample parse failed"
+  else
+    printf '%s\n' "${runner_sample}" >>"${run_dir}/runner-pod-samples.jsonl"
+    if ! jq -e '
+      .phase != "Failed" and .phase != "Unknown" and .reason != "Evicted" and
+      all((.initContainerStatuses + .containerStatuses)[];
+        .restartCount == 0 and (.state.terminated.exitCode // 0) == 0 and
+        .state.terminated.reason != "OOMKilled" and
+        (.state.waiting.reason as $reason |
+          ["CrashLoopBackOff", "ImagePullBackOff", "ErrImagePull", "CreateContainerError",
+           "RunContainerError", "InvalidImageName", "OOMKilled"] | index($reason) == null))
+    ' <<<"${runner_sample}" >/dev/null; then
+      sampler_fail "runner failed or restarted during the build"
+    fi
+  fi
+  if ! docker_json=$(timeout -k 5s 20s docker stats --no-stream --format '{{json .}}' \
+    "${cluster}-control-plane" "${cluster}-worker" 2>/dev/null); then
+    sampler_fail "Docker stats collection failed"
+  fi
+  if ! jq -s -e --arg control "${cluster}-control-plane" --arg worker "${cluster}-worker" '
+    length == 2 and ([.[].Name] | sort) == ([$control, $worker] | sort)
+  ' <<<"${docker_json}" >/dev/null; then
+    sampler_fail "Docker stats omitted a Kind node"
+  fi
+  if ! jq -c --arg at "${now}" '{at:$at,name:.Name,cpu_percent:.CPUPerc,
+      memory_usage:.MemUsage,memory_percent:.MemPerc,pids:.PIDs,block_io:.BlockIO}' \
+    <<<"${docker_json}" >>"${run_dir}/node-docker-stats.jsonl"; then
+    sampler_fail "Docker stats parse failed"
+  fi
 }
 (
-  while :; do sample; sleep 5; done
+  while [[ ! -e ${run_dir}/sampler.stop ]]; do sample; sleep 5; done
 ) &
 sampler_pid=$!
 
@@ -346,22 +398,25 @@ KOVA_E2E_REDACT_TOKEN=${token} python3 "${log_capture}" \
   --receipt "${run_dir}/runner-logs.capture.json" -- \
   kubectl --kubeconfig "${kubeconfig}" --request-timeout=15s -n "${namespace}" \
     logs "pod/kova-job-${job_id}" --all-containers --timestamps || true
+if [[ -n ${log_follower_pid} ]]; then
+  kill "${log_follower_pid}" 2>/dev/null || true
+  wait "${log_follower_pid}" 2>/dev/null || true
+  log_follower_pid=
+fi
+touch "${run_dir}/sampler.stop"
+wait "${sampler_pid}" || die "resource sampler stopped unexpectedly"
+sampler_pid=
 kctl get nodes -o json >"${run_dir}/nodes-final.json" || die "cannot read final Kind node health"
 if [[ ${wait_ok} != true ]]; then die "job wait did not return a terminal receipt; inspect ${run_dir}"; fi
 if [[ ${results_ok} != true ]]; then die "job results did not return a durable output receipt; inspect ${run_dir}"; fi
 jq -e '.status == "succeeded"' "${run_dir}/terminal.json" >/dev/null || die "source-capacity build did not succeed"
-jq -e --arg target "${target}" --arg source "${source_digest}" '
-  .source_digest == $source and (.outputs | length) == 1 and
-  (.outputs[0] | . as $output | $output.image == $target and $output.format == "oci" and
-   $output.platform == "linux/amd64" and ($output.manifest_digest | test("^sha256:[a-f0-9]{64}$")) and
-   ($output.immutable_ref | endswith("@" + $output.manifest_digest)))
-' "${run_dir}/results.json" >/dev/null || die "result is missing the exact verified OCI target and manifest digest"
+observed_output_digest=$(python3 "${evidence_guard}" result "${run_dir}") ||
+  die "result is missing the exact verified OCI target and immutable reference"
 jq -e '.items | length == 2 and all(.[];
   ([.status.conditions[]? | select(.type == "Ready" and .status == "True")] | length) == 1 and
   ([.status.conditions[]? | select((.type == "DiskPressure" or .type == "MemoryPressure" or .type == "PIDPressure") and .status != "False")] | length) == 0)' "${run_dir}/nodes-final.json" >/dev/null || die "Kind nodes were unhealthy after the build"
-if [[ -s ${run_dir}/runner-pod-samples.jsonl ]]; then
-  jq -s -e 'all(.[]; .missing == true or (.phase != "Failed" and .reason != "Evicted"))' "${run_dir}/runner-pod-samples.jsonl" >/dev/null || die "runner failed or was evicted during sampling"
-fi
+python3 "${evidence_guard}" monitoring "${run_dir}" >"${run_dir}/monitoring-evidence.json" ||
+  die "build monitoring or bounded runner log evidence is incomplete or unhealthy"
 jq -e --arg id "${job_id}" --arg ns "${namespace}" '
   all(.items[]; .metadata.name == $id and .metadata.namespace == $ns)
 ' <<<"$(kctl get kovabuilds -A -o json)" >/dev/null || die "an unrelated KovaBuild appeared during this isolated run"
@@ -370,7 +425,6 @@ curl --noproxy '*' --connect-timeout 3 --max-time 10 -fsSI \
   -H 'Accept: application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json' \
   -D "${run_dir}/output-tag.headers" \
   "http://${registry_host}/v2/kova-examples/source-capacity/manifests/${run_id}" >/dev/null || die "output tag is not readable from the exact local registry"
-observed_output_digest=$(jq -r '.outputs[0].manifest_digest' "${run_dir}/results.json")
 registry_output_digest=$(awk 'tolower($1) == "docker-content-digest:" {gsub("\r", "", $2); print $2}' "${run_dir}/output-tag.headers" | tail -1)
 [[ ${registry_output_digest} == "${observed_output_digest}" ]] || die "output tag digest drifted from the verified Service result"
 run_supervised timeout -k 10s 5m docker pull "${pull_target}" >"${run_dir}/pull.log" 2>&1 || die "host pull of exact output tag failed"
