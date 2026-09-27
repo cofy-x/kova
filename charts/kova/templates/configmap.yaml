@@ -4,8 +4,13 @@
 {{- end -}}
 {{- /* BuildKit v0.31.2 interprets its GB suffix as binary GiB-sized units. */ -}}
 {{- $maxBytes := mul (int64 $cache.maxUsedSpaceGB) 1073741824 -}}
+{{- $cacheVolumes := 0 -}}
 {{- range .Values.worker.volumes -}}
-{{- if and (eq .name "lib-buildkit") (hasKey . "emptyDir") -}}
+{{- if eq .name "lib-buildkit" -}}
+{{- $cacheVolumes = add $cacheVolumes 1 -}}
+{{- if not (hasKey . "emptyDir") -}}
+{{- fail "lib-buildkit volume must use a bounded emptyDir" -}}
+{{- end -}}
 {{- $limit := required "lib-buildkit emptyDir.sizeLimit is required for a bounded worker cache" .emptyDir.sizeLimit -}}
 {{- $limitBytes := include "kova.cacheStorageBytes" $limit | int64 -}}
 {{- if gt (mul $maxBytes 5) (mul $limitBytes 4) -}}
@@ -13,13 +18,13 @@
 {{- end -}}
 {{- end -}}
 {{- end -}}
-{{- with .Values.worker.resources.limits -}}
-{{- with (index . "ephemeral-storage") -}}
-{{- $limitBytes := include "kova.cacheStorageBytes" . | int64 -}}
-{{- if gt (mul $maxBytes 5) (mul $limitBytes 4) -}}
+{{- if ne $cacheVolumes 1 -}}
+{{- fail "worker.volumes must contain exactly one lib-buildkit emptyDir volume" -}}
+{{- end -}}
+{{- $ephemeralLimit := required "worker.resources.limits.ephemeral-storage is required for a bounded worker cache" (index .Values.worker.resources.limits "ephemeral-storage") -}}
+{{- $ephemeralLimitBytes := include "kova.cacheStorageBytes" $ephemeralLimit | int64 -}}
+{{- if gt (mul $maxBytes 5) (mul $ephemeralLimitBytes 4) -}}
 {{- fail "worker.cache.maxUsedSpaceGB must be at most 80% of worker ephemeral-storage limit" -}}
-{{- end -}}
-{{- end -}}
 {{- end -}}
 {{- if regexMatch `(?m)^\s*\[\[?worker\.oci` .Values.buildkitdConfig -}}
 {{- fail "buildkitdConfig must not declare worker.oci; configure worker.cache instead" -}}

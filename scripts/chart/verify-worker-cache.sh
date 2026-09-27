@@ -31,6 +31,9 @@ assert_budget ./deploy/quickstart-kind-values.yaml 3
 assert_rejected reserved-at-max --set worker.cache.reservedSpaceGB=8
 assert_rejected cache-near-volume --set worker.cache.maxUsedSpaceGB=17
 assert_rejected cache-near-ephemeral-limit --set worker.resources.limits.ephemeral-storage=8Gi
+assert_rejected missing-cache-volume --set worker.volumes[1].name=other-cache
+assert_rejected unbounded-cache-volume --set worker.volumes[1].emptyDir.sizeLimit=null
+assert_rejected missing-ephemeral-limit --set worker.resources.limits.ephemeral-storage=null
 assert_rejected raw-worker-override --set-string 'buildkitdConfig=[worker.oci]'
 
 echo "BuildKit worker cache budgets render and reject unsafe overrides"
