@@ -251,6 +251,9 @@ func (r *KovaBuildReconciler) submitWhenReady(ctx context.Context, build *kovav1
 	defer cancelOperation()
 	sourceTargets, err := client.SourceTargets(operationCtx, build, sourcePath(build))
 	if err != nil {
+		if errors.Is(err, runnerexec.ErrRunnerResponseTooLarge) {
+			return ctrl.Result{}, r.finish(ctx, build, kovav1.PhaseFailed, "RunnerProtocolError", err.Error())
+		}
 		if errors.Is(err, runnerexec.ErrSourceInspectTransport) {
 			return r.retryStatusObservation(ctx, build, err)
 		}

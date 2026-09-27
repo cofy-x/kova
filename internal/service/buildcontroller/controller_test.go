@@ -342,6 +342,7 @@ func TestSubmitWhenReadyValidatesExactSourceTargetSetBeforeBuild(t *testing.T) {
 		{name: "different", inspection: `{"targets":[{"target":"registry.example/b:dev","platform":"linux/amd64"}]}`, wantReason: "InvalidTargets"},
 		{name: "different-platform", inspection: `{"targets":[{"target":"registry.example/a:dev","platform":"linux/arm64"},{"target":"registry.example/b:dev","platform":"linux/amd64"}]}`, wantReason: "InvalidTargets"},
 		{name: "duplicate", inspectionErr: utilexec.CodeExitError{Err: errors.New("duplicate target"), Code: 1}, wantReason: "InvalidSource"},
+		{name: "oversized-runner-response", inspection: strings.Repeat("x", (1<<20)+1), wantReason: "RunnerProtocolError"},
 		{name: "same-set-different-order", inspection: `{"targets":[{"target":"registry.example/b:dev","platform":"linux/amd64"},{"target":"registry.example/a:dev","platform":"linux/amd64"}]}`, wantBuild: true},
 	}
 	for _, tt := range tests {
