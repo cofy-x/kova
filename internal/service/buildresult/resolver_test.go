@@ -107,8 +107,11 @@ func TestResolveKeepsThisJobsDigestAfterConcurrentSameTagOverwrite(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	imageA, digestA := imageForPlatform(t, "amd64")
-	imageB, digestB := imageForPlatform(t, "arm64")
+	imageA, digestA := imageForPlatform(t, "amd64", "job-a")
+	imageB, digestB := imageForPlatform(t, "amd64", "job-b")
+	if digestA == digestB {
+		t.Fatal("test images must have different manifest digests")
+	}
 	if err := remote.Write(ref, imageA); err != nil {
 		t.Fatal(err)
 	}
@@ -141,9 +144,15 @@ func TestResolveKeepsThisJobsDigestAfterConcurrentSameTagOverwrite(t *testing.T)
 	if current.Descriptor.Digest.String() != digestB {
 		t.Fatalf("tag digest = %s, want competing job's %s", current.Descriptor.Digest, digestB)
 	}
+	// The old OCI path queried the tag. Both images are linux/amd64, so it
+	// would have silently accepted B's digest as A's successful output.
+	legacyDigest, legacyPlatform, err := (remoteRegistryResolver{}).Resolve(context.Background(), ref.Name(), "", []string{host})
+	if err != nil || legacyDigest != digestB || legacyPlatform != "linux/amd64" {
+		t.Fatalf("legacy tag lookup: digest=%q platform=%q err=%v, want B's digest and matching platform", legacyDigest, legacyPlatform, err)
+	}
 }
 
-func imageForPlatform(t *testing.T, arch string) (v1.Image, string) {
+func imageForPlatform(t *testing.T, arch, owner string) (v1.Image, string) {
 	t.Helper()
 	config, err := empty.Image.ConfigFile()
 	if err != nil {
@@ -151,6 +160,7 @@ func imageForPlatform(t *testing.T, arch string) (v1.Image, string) {
 	}
 	config.OS = "linux"
 	config.Architecture = arch
+	config.Config.Labels = map[string]string{"example.test/job": owner}
 	image, err := mutate.ConfigFile(empty.Image, config)
 	if err != nil {
 		t.Fatal(err)
