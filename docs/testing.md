@@ -47,7 +47,7 @@ and environment policy in the consuming workspace rather than this repository.
 | Target | Coverage | Main Artifacts |
 | --- | --- | --- |
 | `make e2e` | Low-level zip-stream OCI build, push, export, and host pull. | `examples/simple`, `.work/result.jsonl` |
-| `make e2e-helm-quickstart` | Packages the chart, installs it into an ephemeral minimal kind cluster, runs the authenticated Service workflow, and deletes the cluster on exit. Set `KEEP_KIND_CLUSTER=true` to retain a cluster created by the test, or `REUSE_KIND_CLUSTER=true` to explicitly use a caller-owned cluster that the test will not delete. | Helm archive, `examples/simple`, `.work/result-service.jsonl` |
+| `make e2e-helm-quickstart` | Packages the chart, installs it into an ephemeral minimal kind cluster, runs the authenticated Service workflow, and deletes the cluster on exit. Set `KEEP_KIND_CLUSTER=true` to retain a cluster created by the test, or `REUSE_KIND_CLUSTER=true` to explicitly use a caller-owned cluster that the test will not delete. The default quickstart does not write a Service receipt; set `RESULT_JSONL=.work/result-service.jsonl` explicitly to opt in. | Helm archive, `examples/simple`; optional run-scoped Service JSONL |
 | `make e2e-service-admission` | Read-only admission preflight by default; with `ADMISSION_E2E_MODE=run` and a test token, checks two Service Pods on an existing dedicated `kova-admission-*` Kind cluster, then sends a 40-way HTTP burst, preserves run-scoped request/response receipts, and cleans up only its exact CR IDs. Requires preinstalled active=1, global queue=3, requester queue=2, and `never=true` runner selector. | Existing dedicated Kind cluster; no install or cluster-wide cleanup |
 | `make e2e-service-admission-failover` | Read-only preflight by default; normal live mode proves leader handoff while a challenger remains queued. An explicit `ADMISSION_FAILOVER_PROMOTION=true` fixture additionally releases the exact blocker and verifies the challenger acquires the sole active grant and Pending runner. Receipts survive ambiguous outcomes. | Same empty, dedicated two-replica Kind admission caps; promotion is restricted further to the sole `kova-admission-pump` Kind on `wayne-hk-kvm`. |
 | `make e2e-service-admission-fairness` | Read-only preflight by default; opt-in live mode uses two TokenReview-authenticated callers to prove requester and global queue caps, durable fair rotation across leader handoff, and exact UID cleanup. | Sole dedicated `kova-admission-fairness` Kind on `wayne-hk-kvm`; run receipts under `/data/forge-artifacts/kova-admission-fairness/`. |
@@ -57,9 +57,9 @@ and environment policy in the consuming workspace rather than this repository.
 | `make e2e-service-partial-output` | Read-only preflight by default; live mode executes a real two-target OCI+Nydus runner build whose later target fails in BuildKit, then checks final `Failed` and the first target's exact digest-pinned partial receipts. | Existing empty `kova-partial-output-41` Kind on `wayne-hk-kvm`; run-scoped source/output tags and private receipts under `.work/partial-output/`. |
 | `make e2e-source-capacity` | Read-only preflight by default; live mode publishes one 128 MiB incompressible immutable source, builds one OCI output, verifies its digest and host pull, and samples Kind node/runner state. Preserves run-scoped receipts and tags; never deletes the cluster or registry content. | Existing empty, dedicated `kova-source-capacity` Kind quickstart cluster and localhost registry |
 | `make e2e-source-oci-oversize` | Read-only preflight by default; live mode streams one exact 512 MiB + 1 byte sparse ZIP as an immutable OCI source, submits one public Service build, and requires an `InvalidSource` size-limit failure with no output tag. | Existing empty, dedicated `kova-source-capacity` Kind quickstart cluster and localhost registry |
-| `make e2e-service` | RBAC isolation, immutable OCI source publication, pre-build target-and-platform contract failure, platform-scoped worker dispatch, safe caller retry, verified output platform and manifest digest, ephemeral logs, TTL cleanup, and host pull. | `examples/simple`, `.work/result-service.jsonl` |
+| `make e2e-service` | RBAC isolation, immutable OCI source publication, pre-build target-and-platform contract failure, platform-scoped worker dispatch, safe caller retry, verified output platform and manifest digest, ephemeral logs, TTL cleanup, and host pull. | `examples/simple`, `.work/result-service-service-e2e-<timestamp>-<nonce>.jsonl` |
 | `make e2e-crd-upgrade` | Isolated pre-retry CRD to current CRD/controller migration, including live status pruning/persistence, a quiescence gate, and an injected old Starting runner that must fail before POST. | Public `v0.1.0-rc.9` chart and role images, dedicated Kind cluster and registry |
-| `make e2e-release KOVA_VERSION=vX.Y.Z` | Downloads and verifies the exact public CLI and OCI chart, pulls matching public role images, then runs the immutable-source Service lifecycle in a clean kind cluster. | GitHub release files, public OCI packages, `.work/result-released.jsonl` |
+| `make e2e-release KOVA_VERSION=vX.Y.Z` | Downloads and verifies the exact public CLI and OCI chart, pulls matching public role images, then runs the immutable-source Service lifecycle in a clean kind cluster. | GitHub release files and public OCI packages; no Service JSONL by default |
 | `make e2e-concurrent` | Multi-image OCI build with worker distribution checks. | generated concurrent examples, `.work/result-concurrent.jsonl` |
 | `make e2e-dragonfly-nydus` | Nydus conversion, export, Dragonfly preheat, and Pod startup. | `examples/nydus-smoke`, `.work/result-nydus.jsonl` |
 | `make e2e-runtime-preflight` | Local tool and registry readiness checks for runtime validation. | Docker, kind, Helm, kubectl, local registry |
@@ -68,6 +68,18 @@ and environment policy in the consuming workspace rather than this repository.
 
 Tune the concurrent check with `EXAMPLE_COUNT`, `BUILD_CONCURRENCY`, and
 `MIN_BUILDKIT_NODE_IPS`.
+
+The Service E2E shell script writes receipts only when `RESULT_JSONL` is set.
+The value is a non-existing base path inside this checkout's `.work/`; each
+invocation creates a private `0600` file by adding a unique run ID before the
+`.jsonl` suffix. It refuses an existing base/scoped file, symlink, directory,
+or path outside `.work/`. Each submitted job records a pre-POST attempt,
+confirmed job ID, terminal status, and (for the successful retry) digest-pinned
+outputs. A failed or ambiguous POST leaves a `submit_unconfirmed` event and
+stops without retrying. The final `verified` event means host pull, TTL cleanup,
+and any required rollback also passed. Raw API errors, logs, and bearer tokens
+are not copied into the receipt. Keep the private JSONL when debugging; a
+terminal result by itself is not proof that the full E2E completed.
 
 ## Two-Requester Admission Fairness on Kind
 

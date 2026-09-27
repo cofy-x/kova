@@ -142,13 +142,14 @@ e2e-helm-quickstart:
 	KIND_KUBECONFIG=$(QUICKSTART_KIND_KUBECONFIG) \
 	KIND_WORKERS=1 \
 	KIND_VALUES=$(QUICKSTART_KIND_VALUES) \
+	RESULT_JSONL=$(if $(filter file,$(origin RESULT_JSONL)),,$(RESULT_JSONL)) \
 	./scripts/e2e/e2e-helm-quickstart.sh
 
 e2e-service:
-	SOURCE_ZIP=$(WORK_DIR)/source-service.zip RESULT_JSONL=$(WORK_DIR)/result-service.jsonl ./scripts/e2e/e2e-service.sh
+	SOURCE_ZIP=$(WORK_DIR)/source-service.zip RESULT_JSONL=$(if $(filter file,$(origin RESULT_JSONL)),$(WORK_DIR)/result-service.jsonl,$(RESULT_JSONL)) ./scripts/e2e/e2e-service.sh
 
 e2e-crd-upgrade:
-	./scripts/e2e/e2e-crd-upgrade.sh
+	RESULT_JSONL=$(if $(filter file,$(origin RESULT_JSONL)),,$(RESULT_JSONL)) ./scripts/e2e/e2e-crd-upgrade.sh
 
 e2e-service-admission:
 	./scripts/e2e/e2e-service-admission.sh
@@ -186,7 +187,7 @@ e2e-source-oci-oversize:
 	./scripts/e2e/e2e-source-oci-oversize.sh
 
 e2e-release:
-	./scripts/e2e/e2e-release.sh "$(KOVA_VERSION)"
+	RESULT_JSONL=$(if $(filter file,$(origin RESULT_JSONL)),,$(RESULT_JSONL)) ./scripts/e2e/e2e-release.sh "$(KOVA_VERSION)"
 
 e2e-concurrent:
 	KOVA_RUNNER_NAME=$(KOVA_CONCURRENT_RUNNER_NAME) SOURCE_ZIP=$(CONCURRENT_SOURCE_ZIP) RESULT_JSONL=$(CONCURRENT_RESULT_JSONL) ./scripts/e2e/e2e-concurrent.sh

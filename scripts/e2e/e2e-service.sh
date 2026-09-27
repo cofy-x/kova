@@ -37,6 +37,7 @@ BASELINE_CONTROLLER_IMAGE=${BASELINE_CONTROLLER_IMAGE:-}
 BASELINE_RUNNER_IMAGE=${BASELINE_RUNNER_IMAGE:-}
 BASELINE_WORKER_IMAGE=${BASELINE_WORKER_IMAGE:-}
 REQUIRE_LEGACY_CRD=${REQUIRE_LEGACY_CRD:-false}
+RESULT_JSONL=${RESULT_JSONL:-}
 KOVA_PLATFORM=$(kova_platform)
 
 require_cmd curl
@@ -56,6 +57,22 @@ fi
 if [[ "${REQUIRE_LEGACY_CRD}" == true && "${SERVICE_RUNNER_NAMESPACE}" == "${NAMESPACE}" ]]; then
   echo 'error: legacy Service migration requires a fresh runner namespace' >&2
   exit 2
+fi
+
+# Opt-in receipts are allocated before any Kind/image side effects. The base
+# names a private .work/ location; each invocation gets a distinct file.
+receipt_file=""
+receipt_run_id=""
+if [[ -n "${RESULT_JSONL}" ]]; then
+  require_cmd git
+  require_cmd python3
+  receipt_run_id=$(python3 -c 'import datetime,secrets; print("service-e2e-"+datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dt%H%M%Sz")+"-"+secrets.token_hex(4))')
+  receipt_file=$(KOVA_SERVICE_E2E_RECEIPT_SECRET="${SERVICE_AUTH_TOKEN}" \
+    python3 "${ROOT}/scripts/e2e/service-receipts.py" init \
+      --root "${ROOT}" --base "${RESULT_JSONL}" --run-id "${receipt_run_id}" \
+      --revision "$(git -C "${ROOT}" rev-parse HEAD)" --cluster "${KIND_CLUSTER:-kova-local}" \
+      --namespace "${NAMESPACE}" --runner-namespace "${SERVICE_RUNNER_NAMESPACE}")
+  echo "Service E2E receipts: ${receipt_file}" >&2
 fi
 
 if [[ "${E2E_SERVICE_BUILD_CLI}" == "true" ]]; then
@@ -315,36 +332,80 @@ KOVA_SERVICE_TOKEN=${SERVICE_AUTH_TOKEN} "${KOVA_CLI}" --service-url "${BASE}" d
   jq -e '.checks | all(.status == "ok")' >/dev/null
 
 create_build() {
-  local target=$1
+  local target=$1 key=$2
   jq -n --arg source_uri "${source_uri}" --arg source_digest "${source_digest}" \
-    --arg target "${target}" --arg platform "${KOVA_PLATFORM}" --arg registry "${CLUSTER_REGISTRY}" \
-    '{source_uri:$source_uri,source_digest:$source_digest,targets:[{target:$target,platform:$platform}],format:"both",concurrency:1,timeout:600,fail_fast:true,verbose:true,variables:["KOVA_IMAGE_REGISTRY="+$registry]}' | \
+    --arg target "${target}" --arg platform "${KOVA_PLATFORM}" --arg registry "${CLUSTER_REGISTRY}" --arg key "${key}" \
+    '{source_uri:$source_uri,source_digest:$source_digest,targets:[{target:$target,platform:$platform}],format:"both",concurrency:1,timeout:600,fail_fast:true,verbose:true,variables:["KOVA_IMAGE_REGISTRY="+$registry]} + (if $key == "" then {} else {idempotency_key:$key} end)' | \
     curl -fsS -X POST "${auth_header[@]}" -H 'Content-Type: application/json' \
       --data-binary @- "${BASE}/v1/builds"
+}
+
+record_receipt_event() {
+  local event=$1 stage=$2 target=$3 key=$4 job_id=${5:-}
+  [[ -n "${receipt_file}" ]] || return 0
+  KOVA_SERVICE_E2E_RECEIPT_SECRET="${SERVICE_AUTH_TOKEN}" \
+    python3 "${ROOT}/scripts/e2e/service-receipts.py" event \
+      --root "${ROOT}" --path "${receipt_file}" --run-id "${receipt_run_id}" \
+      --event "${event}" --stage "${stage}" --target "${target}" --key "${key}" \
+      --source-uri "${source_uri}" --source-digest "${source_digest}" --job-id "${job_id}"
+}
+
+submit_build() {
+  local stage=$1 target=$2 key="" response submitted_job_id
+  if [[ -n "${receipt_file}" ]]; then
+    key="${receipt_run_id}-${stage}"
+    record_receipt_event submit_attempt "${stage}" "${target}" "${key}" </dev/null
+  fi
+  if ! response=$(create_build "${target}" "${key}"); then
+    # A failed POST can still have created a build. Keep the attempt and stop.
+    [[ -z "${receipt_file}" ]] || record_receipt_event submit_unconfirmed "${stage}" "${target}" "${key}" </dev/null
+    return 1
+  fi
+  if [[ -n "${receipt_file}" ]]; then
+    if ! submitted_job_id=$(printf '%s' "${response}" | record_receipt_event submitted "${stage}" "${target}" "${key}"); then
+      record_receipt_event submit_unconfirmed "${stage}" "${target}" "${key}" </dev/null
+      return 1
+    fi
+  else
+    submitted_job_id=$(printf '%s' "${response}" | jq -r '.id')
+  fi
+  printf '%s\n' "${submitted_job_id}"
 }
 
 wait_for_terminal() {
   local job_id=$1 deadline status response
   deadline=$((SECONDS + 900))
   while (( SECONDS < deadline )); do
-    response=$(curl -fsS "${auth_header[@]}" "${BASE}/v1/builds/${job_id}")
-    status=$(printf '%s' "${response}" | jq -r '.status')
+    if ! response=$(curl -fsS "${auth_header[@]}" "${BASE}/v1/builds/${job_id}"); then
+      return 1
+    fi
+    if ! status=$(printf '%s' "${response}" | jq -r '.status'); then
+      return 1
+    fi
     case "${status}" in
       succeeded|failed|cancelled)
-        printf '%s\n' "${status}"
+        printf '%s\n' "${response}"
         return
         ;;
     esac
     sleep 5
   done
-  echo timed-out
+  return 124
 }
 
 # The runner builds the target embedded in the immutable bundle. Asking the
 # controller to verify a different target must fail deterministically.
-failed_response=$(create_build "${SERVICE_TARGET}-expected-failure")
-failed_job_id=$(printf '%s' "${failed_response}" | jq -r '.id')
-failed_status=$(wait_for_terminal "${failed_job_id}")
+failed_target="${SERVICE_TARGET}-expected-failure"
+failed_job_id=$(submit_build negative "${failed_target}")
+if ! failed_terminal=$(wait_for_terminal "${failed_job_id}"); then
+  [[ -z "${receipt_file}" ]] || record_receipt_event observation_incomplete negative "${failed_target}" "${receipt_run_id}-negative" "${failed_job_id}" </dev/null
+  echo 'error: immutable-source failure fixture ended with timed-out or unreadable status' >&2
+  exit 1
+fi
+failed_status=$(printf '%s' "${failed_terminal}" | jq -r '.status')
+if [[ -n "${receipt_file}" ]]; then
+  printf '%s' "${failed_terminal}" | record_receipt_event terminal negative "${failed_target}" "${receipt_run_id}-negative" "${failed_job_id}"
+fi
 if [[ "${failed_status}" != "failed" ]]; then
   echo "error: immutable-source failure fixture ended with ${failed_status}" >&2
   exit 1
@@ -361,9 +422,16 @@ done
 
 # A caller retries with the same immutable source URI and digest. Kova owns no
 # recovery state; the new request independently produces and verifies the OCI image.
-create_response=$(create_build "${SERVICE_TARGET}")
-job_id=$(printf '%s' "${create_response}" | jq -r '.id')
-status=$(wait_for_terminal "${job_id}")
+job_id=$(submit_build positive "${SERVICE_TARGET}")
+if ! positive_terminal=$(wait_for_terminal "${job_id}"); then
+  [[ -z "${receipt_file}" ]] || record_receipt_event observation_incomplete positive "${SERVICE_TARGET}" "${receipt_run_id}-positive" "${job_id}" </dev/null
+  echo 'error: immutable-source retry ended with timed-out or unreadable status' >&2
+  exit 1
+fi
+status=$(printf '%s' "${positive_terminal}" | jq -r '.status')
+if [[ -n "${receipt_file}" ]]; then
+  printf '%s' "${positive_terminal}" | record_receipt_event terminal positive "${SERVICE_TARGET}" "${receipt_run_id}-positive" "${job_id}"
+fi
 if [[ "${status}" != "succeeded" ]]; then
   echo "error: immutable-source retry ended with ${status}" >&2
   curl -fsS "${auth_header[@]}" "${BASE}/v1/builds/${job_id}" >&2 || true
@@ -371,6 +439,9 @@ if [[ "${status}" != "succeeded" ]]; then
 fi
 
 results=$(curl -fsS "${auth_header[@]}" "${BASE}/v1/builds/${job_id}/results")
+if [[ -n "${receipt_file}" ]]; then
+  printf '%s' "${results}" | record_receipt_event results positive "${SERVICE_TARGET}" "${receipt_run_id}-positive" "${job_id}"
+fi
 printf '%s' "${results}" | jq -e --arg image "${SERVICE_TARGET}" --arg digest "${source_digest}" --arg platform "${KOVA_PLATFORM}" \
   '.source_digest == $digest and (.outputs | length) == 2 and
    ([.outputs[].format] | sort) == ["nydus", "oci"] and
@@ -421,4 +492,8 @@ if [[ -n "${baseline_revision}" ]]; then
     --wait --timeout 180s
   kubectl --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" -n "${NAMESPACE}" \
     rollout status "deployment/${RELEASE_NAME}" --timeout=180s
+fi
+
+if [[ -n "${receipt_file}" ]]; then
+  record_receipt_event verified positive "${SERVICE_TARGET}" "${receipt_run_id}-positive" "${job_id}" </dev/null
 fi
