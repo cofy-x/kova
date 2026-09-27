@@ -189,6 +189,8 @@ func checkArchiveHeaders(files []*zip.File, budget archiveBudget) error {
 		return ErrTooManyEntries
 	}
 	var expanded uint64
+	cleanedPaths := make([]string, 0, len(files))
+	symlinks := make(map[string]struct{})
 	for _, file := range files {
 		if file.UncompressedSize64 > budget.expandedBytes-expanded {
 			return ErrExpandedTooLarge
@@ -196,6 +198,10 @@ func checkArchiveHeaders(files []*zip.File, budget archiveBudget) error {
 		cleaned, err := ValidateBuildArchivePath(file.Name)
 		if err != nil {
 			return err
+		}
+		cleanedPaths = append(cleanedPaths, cleaned)
+		if file.FileInfo().Mode()&os.ModeSymlink != 0 {
+			symlinks[cleaned] = struct{}{}
 		}
 		fileLimit, tooLarge := requiredBuildFileLimit(cleaned)
 		if fileLimit > 0 && !file.FileInfo().Mode().IsRegular() {
@@ -205,6 +211,13 @@ func checkArchiveHeaders(files []*zip.File, budget archiveBudget) error {
 			return fmt.Errorf("source archive member %q: %w", file.Name, tooLarge)
 		}
 		expanded += file.UncompressedSize64
+	}
+	for i, cleaned := range cleanedPaths {
+		for parent := path.Dir(cleaned); parent != "."; parent = path.Dir(parent) {
+			if _, ok := symlinks[parent]; ok {
+				return fmt.Errorf("source archive member %q has symlink parent %q", files[i].Name, parent)
+			}
+		}
 	}
 	return nil
 }

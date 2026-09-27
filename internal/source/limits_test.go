@@ -109,6 +109,54 @@ func TestCompressedOversizedDockerfileRejectedBeforeExtraction(t *testing.T) {
 	}
 }
 
+func TestArchiveRejectsMemberNestedBelowSymlink(t *testing.T) {
+	archive := filepath.Join(t.TempDir(), "source.zip")
+	file, err := os.Create(archive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writer := zip.NewWriter(file)
+	for _, entry := range []struct {
+		name string
+		body []byte
+		mode os.FileMode
+	}{
+		{name: "image/Dockerfile", body: []byte("FROM scratch\n")},
+		{name: "image/metadata.json", body: []byte(`{"target":"registry.example.com/team/app:dev","platform":"linux/amd64"}`)},
+		{name: "image/alias", body: []byte("."), mode: os.ModeSymlink | 0o777},
+		{name: "image/alias/Dockerfile", body: bytes.Repeat([]byte("A"), int(MaxDockerfileBytes)+1)},
+	} {
+		header := &zip.FileHeader{Name: entry.name}
+		if entry.mode != 0 {
+			header.SetMode(entry.mode)
+		}
+		member, createErr := writer.CreateHeader(header)
+		if createErr != nil {
+			t.Fatal(createErr)
+		}
+		if _, writeErr := member.Write(entry.body); writeErr != nil {
+			t.Fatal(writeErr)
+		}
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ValidateBuildArchive(archive); err == nil || !strings.Contains(err.Error(), "symlink parent") {
+		t.Fatalf("validation accepted nested symlink member: %v", err)
+	}
+	parent := t.TempDir()
+	dest := filepath.Join(parent, "extracted")
+	if err := ExtractZip(archive, dest); err == nil || !strings.Contains(err.Error(), "symlink parent") {
+		t.Fatalf("extraction accepted nested symlink member: %v", err)
+	}
+	if _, err := os.Stat(dest); !os.IsNotExist(err) {
+		t.Fatalf("rejected archive left destination: %v", err)
+	}
+}
+
 func TestBuildVariableExpansionStaysWithinDockerfileLimit(t *testing.T) {
 	dockerfile := filepath.Join(t.TempDir(), "Dockerfile")
 	raw := []byte("FROM scratch\n" + strings.Repeat("# ${KOVA_VALUE}\n", 1024))
