@@ -124,8 +124,14 @@ func TestVerificationFailsImmediatelyOnPlatformMismatch(t *testing.T) {
 		t.Fatal(err)
 	}
 	stored := storedLifecycleBuild(t, client, build.Name)
-	if stored.Status.Phase != kovav1.PhaseFailed || stored.Status.Reason != "ResultVerificationFailed" || stored.Status.VerificationAttempts != 1 || len(kubeClient.deleted) != 1 {
+	if stored.Status.Phase != kovav1.PhaseFailed || stored.Status.Reason != "ResultVerificationFailed" || stored.Status.VerificationAttempts != 1 || len(kubeClient.deleted) != 0 {
 		t.Fatalf("status=%#v deleted=%#v", stored.Status, kubeClient.deleted)
+	}
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: build.Namespace, Name: build.Name}}); err != nil {
+		t.Fatal(err)
+	}
+	if len(kubeClient.deleted) != 1 {
+		t.Fatalf("terminal cleanup deleted=%#v, want runner Pod", kubeClient.deleted)
 	}
 }
 
@@ -159,8 +165,60 @@ func TestVerificationDeadlineFailsPendingOutputWithoutRunnerPost(t *testing.T) {
 		t.Fatal(err)
 	}
 	stored := storedLifecycleBuild(t, client, build.Name)
-	if stored.Status.Phase != kovav1.PhaseFailed || stored.Status.Reason != "ResultVerificationFailed" || !strings.Contains(stored.Status.VerificationLastError, "deadline") || stored.Status.VerificationResults[0].State != "failed" || len(kubeClient.deleted) != 1 {
+	if stored.Status.Phase != kovav1.PhaseFailed || stored.Status.Reason != "ResultVerificationFailed" || !strings.Contains(stored.Status.VerificationLastError, "deadline") || stored.Status.VerificationResults[0].State != "failed" || len(kubeClient.deleted) != 0 {
 		t.Fatalf("status=%#v deleted=%#v", stored.Status, kubeClient.deleted)
+	}
+}
+
+func TestExpiredVerificationKeepsSuccessfulReceiptWhenPodCleanupFails(t *testing.T) {
+	build := lifecycleBuild("completed-before-cleanup", kovav1.PhaseVerifying)
+	started := metav1.NewTime(time.Now().Add(-2 * time.Minute))
+	deadline := metav1.NewTime(time.Now().Add(-time.Minute))
+	digest := "sha256:" + strings.Repeat("a", 64)
+	build.Status.VerificationStartedAt = &started
+	build.Status.VerificationDeadlineAt = &deadline
+	build.Status.VerificationResults = []kovav1.BuildVerificationResult{{Format: "oci", Image: build.Spec.Targets[0].Target, Platform: "linux/amd64", PushedDigest: digest, State: "succeeded"}}
+	client := crfake.NewClientBuilder().WithScheme(testScheme(t)).WithStatusSubresource(&kovav1.KovaBuild{}).WithObjects(build, testRunnerPod(build)).Build()
+	kubeClient := &fakeKube{podClient: client, deleteErr: errors.New("injected Pod deletion failure"), execFn: func(kube.ExecOptions) error {
+		t.Fatal("completed verification must not call runner")
+		return nil
+	}}
+	r := KovaBuildReconciler{Client: client, Scheme: testScheme(t), Kube: kubeClient}
+	key := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: build.Namespace, Name: build.Name}}
+	if _, err := r.Reconcile(context.Background(), key); err != nil {
+		t.Fatal(err)
+	}
+	stored := storedLifecycleBuild(t, client, build.Name)
+	if stored.Status.Phase != kovav1.PhaseSucceeded || len(stored.Status.Outputs) != 1 || stored.Status.Outputs[0].ManifestDigest != digest || len(kubeClient.deleted) != 0 {
+		t.Fatalf("status before cleanup=%#v deleted=%#v", stored.Status, kubeClient.deleted)
+	}
+	if _, err := r.Reconcile(context.Background(), key); err == nil || !strings.Contains(err.Error(), "injected Pod deletion failure") {
+		t.Fatalf("cleanup error = %v, want injected failure", err)
+	}
+	stored = storedLifecycleBuild(t, client, build.Name)
+	if stored.Status.Phase != kovav1.PhaseSucceeded || len(stored.Status.Outputs) != 1 || stored.Status.Outputs[0].ManifestDigest != digest {
+		t.Fatalf("cleanup failure lost verified success: %#v", stored.Status)
+	}
+	_, reservations, err := r.readReservations(context.Background(), build.Namespace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if grant, ok := reservations.Active[reservationKey(build)]; !ok || !grant.Closing {
+		t.Fatalf("active grant after failed Pod cleanup = %#v, want closing grant", reservations.Active)
+	}
+	kubeClient.deleteErr = nil
+	if _, err := r.Reconcile(context.Background(), key); err != nil {
+		t.Fatal(err)
+	}
+	if len(kubeClient.deleted) != 1 {
+		t.Fatalf("recovered cleanup deleted=%#v, want runner Pod", kubeClient.deleted)
+	}
+	_, reservations, err = r.readReservations(context.Background(), build.Namespace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := reservations.Active[reservationKey(build)]; ok {
+		t.Fatalf("active grant remained after confirmed Pod deletion: %#v", reservations.Active)
 	}
 }
 

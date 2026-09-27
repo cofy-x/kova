@@ -504,8 +504,14 @@ func TestDelayedDeadlineReconcilePreservesCompletedBuild(t *testing.T) {
 				t.Fatal(err)
 			}
 			stored := storedLifecycleBuild(t, crClient, "late-complete")
-			if stored.Status.Phase != kovav1.PhaseSucceeded || stored.Status.Reason != "Completed" || len(stored.Status.Outputs) != 1 || stored.Status.Outputs[0].ManifestDigest != wantDigest.String() || len(kubeClient.deleted) != 1 {
+			if stored.Status.Phase != kovav1.PhaseSucceeded || stored.Status.Reason != "Completed" || len(stored.Status.Outputs) != 1 || stored.Status.Outputs[0].ManifestDigest != wantDigest.String() || len(kubeClient.deleted) != 0 {
 				t.Fatalf("status=%#v deleted=%#v", stored.Status, kubeClient.deleted)
+			}
+			if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "jobs", Name: "late-complete"}}); err != nil {
+				t.Fatal(err)
+			}
+			if len(kubeClient.deleted) != 1 {
+				t.Fatalf("terminal cleanup deleted=%#v, want runner Pod", kubeClient.deleted)
 			}
 		})
 	}

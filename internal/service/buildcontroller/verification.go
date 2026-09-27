@@ -86,6 +86,22 @@ func (r *KovaBuildReconciler) reconcileVerifying(ctx context.Context, build *kov
 		!validVerificationResults(build) {
 		return r.failVerification(ctx, build, "verification state is missing or inconsistent")
 	}
+	// A prior attempt may have persisted every result but lost the subsequent
+	// terminal status write. Its verified receipts win over the deadline on
+	// restart; runner cleanup belongs to reconcileTerminal after that write.
+	done, failed := buildresult.VerificationDone(build.Status.VerificationResults)
+	if failed {
+		return r.failVerification(ctx, build, firstVerificationError(build.Status.VerificationResults))
+	}
+	if done {
+		build.Status.Outputs = buildresult.VerificationOutputs(build.Status.VerificationResults)
+		build.Status.VerificationLastError = ""
+		build.Status.VerificationNextAttemptAt = nil
+		if err := r.finish(ctx, build, kovav1.PhaseSucceeded, "Completed", ""); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{RequeueAfter: time.Millisecond}, nil
+	}
 	remaining := time.Until(build.Status.VerificationDeadlineAt.Time)
 	if remaining <= 0 {
 		message := "result verification exceeded its deadline"
@@ -128,7 +144,7 @@ func (r *KovaBuildReconciler) reconcileVerifying(ctx context.Context, build *kov
 	}
 	boundVerificationErrors(build.Status.VerificationResults)
 	build.Status.Outputs = buildresult.VerificationOutputs(build.Status.VerificationResults)
-	done, failed := buildresult.VerificationDone(build.Status.VerificationResults)
+	done, failed = buildresult.VerificationDone(build.Status.VerificationResults)
 	if hardFailure || failed {
 		build.Status.VerificationLastError = firstVerificationError(build.Status.VerificationResults)
 		return r.failVerification(ctx, build, build.Status.VerificationLastError)
@@ -136,10 +152,15 @@ func (r *KovaBuildReconciler) reconcileVerifying(ctx context.Context, build *kov
 	if done {
 		build.Status.VerificationLastError = ""
 		build.Status.VerificationNextAttemptAt = nil
-		if err := r.deleteVerifiedRunner(ctx, build); err != nil {
+		// Durable receipts precede the terminal transition. A status-write
+		// ambiguity can then be recovered even if the deadline has elapsed.
+		if err := r.Status().Update(ctx, build); err != nil {
 			return ctrl.Result{}, err
 		}
-		return ctrl.Result{}, r.finish(ctx, build, kovav1.PhaseSucceeded, "Completed", "")
+		if err := r.finish(ctx, build, kovav1.PhaseSucceeded, "Completed", ""); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{RequeueAfter: time.Millisecond}, nil
 	}
 	if transient == "" {
 		transient = "verification batch remains pending"
@@ -211,12 +232,11 @@ func (r *KovaBuildReconciler) failVerification(ctx context.Context, build *kovav
 		}
 	}
 	build.Status.Outputs = buildresult.VerificationOutputs(build.Status.VerificationResults)
-	if err := r.deleteVerifiedRunner(ctx, build); err != nil {
+	if err := r.Status().Update(ctx, build); err != nil {
 		return ctrl.Result{}, err
 	}
-	return ctrl.Result{}, r.finish(ctx, build, kovav1.PhaseFailed, "ResultVerificationFailed", message)
-}
-
-func (r *KovaBuildReconciler) deleteVerifiedRunner(ctx context.Context, build *kovav1.KovaBuild) error {
-	return r.deleteRunnerAndConfirm(ctx, build)
+	if err := r.finish(ctx, build, kovav1.PhaseFailed, "ResultVerificationFailed", message); err != nil {
+		return ctrl.Result{}, err
+	}
+	return ctrl.Result{RequeueAfter: time.Millisecond}, nil
 }

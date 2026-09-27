@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"strings"
 	"sync"
 
@@ -30,6 +32,76 @@ type RegistryResolver interface {
 
 type remoteRegistryResolver struct{}
 
+// Registry manifests and image configs are untrusted input. In particular,
+// manifest config.size and HTTP Content-Length can both lie, while the image
+// library reads the config body into memory before parsing it.
+const maxRegistryVerificationResponseBytes int64 = 4 << 20
+
+var errRegistryVerificationResponseTooLarge = errors.New("registry verification response exceeds 4 MiB")
+
+type boundedRegistryTransport struct {
+	base http.RoundTripper
+}
+
+func (t boundedRegistryTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	response, err := t.base.RoundTrip(request)
+	if err != nil {
+		return nil, err
+	}
+	if response.ContentLength > maxRegistryVerificationResponseBytes {
+		_ = response.Body.Close()
+		return nil, errRegistryVerificationResponseTooLarge
+	}
+	response.Body = &boundedRegistryBody{ReadCloser: response.Body, remaining: maxRegistryVerificationResponseBytes}
+	return response, nil
+}
+
+type boundedRegistryBody struct {
+	io.ReadCloser
+	remaining int64
+}
+
+func (b *boundedRegistryBody) Read(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	if b.remaining == 0 {
+		var extra [1]byte
+		n, err := b.ReadCloser.Read(extra[:])
+		if n > 0 {
+			return 0, errRegistryVerificationResponseTooLarge
+		}
+		if err == nil {
+			return 0, io.ErrNoProgress
+		}
+		return 0, err
+	}
+	if int64(len(p)) > b.remaining {
+		p = p[:int(b.remaining)]
+	}
+	n, err := b.ReadCloser.Read(p)
+	b.remaining -= int64(n)
+	if n == 0 && err == nil {
+		return 0, io.ErrNoProgress
+	}
+	return n, err
+}
+
+func registryVerificationOptions(ctx context.Context) []remote.Option {
+	return []remote.Option{
+		remote.WithContext(ctx),
+		remote.WithAuthFromKeychain(authn.DefaultKeychain),
+		remote.WithTransport(boundedRegistryTransport{base: remote.DefaultTransport}),
+	}
+}
+
+func registryResponseError(operation string, err error) error {
+	if errors.Is(err, errRegistryVerificationResponseTooLarge) {
+		return fmt.Errorf("%w: %s: %w", ErrDefinitive, operation, err)
+	}
+	return fmt.Errorf("%s: %w", operation, err)
+}
+
 // ErrDefinitive means that retrying the same immutable pushed digest cannot
 // make the receipt valid. Transport and availability errors are retryable.
 var ErrDefinitive = errors.New("definitive result verification failure")
@@ -46,9 +118,9 @@ func (remoteRegistryResolver) Resolve(ctx context.Context, target, pushedDigest 
 	if err != nil {
 		return "", "", fmt.Errorf("%w: parse pushed digest reference: %v", ErrDefinitive, err)
 	}
-	descriptor, err := remote.Get(digestRef, remote.WithContext(ctx), remote.WithAuthFromKeychain(authn.DefaultKeychain))
+	descriptor, err := remote.Get(digestRef, registryVerificationOptions(ctx)...)
 	if err != nil {
-		return "", "", fmt.Errorf("resolve pushed descriptor by digest: %w", err)
+		return "", "", registryResponseError("resolve pushed descriptor by digest", err)
 	}
 	if descriptor.Descriptor.Digest.String() != pushedDigest {
 		return "", "", fmt.Errorf("%w: resolved manifest digest %s does not match pushed digest %s", ErrDefinitive, descriptor.Descriptor.Digest, pushedDigest)
@@ -56,13 +128,13 @@ func (remoteRegistryResolver) Resolve(ctx context.Context, target, pushedDigest 
 	if !descriptor.MediaType.IsImage() {
 		return "", "", fmt.Errorf("%w: pushed descriptor is not a single-platform image manifest (%s)", ErrDefinitive, descriptor.MediaType)
 	}
-	image, err := remote.Image(digestRef, remote.WithContext(ctx), remote.WithAuthFromKeychain(authn.DefaultKeychain))
+	image, err := descriptor.Image()
 	if err != nil {
-		return "", "", fmt.Errorf("resolve pushed single-platform image: %w", err)
+		return "", "", fmt.Errorf("%w: invalid pushed single-platform image: %w", ErrDefinitive, err)
 	}
 	config, err := image.ConfigFile()
 	if err != nil {
-		return "", "", fmt.Errorf("%w: read pushed image platform: %v", ErrDefinitive, err)
+		return "", "", fmt.Errorf("%w: read pushed image platform: %w", ErrDefinitive, err)
 	}
 	platform, err := buildcontract.NormalizePlatform(config.OS + "/" + config.Architecture)
 	if err != nil {
