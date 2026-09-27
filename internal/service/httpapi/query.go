@@ -3,7 +3,9 @@ package httpapi
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -16,6 +18,28 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
+
+const maxBuildLogResponseBytes = 4 << 20
+
+var errBuildLogsTooLarge = errors.New("requested build log tail exceeds 4 MiB")
+
+// Keep the buffer private so io.WriteString cannot bypass the response cap.
+type boundedLogBuffer struct {
+	buffer   bytes.Buffer
+	overflow bool
+}
+
+func (b *boundedLogBuffer) Write(data []byte) (int, error) {
+	remaining := maxBuildLogResponseBytes - b.buffer.Len()
+	if len(data) > remaining {
+		_, _ = b.buffer.Write(data[:remaining])
+		b.overflow = true
+		return remaining, errBuildLogsTooLarge
+	}
+	return b.buffer.Write(data)
+}
+
+var _ io.Writer = (*boundedLogBuffer)(nil)
 
 func (s *Server) handleListBuilds(c echo.Context) error {
 	principal := principalFromContext(c)
@@ -78,17 +102,21 @@ func (s *Server) handleBuildLogs(c echo.Context) error {
 	if err != nil || tail < 0 || tail > apiv1.MaxLogTailLines {
 		return invalidRequest(c, fmt.Errorf("tail_lines must be between 0 and %d", apiv1.MaxLogTailLines))
 	}
-	var out bytes.Buffer
+	var out boundedLogBuffer
 	if build.Status.RunnerPodName == "" {
 		return logsUnavailable(c, http.StatusNotFound, "build logs are not available yet", true)
 	}
 	if isTerminalPhase(build.Status.Phase) {
 		return logsUnavailable(c, http.StatusGone, "build logs are only available while the runner is active", false)
 	}
-	if err := s.kube.WritePodLogsTail(c.Request().Context(), build.Namespace, build.Status.RunnerPodName, tail, &out); err != nil {
+	err = s.kube.WritePodLogsTail(c.Request().Context(), build.Namespace, build.Status.RunnerPodName, tail, &out)
+	if out.overflow || errors.Is(err, errBuildLogsTooLarge) {
+		return logsUnavailable(c, http.StatusRequestEntityTooLarge, "requested build log tail exceeds 4 MiB; request fewer tail lines", false)
+	}
+	if err != nil {
 		return internalError(c, err)
 	}
-	return c.Blob(http.StatusOK, "text/plain; charset=utf-8", out.Bytes())
+	return c.Blob(http.StatusOK, "text/plain; charset=utf-8", out.buffer.Bytes())
 }
 
 func tailLogLines(raw []byte, lines int64) []byte {

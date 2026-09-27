@@ -170,6 +170,12 @@ paths:
           $ref: "#/components/responses/LogsUnavailable"
         "410":
           $ref: "#/components/responses/LogsUnavailable"
+        "413":
+          description: The selected log tail exceeds 4 MiB; request fewer lines. No partial log response is returned.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LogsUnavailableError"
         "500":
           $ref: "#/components/responses/InternalError"
   /v1/builds/{id}/cancel:

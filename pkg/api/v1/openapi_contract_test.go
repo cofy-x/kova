@@ -85,6 +85,9 @@ func TestOpenAPIContractMatchesPublicTypes(t *testing.T) {
 	assertInteger(t, object(t, object(t, object(t, schemas, "BuildResults"), "properties"), "outputs")["maxItems"], MaxConcreteOutputs)
 	logsOperation := object(t, object(t, paths, "/v1/builds/{id}/logs"), "get")
 	assertParameterMaximum(t, logsOperation["parameters"], "tail_lines", MaxLogTailLines)
+	if _, ok := object(t, logsOperation, "responses")["413"]; !ok {
+		t.Fatal("log-tail response limit must be documented as HTTP 413")
+	}
 	listOperation := object(t, object(t, paths, "/v1/builds"), "get")
 	assertParameterMaximum(t, listOperation["parameters"], "limit", MaxListBuildsPageSize)
 	for schema, code := range map[string]ErrorCode{

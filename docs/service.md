@@ -262,6 +262,8 @@ Job responses contain the public execution state and a stable `failure_code` for
 After the runner completes, `verifying` is a durable nonterminal state; the response includes verification start/deadline/next-attempt times, attempt count, last error, and pending/succeeded/failed output counts.
 They do not expose runner Pod names, Kubernetes namespaces, or internal BuildKit addresses.
 List pages are limited to 500 jobs, and log requests are limited to the last 10,000 lines.
+Each log response is also limited to 4 MiB regardless of line count.
+If the selected tail exceeds that limit, Kova returns `413 logs_unavailable` without partial logs; request fewer lines or use an external log backend for longer output.
 
 Each successful output contains `format`, `platform`, the mutable pushed `image` tag, `manifest_digest`, and a server-derived `immutable_ref`.
 The Service removes the explicit tag, preserves registry ports and nested repositories, validates the SHA-256 digest, and returns a canonical `repository@sha256:...` reference.

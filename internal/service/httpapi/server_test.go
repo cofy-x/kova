@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -118,6 +119,37 @@ func TestTailLogLines(t *testing.T) {
 				t.Fatalf("got %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestBuildLogResponseIsBounded(t *testing.T) {
+	var out boundedLogBuffer
+	full := strings.Repeat("x", maxBuildLogResponseBytes)
+	if n, err := io.WriteString(&out, full); n != len(full) || err != nil {
+		t.Fatalf("exact-limit write n=%d err=%v", n, err)
+	}
+	if n, err := io.WriteString(&out, "y"); n != 0 || !errors.Is(err, errBuildLogsTooLarge) || !out.overflow || out.buffer.Len() != maxBuildLogResponseBytes {
+		t.Fatalf("overflow write n=%d err=%v flag=%v length=%d", n, err, out.overflow, out.buffer.Len())
+	}
+
+	srv := newTestServer(t, &fakeKube{logs: full + "y"})
+	build := &kovav1.KovaBuild{
+		ObjectMeta: metav1.ObjectMeta{Name: "large-logs", Namespace: "jobs"},
+		Status:     kovav1.KovaBuildStatus{Phase: kovav1.PhaseRunning, RunnerPodName: "kova-job-large-logs"},
+	}
+	if err := srv.client.Create(context.Background(), build); err != nil {
+		t.Fatal(err)
+	}
+	if err := srv.client.Status().Update(context.Background(), build); err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/v1/builds/large-logs/logs?tail_lines=1", nil)
+	req.Header.Set("Authorization", "Bearer token")
+	rec := httptest.NewRecorder()
+	srv.routes().ServeHTTP(rec, req)
+	assertAPIError(t, rec, http.StatusRequestEntityTooLarge, apiv1.ErrorCodeLogsUnavailable, false)
+	if strings.Contains(rec.Body.String(), full[:64]) {
+		t.Fatal("oversized log contents leaked into error response")
 	}
 }
 

@@ -28,45 +28,73 @@ type Client struct {
 var ErrInvalidBuildStatus = errors.New("invalid runner build status")
 var ErrSourceInspectTransport = errors.New("source inspect transport failed")
 var ErrExportTooLarge = errors.New("runner export exceeds 1 MiB limit")
+var ErrRunnerResponseTooLarge = errors.New("runner response exceeds 1 MiB limit")
 
-const maxExportBytes = 1 << 20
-const maxExportErrorBytes = 64 << 10
+const maxRunnerResponseBytes = 1 << 20
+const maxRunnerErrorBytes = 64 << 10
 
-type boundedExportBuffer struct {
-	bytes.Buffer
-	overflow bool
+// Keep the buffer private so io.WriteString cannot bypass the bounded Write.
+type boundedResponseBuffer struct {
+	buffer      bytes.Buffer
+	overflowErr error
+	overflow    bool
 }
 
-func (b *boundedExportBuffer) Write(data []byte) (int, error) {
-	remaining := maxExportBytes - b.Len()
+func (b *boundedResponseBuffer) Write(data []byte) (int, error) {
+	remaining := maxRunnerResponseBytes - b.buffer.Len()
 	if len(data) > remaining {
-		_, _ = b.Buffer.Write(data[:remaining])
+		_, _ = b.buffer.Write(data[:remaining])
 		b.overflow = true
-		return remaining, ErrExportTooLarge
+		return remaining, b.overflowErr
 	}
-	return b.Buffer.Write(data)
+	return b.buffer.Write(data)
 }
 
-var _ io.Writer = (*boundedExportBuffer)(nil)
+func (b *boundedResponseBuffer) Bytes() []byte  { return b.buffer.Bytes() }
+func (b *boundedResponseBuffer) String() string { return b.buffer.String() }
+func (b *boundedResponseBuffer) Len() int       { return b.buffer.Len() }
 
-type boundedExportErrorBuffer struct{ bytes.Buffer }
+var _ io.Writer = (*boundedResponseBuffer)(nil)
 
-func (b *boundedExportErrorBuffer) Write(data []byte) (int, error) {
-	if remaining := maxExportErrorBytes - b.Len(); remaining > 0 {
-		_, _ = b.Buffer.Write(data[:min(remaining, len(data))])
+// Stderr is diagnostic only; drain it while retaining a finite prefix.
+type boundedErrorBuffer struct {
+	buffer    bytes.Buffer
+	truncated bool
+}
+
+func (b *boundedErrorBuffer) Write(data []byte) (int, error) {
+	remaining := maxRunnerErrorBytes - b.buffer.Len()
+	if len(data) > remaining {
+		b.truncated = true
+	}
+	if remaining > 0 {
+		_, _ = b.buffer.Write(data[:min(remaining, len(data))])
 	}
 	return len(data), nil
 }
 
+func (b *boundedErrorBuffer) Diagnostic() []byte {
+	if b.truncated {
+		return append(bytes.TrimSpace(b.buffer.Bytes()), []byte("\n[runner stderr truncated]")...)
+	}
+	return b.buffer.Bytes()
+}
+
+func (b *boundedErrorBuffer) Len() int { return b.buffer.Len() }
+
 func (c Client) SourceTargets(ctx context.Context, build *kovav1.KovaBuild, sourcePath string) ([]buildcontract.TargetSpec, error) {
-	var stdout, stderr bytes.Buffer
+	stdout := boundedResponseBuffer{overflowErr: ErrRunnerResponseTooLarge}
+	var stderr boundedErrorBuffer
 	err := c.Kube.Exec(ctx, build.Namespace, build.Status.RunnerPodName, kube.ExecOptions{
 		Stdout:  &stdout,
 		Stderr:  &stderr,
 		Command: []string{"kovad", "source", "inspect", "--input", sourcePath},
 	})
+	if stdout.overflow {
+		return nil, fmt.Errorf("inspect source contract: %w", ErrRunnerResponseTooLarge)
+	}
 	if err != nil {
-		wrapped := ExecError("inspect source contract", stderr.Bytes(), err)
+		wrapped := ExecError("inspect source contract", stderr.Diagnostic(), err)
 		var exitErr utilexec.ExitError
 		if errors.As(err, &exitErr) && exitErr.Exited() {
 			return nil, wrapped
@@ -83,14 +111,18 @@ func (c Client) SourceTargets(ctx context.Context, build *kovav1.KovaBuild, sour
 }
 
 func (c Client) SubmitBuild(ctx context.Context, build *kovav1.KovaBuild, sourcePath string) error {
-	var stdout, stderr bytes.Buffer
+	stdout := boundedResponseBuffer{overflowErr: ErrRunnerResponseTooLarge}
+	var stderr boundedErrorBuffer
 	err := c.Kube.Exec(ctx, build.Namespace, build.Status.RunnerPodName, kube.ExecOptions{
 		Stdout:  &stdout,
 		Stderr:  &stderr,
 		Command: daemonclient.TransportCommand("POST", daemonclient.BuildPath, BuildQuery(build, c.BuildkitPlatformAddrs), sourcePath),
 	})
+	if stdout.overflow {
+		return fmt.Errorf("submit build: %w", ErrRunnerResponseTooLarge)
+	}
 	if err != nil {
-		return ExecError("submit build", stderr.Bytes(), err)
+		return ExecError("submit build", stderr.Diagnostic(), err)
 	}
 	state, err := runner.ParseBuildState(stdout.Bytes())
 	if err != nil {
@@ -103,14 +135,18 @@ func (c Client) SubmitBuild(ctx context.Context, build *kovav1.KovaBuild, source
 }
 
 func (c Client) BuildStatus(ctx context.Context, build *kovav1.KovaBuild) (runner.BuildState, error) {
-	var stdout, stderr bytes.Buffer
+	stdout := boundedResponseBuffer{overflowErr: ErrRunnerResponseTooLarge}
+	var stderr boundedErrorBuffer
 	err := c.Kube.Exec(ctx, build.Namespace, build.Status.RunnerPodName, kube.ExecOptions{
 		Stdout:  &stdout,
 		Stderr:  &stderr,
 		Command: daemonclient.TransportCommand("GET", daemonclient.StatusPath, "", ""),
 	})
+	if stdout.overflow {
+		return runner.BuildState{}, fmt.Errorf("%w: %w", ErrInvalidBuildStatus, ErrRunnerResponseTooLarge)
+	}
 	if err != nil {
-		return runner.BuildState{}, ExecError("build status", stderr.Bytes(), err)
+		return runner.BuildState{}, ExecError("build status", stderr.Diagnostic(), err)
 	}
 	state, err := runner.ParseBuildState(stdout.Bytes())
 	if err != nil {
@@ -120,30 +156,30 @@ func (c Client) BuildStatus(ctx context.Context, build *kovav1.KovaBuild) (runne
 }
 
 func (c Client) CancelBuild(ctx context.Context, build *kovav1.KovaBuild) error {
-	var stderr bytes.Buffer
+	var stderr boundedErrorBuffer
 	err := c.Kube.Exec(ctx, build.Namespace, build.Status.RunnerPodName, kube.ExecOptions{
 		Stderr:  &stderr,
 		Command: daemonclient.TransportCommand("POST", daemonclient.CancelPath, "", ""),
 	})
 	if err != nil {
-		return ExecError("cancel build", stderr.Bytes(), err)
+		return ExecError("cancel build", stderr.Diagnostic(), err)
 	}
 	return nil
 }
 
 func (c Client) Post(ctx context.Context, build *kovav1.KovaBuild, path string, query string) ([]byte, error) {
-	var out boundedExportBuffer
-	var stderr boundedExportErrorBuffer
+	out := boundedResponseBuffer{overflowErr: ErrExportTooLarge}
+	var stderr boundedErrorBuffer
 	err := c.Kube.Exec(ctx, build.Namespace, build.Status.RunnerPodName, kube.ExecOptions{
 		Stdout:  &out,
 		Stderr:  &stderr,
 		Command: daemonclient.TransportCommand("POST", "/api/v1/"+path, query, ""),
 	})
-	if err != nil {
-		return nil, ExecError(path, stderr.Bytes(), err)
-	}
 	if out.overflow {
 		return nil, ErrExportTooLarge
+	}
+	if err != nil {
+		return nil, ExecError(path, stderr.Diagnostic(), err)
 	}
 	return out.Bytes(), nil
 }
