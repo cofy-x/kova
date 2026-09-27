@@ -44,7 +44,7 @@ func main() {
 	app := newCLIApp()
 	if err := app.Run(os.Args); err != nil {
 		logging.Errorf("%v", err)
-		exitCode = 1
+		exitCode = sourcecmd.ExitCode(err)
 		return
 	}
 }

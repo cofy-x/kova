@@ -49,6 +49,10 @@ Top-level `Dockerfile` and `metadata.json` files must be regular files and are e
 Standalone symlinks may point within their image context, but archive members nested below a symlink path are rejected to prevent extraction aliases from bypassing path-specific limits.
 These fixed limits apply to local source inspection and push, HTTPS and OCI fetches, runner uploads, and extraction.
 Kova counts bytes while reading and extracting as well as checking ZIP headers; a rejected source is reported as `InvalidSource` during source inspection or fetch, before any image push.
+The Service reports `invalid_source` only when source validation has proven that the reference or content violates the source contract, including size, layer type, or digest checks.
+Source fetch registry/network failures return `source_unavailable`; source-fetch out-of-memory or full disk, and Pod eviction before build submission, return `resource_exhausted`.
+An unclassified source-fetch init failure is treated as `source_unavailable`, not as proof that the immutable input is invalid.
+Callers should inspect their own retry policy for those transient or resource failures; Kova never retries a build automatically.
 `kova source push` uses a bounded immutable temporary file rather than buffering the source ZIP in client memory; the client host needs up to 512 MiB of temporary disk headroom per concurrent push.
 
 Each request has 1–100 logical targets. Every target is an object containing one unique, explicitly tagged OCI push destination and exactly one supported platform: `linux/amd64` or `linux/arm64`.

@@ -602,15 +602,18 @@ func TestBuildJobExposesStableFailureWithoutRuntimeInternals(t *testing.T) {
 
 func TestPublicBuildFailureContract(t *testing.T) {
 	for reason, want := range map[string]apiv1.BuildFailureCode{
-		"InvalidSource":            apiv1.BuildFailureInvalidSource,
-		"InvalidTargets":           apiv1.BuildFailureInvalidTargets,
-		"RunnerCreateFailed":       apiv1.BuildFailureRunnerUnavailable,
-		"RunnerUnavailable":        apiv1.BuildFailureRunnerUnavailable,
-		"BuildSubmissionFailed":    apiv1.BuildFailureSubmissionFailed,
-		"ResultVerificationFailed": apiv1.BuildFailureVerificationFailed,
-		"BuildFailed":              apiv1.BuildFailureExecutionFailed,
-		"BuildTimedOut":            apiv1.BuildFailureExecutionFailed,
-		"Cancelled":                apiv1.BuildFailureCancelled,
+		"InvalidSource":                apiv1.BuildFailureInvalidSource,
+		"SourceFetchUnavailable":       apiv1.BuildFailureSourceUnavailable,
+		"SourceFetchResourceExhausted": apiv1.BuildFailureResourceExhausted,
+		"RunnerResourceExhausted":      apiv1.BuildFailureResourceExhausted,
+		"InvalidTargets":               apiv1.BuildFailureInvalidTargets,
+		"RunnerCreateFailed":           apiv1.BuildFailureRunnerUnavailable,
+		"RunnerUnavailable":            apiv1.BuildFailureRunnerUnavailable,
+		"BuildSubmissionFailed":        apiv1.BuildFailureSubmissionFailed,
+		"ResultVerificationFailed":     apiv1.BuildFailureVerificationFailed,
+		"BuildFailed":                  apiv1.BuildFailureExecutionFailed,
+		"BuildTimedOut":                apiv1.BuildFailureExecutionFailed,
+		"Cancelled":                    apiv1.BuildFailureCancelled,
 	} {
 		if got := publicBuildFailureCode(reason); got != want {
 			t.Errorf("reason %q mapped to %q, want %q", reason, got, want)

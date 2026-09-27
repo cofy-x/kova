@@ -2,10 +2,12 @@ package sourcecmd
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"github.com/cofy-x/kova/internal/buildcontract"
 	"github.com/cofy-x/kova/internal/source"
@@ -28,12 +30,15 @@ func CLICommand() *cli.Command {
 			Action: func(c *cli.Context) error {
 				output := filepath.Clean(c.String("output"))
 				if err := os.MkdirAll(filepath.Dir(output), 0o755); err != nil {
-					return err
+					return classifyFetchCommandError(err)
 				}
 				if strings.TrimSpace(output) == "." {
 					return fmt.Errorf("output path is required")
 				}
-				return sourcebundle.Fetch(c.Context, c.String("uri"), c.String("digest"), output, c.StringSlice("registry-plain-http"))
+				if err := sourcebundle.Fetch(c.Context, c.String("uri"), c.String("digest"), output, c.StringSlice("registry-plain-http")); err != nil {
+					return classifyFetchCommandError(err)
+				}
+				return nil
 			},
 		}, {
 			Name: "inspect", Usage: "validate a source archive and print its normalized target contract",
@@ -49,4 +54,38 @@ func CLICommand() *cli.Command {
 			},
 		}},
 	}
+}
+
+// fetchCommandError intentionally does not implement cli.ExitCoder: the
+// kovad entrypoint owns logging and process exit after shutting down telemetry.
+type fetchCommandError struct {
+	err  error
+	code int
+}
+
+func (e *fetchCommandError) Error() string { return e.err.Error() }
+func (e *fetchCommandError) Unwrap() error { return e.err }
+
+func classifyFetchCommandError(err error) error {
+	return &fetchCommandError{err: err, code: fetchExitCode(err)}
+}
+
+func fetchExitCode(err error) int {
+	if errors.Is(err, sourcebundle.ErrInvalidSource) {
+		return sourcebundle.FetchExitCodeInvalidSource
+	}
+	if errors.Is(err, syscall.ENOSPC) || errors.Is(err, syscall.EDQUOT) || errors.Is(err, syscall.EFBIG) {
+		return sourcebundle.FetchExitCodeResourceExhausted
+	}
+	return 1
+}
+
+// ExitCode returns the source-fetch protocol exit code, or the ordinary
+// command failure code for other kovad commands.
+func ExitCode(err error) int {
+	var fetchErr *fetchCommandError
+	if errors.As(err, &fetchErr) {
+		return fetchErr.code
+	}
+	return 1
 }

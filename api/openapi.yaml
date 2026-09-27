@@ -395,7 +395,7 @@ components:
           type: string
         failure_code:
           type: string
-          enum: [invalid_source, invalid_targets, worker_platform_unavailable, runner_unavailable, build_submission_failed, result_verification_failed, build_failed, cancelled]
+          enum: [invalid_source, source_unavailable, resource_exhausted, invalid_targets, worker_platform_unavailable, runner_unavailable, build_submission_failed, result_verification_failed, build_failed, cancelled]
         created_at:
           type: string
           format: date-time

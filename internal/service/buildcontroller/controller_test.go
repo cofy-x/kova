@@ -11,6 +11,7 @@ import (
 	kovav1 "github.com/cofy-x/kova/internal/apis/kova/v1alpha1"
 	"github.com/cofy-x/kova/internal/kube"
 	"github.com/cofy-x/kova/internal/service/config"
+	"github.com/cofy-x/kova/internal/sourcebundle"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -299,33 +300,52 @@ func TestSubmitWhenReadyFailsWhenRunnerDisappears(t *testing.T) {
 	}
 }
 
-func TestSubmitWhenReadyReportsSourceFetchFailureAsInvalidSource(t *testing.T) {
-	scheme := testScheme(t)
-	build := &kovav1.KovaBuild{
-		ObjectMeta: metav1.ObjectMeta{Name: "invalid-source", Namespace: "jobs", Finalizers: []string{cleanupFinalizer}},
-		Status: kovav1.KovaBuildStatus{
-			Phase: kovav1.PhaseStarting, RunnerPodName: "kova-job-invalid-source",
-		},
-	}
-	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Name: "kova-job-invalid-source", Namespace: "jobs"},
-		Status: corev1.PodStatus{Phase: corev1.PodPending, InitContainerStatuses: []corev1.ContainerStatus{{
-			Name: "source-fetch", State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
-				ExitCode: 1, Message: "source digest mismatch",
-			}},
-		}}},
-	}
-	crClient := crfake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&kovav1.KovaBuild{}).WithObjects(build, pod).Build()
-	reconciler := KovaBuildReconciler{Client: crClient, Scheme: scheme, Kube: &fakeKube{}}
-	if _, err := reconciler.submitWhenReady(context.Background(), build); err != nil {
-		t.Fatal(err)
-	}
-	var updated kovav1.KovaBuild
-	if err := crClient.Get(context.Background(), types.NamespacedName{Namespace: "jobs", Name: "invalid-source"}, &updated); err != nil {
-		t.Fatal(err)
-	}
-	if updated.Status.Phase != kovav1.PhaseFailed || updated.Status.Reason != "InvalidSource" || updated.Status.Message != "source digest mismatch" {
-		t.Fatalf("status = %#v", updated.Status)
+func TestSubmitWhenReadyClassifiesSourceFetchFailureByStatus(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		exitCode   int32
+		termReason string
+		podReason  string
+		wantReason string
+	}{
+		{name: "invalid source", exitCode: sourcebundle.FetchExitCodeInvalidSource, wantReason: "InvalidSource"},
+		{name: "registry unavailable", exitCode: 1, wantReason: "SourceFetchUnavailable"},
+		{name: "disk full", exitCode: sourcebundle.FetchExitCodeResourceExhausted, wantReason: "SourceFetchResourceExhausted"},
+		{name: "out of memory", exitCode: 137, termReason: "OOMKilled", wantReason: "SourceFetchResourceExhausted"},
+		{name: "evicted", podReason: "Evicted", wantReason: "RunnerResourceExhausted"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			scheme := testScheme(t)
+			build := &kovav1.KovaBuild{
+				ObjectMeta: metav1.ObjectMeta{Name: "source-failure", Namespace: "jobs", Finalizers: []string{cleanupFinalizer}},
+				Status:     kovav1.KovaBuildStatus{Phase: kovav1.PhaseStarting, RunnerPodName: "kova-job-source-failure"},
+			}
+			pod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: "kova-job-source-failure", Namespace: "jobs"},
+				Status:     corev1.PodStatus{Phase: corev1.PodPending, Reason: tc.podReason},
+			}
+			if tc.podReason == "Evicted" {
+				pod.Status.Phase = corev1.PodFailed
+			} else {
+				pod.Status.InitContainerStatuses = []corev1.ContainerStatus{{
+					Name: "source-fetch", State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
+						ExitCode: tc.exitCode, Reason: tc.termReason, Message: "fetch failed",
+					}},
+				}}
+			}
+			crClient := crfake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&kovav1.KovaBuild{}).WithObjects(build, pod).Build()
+			reconciler := KovaBuildReconciler{Client: crClient, Scheme: scheme, Kube: &fakeKube{}}
+			if _, err := reconciler.submitWhenReady(context.Background(), build); err != nil {
+				t.Fatal(err)
+			}
+			var updated kovav1.KovaBuild
+			if err := crClient.Get(context.Background(), types.NamespacedName{Namespace: "jobs", Name: build.Name}, &updated); err != nil {
+				t.Fatal(err)
+			}
+			if updated.Status.Phase != kovav1.PhaseFailed || updated.Status.Reason != tc.wantReason {
+				t.Fatalf("status = %#v", updated.Status)
+			}
+		})
 	}
 }
 

@@ -71,6 +71,8 @@ type BuildFailureCode string
 
 const (
 	BuildFailureInvalidSource             BuildFailureCode = "invalid_source"
+	BuildFailureSourceUnavailable         BuildFailureCode = "source_unavailable"
+	BuildFailureResourceExhausted         BuildFailureCode = "resource_exhausted"
 	BuildFailureInvalidTargets            BuildFailureCode = "invalid_targets"
 	BuildFailureRunnerUnavailable         BuildFailureCode = "runner_unavailable"
 	BuildFailureWorkerPlatformUnavailable BuildFailureCode = "worker_platform_unavailable"

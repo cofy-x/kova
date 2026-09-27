@@ -1,10 +1,25 @@
 package main
 
 import (
+	"path/filepath"
+	"strings"
 	"testing"
 
+	"github.com/cofy-x/kova/internal/sourcecmd"
 	"github.com/urfave/cli/v2"
 )
+
+func TestSourceFetchCommandPreservesInvalidSourceExitCode(t *testing.T) {
+	err := newCLIApp().Run([]string{
+		"kovad", "source", "fetch",
+		"--uri", "https://sources.example.com/source.zip?token=forbidden",
+		"--digest", "sha256:" + strings.Repeat("a", 64),
+		"--output", filepath.Join(t.TempDir(), "source.zip"),
+	})
+	if err == nil || sourcecmd.ExitCode(err) != 20 {
+		t.Fatalf("source-fetch error=%v exit=%d, want classified invalid source", err, sourcecmd.ExitCode(err))
+	}
+}
 
 func TestPprofFlagBelongsOnlyToDaemonCommand(t *testing.T) {
 	app := newCLIApp()

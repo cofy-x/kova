@@ -12,6 +12,7 @@ import (
 	"github.com/cofy-x/kova/internal/runner"
 	"github.com/cofy-x/kova/internal/service/queueadmission"
 	"github.com/cofy-x/kova/internal/service/runnerexec"
+	"github.com/cofy-x/kova/internal/sourcebundle"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -217,8 +218,8 @@ func (r *KovaBuildReconciler) submitWhenReady(ctx context.Context, build *kovav1
 		return ctrl.Result{}, err
 	}
 	if !podReady(&pod) {
-		if message, failed := sourceFetchFailure(&pod); failed {
-			return ctrl.Result{}, r.finish(ctx, build, kovav1.PhaseFailed, "InvalidSource", message)
+		if reason, message, failed := sourceFetchFailure(&pod); failed {
+			return ctrl.Result{}, r.finish(ctx, build, kovav1.PhaseFailed, reason, message)
 		}
 		if pod.Status.Phase == corev1.PodFailed || pod.Status.Phase == corev1.PodSucceeded {
 			return ctrl.Result{}, r.finish(ctx, build, kovav1.PhaseFailed, "RunnerUnavailable", fmt.Sprintf("runner Pod terminated before becoming ready: %s", pod.Status.Phase))
@@ -308,21 +309,31 @@ func (r *KovaBuildReconciler) markSubmitted(ctx context.Context, build *kovav1.K
 	return ctrl.Result{RequeueAfter: r.activeRequeueAfter(build, r.Cfg.PollInterval)}, nil
 }
 
-func sourceFetchFailure(pod *corev1.Pod) (string, bool) {
+func sourceFetchFailure(pod *corev1.Pod) (string, string, bool) {
+	if pod.Status.Reason == "Evicted" {
+		return "RunnerResourceExhausted", "runner Pod was evicted before build submission", true
+	}
 	for _, status := range pod.Status.InitContainerStatuses {
 		if status.Name != "source-fetch" || status.State.Terminated == nil || status.State.Terminated.ExitCode == 0 {
 			continue
 		}
-		message := status.State.Terminated.Message
+		terminated := status.State.Terminated
+		message := terminated.Message
 		if message == "" {
-			message = status.State.Terminated.Reason
+			message = terminated.Reason
 		}
 		if message == "" {
-			message = fmt.Sprintf("source fetch exited with code %d", status.State.Terminated.ExitCode)
+			message = fmt.Sprintf("source fetch exited with code %d", terminated.ExitCode)
 		}
-		return message, true
+		if terminated.Reason == "OOMKilled" || terminated.ExitCode == sourcebundle.FetchExitCodeResourceExhausted {
+			return "SourceFetchResourceExhausted", message, true
+		}
+		if terminated.ExitCode == sourcebundle.FetchExitCodeInvalidSource {
+			return "InvalidSource", message, true
+		}
+		return "SourceFetchUnavailable", message, true
 	}
-	return "", false
+	return "", "", false
 }
 
 func (r *KovaBuildReconciler) pollBuild(ctx context.Context, build *kovav1.KovaBuild) (ctrl.Result, error) {

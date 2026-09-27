@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -23,6 +24,21 @@ import (
 )
 
 const LayerMediaType types.MediaType = "application/vnd.cofy.kova.source.v1+zip"
+
+const (
+	// These are the source-fetch init container's explicit termination codes.
+	// Other nonzero exits are not evidence of invalid source content.
+	FetchExitCodeInvalidSource     = 20
+	FetchExitCodeResourceExhausted = 21
+)
+
+// ErrInvalidSource marks a source contract or content rejection. Fetch errors
+// without this marker may instead be caused by the registry, network, or host.
+var ErrInvalidSource = errors.New("invalid immutable source")
+
+func invalidSource(err error) error {
+	return fmt.Errorf("%w: %w", ErrInvalidSource, err)
+}
 
 type Reference struct {
 	URI    string `json:"uri"`
@@ -131,7 +147,7 @@ func Fetch(ctx context.Context, uri, digest, output string, plainHTTP []string) 
 
 func fetchWithLimit(ctx context.Context, uri, digest, output string, plainHTTP []string, maxBytes int64, client *http.Client) error {
 	if err := Validate(uri, digest); err != nil {
-		return err
+		return invalidSource(err)
 	}
 	tmp, err := os.CreateTemp(filepath.Dir(output), ".kova-source-*")
 	if err != nil {
@@ -161,18 +177,21 @@ func fetchWithLimit(ctx context.Context, uri, digest, output string, plainHTTP [
 		}
 		if resp.ContentLength > maxBytes {
 			tmp.Close()
-			return source.ErrArchiveTooLarge
+			return invalidSource(source.ErrArchiveTooLarge)
 		}
 		_, err = source.CopyArchive(writer, resp.Body, maxBytes)
 		if err != nil {
 			tmp.Close()
+			if errors.Is(err, source.ErrArchiveTooLarge) {
+				return invalidSource(err)
+			}
 			return err
 		}
 	case "oci":
 		ref, err := name.NewDigest(strings.TrimPrefix(uri, "oci://"), referenceOptions(uri, plainHTTP)...)
 		if err != nil {
 			tmp.Close()
-			return err
+			return invalidSource(err)
 		}
 		image, err := remote.Image(ref, remote.WithContext(ctx), remote.WithAuthFromKeychain(authn.DefaultKeychain))
 		if err != nil {
@@ -180,14 +199,22 @@ func fetchWithLimit(ctx context.Context, uri, digest, output string, plainHTTP [
 			return fmt.Errorf("fetch OCI source manifest: %w", err)
 		}
 		layers, err := image.Layers()
-		if err != nil || len(layers) != 1 {
+		if err != nil {
 			tmp.Close()
-			return fmt.Errorf("OCI source bundle must contain exactly one layer")
+			return fmt.Errorf("inspect OCI source layers: %w", err)
+		}
+		if len(layers) != 1 {
+			tmp.Close()
+			return invalidSource(errors.New("OCI source bundle must contain exactly one layer"))
 		}
 		mediaType, err := layers[0].MediaType()
-		if err != nil || mediaType != LayerMediaType {
+		if err != nil {
 			tmp.Close()
-			return fmt.Errorf("OCI source layer has unsupported media type %q", mediaType)
+			return fmt.Errorf("inspect OCI source layer media type: %w", err)
+		}
+		if mediaType != LayerMediaType {
+			tmp.Close()
+			return invalidSource(fmt.Errorf("OCI source layer has unsupported media type %q", mediaType))
 		}
 		reader, err := layers[0].Compressed()
 		if err != nil {
@@ -198,6 +225,9 @@ func fetchWithLimit(ctx context.Context, uri, digest, output string, plainHTTP [
 		closeErr := reader.Close()
 		if copyErr != nil {
 			tmp.Close()
+			if errors.Is(copyErr, source.ErrArchiveTooLarge) {
+				return invalidSource(copyErr)
+			}
 			return copyErr
 		}
 		if closeErr != nil {
@@ -210,7 +240,7 @@ func fetchWithLimit(ctx context.Context, uri, digest, output string, plainHTTP [
 	}
 	actual := "sha256:" + hex.EncodeToString(hash.Sum(nil))
 	if actual != digest {
-		return fmt.Errorf("source digest mismatch: expected %s, got %s", digest, actual)
+		return invalidSource(fmt.Errorf("source digest mismatch: expected %s, got %s", digest, actual))
 	}
 	if err := os.Chmod(tmpPath, 0o600); err != nil {
 		return err

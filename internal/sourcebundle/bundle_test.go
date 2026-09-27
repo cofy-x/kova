@@ -116,6 +116,9 @@ func TestFetchHTTPSCountsStreamedBytesAndCleansTemp(t *testing.T) {
 	if !errors.Is(err, source.ErrArchiveTooLarge) {
 		t.Fatalf("fetch error = %v, want compressed-byte limit", err)
 	}
+	if !errors.Is(err, ErrInvalidSource) {
+		t.Fatalf("fetch error = %v, want invalid source marker", err)
+	}
 	raw, err := os.ReadFile(output)
 	if err != nil || string(raw) != "existing" {
 		t.Fatalf("existing output changed: %q, %v", raw, err)
@@ -176,7 +179,70 @@ func TestFetchOCICountsStreamedLayerBytesAndCleansTemp(t *testing.T) {
 	if !errors.Is(err, source.ErrArchiveTooLarge) {
 		t.Fatalf("OCI fetch error = %v, want compressed-byte limit", err)
 	}
+	if !errors.Is(err, ErrInvalidSource) {
+		t.Fatalf("OCI fetch error = %v, want invalid source marker", err)
+	}
 	assertOnlyOutput(t, dir, "")
+}
+
+func TestFetchTransportFailureIsNotInvalidSource(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+	output := filepath.Join(t.TempDir(), "source.zip")
+	err := fetchWithLimit(context.Background(), server.URL+"/source.zip", "sha256:"+strings.Repeat("a", 64), output, nil, 8, server.Client())
+	if err == nil || errors.Is(err, ErrInvalidSource) {
+		t.Fatalf("transport failure classified as invalid source: %v", err)
+	}
+}
+
+func TestFetchDigestMismatchIsInvalidSource(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("source"))
+	}))
+	defer server.Close()
+	output := filepath.Join(t.TempDir(), "source.zip")
+	err := fetchWithLimit(context.Background(), server.URL+"/source.zip", "sha256:"+strings.Repeat("a", 64), output, nil, 8, server.Client())
+	if !errors.Is(err, ErrInvalidSource) || !strings.Contains(err.Error(), "source digest mismatch") {
+		t.Fatalf("digest mismatch classification = %v", err)
+	}
+	if _, statErr := os.Stat(output); !os.IsNotExist(statErr) {
+		t.Fatalf("failed fetch created output: %v", statErr)
+	}
+}
+
+func TestFetchRejectsUnsupportedOCILayerAsInvalidSource(t *testing.T) {
+	t.Setenv("DOCKER_CONFIG", t.TempDir())
+	server := httptest.NewServer(registry.New())
+	defer server.Close()
+	host := strings.TrimPrefix(server.URL, "http://")
+	ref, err := name.NewTag(host+"/team/source:unsupported", name.Insecure)
+	if err != nil {
+		t.Fatal(err)
+	}
+	image, err := mutate.AppendLayers(empty.Image, static.NewLayer([]byte("archive"), types.OCIUncompressedLayer))
+	if err != nil {
+		t.Fatal(err)
+	}
+	image = mutate.MediaType(image, types.OCIManifestSchema1)
+	image = mutate.ConfigMediaType(image, types.OCIConfigJSON)
+	if err := remote.Write(ref, image); err != nil {
+		t.Fatal(err)
+	}
+	manifestDigest, err := image.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	uri := "oci://" + ref.Context().Digest(manifestDigest.String()).Name()
+	output := filepath.Join(t.TempDir(), "source.zip")
+	err = Fetch(context.Background(), uri, "sha256:"+strings.Repeat("a", 64), output, []string{host})
+	if !errors.Is(err, ErrInvalidSource) || !strings.Contains(err.Error(), "unsupported media type") {
+		t.Fatalf("unsupported layer classification = %v", err)
+	}
+	if _, statErr := os.Stat(output); !os.IsNotExist(statErr) {
+		t.Fatalf("invalid layer created output: %v", statErr)
+	}
 }
 
 func TestFetchHTTPSAcceptsExactLimit(t *testing.T) {

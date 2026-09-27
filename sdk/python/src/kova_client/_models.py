@@ -21,6 +21,8 @@ class JobStatus(str, Enum):
 
 class BuildFailureCode(str, Enum):
     INVALID_SOURCE = "invalid_source"
+    SOURCE_UNAVAILABLE = "source_unavailable"
+    RESOURCE_EXHAUSTED = "resource_exhausted"
     INVALID_TARGETS = "invalid_targets"
     WORKER_PLATFORM_UNAVAILABLE = "worker_platform_unavailable"
     RUNNER_UNAVAILABLE = "runner_unavailable"
