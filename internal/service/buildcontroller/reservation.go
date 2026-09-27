@@ -2,6 +2,8 @@ package buildcontroller
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 
@@ -17,17 +19,29 @@ import (
 const (
 	reservationConfigMap = "kova-service-admission"
 	reservationDataKey   = "reservations.json"
+	podCreateAttemptKey  = "kova.cofy.dev/create-attempt"
 )
 
 type activeReservation struct {
-	BuildName string `json:"buildName"`
-	Requester string `json:"requester"`
-	Slots     int    `json:"slots"`
+	BuildName string   `json:"buildName"`
+	Requester string   `json:"requester"`
+	Slots     int      `json:"slots"`
+	InFlight  []string `json:"inFlight,omitempty"`
 }
 
 type reservationState struct {
 	Version int                          `json:"version"`
 	Active  map[string]activeReservation `json:"active"`
+}
+
+type admissionRecoveryError struct {
+	Namespace string
+	BuildName string
+	Pending   int
+}
+
+func (e *admissionRecoveryError) Error() string {
+	return fmt.Sprintf("admission recovery required for %s/%s: %d Pod create attempt(s) have unknown outcome", e.Namespace, e.BuildName, e.Pending)
 }
 
 func reservationKey(build *kovav1.KovaBuild) string {
@@ -90,6 +104,13 @@ func decodeReservations(cm *corev1.ConfigMap) (reservationState, error) {
 	for key, entry := range state.Active {
 		if key == "" || entry.BuildName == "" || entry.Requester == "" || entry.Slots < 1 {
 			return reservationState{}, fmt.Errorf("admission ledger %s/%s has an invalid active reservation", cm.Namespace, cm.Name)
+		}
+		seen := map[string]bool{}
+		for _, attempt := range entry.InFlight {
+			if attempt == "" || seen[attempt] {
+				return reservationState{}, fmt.Errorf("admission ledger %s/%s has an invalid Pod create attempt", cm.Namespace, cm.Name)
+			}
+			seen[attempt] = true
 		}
 	}
 	return state, nil
@@ -173,6 +194,9 @@ func (r *KovaBuildReconciler) releaseReservation(ctx context.Context, build *kov
 		if entry.BuildName != build.Name {
 			return fmt.Errorf("admission reservation for %s/%s has mismatched build name %q", build.Namespace, build.Name, entry.BuildName)
 		}
+		if len(entry.InFlight) != 0 {
+			return &admissionRecoveryError{Namespace: build.Namespace, BuildName: build.Name, Pending: len(entry.InFlight)}
+		}
 		delete(state.Active, reservationKey(build))
 		if err := r.writeReservations(ctx, &cm, state); err != nil {
 			if apierrors.IsConflict(err) {
@@ -182,6 +206,111 @@ func (r *KovaBuildReconciler) releaseReservation(ctx context.Context, build *kov
 		}
 		return nil
 	}
+}
+
+func newPodCreateAttempt() (string, error) {
+	var raw [16]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(raw[:]), nil
+}
+
+// beginPodCreate is a durable in-flight fence. A replacement leader cannot
+// release the capacity while this API Create might still reach the apiserver.
+func (r *KovaBuildReconciler) beginPodCreate(ctx context.Context, build *kovav1.KovaBuild) (string, error) {
+	attempt, err := newPodCreateAttempt()
+	if err != nil {
+		return "", err
+	}
+	for {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+		cm, state, err := r.readReservations(ctx, build.Namespace)
+		if err != nil {
+			return "", err
+		}
+		entry, ok := state.Active[reservationKey(build)]
+		if !ok || entry.BuildName != build.Name {
+			return "", fmt.Errorf("KovaBuild %s/%s has no matching active reservation", build.Namespace, build.Name)
+		}
+		if len(entry.InFlight) != 0 {
+			return "", &admissionRecoveryError{Namespace: build.Namespace, BuildName: build.Name, Pending: len(entry.InFlight)}
+		}
+		entry.InFlight = append(entry.InFlight, attempt)
+		state.Active[reservationKey(build)] = entry
+		if err := r.writeReservations(ctx, cm, state); err != nil {
+			if apierrors.IsConflict(err) {
+				continue
+			}
+			// A lost Update response is not proof that the nonce was absent.
+			// If the authoritative read sees this exact nonce, its fence is
+			// committed and this caller may safely issue its Pod Create.
+			if recorded, readErr := r.podCreateAttemptRecorded(ctx, build, attempt); readErr == nil && recorded {
+				return attempt, nil
+			}
+			return "", err
+		}
+		return attempt, nil
+	}
+}
+
+// completePodCreate is only called after a definitive Create success or
+// AlreadyExists response, or after observing the Pod with this exact nonce.
+func (r *KovaBuildReconciler) completePodCreate(ctx context.Context, build *kovav1.KovaBuild, attempt string) error {
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		cm, state, err := r.readReservations(ctx, build.Namespace)
+		if err != nil {
+			return err
+		}
+		entry, ok := state.Active[reservationKey(build)]
+		if !ok || entry.BuildName != build.Name {
+			return fmt.Errorf("KovaBuild %s/%s lost its active reservation while completing Pod create", build.Namespace, build.Name)
+		}
+		index := -1
+		for i, value := range entry.InFlight {
+			if value == attempt {
+				index = i
+				break
+			}
+		}
+		if index < 0 {
+			return nil
+		}
+		entry.InFlight = append(entry.InFlight[:index], entry.InFlight[index+1:]...)
+		state.Active[reservationKey(build)] = entry
+		if err := r.writeReservations(ctx, cm, state); err != nil {
+			if apierrors.IsConflict(err) {
+				continue
+			}
+			if recorded, readErr := r.podCreateAttemptRecorded(ctx, build, attempt); readErr == nil && !recorded {
+				return nil
+			}
+			return err
+		}
+		return nil
+	}
+}
+
+func (r *KovaBuildReconciler) podCreateAttemptRecorded(ctx context.Context, build *kovav1.KovaBuild, attempt string) (bool, error) {
+	_, state, err := r.readReservations(ctx, build.Namespace)
+	if err != nil {
+		return false, err
+	}
+	entry, ok := state.Active[reservationKey(build)]
+	if !ok || entry.BuildName != build.Name {
+		return false, fmt.Errorf("KovaBuild %s/%s has no matching active reservation", build.Namespace, build.Name)
+	}
+	for _, value := range entry.InFlight {
+		if value == attempt {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func podOwnedByBuild(pod *corev1.Pod, build *kovav1.KovaBuild) bool {
@@ -252,17 +381,17 @@ func (r *KovaBuildReconciler) reservationCovered(ctx context.Context, namespace 
 	return ok && entry.BuildName == build.Name, nil
 }
 
-func (r *KovaBuildReconciler) getOwnedPod(ctx context.Context, build *kovav1.KovaBuild) (bool, error) {
+func (r *KovaBuildReconciler) getOwnedPod(ctx context.Context, build *kovav1.KovaBuild) (*corev1.Pod, error) {
 	var pod corev1.Pod
 	err := r.reader().Get(ctx, types.NamespacedName{Namespace: build.Namespace, Name: buildPodName(build.Name)}, &pod)
 	if apierrors.IsNotFound(err) {
-		return false, nil
+		return nil, nil
 	}
 	if err != nil {
-		return false, err
+		return nil, err
 	}
 	if !podOwnedByBuild(&pod, build) {
-		return false, fmt.Errorf("runner Pod %s/%s is not owned by KovaBuild UID %s", pod.Namespace, pod.Name, build.UID)
+		return nil, fmt.Errorf("runner Pod %s/%s is not owned by KovaBuild UID %s", pod.Namespace, pod.Name, build.UID)
 	}
-	return true, nil
+	return &pod, nil
 }

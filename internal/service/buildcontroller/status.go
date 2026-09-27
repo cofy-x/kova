@@ -2,6 +2,7 @@ package buildcontroller
 
 import (
 	"context"
+	"fmt"
 	"time"
 	"unicode/utf8"
 
@@ -12,6 +13,31 @@ import (
 	apiMeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
+
+const admissionRecoveryCondition = "AdmissionRecoveryRequired"
+
+func (r *KovaBuildReconciler) markAdmissionRecovery(ctx context.Context, build *kovav1.KovaBuild, pending int) error {
+	message := fmt.Sprintf("%d runner Pod create attempt(s) have an unknown outcome; capacity remains reserved", pending)
+	if current := apiMeta.FindStatusCondition(build.Status.Conditions, admissionRecoveryCondition); current != nil && current.Status == metav1.ConditionTrue && current.Reason == "PodCreateOutcomeUnknown" && current.Message == message {
+		return nil
+	}
+	apiMeta.SetStatusCondition(&build.Status.Conditions, metav1.Condition{
+		Type: admissionRecoveryCondition, Status: metav1.ConditionTrue,
+		Reason: "PodCreateOutcomeUnknown", Message: message,
+		ObservedGeneration: build.Generation,
+	})
+	if r.Recorder != nil {
+		r.Recorder.Event(build, corev1.EventTypeWarning, "AdmissionRecoveryRequired", message)
+	}
+	return r.Status().Update(ctx, build)
+}
+
+func (r *KovaBuildReconciler) clearAdmissionRecovery(ctx context.Context, build *kovav1.KovaBuild) error {
+	if !apiMeta.RemoveStatusCondition(&build.Status.Conditions, admissionRecoveryCondition) {
+		return nil
+	}
+	return r.Status().Update(ctx, build)
+}
 
 func (r *KovaBuildReconciler) finish(ctx context.Context, build *kovav1.KovaBuild, phase string, reason string, message string) error {
 	now := metav1.Now()

@@ -300,6 +300,7 @@ The current per-requester queued-build check is a best-effort API backpressure s
 Concurrent HTTP requests, including requests handled by different replicas, can pass the check together; there is no global queued-build cap yet.
 Do not treat `maxQueuedJobsPerRequester` or a missing 429 response as a strict quota.
 The remaining design and failure cases are recorded in the [Service admission design](service-admission-design.md).
+If an earlier runner Pod Create has an unknown outcome, the build reports `recovery_required=true` while its capacity remains reserved; an operator must resolve the recorded attempt before that slot can be reused.
 
 ## Helm Configuration
 

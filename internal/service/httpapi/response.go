@@ -4,6 +4,8 @@ import (
 	kovav1 "github.com/cofy-x/kova/internal/apis/kova/v1alpha1"
 	"github.com/cofy-x/kova/internal/service/config"
 	apiv1 "github.com/cofy-x/kova/pkg/api/v1"
+
+	apiMeta "k8s.io/apimachinery/pkg/api/meta"
 )
 
 func buildJobFromCR(build *kovav1.KovaBuild, cfg config.Config) apiv1.BuildJob {
@@ -16,6 +18,7 @@ func buildJobFromCR(build *kovav1.KovaBuild, cfg config.Config) apiv1.BuildJob {
 		IdempotencyKey:        build.Spec.IdempotencyKey,
 		Requester:             build.Spec.Requester.Username,
 		CancellationRequested: build.Annotations[kovav1.CancellationRequestedAnnotation] != "",
+		RecoveryRequired:      apiMeta.IsStatusConditionTrue(build.Status.Conditions, "AdmissionRecoveryRequired"),
 		RequestedConcurrency:  requestedConcurrency(build),
 		AllocatedConcurrency:  build.Status.AllocatedConcurrency,
 	}

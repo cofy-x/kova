@@ -14,6 +14,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	apiMeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -80,16 +81,55 @@ func (r *KovaBuildReconciler) startBuild(ctx context.Context, build *kovav1.Kova
 	if err := ctrl.SetControllerReference(build, &pod, r.Scheme); err != nil {
 		return ctrl.Result{}, r.finish(ctx, build, kovav1.PhaseFailed, "RunnerCreateFailed", err.Error())
 	}
-	if err := r.Create(ctx, &pod); err != nil {
-		if !apierrors.IsAlreadyExists(err) {
-			return ctrl.Result{}, r.finish(ctx, build, kovav1.PhaseFailed, "RunnerCreateFailed", err.Error())
+	owned, err := r.getOwnedPod(ctx, build)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if owned != nil {
+		// A previous Create may have persisted before its response or the
+		// Starting status update was lost. The stamped nonce proves which
+		// attempt reached storage; no second Create is needed.
+		if observed := owned.Annotations[podCreateAttemptKey]; observed != "" {
+			if err := r.completePodCreate(ctx, build, observed); err != nil {
+				return ctrl.Result{}, err
+			}
 		}
-		owned, getErr := r.getOwnedPod(ctx, build)
-		if getErr != nil {
-			return ctrl.Result{}, getErr
+	} else {
+		attempt, err := r.beginPodCreate(ctx, build)
+		if err != nil {
+			var recovery *admissionRecoveryError
+			if errors.As(err, &recovery) {
+				if statusErr := r.markAdmissionRecovery(ctx, build, recovery.Pending); statusErr != nil {
+					return ctrl.Result{}, statusErr
+				}
+			}
+			return ctrl.Result{}, err
 		}
-		if !owned {
-			return ctrl.Result{}, fmt.Errorf("runner Pod %s/%s disappeared after AlreadyExists", build.Namespace, podName)
+		if pod.Annotations == nil {
+			pod.Annotations = map[string]string{}
+		}
+		pod.Annotations[podCreateAttemptKey] = attempt
+		if err := r.Create(ctx, &pod); err != nil {
+			if !apierrors.IsAlreadyExists(err) {
+				return ctrl.Result{}, r.finish(ctx, build, kovav1.PhaseFailed, "RunnerCreateOutcomeUnknown", err.Error())
+			}
+			owned, getErr := r.getOwnedPod(ctx, build)
+			if getErr != nil {
+				return ctrl.Result{}, getErr
+			}
+			if owned == nil {
+				return ctrl.Result{}, fmt.Errorf("runner Pod %s/%s disappeared after AlreadyExists", build.Namespace, podName)
+			}
+			if err := r.completePodCreate(ctx, build, attempt); err != nil {
+				return ctrl.Result{}, err
+			}
+			if observed := owned.Annotations[podCreateAttemptKey]; observed != "" {
+				if err := r.completePodCreate(ctx, build, observed); err != nil {
+					return ctrl.Result{}, err
+				}
+			}
+		} else if err := r.completePodCreate(ctx, build, attempt); err != nil {
+			return ctrl.Result{}, err
 		}
 	}
 	now := metav1.Now()
@@ -100,6 +140,7 @@ func (r *KovaBuildReconciler) startBuild(ctx context.Context, build *kovav1.Kova
 	build.Status.RunnerPodName = podName
 	build.Status.StartedAt = &now
 	build.Status.Message = ""
+	apiMeta.RemoveStatusCondition(&build.Status.Conditions, admissionRecoveryCondition)
 	setPhaseCondition(build, kovav1.PhaseStarting, "RunnerCreated", "runner Pod was created")
 	if err := r.Status().Update(ctx, build); err != nil {
 		return ctrl.Result{}, err
@@ -402,6 +443,15 @@ func (r *KovaBuildReconciler) reconcileTerminal(ctx context.Context, build *kova
 		return ctrl.Result{}, err
 	}
 	if err := r.releaseReservation(ctx, build); err != nil {
+		var recovery *admissionRecoveryError
+		if errors.As(err, &recovery) {
+			if statusErr := r.markAdmissionRecovery(ctx, build, recovery.Pending); statusErr != nil {
+				return ctrl.Result{}, statusErr
+			}
+		}
+		return ctrl.Result{}, err
+	}
+	if err := r.clearAdmissionRecovery(ctx, build); err != nil {
 		return ctrl.Result{}, err
 	}
 	if build.Status.FinishedAt == nil || r.Cfg.JobTTL <= 0 {
@@ -422,6 +472,12 @@ func (r *KovaBuildReconciler) reconcileDelete(ctx context.Context, build *kovav1
 		return ctrl.Result{}, err
 	}
 	if err := r.releaseReservation(ctx, build); err != nil {
+		var recovery *admissionRecoveryError
+		if errors.As(err, &recovery) {
+			if statusErr := r.markAdmissionRecovery(ctx, build, recovery.Pending); statusErr != nil {
+				return ctrl.Result{}, statusErr
+			}
+		}
 		return ctrl.Result{}, err
 	}
 	if controllerutil.RemoveFinalizer(build, cleanupFinalizer) {
@@ -433,9 +489,14 @@ func (r *KovaBuildReconciler) reconcileDelete(ctx context.Context, build *kovav1
 }
 
 func (r *KovaBuildReconciler) deleteRunnerAndConfirm(ctx context.Context, build *kovav1.KovaBuild) error {
-	owned, err := r.getOwnedPod(ctx, build)
-	if err != nil || !owned {
+	pod, err := r.getOwnedPod(ctx, build)
+	if err != nil || pod == nil {
 		return err
+	}
+	if observed := pod.Annotations[podCreateAttemptKey]; observed != "" {
+		if err := r.completePodCreate(ctx, build, observed); err != nil {
+			return err
+		}
 	}
 	if err := r.Kube.DeletePod(ctx, build.Namespace, buildPodName(build.Name)); err != nil {
 		return err
@@ -444,7 +505,7 @@ func (r *KovaBuildReconciler) deleteRunnerAndConfirm(ctx context.Context, build 
 	if err != nil {
 		return err
 	}
-	if stillPresent {
+	if stillPresent != nil {
 		return fmt.Errorf("runner Pod %s/%s still exists after deletion", build.Namespace, buildPodName(build.Name))
 	}
 	return nil

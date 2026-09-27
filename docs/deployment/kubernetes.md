@@ -236,7 +236,8 @@ busy or cooling endpoints, and refresh DNS as replicas change.
 Active grants now use a durable Kubernetes admission ledger before Pod creation.
 The ledger is adopted from existing build status and runner Pods on first use, and admission stops if a live runner or active build lacks a reservation.
 Do not delete `kova-service-admission` while the Service is running.
-Before rolling this version over a prior version, drain old controller instances and active runner Pods; a mixed-version rollout cannot preserve the ledger invariant.
+Before upgrading from a prior version, stop submissions, drain old active builds and runner Pods, stop old controller instances, apply the updated CRD, and start the new Service with a new runner namespace and fresh ledger.
+A mixed-version rollout cannot preserve the ledger invariant.
 The queued-build check is still best effort and has no global cap.
 See the [remaining admission work](../service-admission-design.md) before relying on these values as strict high-concurrency quotas.
 

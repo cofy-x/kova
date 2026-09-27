@@ -395,6 +395,8 @@ components:
           type: string
         cancellation_requested:
           type: boolean
+        recovery_required:
+          type: boolean
         requested_concurrency:
           type: integer
         allocated_concurrency:

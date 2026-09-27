@@ -130,7 +130,7 @@ type KovaBuildStatus struct {
 	Outputs []BuildOutput `json:"outputs,omitempty"`
 	// +listType=map
 	// +listMapKey=type
-	// +kubebuilder:validation:MaxItems=1
+	// +kubebuilder:validation:MaxItems=2
 	Conditions []metav1.Condition `json:"conditions,omitempty" patchStrategy:"merge" patchMergeKey:"type"`
 }
 

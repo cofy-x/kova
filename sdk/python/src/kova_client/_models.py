@@ -133,6 +133,7 @@ class BuildJob:
     source_uri: str | None = None
     idempotency_key: str | None = None
     cancellation_requested: bool = False
+    recovery_required: bool = False
     requested_concurrency: int | None = None
     allocated_concurrency: int | None = None
 
@@ -154,6 +155,7 @@ class BuildJob:
             source_uri=_optional_string(value, "source_uri"),
             idempotency_key=_optional_string(value, "idempotency_key"),
             cancellation_requested=_optional_bool(value, "cancellation_requested") or False,
+            recovery_required=_optional_bool(value, "recovery_required") or False,
             requested_concurrency=_optional_int(value, "requested_concurrency"),
             allocated_concurrency=_optional_int(value, "allocated_concurrency"),
         )
@@ -247,6 +249,7 @@ _BUILD_JOB_FIELDS = {
     "idempotency_key",
     "requester",
     "cancellation_requested",
+    "recovery_required",
     "requested_concurrency",
     "allocated_concurrency",
 }

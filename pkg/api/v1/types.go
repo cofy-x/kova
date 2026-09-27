@@ -93,6 +93,7 @@ type BuildJob struct {
 	IdempotencyKey        string           `json:"idempotency_key,omitempty"`
 	Requester             string           `json:"requester"`
 	CancellationRequested bool             `json:"cancellation_requested,omitempty"`
+	RecoveryRequired      bool             `json:"recovery_required,omitempty"`
 	RequestedConcurrency  int              `json:"requested_concurrency,omitempty"`
 	AllocatedConcurrency  int32            `json:"allocated_concurrency,omitempty"`
 }

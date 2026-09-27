@@ -12,6 +12,7 @@ import (
 	"github.com/cofy-x/kova/internal/service/config"
 
 	corev1 "k8s.io/api/core/v1"
+	apiMeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -31,15 +32,22 @@ func (c emptyCachedBuildList) List(ctx context.Context, list client.ObjectList, 
 
 type uncertainConfigMapUpdate struct {
 	client.Client
-	mu     sync.Mutex
-	failed bool
+	mu      sync.Mutex
+	failAt  int
+	updates int
+	failed  bool
 }
 
 func (c *uncertainConfigMapUpdate) Update(ctx context.Context, obj client.Object, opts ...client.UpdateOption) error {
 	if _, ok := obj.(*corev1.ConfigMap); ok {
 		c.mu.Lock()
 		defer c.mu.Unlock()
-		if !c.failed {
+		c.updates++
+		failAt := c.failAt
+		if failAt == 0 {
+			failAt = 1
+		}
+		if c.updates == failAt {
 			c.failed = true
 			if err := c.Client.Update(ctx, obj, opts...); err != nil {
 				return err
@@ -48,6 +56,86 @@ func (c *uncertainConfigMapUpdate) Update(ctx context.Context, obj client.Object
 		}
 	}
 	return c.Client.Update(ctx, obj, opts...)
+}
+
+func TestPodCreateFenceSurvivesLostLedgerResponse(t *testing.T) {
+	for _, failAt := range []int{2, 3} {
+		t.Run(fmt.Sprintf("update-%d", failAt), func(t *testing.T) {
+			scheme := testScheme(t)
+			build := queuedBuild("a", "alice", 1, 1)
+			base := crfake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&kovav1.KovaBuild{}).WithObjects(build).Build()
+			uncertain := &uncertainConfigMapUpdate{Client: base, failAt: failAt}
+			r := KovaBuildReconciler{Client: uncertain, APIReader: base, Scheme: scheme, Kube: &fakeKube{}, Cfg: admissionConfig()}
+			if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "jobs", Name: "a"}}); err != nil {
+				t.Fatal(err)
+			}
+			if !uncertain.failed {
+				t.Fatalf("did not inject lost response for ConfigMap Update %d", failAt)
+			}
+			var pod corev1.Pod
+			if err := base.Get(context.Background(), types.NamespacedName{Namespace: "jobs", Name: buildPodName("a")}, &pod); err != nil {
+				t.Fatal(err)
+			}
+			if pod.Annotations[podCreateAttemptKey] == "" {
+				t.Fatal("Pod lacks fenced create nonce")
+			}
+			_, state, err := r.readReservations(context.Background(), "jobs")
+			if err != nil {
+				t.Fatal(err)
+			}
+			entry := state.Active[reservationKey(build)]
+			if len(entry.InFlight) != 0 {
+				t.Fatalf("resolved Pod Create retained nonce: %#v", entry.InFlight)
+			}
+		})
+	}
+}
+
+func TestRestartedControllerDoesNotRetryUnresolvedPodCreate(t *testing.T) {
+	scheme := testScheme(t)
+	build := queuedBuild("a", "alice", 1, 1)
+	base := crfake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&kovav1.KovaBuild{}).WithObjects(build).Build()
+	r := KovaBuildReconciler{Client: base, APIReader: base, Scheme: scheme, Kube: &fakeKube{}, Cfg: admissionConfig()}
+	if decision, err := r.admission(context.Background(), build); err != nil || !decision.Admitted {
+		t.Fatalf("initial admission = %#v, %v", decision, err)
+	}
+	first, err := r.beginPodCreate(context.Background(), build)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Simulate process loss before the result of its Pod Create is known.
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "jobs", Name: "a"}}); err == nil {
+		t.Fatal("replacement leader retried an unresolved Pod Create")
+	}
+	_, state, err := r.readReservations(context.Background(), "jobs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry := state.Active[reservationKey(build)]
+	if len(entry.InFlight) != 1 || entry.InFlight[0] != first {
+		t.Fatalf("replacement leader changed unresolved attempts: %#v", entry.InFlight)
+	}
+	var current kovav1.KovaBuild
+	if err := base.Get(context.Background(), types.NamespacedName{Namespace: "jobs", Name: "a"}, &current); err != nil {
+		t.Fatal(err)
+	}
+	if !apiMeta.IsStatusConditionTrue(current.Status.Conditions, admissionRecoveryCondition) {
+		t.Fatal("unresolved Pod Create was not surfaced to the API")
+	}
+	late := testRunnerPod(build)
+	late.Annotations = map[string]string{podCreateAttemptKey: first}
+	if err := base.Create(context.Background(), late); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "jobs", Name: "a"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := base.Get(context.Background(), types.NamespacedName{Namespace: "jobs", Name: "a"}, &current); err != nil {
+		t.Fatal(err)
+	}
+	if current.Status.Phase != kovav1.PhaseStarting || apiMeta.IsStatusConditionTrue(current.Status.Conditions, admissionRecoveryCondition) {
+		t.Fatalf("persisted Pod did not resolve recovery: %#v", current.Status)
+	}
 }
 
 type uncertainPodCreate struct {
@@ -340,5 +428,61 @@ func TestFailedPodCleanupRetainsReservation(t *testing.T) {
 	}
 	if _, state, err := r.readReservations(context.Background(), "jobs"); err != nil || len(state.Active) != 0 {
 		t.Fatalf("ledger retained after confirmed cleanup: %#v, err=%v", state, err)
+	}
+}
+
+func TestLateOldLeaderPodCreateCannotEscapeReservation(t *testing.T) {
+	scheme := testScheme(t)
+	a := queuedBuild("a", "alice", 1, 1)
+	b := queuedBuild("b", "bob", 2, 1)
+	base := crfake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&kovav1.KovaBuild{}).WithObjects(a, b).Build()
+	cfg := admissionConfig()
+	cfg.MaxActiveJobs, cfg.WorkerSlots = 1, 1
+	oldLeader := KovaBuildReconciler{Client: base, APIReader: base, Scheme: scheme, Kube: &fakeKube{}, Cfg: cfg}
+	newLeader := KovaBuildReconciler{Client: base, APIReader: base, Scheme: scheme, Kube: &fakeKube{podClient: base}, Cfg: cfg}
+	if decision, err := oldLeader.admission(context.Background(), a); err != nil || !decision.Admitted {
+		t.Fatalf("old leader reservation = %#v, err=%v", decision, err)
+	}
+	attempt, err := oldLeader.beginPodCreate(context.Background(), a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The replacement sees a terminal CR before the old leader's Pod CREATE
+	// reaches the API server. No Pod yet is not proof that the old call ended.
+	a.Status.Phase = kovav1.PhaseFailed
+	if err := base.Status().Update(context.Background(), a); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := newLeader.reconcileTerminal(context.Background(), a); err == nil {
+		t.Fatal("replacement released an in-flight Pod create")
+	}
+	var observed kovav1.KovaBuild
+	if err := base.Get(context.Background(), types.NamespacedName{Namespace: "jobs", Name: "a"}, &observed); err != nil {
+		t.Fatal(err)
+	}
+	if !apiMeta.IsStatusConditionTrue(observed.Status.Conditions, admissionRecoveryCondition) {
+		t.Fatalf("unknown Pod create was not surfaced in status: %#v", observed.Status.Conditions)
+	}
+	if decision, err := newLeader.admission(context.Background(), b); err != nil || decision.Admitted {
+		t.Fatalf("new build admitted during in-flight Create: %#v, err=%v", decision, err)
+	}
+	latePod := testRunnerPod(a)
+	latePod.Annotations = map[string]string{podCreateAttemptKey: attempt}
+	if err := base.Create(context.Background(), latePod); err != nil {
+		t.Fatal(err)
+	}
+	// Observing the exact attempt nonce proves that call committed; cleanup
+	// can now remove its marker, delete its Pod, and release the capacity.
+	if _, err := newLeader.reconcileTerminal(context.Background(), &observed); err != nil {
+		t.Fatal(err)
+	}
+	if err := base.Get(context.Background(), types.NamespacedName{Namespace: "jobs", Name: "a"}, &observed); err != nil {
+		t.Fatal(err)
+	}
+	if apiMeta.IsStatusConditionTrue(observed.Status.Conditions, admissionRecoveryCondition) {
+		t.Fatalf("resolved Pod create still reports recovery required: %#v", observed.Status.Conditions)
+	}
+	if decision, err := newLeader.admission(context.Background(), b); err != nil || !decision.Admitted {
+		t.Fatalf("new build did not receive released capacity: %#v, err=%v", decision, err)
 	}
 }
