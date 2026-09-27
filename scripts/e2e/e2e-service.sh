@@ -380,6 +380,9 @@ printf '%s' "${results}" | jq -e --arg image "${SERVICE_TARGET}" --arg digest "$
      ($output.immutable_ref | endswith("@" + $output.manifest_digest)))) and
    (.outputs | any(.format == "oci" and .image == $image)) and
    (.outputs | any(.format == "nydus" and .image == ($image + "_nydus_v3")))' >/dev/null
+printf '%s' "${results}" | jq -r \
+  '"Service E2E: negative contract fixture failed as expected; positive build succeeded; source=" + .source_digest +
+   "; outputs=" + ([.outputs[] | .format + "@" + .manifest_digest] | join(","))'
 kubectl --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" -n "${SERVICE_RUNNER_NAMESPACE}" get kovabuild "${job_id}" \
   -o jsonpath='{.status.outputs[0].manifestDigest}' | grep -E '^sha256:[a-f0-9]{64}$' >/dev/null
 
