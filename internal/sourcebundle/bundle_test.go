@@ -79,6 +79,10 @@ func TestPushUsesImmutableSnapshotWhenOriginalChanges(t *testing.T) {
 	if mutateErr != nil {
 		t.Fatal(mutateErr)
 	}
+	changed, err := os.ReadFile(archive)
+	if err != nil || string(changed) != "changed during push" {
+		t.Fatalf("test did not replace the original archive during push: %q, %v", changed, err)
+	}
 	wantDigest := sha256.Sum256(original)
 	if ref.Digest != fmt.Sprintf("sha256:%x", wantDigest) {
 		t.Fatalf("pushed digest = %s, want original archive digest", ref.Digest)
