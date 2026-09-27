@@ -16,7 +16,7 @@ release=${RELEASE_NAME:-kova}
 repository=${VERIFICATION_FAULT_REPOSITORY:-}
 tag=${VERIFICATION_FAULT_TAG:-dev}
 ack=${VERIFICATION_FAULT_ACK:-}
-proxy_image=${VERIFICATION_FAULT_PROXY_IMAGE:-python:3.12-alpine}
+proxy_image=${VERIFICATION_FAULT_PROXY_IMAGE:-python@sha256:4c47124a8391cb7a9f571164147d154777cf012a4ece5f86097130d7a4478111}
 evidence_root=${VERIFICATION_FAULT_EVIDENCE_ROOT:-${root}/.work/verification-fault}
 proxy_name=registry-verification-fault
 proxy_host=${proxy_name}.${namespace}.svc.cluster.local:5000
@@ -84,8 +84,8 @@ run_id=$(date -u +%Y%m%dt%H%M%sz)-$(openssl rand -hex 4)
 first_id="verification-503-${run_id}"
 second_id="verification-timeout-${run_id}"
 target="${proxy_host}/${repository}:${tag}"
-printf 'cluster=%s\nnamespace=%s\nrepository=%s\ntag=%s\ndigest=%s\nproxy=%s\nfirst_id=%s\nsecond_id=%s\n' \
-  "${cluster}" "${namespace}" "${repository}" "${tag}" "${digest}" "${proxy_host}" "${first_id}" "${second_id}" >"${work_dir}/identities.txt"
+printf 'cluster=%s\nnamespace=%s\nrepository=%s\ntag=%s\ndigest=%s\nproxy=%s\nproxy_image=%s\nfirst_id=%s\nsecond_id=%s\n' \
+  "${cluster}" "${namespace}" "${repository}" "${tag}" "${digest}" "${proxy_host}" "${proxy_image}" "${first_id}" "${second_id}" >"${work_dir}/identities.txt"
 success=false
 proxy_forward=
 snapshot() {
@@ -97,6 +97,8 @@ snapshot() {
   kctl -n "${namespace}" get configmap kova-service-admission -o json >"${work_dir}/${stage}-active.json" 2>"${work_dir}/${stage}-active.err" || true
   kctl -n "${namespace}" get configmap kova-service-queue-admission -o json >"${work_dir}/${stage}-queue.json" 2>"${work_dir}/${stage}-queue.err" || true
   kctl -n "${namespace}" get events --field-selector "involvedObject.kind=KovaBuild" -o json >"${work_dir}/${stage}-events.json" 2>"${work_dir}/${stage}-events.err" || true
+  kctl -n "${namespace}" get deployment "${proxy_name}" -o json >"${work_dir}/${stage}-proxy-deployment.json" 2>"${work_dir}/${stage}-proxy-deployment.err" || true
+  kctl -n "${namespace}" get pods -l kova.cofy.dev/e2e=verification-fault-proxy -o json >"${work_dir}/${stage}-proxy-pods.json" 2>"${work_dir}/${stage}-proxy-pods.err" || true
   kctl -n "${namespace}" logs "deployment/${proxy_name}" --tail=200 >"${work_dir}/${stage}-proxy.log" 2>"${work_dir}/${stage}-proxy.err" || true
 }
 finish() {
@@ -236,13 +238,38 @@ set_mode healthy
 wait_succeeded "${second_id}"
 snapshot after-timeout-recovery
 
-jq -e --arg first "${first_id}" --arg second "${second_id}" '[.items[] | select(.metadata.name == $first or .metadata.name == $second)] | length == 2' <<<"$(kctl -n "${namespace}" get kovabuilds -o json)" >/dev/null || die "exact test CR identities changed before cleanup"
-kctl -n "${namespace}" delete kovabuild "${first_id}" "${second_id}" --wait=true --timeout=120s >"${work_dir}/exact-cr-delete.txt"
+for id in "${first_id}" "${second_id}"; do
+  # A short JobTTL may have already deleted the first successful build while
+  # the second fault was running. Its saved terminal receipt is authoritative;
+  # an API error is not equivalent to NotFound and must stop cleanup.
+  receipt="${work_dir}/${id}-succeeded.json"
+  jq -e --arg name "${id}" --arg digest "${digest}" \
+    '.metadata.name == $name and .status.phase == "Succeeded" and .status.outputs[0].manifestDigest == $digest' \
+    "${receipt}" >/dev/null || die "saved terminal receipt is invalid for ${id}"
+  current=$(kctl -n "${namespace}" get kovabuild "${id}" --ignore-not-found -o json)
+  if [[ -z ${current} ]]; then
+    printf '%s: already absent after successful receipt (JobTTL)\n' "${id}" >>"${work_dir}/exact-cr-delete.txt"
+    continue
+  fi
+  jq -e --arg uid "$(jq -r .metadata.uid "${receipt}")" --arg digest "${digest}" \
+    '.metadata.uid == $uid and .status.phase == "Succeeded" and .status.outputs[0].manifestDigest == $digest' \
+    <<<"${current}" >/dev/null || die "current CR differs from saved terminal receipt for ${id}"
+  kctl -n "${namespace}" delete kovabuild "${id}" --wait=true --timeout=120s >>"${work_dir}/exact-cr-delete.txt"
+done
 jq -e '.items | length == 0' <<<"$(kctl get kovabuilds --all-namespaces -o json)" >/dev/null || die "a KovaBuild remains after exact CR cleanup"
 jq -e '.items | length == 0' <<<"$(kctl get pods --all-namespaces -l app.kubernetes.io/name=kova-runner -o json)" >/dev/null || die "runner Pod appeared in synthetic verification test"
 jq -e '.data["reservations.json"] | fromjson | .active == {}' <<<"$(kctl -n "${namespace}" get configmap kova-service-admission -o json)" >/dev/null || die "active ledger is not empty after test"
 jq -e '.data["queue.json"] | fromjson | .intents == {}' <<<"$(kctl -n "${namespace}" get configmap kova-service-queue-admission -o json)" >/dev/null || die "queue ledger is not empty after test"
 snapshot after-cr-cleanup
+# Restore the chart's original single registry entry before removing the
+# proxy. A dangling proxy host in a Ready Service is not a healthy handoff.
+helm upgrade "${release}" "${root}/charts/kova" --kubeconfig "${kubeconfig}" -n "${namespace}" --reuse-values --wait --timeout=180s \
+  --set-json 'serviceDaemon.registryPlainHTTP=["kind-registry:5000"]' >"${work_dir}/helm-restore.txt"
+kctl -n "${namespace}" rollout status "deployment/${release}-service" --timeout=180s >"${work_dir}/service-restore-rollout.txt"
+helm get values "${release}" --kubeconfig "${kubeconfig}" -n "${namespace}" -o json >"${work_dir}/helm-values-restored.json"
+jq -e '.serviceDaemon.registryPlainHTTP == ["kind-registry:5000"]' "${work_dir}/helm-values-restored.json" >/dev/null || die "Service registry list still contains test proxy"
+jq -e '.spec.replicas == 2 and .status.readyReplicas == 2' <<<"$(kctl -n "${namespace}" get deployment "${release}-service" -o json)" >/dev/null || die "Service did not return to 2/2 Ready"
+snapshot after-helm-restore
 kctl -n "${namespace}" delete service "${proxy_name}" --wait=true --timeout=60s >"${work_dir}/proxy-service-delete.txt"
 kctl -n "${namespace}" delete deployment "${proxy_name}" --wait=true --timeout=60s >"${work_dir}/proxy-deployment-delete.txt"
 kctl -n "${namespace}" delete configmap "${proxy_name}" --wait=true --timeout=60s >"${work_dir}/proxy-configmap-delete.txt"
