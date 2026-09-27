@@ -79,6 +79,58 @@ def pending_build(*, failed: bool, prefix: str) -> dict:
 
 
 class ReceiptSafetyTest(unittest.TestCase):
+    def test_wait_pending_tolerates_inflight_verification_status(self) -> None:
+        transient = pending_build(failed=True, prefix="a")
+        transient["status"].pop("verificationLastError")
+        settled = pending_build(failed=True, prefix="a")
+        for build in (transient, settled):
+            build["metadata"]["uid"] = "build-uid"
+        identity = (
+            transient["metadata"]["name"],
+            "build-uid",
+            "source-uri",
+            "source-digest",
+            [FIRST, SECOND],
+            "idempotency-key",
+        )
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            patch.object(acceptance, "exact_build", side_effect=[transient, settled]),
+            patch.object(acceptance, "guard_running"),
+            patch.object(acceptance.time, "sleep"),
+        ):
+            build, digests = acceptance.wait_pending(
+                Path(temporary), "a", {}, identity, FIRST, SECOND, {}
+            )
+        self.assertEqual(build, settled)
+        self.assertEqual(len(digests), 2)
+
+    def test_wait_pending_rejects_stale_incomplete_verification_status(self) -> None:
+        stale = pending_build(failed=True, prefix="a")
+        stale["metadata"]["uid"] = "build-uid"
+        stale["status"].pop("verificationLastError")
+        identity = (
+            stale["metadata"]["name"],
+            "build-uid",
+            "source-uri",
+            "source-digest",
+            [FIRST, SECOND],
+            "idempotency-key",
+        )
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            patch.object(acceptance, "exact_build", return_value=stale),
+            patch.object(acceptance, "guard_running"),
+            patch.object(acceptance.time, "sleep"),
+            patch.object(acceptance.time, "monotonic", side_effect=[0, 1, 2, 3, 4, 5, 33, 34]),
+        ):
+            with self.assertRaisesRegex(
+                acceptance.base.AcceptanceError, "not durably pending"
+            ):
+                acceptance.wait_pending(
+                    Path(temporary), "a", {}, identity, FIRST, SECOND, {}
+                )
+
     def test_first_and_second_pending_receipts_are_distinct(self) -> None:
         first = pending_build(failed=True, prefix="a")
         second = pending_build(failed=False, prefix="c")

@@ -47,6 +47,7 @@ PROXY_HOST = f"{PROXY_NAME}.{NAMESPACE}.svc.cluster.local:5000"
 PROXY_IMAGE = "python@sha256:4c47124a8391cb7a9f571164147d154777cf012a4ece5f86097130d7a4478111"
 IMAGE_REPOSITORY = "localhost:5004/kova"
 RUN_SECONDS = 20 * 60
+PENDING_SETTLE_SECONDS = 30
 SHA = re.compile(r"sha256:[0-9a-f]{64}")
 
 
@@ -957,6 +958,7 @@ def wait_pending(
     job_id, uid, source_uri, source_digest, targets, key = identity
     deadline = time.monotonic() + RUN_SECONDS
     next_guard = 0.0
+    pending_settle_deadline: float | None = None
     while time.monotonic() < deadline:
         build = exact_build(job_id, uid, source_uri, source_digest, targets, key)
         save(run_dir, f"{label}-latest-build.json", base.project_build(build))
@@ -995,9 +997,14 @@ def wait_pending(
             try:
                 digests = pending_digests(build, first, second)
             except base.AcceptanceError:
-                # Collection may not yet have committed both output receipts.
+                # The controller first persists verificationAttempts, then its
+                # registry request and error. Do not mistake that short-lived
+                # intermediate status for a completed verification attempt.
                 if build.get("status", {}).get("verificationAttempts", 0) >= 1:
-                    raise
+                    if pending_settle_deadline is None:
+                        pending_settle_deadline = time.monotonic() + PENDING_SETTLE_SECONDS
+                    if time.monotonic() >= pending_settle_deadline:
+                        raise
             else:
                 save(run_dir, f"{label}-pending.json", base.project_build(build))
                 return build, digests
