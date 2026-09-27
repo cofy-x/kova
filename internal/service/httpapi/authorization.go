@@ -60,10 +60,13 @@ func (s *Server) authorize(ctx context.Context, principal serviceauth.Principal,
 }
 
 func (s *Server) authorizeBuild(ctx context.Context, principal serviceauth.Principal, verb string, build *kovav1.KovaBuild) error {
-	if err := s.authorize(ctx, principal, verb, build.Name); err == nil {
+	if principal.Username != "" && build.Spec.Requester.Username == principal.Username {
+		// Ownership already grants this operation. Calling SubjectAccessReview
+		// first would add an API-server request for every owner poll without
+		// changing the authorization decision, including when SAR is unavailable.
 		return nil
 	}
-	if principal.Username != "" && build.Spec.Requester.Username == principal.Username {
+	if err := s.authorize(ctx, principal, verb, build.Name); err == nil {
 		return nil
 	}
 	return fmt.Errorf("access denied")
