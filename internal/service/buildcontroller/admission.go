@@ -28,6 +28,9 @@ func (r *KovaBuildReconciler) admission(ctx context.Context, build *kovav1.KovaB
 		if err != nil {
 			return admissionDecision{}, err
 		}
+		if err := r.ensureLiveAdmissionBuild(ctx, build); err != nil {
+			return admissionDecision{}, err
+		}
 		key := reservationKey(build)
 		var builds kovav1.KovaBuildList
 		if err := r.reader().List(ctx, &builds, client.InNamespace(build.Namespace)); err != nil {
@@ -39,6 +42,9 @@ func (r *KovaBuildReconciler) admission(ctx context.Context, build *kovav1.KovaB
 		if existing, ok := reservations.Active[key]; ok {
 			if existing.BuildName != build.Name || existing.Requester != requesterKey(build) {
 				return admissionDecision{}, fmt.Errorf("admission reservation for %s/%s does not match KovaBuild identity", build.Namespace, build.Name)
+			}
+			if existing.Closing {
+				return admissionDecision{}, fmt.Errorf("%w: %s/%s grant is closing", errAdmissionClosed, build.Namespace, build.Name)
 			}
 			return admissionDecision{Admitted: true, Allocation: existing.Slots}, nil
 		}

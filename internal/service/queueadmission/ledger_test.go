@@ -198,6 +198,21 @@ func TestInitializationRereadsLedgerWhenAnotherReplicaCreatedBuild(t *testing.T)
 	}
 }
 
+func TestEagerInitializationAllowsDirectBuildBeforeFirstHTTPSubmission(t *testing.T) {
+	store, base := testStore(t, 2, 2)
+	if err := store.EnsureInitialized(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	// A direct/admin CR is outside HTTP queue limits and can arrive after
+	// Service readiness but before its first HTTP submission.
+	if err := base.Create(context.Background(), testBuild("direct", "operator")); err != nil {
+		t.Fatal(err)
+	}
+	if _, fresh, err := store.Reserve(context.Background(), testBuild("http", "alice")); err != nil || !fresh {
+		t.Fatalf("direct CR after startup blocked HTTP admission: fresh=%t err=%v", fresh, err)
+	}
+}
+
 func TestQueueLedgerRejectsCorruptRequesterCount(t *testing.T) {
 	store, base := testStore(t, 3, 1)
 	if _, fresh, err := store.Reserve(context.Background(), testBuild("one", "alice")); err != nil || !fresh {

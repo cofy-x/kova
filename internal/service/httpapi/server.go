@@ -65,6 +65,9 @@ func (s *Server) queueStore() queueadmission.Store {
 }
 
 func (s *Server) Start(ctx context.Context) error {
+	if err := s.queueStore().EnsureInitialized(ctx); err != nil {
+		return err
+	}
 	e := s.routes()
 	httpSrv := &http.Server{Addr: s.cfg.Listen, Handler: e}
 	go func() {

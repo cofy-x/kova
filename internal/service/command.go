@@ -13,6 +13,7 @@ import (
 	kovav1 "github.com/cofy-x/kova/internal/apis/kova/v1alpha1"
 	"github.com/cofy-x/kova/internal/buildcontract"
 	"github.com/cofy-x/kova/internal/kube"
+	"github.com/cofy-x/kova/internal/logging"
 	"github.com/cofy-x/kova/internal/runner"
 	serviceauth "github.com/cofy-x/kova/internal/service/auth"
 	"github.com/cofy-x/kova/internal/service/buildcontroller"
@@ -184,6 +185,7 @@ func CLICommand() *cli.Command {
 			}
 			go func() {
 				if err := httpapi.NewServer(cfg, kubeClient, mgr.GetClient(), mgr.GetAPIReader(), authenticator, authorizer).Start(ctx); err != nil {
+					logging.Errorf("Kova Service HTTP server stopped: %v", err)
 					stop()
 				}
 			}()

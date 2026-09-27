@@ -41,6 +41,9 @@ func (r *KovaBuildReconciler) startBuild(ctx context.Context, build *kovav1.Kova
 	build = &current
 	decision, err := r.admission(ctx, build)
 	if err != nil {
+		if errors.Is(err, errAdmissionClosed) || apierrors.IsNotFound(err) {
+			return ctrl.Result{Requeue: true}, nil
+		}
 		if errors.Is(err, queueadmission.ErrDrift) {
 			if statusErr := r.markAdmissionRecoveryReason(ctx, build, "QueueIntentDrift", "queue intent does not match the build; active admission is blocked"); statusErr != nil {
 				return ctrl.Result{}, statusErr
@@ -115,6 +118,9 @@ func (r *KovaBuildReconciler) startBuild(ctx context.Context, build *kovav1.Kova
 	} else {
 		attempt, err := r.beginPodCreate(ctx, build)
 		if err != nil {
+			if errors.Is(err, errAdmissionClosed) || apierrors.IsNotFound(err) {
+				return ctrl.Result{Requeue: true}, nil
+			}
 			var recovery *admissionRecoveryError
 			if errors.As(err, &recovery) {
 				if statusErr := r.markAdmissionRecovery(ctx, build, recovery.Pending); statusErr != nil {
@@ -129,6 +135,12 @@ func (r *KovaBuildReconciler) startBuild(ctx context.Context, build *kovav1.Kova
 		pod.Annotations[podCreateAttemptKey] = attempt
 		if err := r.Create(ctx, &pod); err != nil {
 			if !apierrors.IsAlreadyExists(err) {
+				if definitivePodCreateRejection(err) {
+					if clearErr := r.completePodCreate(ctx, build, attempt); clearErr != nil {
+						return ctrl.Result{}, clearErr
+					}
+					return ctrl.Result{}, r.finish(ctx, build, kovav1.PhaseFailed, "RunnerCreateRejected", err.Error())
+				}
 				return ctrl.Result{}, r.finish(ctx, build, kovav1.PhaseFailed, "RunnerCreateOutcomeUnknown", err.Error())
 			}
 			owned, getErr := r.getOwnedPod(ctx, build)
@@ -166,7 +178,14 @@ func (r *KovaBuildReconciler) startBuild(ctx context.Context, build *kovav1.Kova
 	return ctrl.Result{RequeueAfter: time.Second}, nil
 }
 
+func definitivePodCreateRejection(err error) bool {
+	return apierrors.IsForbidden(err) || apierrors.IsInvalid(err) || apierrors.IsBadRequest(err) || apierrors.IsUnauthorized(err)
+}
+
 func (r *KovaBuildReconciler) cancelBuild(ctx context.Context, build *kovav1.KovaBuild) (ctrl.Result, error) {
+	if err := r.fenceReservation(ctx, build); err != nil {
+		return ctrl.Result{}, err
+	}
 	if build.Status.Phase == kovav1.PhaseRunning && build.Status.RunnerPodName != "" {
 		// Cancellation remains effective when the daemon is already unavailable;
 		// deleting the runner Pod is the authoritative stop operation.
@@ -451,6 +470,9 @@ func (r *KovaBuildReconciler) expireActiveBuild(ctx context.Context, build *kova
 }
 
 func (r *KovaBuildReconciler) reconcileTerminal(ctx context.Context, build *kovav1.KovaBuild) (ctrl.Result, error) {
+	if err := r.fenceReservation(ctx, build); err != nil {
+		return ctrl.Result{}, err
+	}
 	// The terminal status and verified outputs live on the KovaBuild until JobTTL.
 	// Keeping its runner Pod for the same duration would consume scheduler Pod
 	// capacity long after the build has released its active worker slot.
@@ -491,6 +513,9 @@ func (r *KovaBuildReconciler) reconcileTerminal(ctx context.Context, build *kova
 }
 
 func (r *KovaBuildReconciler) reconcileDelete(ctx context.Context, build *kovav1.KovaBuild) (ctrl.Result, error) {
+	if err := r.fenceReservation(ctx, build); err != nil {
+		return ctrl.Result{}, err
+	}
 	if err := r.deleteRunnerAndConfirm(ctx, build); err != nil {
 		return ctrl.Result{}, err
 	}

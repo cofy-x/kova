@@ -178,6 +178,38 @@ func waitCAS(ctx context.Context, attempt int) error {
 	}
 }
 
+// EnsureInitialized establishes the queue ledger before the HTTP listener is
+// made ready. Direct/admin CRs created after startup must not be mistaken for
+// legacy state merely because no HTTP submission has happened yet.
+func (s Store) EnsureInitialized(ctx context.Context) error {
+	for retry := 0; retry < maxCASAttempts; retry++ {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if _, _, err := s.read(ctx); err == nil {
+			return nil
+		} else if !apierrors.IsNotFound(err) {
+			return err
+		}
+		if err := s.initialize(ctx); err != nil {
+			if apierrors.IsAlreadyExists(err) || apierrors.IsTooManyRequests(err) {
+				if err := waitCAS(ctx, retry); err != nil {
+					return err
+				}
+				continue
+			}
+			// A missing Create response may hide a committed ledger. Only a
+			// validating direct read permits the listener to start.
+			if _, _, readErr := s.read(ctx); readErr == nil {
+				return nil
+			}
+			return err
+		}
+		return nil
+	}
+	return ErrBusy
+}
+
 // Reserve returns fresh=true only to the single caller authorized to issue
 // Create. Every duplicate, including a same-key retry after process loss,
 // must observe the CR or report a pending intent, never issue another Create.

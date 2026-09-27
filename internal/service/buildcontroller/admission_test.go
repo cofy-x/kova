@@ -13,8 +13,10 @@ import (
 	"github.com/cofy-x/kova/internal/service/queueadmission"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apiMeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -37,6 +39,204 @@ type uncertainConfigMapUpdate struct {
 	failAt  int
 	updates int
 	failed  bool
+}
+
+type pausedActiveGrantUpdate struct {
+	client.Client
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+type pausedPodMissReader struct {
+	client.Reader
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (r *pausedPodMissReader) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+	err := r.Reader.Get(ctx, key, obj, opts...)
+	if _, ok := obj.(*corev1.Pod); ok && apierrors.IsNotFound(err) {
+		paused := false
+		r.once.Do(func() {
+			paused = true
+			close(r.entered)
+		})
+		if paused {
+			select {
+			case <-r.release:
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+	}
+	return err
+}
+
+func (c *pausedActiveGrantUpdate) Update(ctx context.Context, obj client.Object, opts ...client.UpdateOption) error {
+	if cm, ok := obj.(*corev1.ConfigMap); ok && cm.Name == reservationConfigMap {
+		paused := false
+		c.once.Do(func() {
+			paused = true
+			close(c.entered)
+		})
+		if paused {
+			select {
+			case <-c.release:
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+	}
+	return c.Client.Update(ctx, obj, opts...)
+}
+
+func TestCleanupFenceDefeatsPausedAdmissionCAS(t *testing.T) {
+	for _, mode := range []string{"delete", "terminal", "cancel"} {
+		t.Run(mode, func(t *testing.T) {
+			ctx := context.Background()
+			scheme := testScheme(t)
+			build := queuedBuild("a", "alice", 1, 1)
+			base := crfake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&kovav1.KovaBuild{}).WithObjects(build).Build()
+			cfg := admissionConfig()
+			newLeader := KovaBuildReconciler{Client: base, APIReader: base, Scheme: scheme, Kube: &fakeKube{}, Cfg: cfg}
+			if _, _, err := newLeader.readReservations(ctx, "jobs"); err != nil {
+				t.Fatal(err)
+			}
+			paused := &pausedActiveGrantUpdate{Client: base, entered: make(chan struct{}), release: make(chan struct{})}
+			oldLeader := KovaBuildReconciler{Client: paused, APIReader: base, Scheme: scheme, Kube: &fakeKube{}, Cfg: cfg}
+			request := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "jobs", Name: "a"}}
+			oldResult := make(chan error, 1)
+			go func() {
+				_, err := oldLeader.Reconcile(ctx, request)
+				oldResult <- err
+			}()
+			select {
+			case <-paused.entered:
+			case err := <-oldResult:
+				t.Fatalf("old reconcile exited before grant CAS: %v", err)
+			case <-time.After(5 * time.Second):
+				t.Fatal("old admission did not reach grant CAS")
+			}
+			var current kovav1.KovaBuild
+			if err := base.Get(ctx, client.ObjectKey{Namespace: "jobs", Name: "a"}, &current); err != nil {
+				t.Fatal(err)
+			}
+			switch mode {
+			case "delete":
+				if err := base.Delete(ctx, &current); err != nil {
+					t.Fatal(err)
+				}
+			case "terminal":
+				current.Status.Phase = kovav1.PhaseFailed
+				if err := base.Status().Update(ctx, &current); err != nil {
+					t.Fatal(err)
+				}
+			case "cancel":
+				if current.Annotations == nil {
+					current.Annotations = map[string]string{}
+				}
+				current.Annotations[kovav1.CancellationRequestedAnnotation] = time.Now().Format(time.RFC3339Nano)
+				if err := base.Update(ctx, &current); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := newLeader.Reconcile(ctx, request); err != nil {
+				t.Fatal(err)
+			}
+			close(paused.release)
+			select {
+			case err := <-oldResult:
+				if err != nil {
+					t.Fatal(err)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("old reconcile did not finish after fence")
+			}
+			_, state, err := newLeader.readReservations(ctx, "jobs")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if state.Fence == 0 || len(state.Active) != 0 {
+				t.Fatalf("cleanup did not fence stale grant: fence=%d active=%#v", state.Fence, state.Active)
+			}
+			var pods corev1.PodList
+			if err := base.List(ctx, &pods, client.InNamespace("jobs")); err != nil || len(pods.Items) != 0 {
+				t.Fatalf("old reconcile created orphan Pod: %d err=%v", len(pods.Items), err)
+			}
+		})
+	}
+}
+
+func TestCleanupRechecksPodAfterEarlierInFlightCreateCompletes(t *testing.T) {
+	ctx := context.Background()
+	scheme := testScheme(t)
+	build := queuedBuild("a", "alice", 1, 1)
+	base := crfake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&kovav1.KovaBuild{}).WithObjects(build).Build()
+	oldLeader := KovaBuildReconciler{Client: base, APIReader: base, Scheme: scheme, Kube: &fakeKube{podClient: base}, Cfg: admissionConfig()}
+	if decision, err := oldLeader.admission(ctx, build); err != nil || !decision.Admitted {
+		t.Fatalf("old grant=%#v err=%v", decision, err)
+	}
+	attempt, err := oldLeader.beginPodCreate(ctx, build)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var terminal kovav1.KovaBuild
+	if err := base.Get(ctx, client.ObjectKey{Namespace: "jobs", Name: "a"}, &terminal); err != nil {
+		t.Fatal(err)
+	}
+	terminal.Status.Phase = kovav1.PhaseFailed
+	if err := base.Status().Update(ctx, &terminal); err != nil {
+		t.Fatal(err)
+	}
+	reader := &pausedPodMissReader{Reader: base, entered: make(chan struct{}), release: make(chan struct{})}
+	newLeader := KovaBuildReconciler{Client: base, APIReader: reader, Scheme: scheme, Kube: &fakeKube{podClient: base}, Cfg: admissionConfig()}
+	request := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "jobs", Name: "a"}}
+	cleanupResult := make(chan error, 1)
+	go func() {
+		_, err := newLeader.Reconcile(ctx, request)
+		cleanupResult <- err
+	}()
+	select {
+	case <-reader.entered:
+	case err := <-cleanupResult:
+		t.Fatalf("cleanup did not reach absent Pod read: %v", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("cleanup did not reach absent Pod read")
+	}
+	_, state, err := newLeader.readReservations(ctx, "jobs")
+	if err != nil || !state.Active[reservationKey(build)].Closing {
+		t.Fatalf("cleanup did not close grant before Pod read: %#v err=%v", state.Active, err)
+	}
+	pod := testRunnerPod(build)
+	pod.Annotations = map[string]string{podCreateAttemptKey: attempt}
+	if err := base.Create(ctx, pod); err != nil {
+		t.Fatal(err)
+	}
+	if err := oldLeader.completePodCreate(ctx, build, attempt); err != nil {
+		t.Fatal(err)
+	}
+	close(reader.release)
+	select {
+	case err := <-cleanupResult:
+		if err == nil {
+			t.Fatal("cleanup released active grant after stale absent-Pod read")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("cleanup did not finish after Pod appeared")
+	}
+	_, state, err = newLeader.readReservations(ctx, "jobs")
+	if err != nil || len(state.Active) != 1 {
+		t.Fatalf("live Pod lost its charged grant: %#v err=%v", state.Active, err)
+	}
+	if _, err := newLeader.Reconcile(ctx, request); err != nil {
+		t.Fatal(err)
+	}
+	_, state, err = newLeader.readReservations(ctx, "jobs")
+	if err != nil || len(state.Active) != 0 {
+		t.Fatalf("grant remained after verified Pod deletion: %#v err=%v", state.Active, err)
+	}
 }
 
 func (c *uncertainConfigMapUpdate) Update(ctx context.Context, obj client.Object, opts ...client.UpdateOption) error {
@@ -142,6 +342,52 @@ func TestRestartedControllerDoesNotRetryUnresolvedPodCreate(t *testing.T) {
 type uncertainPodCreate struct {
 	client.Client
 	failed bool
+}
+
+type forbiddenPodCreate struct{ client.Client }
+
+func (c forbiddenPodCreate) Create(ctx context.Context, obj client.Object, opts ...client.CreateOption) error {
+	if pod, ok := obj.(*corev1.Pod); ok {
+		return apierrors.NewForbidden(schema.GroupResource{Resource: "pods"}, pod.Name, errors.New("test PodSecurity rejection"))
+	}
+	return c.Client.Create(ctx, obj, opts...)
+}
+
+func TestDefinitivePodCreateRejectionReleasesNonceAndCapacity(t *testing.T) {
+	ctx := context.Background()
+	scheme := testScheme(t)
+	build := queuedBuild("rejected", "alice", 1, 1)
+	base := crfake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&kovav1.KovaBuild{}).WithObjects(build).Build()
+	r := KovaBuildReconciler{Client: forbiddenPodCreate{Client: base}, APIReader: base, Scheme: scheme, Kube: &fakeKube{}, Cfg: admissionConfig()}
+	request := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "jobs", Name: build.Name}}
+	if _, err := r.Reconcile(ctx, request); err != nil {
+		t.Fatal(err)
+	}
+	_, state, err := r.readReservations(ctx, "jobs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry := state.Active[reservationKey(build)]
+	if len(entry.InFlight) != 0 {
+		t.Fatalf("definitive Pod rejection retained nonce: %#v", entry.InFlight)
+	}
+	if _, err := r.Reconcile(ctx, request); err != nil {
+		t.Fatal(err)
+	}
+	_, state, err = r.readReservations(ctx, "jobs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(state.Active) != 0 {
+		t.Fatalf("definitive Pod rejection leaked active capacity: %#v", state.Active)
+	}
+	var current kovav1.KovaBuild
+	if err := base.Get(ctx, request.NamespacedName, &current); err != nil {
+		t.Fatal(err)
+	}
+	if current.Status.Phase != kovav1.PhaseFailed || current.Status.Reason != "RunnerCreateRejected" {
+		t.Fatalf("unexpected rejection status: %#v", current.Status)
+	}
 }
 
 func (c *uncertainPodCreate) Create(ctx context.Context, obj client.Object, opts ...client.CreateOption) error {

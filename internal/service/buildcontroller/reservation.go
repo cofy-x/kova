@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -28,16 +29,20 @@ type activeReservation struct {
 	BuildName string   `json:"buildName"`
 	Requester string   `json:"requester"`
 	Slots     int      `json:"slots"`
+	Closing   bool     `json:"closing,omitempty"`
 	InFlight  []string `json:"inFlight,omitempty"`
 }
 
 type reservationState struct {
 	Version         int                          `json:"version"`
+	Fence           uint64                       `json:"fence"`
 	MaxJobs         int                          `json:"maxJobs"`
 	MaxPerRequester int                          `json:"maxPerRequester"`
 	WorkerSlots     int                          `json:"workerSlots"`
 	Active          map[string]activeReservation `json:"active"`
 }
+
+var errAdmissionClosed = errors.New("KovaBuild is no longer eligible for runner admission")
 
 type admissionRecoveryError struct {
 	Namespace string
@@ -62,6 +67,21 @@ func (r *KovaBuildReconciler) reader() client.Reader {
 		return r.APIReader
 	}
 	return r.Client
+}
+
+// A direct CR read must follow the active-ledger read on every CAS attempt.
+// Terminal/deletion cleanup first changes that ledger's resourceVersion, so
+// a writer that checked an older CR state either commits before cleanup sees
+// its grant, or conflicts and rechecks this now-ineligible CR.
+func (r *KovaBuildReconciler) ensureLiveAdmissionBuild(ctx context.Context, build *kovav1.KovaBuild) error {
+	var current kovav1.KovaBuild
+	if err := r.reader().Get(ctx, client.ObjectKey{Namespace: build.Namespace, Name: build.Name}, &current); err != nil {
+		return err
+	}
+	if current.UID != build.UID || !current.DeletionTimestamp.IsZero() || cancellationRequested(&current) || (current.Status.Phase != "" && current.Status.Phase != kovav1.PhaseQueued) {
+		return fmt.Errorf("%w: %s/%s", errAdmissionClosed, build.Namespace, build.Name)
+	}
+	return nil
 }
 
 func (r *KovaBuildReconciler) readReservations(ctx context.Context, namespace string) (*corev1.ConfigMap, reservationState, error) {
@@ -204,6 +224,41 @@ func waitReservationCAS(ctx context.Context, retry int) error {
 	}
 }
 
+// fenceReservation is a bounded global RV fence, not an unbounded per-build
+// tombstone. It also closes any current grant before Pod inspection: no new
+// Pod Create nonce may be appended during cleanup. It must CAS even when no
+// grant exists, so a paused old leader's pre-fence admission CAS conflicts.
+func (r *KovaBuildReconciler) fenceReservation(ctx context.Context, build *kovav1.KovaBuild) error {
+	for retry := 0; retry < maxReservationCASAttempts; retry++ {
+		cm, state, err := r.readReservations(ctx, build.Namespace)
+		if err != nil {
+			return err
+		}
+		if state.Fence == ^uint64(0) {
+			return fmt.Errorf("active admission fence counter is exhausted in %s", build.Namespace)
+		}
+		state.Fence++
+		if entry, ok := state.Active[reservationKey(build)]; ok {
+			if entry.BuildName != build.Name {
+				return fmt.Errorf("admission reservation for %s/%s has mismatched build name %q", build.Namespace, build.Name, entry.BuildName)
+			}
+			entry.Closing = true
+			state.Active[reservationKey(build)] = entry
+		}
+		if err := r.writeReservations(ctx, cm, state); err != nil {
+			if apierrors.IsConflict(err) {
+				if err := waitReservationCAS(ctx, retry); err != nil {
+					return err
+				}
+				continue
+			}
+			return err
+		}
+		return nil
+	}
+	return fmt.Errorf("active admission ledger is busy fencing %s/%s", build.Namespace, build.Name)
+}
+
 func (r *KovaBuildReconciler) releaseReservation(ctx context.Context, build *kovav1.KovaBuild) error {
 	key := client.ObjectKey{Namespace: build.Namespace, Name: reservationConfigMap}
 	for retry := 0; retry < maxReservationCASAttempts; retry++ {
@@ -228,8 +283,16 @@ func (r *KovaBuildReconciler) releaseReservation(ctx context.Context, build *kov
 		if entry.BuildName != build.Name {
 			return fmt.Errorf("admission reservation for %s/%s has mismatched build name %q", build.Namespace, build.Name, entry.BuildName)
 		}
+		if !entry.Closing {
+			return fmt.Errorf("admission reservation for %s/%s cannot be released before its cleanup fence", build.Namespace, build.Name)
+		}
 		if len(entry.InFlight) != 0 {
 			return &admissionRecoveryError{Namespace: build.Namespace, BuildName: build.Name, Pending: len(entry.InFlight)}
+		}
+		if pod, err := r.getOwnedPod(ctx, build); err != nil {
+			return err
+		} else if pod != nil {
+			return fmt.Errorf("runner Pod %s/%s still exists while releasing active capacity", pod.Namespace, pod.Name)
 		}
 		delete(state.Active, reservationKey(build))
 		if err := r.writeReservations(ctx, &cm, state); err != nil {
@@ -269,9 +332,15 @@ func (r *KovaBuildReconciler) beginPodCreate(ctx context.Context, build *kovav1.
 		if err != nil {
 			return "", err
 		}
+		if err := r.ensureLiveAdmissionBuild(ctx, build); err != nil {
+			return "", err
+		}
 		entry, ok := state.Active[reservationKey(build)]
 		if !ok || entry.BuildName != build.Name {
 			return "", fmt.Errorf("KovaBuild %s/%s has no matching active reservation", build.Namespace, build.Name)
+		}
+		if entry.Closing {
+			return "", fmt.Errorf("%w: %s/%s grant is closing", errAdmissionClosed, build.Namespace, build.Name)
 		}
 		if len(entry.InFlight) != 0 {
 			return "", &admissionRecoveryError{Namespace: build.Namespace, BuildName: build.Name, Pending: len(entry.InFlight)}
@@ -298,8 +367,8 @@ func (r *KovaBuildReconciler) beginPodCreate(ctx context.Context, build *kovav1.
 	return "", fmt.Errorf("active admission ledger is busy starting Pod create for %s/%s", build.Namespace, build.Name)
 }
 
-// completePodCreate is only called after a definitive Create success or
-// AlreadyExists response, or after observing the Pod with this exact nonce.
+// completePodCreate is called only after definitive Create success/rejection,
+// AlreadyExists, or observation of the Pod with this exact nonce.
 func (r *KovaBuildReconciler) completePodCreate(ctx context.Context, build *kovav1.KovaBuild, attempt string) error {
 	for retry := 0; retry < maxReservationCASAttempts; retry++ {
 		if err := ctx.Err(); err != nil {
