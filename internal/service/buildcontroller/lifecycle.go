@@ -40,7 +40,9 @@ func (r *KovaBuildReconciler) startBuild(ctx context.Context, build *kovav1.Kova
 		return ctrl.Result{Requeue: true}, nil
 	}
 	build = &current
+	admissionStarted := time.Now()
 	decision, err := r.admission(ctx, build)
+	recordServiceStage(ctx, "admission", admissionStarted, err)
 	if err != nil {
 		if errors.Is(err, errAdmissionClosed) || apierrors.IsNotFound(err) {
 			return ctrl.Result{Requeue: true}, nil
@@ -237,7 +239,7 @@ func (r *KovaBuildReconciler) submitWhenReady(ctx context.Context, build *kovav1
 		return r.retryStatusObservation(ctx, build, err)
 	}
 	if state.Status != "idle" {
-		return r.markSubmitted(ctx, build, state)
+		return r.markSubmittedWithTimings(ctx, build, state, &pod)
 	}
 	if !state.SupportsIdempotentBuildRequest() {
 		return ctrl.Result{}, r.finish(ctx, build, kovav1.PhaseFailed, "RunnerProtocolIncompatible", "idle runner does not advertise idempotent build submission; drain Starting jobs and replace the legacy runner before upgrading the controller")
@@ -251,7 +253,9 @@ func (r *KovaBuildReconciler) submitWhenReady(ctx context.Context, build *kovav1
 		operationCtx, cancelOperation = context.WithDeadline(ctx, build.Status.StartedAt.Add(r.Cfg.MaxBuildDuration))
 	}
 	defer cancelOperation()
+	inspectStarted := time.Now()
 	sourceTargets, err := client.SourceTargets(operationCtx, build, sourcePath(build))
+	recordServiceStage(ctx, "source_inspect", inspectStarted, err)
 	if err != nil {
 		if errors.Is(err, runnerexec.ErrRunnerResponseTooLarge) || errors.Is(err, runnerexec.ErrSourceInspectProtocol) {
 			return ctrl.Result{}, r.finish(ctx, build, kovav1.PhaseFailed, "RunnerProtocolError", err.Error())
@@ -273,7 +277,10 @@ func (r *KovaBuildReconciler) submitWhenReady(ctx context.Context, build *kovav1
 	if expired, result, err := r.reconcileExpiredBuild(ctx, build, client); expired {
 		return result, err
 	}
-	if err := client.SubmitBuild(operationCtx, build, sourcePath(build)); err != nil {
+	submitStarted := time.Now()
+	submitErr := client.SubmitBuild(operationCtx, build, sourcePath(build))
+	recordServiceStage(ctx, "submit", submitStarted, submitErr)
+	if submitErr != nil {
 		// The POST can be accepted even when exec loses its response. The
 		// runner's request ID makes the next submission safe if observation
 		// is also unavailable.
@@ -287,9 +294,9 @@ func (r *KovaBuildReconciler) submitWhenReady(ctx context.Context, build *kovav1
 		if state.Status == "idle" {
 			return ctrl.Result{RequeueAfter: r.activeRequeueAfter(build, time.Second)}, nil
 		}
-		return r.markSubmitted(ctx, build, state)
+		return r.markSubmittedWithTimings(ctx, build, state, &pod)
 	}
-	return r.markSubmitted(ctx, build, runner.BuildState{Status: "running"})
+	return r.markSubmittedWithTimings(ctx, build, runner.BuildState{Status: "running"}, &pod)
 }
 
 func (r *KovaBuildReconciler) markSubmitted(ctx context.Context, build *kovav1.KovaBuild, state runner.BuildState) (ctrl.Result, error) {

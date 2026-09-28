@@ -2,6 +2,7 @@ package buildcontroller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"time"
@@ -28,6 +29,7 @@ const (
 	admissionAuditGrantBatch   = 32
 	admissionAuditContinuation = 4 * time.Second
 	admissionWakeTimeout       = time.Second
+	admissionHandoffRetry      = 100 * time.Millisecond
 )
 
 // AdmissionPump turns durable capacity changes into one targeted KovaBuild
@@ -173,6 +175,22 @@ func (p *AdmissionPump) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 		return result, nil
 	}
 	if err := queue.VerifyForBuild(ctx, &current); err != nil {
+		if errors.Is(err, queueadmission.ErrDrift) {
+			recovered, recoveryErr := p.recoverConcurrentGrant(ctx, ledger.ResourceVersion, &current, queue)
+			if recoveryErr != nil {
+				return ctrl.Result{}, recoveryErr
+			}
+			if recovered {
+				// Grant commit and queue release can race this selection's
+				// older active snapshot. Do not turn that legal handoff into
+				// exponential error backoff, or select a later requester from
+				// the stale fairness cursor. One bounded retry uses fresh state.
+				if result.RequeueAfter == 0 || result.RequeueAfter > admissionHandoffRetry {
+					result.RequeueAfter = admissionHandoffRetry
+				}
+				return result, nil
+			}
+		}
 		// Let the build record AdmissionRecoveryRequired, but do not wake a
 		// later fair-share candidate or grant around an unexplained drift.
 		if wakeErr := p.wakeBuild(ctx, &current); wakeErr != nil {
@@ -188,6 +206,48 @@ func (p *AdmissionPump) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 	}
 	p.lastWakeUID, p.lastWakeLedgerRV, p.lastWakeAt = current.UID, ledger.ResourceVersion, time.Now()
 	return result, nil
+}
+
+// recoverConcurrentGrant recognizes only a fully proved queue-to-active
+// handoff. A matching live grant replaces the first-grant queue intent, but
+// never authorizes ignoring a lost ledger, changed intent, identity mismatch,
+// or closing grant. This bounded reread is needed only after apparent drift.
+func (p *AdmissionPump) recoverConcurrentGrant(ctx context.Context, selectedLedgerRV string, selected *kovav1.KovaBuild, queue queueadmission.Store) (bool, error) {
+	r := KovaBuildReconciler{APIReader: p.Reader, Cfg: p.Cfg}
+	ledger, state, err := r.readReservations(ctx, p.Cfg.Namespace)
+	if err != nil {
+		return false, err
+	}
+	entry, found := state.Active[reservationKey(selected)]
+	if ledger.ResourceVersion == selectedLedgerRV || selected.UID == "" || !found || entry.Closing ||
+		entry.BuildName != selected.Name || entry.Requester != requesterKey(selected) {
+		return false, nil
+	}
+	var current kovav1.KovaBuild
+	if err := p.Reader.Get(ctx, client.ObjectKeyFromObject(selected), &current); err != nil {
+		return false, err
+	}
+	if current.UID != selected.UID || current.Name != entry.BuildName || requesterKey(&current) != entry.Requester ||
+		!current.DeletionTimestamp.IsZero() || cancellationRequested(&current) ||
+		entry.Slots > requestedConcurrency(&current) || (p.Cfg.WorkerSlots > 0 && entry.Slots > p.Cfg.WorkerSlots) {
+		return false, nil
+	}
+	switch current.Status.Phase {
+	case "", kovav1.PhaseQueued, kovav1.PhaseStarting, kovav1.PhaseRunning, kovav1.PhaseVerifying, kovav1.PhaseFailedVerifying:
+	default:
+		return false, nil
+	}
+	// An absent intent is the expected release outcome. An existing changed
+	// intent remains drift, and a missing/invalid queue ledger remains an error.
+	if _, found, err := queue.Lookup(ctx, current.Name); err != nil {
+		return false, err
+	} else if found {
+		return false, nil
+	}
+	if err := p.wakeBuild(ctx, &current); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func activeCapacityExhausted(active map[string]activeReservation, maxJobs, workerSlots int) bool {

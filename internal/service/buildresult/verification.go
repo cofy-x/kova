@@ -80,6 +80,7 @@ func CollectReceipts(ctx context.Context, exporter Exporter, build *kovav1.KovaB
 				continue
 			}
 			result.PushedDigest = entry.ManifestDigest
+			recordTargetExecution(ctx, build.Name, format, i, entry.StartedAt, entry.FinishedAt)
 		}
 	}
 	return transient, failed
