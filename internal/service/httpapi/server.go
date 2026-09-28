@@ -125,39 +125,76 @@ func (s *Server) initializeAdmission(ctx context.Context) error {
 		if !apierrors.IsNotFound(queueErr) {
 			return queueErr
 		}
-		// Another replica may be between first-start active and queue
-		// creation. Observe briefly, but never create the missing queue here:
-		// it may instead have been deleted with an unknown CR Create intent.
-		for retry := 0; retry < 10; retry++ {
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-time.After(100 * time.Millisecond):
-			}
-			if err := queue.CheckReady(ctx); err == nil {
-				return nil
-			} else if !apierrors.IsNotFound(err) {
-				return err
-			}
-		}
-		return fmt.Errorf("queue admission ledger is absent while active admission ledger exists in %s; inspect recovery evidence before migration", s.cfg.Namespace)
+		return s.waitAdmissionBootstrap(ctx, queue)
 	}
 	if !apierrors.IsNotFound(activeErr) {
 		return activeErr
 	}
 	if queueErr == nil {
+		// These are separate authoritative GETs, not an atomic snapshot.
+		// A concurrent first start can finish between them.
+		if err := s.checkActiveAdmissionLedger(ctx); err == nil {
+			return nil
+		} else if !apierrors.IsNotFound(err) {
+			return err
+		}
 		return fmt.Errorf("active admission ledger is absent while queue admission ledger exists in %s; inspect recovery evidence before migration", s.cfg.Namespace)
 	}
 	if !apierrors.IsNotFound(queueErr) {
 		return queueErr
 	}
+	// Validate BOTH first-start contracts before either write. In particular,
+	// queue validation must reject pre-existing CRs before the active ledger
+	// can be created. A fully initialized concurrent replica is safe to observe;
+	// a partial pair is never repaired by this fallback.
+	if err := queue.PreflightInitialization(ctx); err != nil {
+		return s.bootstrapRaceResult(ctx, err)
+	}
+	if err := buildcontroller.PreflightAdmissionLedger(ctx, s.reader, s.cfg.Namespace, s.cfg); err != nil {
+		return s.bootstrapRaceResult(ctx, err)
+	}
 	// Active-first creation makes either ledger a marker that prevents silent
 	// replacement of the other after startup. A crash in this short bootstrap
 	// window requires an explicit, audited empty-namespace recovery.
-	if err := buildcontroller.EnsureAdmissionLedger(ctx, s.client, s.reader, s.cfg.Namespace, s.cfg); err != nil {
-		return err
+	created, err := buildcontroller.EnsureAdmissionLedger(ctx, s.client, s.reader, s.cfg.Namespace, s.cfg)
+	if err != nil {
+		return s.bootstrapRaceResult(ctx, err)
 	}
-	return queue.EnsureInitialized(ctx)
+	if !created {
+		// Even a replica that earlier observed both ledgers missing must
+		// not repair a peer's queue: that peer may have started and then
+		// lost the ledger while holding an unknown CR Create intent.
+		return s.waitAdmissionBootstrap(ctx, queue)
+	}
+	if err := queue.EnsureInitialized(ctx); err != nil {
+		return s.bootstrapRaceResult(ctx, err)
+	}
+	return s.checkAdmissionLedgers(ctx)
+}
+
+func (s *Server) waitAdmissionBootstrap(ctx context.Context, queue queueadmission.Store) error {
+	// Another replica may be between first-start active and queue creation.
+	// Observe briefly, but never create the missing queue here.
+	for retry := 0; retry < 10; retry++ {
+		if err := queue.CheckReady(ctx); err == nil {
+			return s.checkActiveAdmissionLedger(ctx)
+		} else if !apierrors.IsNotFound(err) {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+	return fmt.Errorf("queue admission ledger is absent while active admission ledger exists in %s; inspect recovery evidence before migration", s.cfg.Namespace)
+}
+
+func (s *Server) bootstrapRaceResult(ctx context.Context, bootstrapErr error) error {
+	if err := s.checkAdmissionLedgers(ctx); err == nil {
+		return nil
+	}
+	return bootstrapErr
 }
 
 func (s *Server) checkAdmissionLedgers(ctx context.Context) error {
