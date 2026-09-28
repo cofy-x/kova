@@ -522,9 +522,10 @@ jobs:
           tar -xzf "${archive}" kova LICENSE
           ./kova version | grep -F "${GITHUB_REF_NAME}"
       - name: Verify public Python SDK hashes and installation
+        timeout-minutes: 7
         shell: bash
         run: |
-          sdk_version=$(python scripts/release/verify-pypi-artifacts.py dist)
+          sdk_version=$(python scripts/release/verify-pypi-artifacts.py dist --visibility-deadline-seconds 300)
           python -m venv installed-sdk
           installed-sdk/bin/python -m pip install --index-url https://pypi.org/simple "kova-client==${sdk_version}"
           EXPECTED_SDK_VERSION="${sdk_version}" installed-sdk/bin/python -c 'import importlib.metadata, os; from kova_client import AsyncKovaClient, KovaClient; assert AsyncKovaClient and KovaClient; assert importlib.metadata.version("kova-client") == os.environ["EXPECTED_SDK_VERSION"]'

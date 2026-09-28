@@ -57,6 +57,16 @@ long-lived registry credential. Wheel/sdist versions must match the selected tag
 Before upload, any already-existing PyPI file must match the validated artifact
 hash; after upload, the public complete file set and a clean SDK installation
 are checked. `skip-existing` is not permission to mix different build attempts.
+The verifier snapshots each original wheel/sdist once, deriving the wheel identity and hash from the same bytes; it does not rebuild or modify these inputs while retrying.
+The post-publication verifier gives the exact version up to 300 seconds to become visible, using a monotonic deadline and 5, 10, 20, then at most 30 seconds between attempts.
+Each anonymous metadata request runs in an owned worker with a total timeout of at most 10 seconds or the remaining deadline, including DNS and response reads; an expired worker is killed and reaped.
+Only HTTP 404 and recognized transient connection, timeout, or temporary DNS errors are retried.
+Authentication/permission errors, other HTTP errors, certificate errors, invalid metadata, and version, complete file-set, SHA-256, duplicate, or yank mismatches stop immediately.
+Attempt, status, elapsed time, remaining time, and next delay go to stderr; stdout remains only the verified PEP 440 version for the installation step.
+The pre-upload check retains its absent-version and matching-subset semantics, with a separate 60-second transient-network deadline.
+If visibility never becomes verifiable, the gate fails; rerun only the failed verification and dependants against the original validated artifacts, never rebuild, republish, or retag an immutable release as a visibility workaround.
+The release workflow reserves seven minutes for this verification and clean installation, within the existing 15-minute published-smoke job.
+The visibility deadline does not promise PyPI propagation or bound the later pip installation; the workflow step remains its outer timeout.
 Registry environments are intentionally separate: `pypi` is only for the Python SDK, and any future TypeScript SDK must publish through its own `npm` environment.
 
 ## Release Gates
