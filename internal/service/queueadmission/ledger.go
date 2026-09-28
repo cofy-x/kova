@@ -127,7 +127,18 @@ func (s Store) CheckReady(ctx context.Context) error {
 	return err
 }
 
-func (s Store) initialize(ctx context.Context) error {
+// PreflightInitialization validates first-start eligibility without writing.
+// Service startup must run this before creating the active ledger, otherwise
+// rejecting legacy builds here would leave an unusable half-initialized pair.
+func (s Store) PreflightInitialization(ctx context.Context) error {
+	if s.GlobalLimit < 1 || s.GlobalLimit > 1000 || s.RequesterLimit < 1 || s.RequesterLimit > s.GlobalLimit {
+		return fmt.Errorf("queue ledger %s has invalid replica limits", s.key())
+	}
+	if _, _, err := s.read(ctx); err == nil {
+		return nil
+	} else if !apierrors.IsNotFound(err) {
+		return err
+	}
 	// A missing ledger is only safe to initialize in an empty runner namespace.
 	// Rolling upgrades must drain old builds and move to a fresh namespace.
 	var builds kovav1.KovaBuildList
@@ -144,6 +155,13 @@ func (s Store) initialize(ctx context.Context) error {
 			return err
 		}
 		return fmt.Errorf("queue ledger %s is absent while KovaBuilds exist; drain and migrate before admission", s.key())
+	}
+	return nil
+}
+
+func (s Store) initialize(ctx context.Context) error {
+	if err := s.PreflightInitialization(ctx); err != nil {
+		return err
 	}
 	data, err := json.Marshal(s.freshState())
 	if err != nil {

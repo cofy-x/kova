@@ -25,6 +25,7 @@ const (
 	AdmissionLedgerName       = "kova-service-admission"
 	reservationConfigMap      = AdmissionLedgerName
 	reservationDataKey        = "reservations.json"
+	bootstrapAttemptKey       = "kova.cofy.dev/admission-bootstrap"
 	podCreateAttemptKey       = "kova.cofy.dev/create-attempt"
 	maxReservationCASAttempts = 16
 )
@@ -102,14 +103,15 @@ func (r *KovaBuildReconciler) readReservations(ctx context.Context, namespace st
 	return &cm, state, err
 }
 
-func (r *KovaBuildReconciler) initializeReservations(ctx context.Context, namespace string) (*corev1.ConfigMap, reservationState, error) {
+func (r *KovaBuildReconciler) initializeReservations(ctx context.Context, namespace string) (*corev1.ConfigMap, reservationState, bool, error) {
+	var bootstrapNonce string
 	for retry := 0; retry < maxReservationCASAttempts; retry++ {
 		cm, state, err := r.readReservations(ctx, namespace)
 		if err == nil {
-			return cm, state, nil
+			return cm, state, false, nil
 		}
 		if !apierrors.IsNotFound(err) {
-			return nil, reservationState{}, err
+			return nil, reservationState{}, false, err
 		}
 		// On a fresh namespace the active ledger is created before the queue
 		// ledger. An existing queue ledger proves the active ledger existed
@@ -118,42 +120,96 @@ func (r *KovaBuildReconciler) initializeReservations(ctx context.Context, namesp
 		var queueCM corev1.ConfigMap
 		queueErr := r.reader().Get(ctx, client.ObjectKey{Namespace: namespace, Name: queueadmission.ConfigMapName}, &queueCM)
 		if queueErr == nil {
-			return nil, reservationState{}, fmt.Errorf("active admission ledger is absent while queue admission ledger exists in %s; inspect recovery evidence before migration", namespace)
+			// A concurrent first-start replica may have completed both writes
+			// after our missing active GET. Re-read before declaring ledger loss.
+			if cm, state, err := r.readReservations(ctx, namespace); err == nil {
+				return cm, state, false, nil
+			} else if !apierrors.IsNotFound(err) {
+				return nil, reservationState{}, false, err
+			}
+			return nil, reservationState{}, false, fmt.Errorf("active admission ledger is absent while queue admission ledger exists in %s; inspect recovery evidence before migration", namespace)
 		} else if !apierrors.IsNotFound(queueErr) {
-			return nil, reservationState{}, queueErr
+			return nil, reservationState{}, false, queueErr
 		}
-		state, err = r.seedReservations(ctx, namespace)
-		if err != nil {
-			return nil, reservationState{}, err
+		if err := PreflightAdmissionLedger(ctx, r.reader(), namespace, r.Cfg); err != nil {
+			return nil, reservationState{}, false, err
 		}
+		state = r.freshReservations()
 		data, err := json.Marshal(state)
 		if err != nil {
-			return nil, reservationState{}, err
+			return nil, reservationState{}, false, err
+		}
+		if bootstrapNonce == "" {
+			var nonce [16]byte
+			if _, err := rand.Read(nonce[:]); err != nil {
+				return nil, reservationState{}, false, err
+			}
+			bootstrapNonce = hex.EncodeToString(nonce[:])
 		}
 		cm = &corev1.ConfigMap{
-			ObjectMeta: metav1.ObjectMeta{Name: reservationConfigMap, Namespace: namespace},
+			ObjectMeta: metav1.ObjectMeta{Name: reservationConfigMap, Namespace: namespace, Annotations: map[string]string{bootstrapAttemptKey: bootstrapNonce}},
 			Data:       map[string]string{reservationDataKey: string(data)},
 		}
 		if err := r.Create(ctx, cm); err != nil {
 			if apierrors.IsAlreadyExists(err) {
 				if err := waitReservationCAS(ctx, retry); err != nil {
-					return nil, reservationState{}, err
+					return nil, reservationState{}, false, err
 				}
 				continue
 			}
-			return nil, reservationState{}, err
+			// A lost Create response may hide a committed active ledger. Only
+			// a validating direct read of THIS nonce permits queue creation.
+			// A peer's committed ledger only permits waiting for its queue.
+			if cm, state, readErr := r.readReservations(ctx, namespace); readErr == nil {
+				return cm, state, cm.Annotations[bootstrapAttemptKey] == bootstrapNonce, nil
+			}
+			return nil, reservationState{}, false, err
 		}
-		return cm, state, nil
+		return cm, state, true, nil
 	}
-	return nil, reservationState{}, fmt.Errorf("active admission ledger is busy initializing in %s", namespace)
+	return nil, reservationState{}, false, fmt.Errorf("active admission ledger is busy initializing in %s", namespace)
+}
+
+// PreflightAdmissionLedger checks first-start eligibility without mutation.
+// Existing ledgers are validated in place; absent ledgers require no legacy
+// builds or runners. It does not authorize repairing a half-existing pair.
+func PreflightAdmissionLedger(ctx context.Context, reader client.Reader, namespace string, cfg config.Config) error {
+	r := &KovaBuildReconciler{APIReader: reader, Cfg: cfg}
+	if _, _, err := r.readReservations(ctx, namespace); err == nil {
+		return nil
+	} else if !apierrors.IsNotFound(err) {
+		return err
+	}
+	if cfg.MaxActiveJobs < 1 || cfg.MaxActiveJobsPerRequester < 1 || cfg.MaxActiveJobsPerRequester > cfg.MaxActiveJobs || cfg.WorkerSlots < 1 {
+		return fmt.Errorf("active admission ledger has invalid replica limits")
+	}
+	var builds kovav1.KovaBuildList
+	if err := reader.List(ctx, &builds, client.InNamespace(namespace), client.Limit(1)); err != nil {
+		return err
+	}
+	if len(builds.Items) != 0 {
+		return fmt.Errorf("active admission ledger is absent while KovaBuilds exist in %s; drain and migrate before admission", namespace)
+	}
+	var pods corev1.PodList
+	if err := reader.List(ctx, &pods, client.InNamespace(namespace)); err != nil {
+		return err
+	}
+	for i := range pods.Items {
+		if pods.Items[i].Labels["kova.cofy.dev/build-id"] != "" {
+			return fmt.Errorf("active admission ledger is absent while runner Pods exist in %s; drain and migrate before admission", namespace)
+		}
+	}
+	return nil
 }
 
 // EnsureAdmissionLedger initializes the active ledger before the HTTP listener
-// opens. Subsequent readiness checks are deliberately read-only.
-func EnsureAdmissionLedger(ctx context.Context, writer client.Client, reader client.Reader, namespace string, cfg config.Config) error {
+// opens. created is true only when this call's Create is observed committed;
+// only that caller may finish queue bootstrap. Other callers must wait, never
+// repair a missing queue. Subsequent readiness checks are read-only.
+func EnsureAdmissionLedger(ctx context.Context, writer client.Client, reader client.Reader, namespace string, cfg config.Config) (created bool, err error) {
 	r := &KovaBuildReconciler{Client: writer, APIReader: reader, Cfg: cfg}
-	_, _, err := r.initializeReservations(ctx, namespace)
-	return err
+	_, _, created, err = r.initializeReservations(ctx, namespace)
+	return created, err
 }
 
 // CheckAdmissionLedger validates the authoritative active ledger and this
@@ -208,51 +264,8 @@ func (r *KovaBuildReconciler) validateReservationLimits(state reservationState) 
 	return nil
 }
 
-func (r *KovaBuildReconciler) seedReservations(ctx context.Context, namespace string) (reservationState, error) {
-	state := reservationState{Version: 1, MaxJobs: r.Cfg.MaxActiveJobs, MaxPerRequester: r.Cfg.MaxActiveJobsPerRequester, WorkerSlots: r.Cfg.WorkerSlots, Active: map[string]activeReservation{}}
-	var builds kovav1.KovaBuildList
-	if err := r.reader().List(ctx, &builds, client.InNamespace(namespace)); err != nil {
-		return reservationState{}, err
-	}
-	byName := make(map[string]*kovav1.KovaBuild, len(builds.Items))
-	for i := range builds.Items {
-		build := &builds.Items[i]
-		byName[build.Name] = build
-		if build.Status.Phase == kovav1.PhaseStarting || build.Status.Phase == kovav1.PhaseRunning || build.Status.Phase == kovav1.PhaseVerifying || build.Status.Phase == kovav1.PhaseFailedVerifying {
-			state.Active[reservationKey(build)] = activeReservation{BuildName: build.Name, Requester: requesterKey(build), Slots: allocatedConcurrency(build)}
-		}
-	}
-	var pods corev1.PodList
-	if err := r.reader().List(ctx, &pods, client.InNamespace(namespace)); err != nil {
-		return reservationState{}, err
-	}
-	for i := range pods.Items {
-		pod := &pods.Items[i]
-		name := pod.Labels["kova.cofy.dev/build-id"]
-		if name == "" {
-			continue
-		}
-		build := byName[name]
-		if build != nil && podOwnedByBuild(pod, build) {
-			key := reservationKey(build)
-			if _, ok := state.Active[key]; !ok {
-				state.Active[key] = activeReservation{BuildName: name, Requester: requesterKey(build), Slots: allocatedConcurrency(build)}
-			}
-			continue
-		}
-		// An unowned/unknown runner cannot be safely ignored or reclaimed.
-		// Charge the whole pool until an operator resolves the mismatch.
-		key := "orphan:" + string(pod.UID)
-		if pod.UID == "" {
-			key = "orphan:" + pod.Name
-		}
-		slots := r.Cfg.WorkerSlots
-		if slots < 1 {
-			slots = 1
-		}
-		state.Active[key] = activeReservation{BuildName: name, Requester: "unknown/" + name, Slots: slots}
-	}
-	return state, nil
+func (r *KovaBuildReconciler) freshReservations() reservationState {
+	return reservationState{Version: 1, MaxJobs: r.Cfg.MaxActiveJobs, MaxPerRequester: r.Cfg.MaxActiveJobsPerRequester, WorkerSlots: r.Cfg.WorkerSlots, Active: map[string]activeReservation{}}
 }
 
 func (r *KovaBuildReconciler) writeReservations(ctx context.Context, cm *corev1.ConfigMap, state reservationState) error {

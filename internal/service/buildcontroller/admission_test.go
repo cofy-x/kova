@@ -2,6 +2,7 @@ package buildcontroller
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -469,7 +470,55 @@ func admissionConfig() config.Config {
 
 func initializeAdmissionForTest(t *testing.T, r *KovaBuildReconciler) {
 	t.Helper()
-	if _, _, err := r.initializeReservations(context.Background(), "jobs"); err != nil {
+	ctx := context.Background()
+	if _, _, err := r.readReservations(ctx, "jobs"); err == nil {
+		return
+	} else if !apierrors.IsNotFound(err) {
+		t.Fatal(err)
+	}
+	// Reconcile fixtures may begin with active CRs/Pods. Establish their
+	// charged state explicitly; production bootstrap must reject legacy state
+	// rather than seed one ledger before the other can validate the namespace.
+	state := r.freshReservations()
+	var builds kovav1.KovaBuildList
+	if err := r.reader().List(ctx, &builds, client.InNamespace("jobs")); err != nil {
+		t.Fatal(err)
+	}
+	byName := make(map[string]*kovav1.KovaBuild, len(builds.Items))
+	for i := range builds.Items {
+		build := &builds.Items[i]
+		byName[build.Name] = build
+		if build.Status.Phase == kovav1.PhaseStarting || build.Status.Phase == kovav1.PhaseRunning || build.Status.Phase == kovav1.PhaseVerifying || build.Status.Phase == kovav1.PhaseFailedVerifying {
+			state.Active[reservationKey(build)] = activeReservation{BuildName: build.Name, Requester: requesterKey(build), Slots: allocatedConcurrency(build)}
+		}
+	}
+	var pods corev1.PodList
+	if err := r.reader().List(ctx, &pods, client.InNamespace("jobs")); err != nil {
+		t.Fatal(err)
+	}
+	for i := range pods.Items {
+		pod := &pods.Items[i]
+		name := pod.Labels["kova.cofy.dev/build-id"]
+		if name == "" {
+			continue
+		}
+		build := byName[name]
+		if build != nil && podOwnedByBuild(pod, build) {
+			state.Active[reservationKey(build)] = activeReservation{BuildName: name, Requester: requesterKey(build), Slots: allocatedConcurrency(build)}
+			continue
+		}
+		key := "orphan:" + string(pod.UID)
+		if pod.UID == "" {
+			key = "orphan:" + pod.Name
+		}
+		state.Active[key] = activeReservation{BuildName: name, Requester: "unknown/" + name, Slots: max(r.Cfg.WorkerSlots, 1)}
+	}
+	data, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: reservationConfigMap, Namespace: "jobs"}, Data: map[string]string{reservationDataKey: string(data)}}
+	if err := r.Create(ctx, cm); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -726,7 +775,7 @@ func TestMissingActiveLedgerAfterStartupFailsClosed(t *testing.T) {
 			if err := base.List(ctx, &pods, client.InNamespace("jobs")); err != nil || len(pods.Items) != 0 {
 				t.Fatalf("%s created runner Pod: %d, err=%v", mode, len(pods.Items), err)
 			}
-			if err := EnsureAdmissionLedger(ctx, base, base, "jobs", cfg); err == nil {
+			if _, err := EnsureAdmissionLedger(ctx, base, base, "jobs", cfg); err == nil {
 				t.Fatalf("startup recreated missing active ledger while build exists after %s", mode)
 			}
 		})
@@ -738,7 +787,7 @@ func TestStartupCreatesActiveLedgerInEmptyNamespace(t *testing.T) {
 	base := crfake.NewClientBuilder().WithScheme(testScheme(t)).Build()
 	cfg := admissionConfig()
 	queue := queueadmission.Store{Client: base, Reader: base, Namespace: "jobs", GlobalLimit: cfg.MaxQueuedJobs, RequesterLimit: cfg.MaxQueuedJobsPerRequester}
-	if err := EnsureAdmissionLedger(ctx, base, base, "jobs", cfg); err != nil {
+	if _, err := EnsureAdmissionLedger(ctx, base, base, "jobs", cfg); err != nil {
 		t.Fatal(err)
 	}
 	if err := queue.EnsureInitialized(ctx); err != nil {
@@ -801,7 +850,7 @@ func TestQueueIntentReleasesOnlyAfterActiveGrant(t *testing.T) {
 	cfg := admissionConfig()
 	cfg.MaxActiveJobs, cfg.WorkerSlots = 1, 1
 	cfg.MaxQueuedJobs, cfg.MaxQueuedJobsPerRequester = 1, 1
-	if err := EnsureAdmissionLedger(context.Background(), base, base, "jobs", cfg); err != nil {
+	if _, err := EnsureAdmissionLedger(context.Background(), base, base, "jobs", cfg); err != nil {
 		t.Fatal(err)
 	}
 	store := queueadmission.Store{Client: base, Reader: base, Namespace: "jobs", GlobalLimit: 1, RequesterLimit: 1}
@@ -866,7 +915,7 @@ func TestFailedQueueReleaseOvercountsUntilControllerRestart(t *testing.T) {
 	cfg := admissionConfig()
 	cfg.MaxActiveJobs, cfg.WorkerSlots = 1, 1
 	cfg.MaxQueuedJobs, cfg.MaxQueuedJobsPerRequester = 1, 1
-	if err := EnsureAdmissionLedger(context.Background(), base, base, "jobs", cfg); err != nil {
+	if _, err := EnsureAdmissionLedger(context.Background(), base, base, "jobs", cfg); err != nil {
 		t.Fatal(err)
 	}
 	store := queueadmission.Store{Client: base, Reader: base, Namespace: "jobs", GlobalLimit: 1, RequesterLimit: 1}
