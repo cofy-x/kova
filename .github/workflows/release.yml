@@ -17,6 +17,8 @@ jobs:
     permissions:
       contents: read
     steps:
+      - name: Check out release guards
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Validate semantic version
         shell: bash
         run: |
@@ -24,6 +26,7 @@ jobs:
             echo "release tag must be a semantic version such as v0.1.0 or v0.1.0-rc.1" >&2
             exit 1
           fi
+
           prerelease="${BASH_REMATCH[5]:-}"
           if [[ -n "${prerelease}" ]]; then
             if [[ "${prerelease}" == .* || "${prerelease}" == *. || "${prerelease}" == *..* ]]; then
@@ -38,6 +41,11 @@ jobs:
               fi
             done
           fi
+
+      - name: Refuse to republish an existing release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/release/guard-release-version.sh "${GITHUB_REPOSITORY}" "${GITHUB_REF_NAME}"
 
   cli:
     name: CLI artifacts
@@ -104,6 +112,8 @@ jobs:
         with:
           enable-cache: true
       - name: Build and validate Python package
+        env:
+          KOVA_EXPECTED_VERSION: ${{ github.ref_name }}
         run: scripts/ci/python-sdk.sh dist/python
       - name: Attest Python package
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
@@ -127,13 +137,22 @@ jobs:
       name: pypi
       url: https://pypi.org/p/kova-client
     permissions:
+      contents: read
       id-token: write
     steps:
+      - name: Check out publication guards
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.10"
       - name: Download Python package
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: python-sdk-assets
           path: dist
+      - name: Reject mismatched existing PyPI files before upload
+        run: python scripts/release/verify-pypi-artifacts.py dist --preflight
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
         with:
@@ -173,6 +192,10 @@ jobs:
     needs: validate
     runs-on: ubuntu-24.04
     timeout-minutes: 45
+    outputs:
+      controller_digest: ${{ steps.digests.outputs.controller_digest }}
+      runner_digest: ${{ steps.digests.outputs.runner_digest }}
+      worker_digest: ${{ steps.digests.outputs.worker_digest }}
     permissions:
       contents: read
       packages: write
@@ -196,9 +219,11 @@ jobs:
       - name: Build and publish candidate images
         shell: bash
         run: |
+          mkdir -p dist
           docker buildx bake images --push --provenance=mode=max --sbom=true \
+            --metadata-file dist/candidate-images.json \
             --var "KOVA_IMAGE_REPOSITORY=ghcr.io/${GITHUB_REPOSITORY}" \
-            --var "KOVA_IMAGE_TAG_SUFFIX=candidate-${GITHUB_SHA}" \
+            --var "KOVA_IMAGE_TAG_SUFFIX=candidate-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
             --var "KOVA_VERSION=${GITHUB_REF_NAME}" \
             --var "KOVA_COMMIT=${GITHUB_SHA}" \
             --var "KOVA_BUILD_DATE=${{ steps.metadata.outputs.build_date }}" \
@@ -208,6 +233,15 @@ jobs:
             --set 'runner.cache-to=type=gha,mode=max,scope=kova-runner' \
             --set 'worker.cache-from=type=gha,scope=kova-worker' \
             --set 'worker.cache-to=type=gha,mode=max,scope=kova-worker'
+      - name: Capture immutable candidate digests
+        id: digests
+        run: scripts/release/capture-image-digests.sh dist/candidate-images.json >> "${GITHUB_OUTPUT}"
+      - name: Upload candidate image evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: image-candidate-evidence
+          path: dist/candidate-images.json
+          if-no-files-found: error
 
   candidate-smoke:
     name: Candidate Service and upgrade smoke
@@ -281,9 +315,9 @@ jobs:
           fi
       - name: Run candidate Service lifecycle
         env:
-          CONTROLLER_IMAGE: ghcr.io/${{ github.repository }}:controller-candidate-${{ github.sha }}
-          RUNNER_IMAGE: ghcr.io/${{ github.repository }}:runner-candidate-${{ github.sha }}
-          WORKER_IMAGE: ghcr.io/${{ github.repository }}:worker-candidate-${{ github.sha }}
+          CONTROLLER_IMAGE: ghcr.io/${{ github.repository }}@${{ needs.image.outputs.controller_digest }}
+          RUNNER_IMAGE: ghcr.io/${{ github.repository }}@${{ needs.image.outputs.runner_digest }}
+          WORKER_IMAGE: ghcr.io/${{ github.repository }}@${{ needs.image.outputs.worker_digest }}
           KOVA_CHART: ${{ github.workspace }}/dist/kova-candidate.tgz
           KOVA_CLI: ${{ github.workspace }}/dist/cli/kova
           E2E_SERVICE_BUILD_CLI: "false"
@@ -300,7 +334,7 @@ jobs:
 
   publish-image:
     name: Publish ${{ matrix.role }} image
-    needs: candidate-smoke
+    needs: [candidate-smoke, image]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -314,6 +348,8 @@ jobs:
           - runner
           - worker
     steps:
+      - name: Check out publication guards
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@594f3bf4285d9ea8dc53c9a0c9c4092420091003 # v4.4.0
       - name: Log in to GitHub Container Registry
@@ -323,14 +359,23 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Promote validated image digest
+        env:
+          CANDIDATE_DIGEST: ${{ needs.image.outputs[format('{0}_digest', matrix.role)] }}
         shell: bash
         run: |
-          source="ghcr.io/${GITHUB_REPOSITORY}:${{ matrix.role }}-candidate-${GITHUB_SHA}"
+          if [[ ! "${CANDIDATE_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "validated candidate digest is missing or invalid" >&2
+            exit 1
+          fi
+          source="ghcr.io/${GITHUB_REPOSITORY}@${CANDIDATE_DIGEST}"
+          scripts/release/guard-image-version.sh "ghcr.io/${GITHUB_REPOSITORY}:${{ matrix.role }}-${GITHUB_REF_NAME}" "${CANDIDATE_DIGEST}"
           args=(--tag "ghcr.io/${GITHUB_REPOSITORY}:${{ matrix.role }}-${GITHUB_REF_NAME}")
           if [[ "${GITHUB_REF_NAME}" != *-* ]]; then
             args+=(--tag "ghcr.io/${GITHUB_REPOSITORY}:${{ matrix.role }}-latest")
           fi
           docker buildx imagetools create "${args[@]}" "${source}"
+          actual=$(docker buildx imagetools inspect "ghcr.io/${GITHUB_REPOSITORY}:${{ matrix.role }}-${GITHUB_REF_NAME}" --format '{{json .Manifest}}' | jq -r .digest)
+          test "${actual}" = "${CANDIDATE_DIGEST}"
 
   publish-chart:
     name: Publish Helm chart
@@ -362,6 +407,15 @@ jobs:
         shell: bash
         run: |
           version="${GITHUB_REF_NAME#v}"
+          # Version tags are immutable across attempts. A partial release may
+          # resume only if an already-pushed chart matches this validated file.
+          mkdir -p existing-chart
+          if helm pull "oci://ghcr.io/${GITHUB_REPOSITORY_OWNER}/charts/kova" --version "${version}" --destination existing-chart >existing-chart/pull.log 2>&1; then
+            cmp "dist/kova-${version}.tgz" "existing-chart/kova-${version}.tgz"
+          elif ! grep -Fq "ghcr.io/${GITHUB_REPOSITORY_OWNER}/charts/kova:${version}: not found" existing-chart/pull.log; then
+            echo 'cannot establish existing chart identity; refusing publication' >&2
+            exit 1
+          fi
           output=$(helm push "dist/kova-${version}.tgz" \
             "oci://ghcr.io/${GITHUB_REPOSITORY_OWNER}/charts" 2>&1)
           printf '%s\n' "${output}"
@@ -389,6 +443,7 @@ jobs:
       - cli
       - publish-python-sdk
       - publish-chart
+      - image
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -408,6 +463,11 @@ jobs:
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: python-sdk-assets
+          path: dist
+      - name: Download candidate image evidence
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: image-candidate-evidence
           path: dist
       - name: Generate checksums
         shell: bash
@@ -435,6 +495,14 @@ jobs:
       contents: read
       packages: read
     steps:
+      - name: Check out artifact verification scripts
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.10"
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@594f3bf4285d9ea8dc53c9a0c9c4092420091003 # v4.4.0
       - name: Set up Helm
         uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
         with:
@@ -453,6 +521,13 @@ jobs:
           tar -tzf "${archive}" | grep -qx LICENSE
           tar -xzf "${archive}" kova LICENSE
           ./kova version | grep -F "${GITHUB_REF_NAME}"
+      - name: Verify public Python SDK hashes and installation
+        shell: bash
+        run: |
+          sdk_version=$(python scripts/release/verify-pypi-artifacts.py dist)
+          python -m venv installed-sdk
+          installed-sdk/bin/python -m pip install --index-url https://pypi.org/simple "kova-client==${sdk_version}"
+          EXPECTED_SDK_VERSION="${sdk_version}" installed-sdk/bin/python -c 'import importlib.metadata, os; from kova_client import AsyncKovaClient, KovaClient; assert AsyncKovaClient and KovaClient; assert importlib.metadata.version("kova-client") == os.environ["EXPECTED_SDK_VERSION"]'
       - name: Verify public Helm chart
         shell: bash
         run: |
@@ -482,6 +557,9 @@ jobs:
         run: |
           for role in controller runner worker; do
             image="ghcr.io/${GITHUB_REPOSITORY}:${role}-${GITHUB_REF_NAME}"
+            expected=$(jq -er --arg role "${role}" '.[$role]["containerimage.digest"]' dist/candidate-images.json)
+            actual=$(docker buildx imagetools inspect "${image}" --format '{{json .Manifest}}' | jq -r .digest)
+            test "${actual}" = "${expected}"
             pulled_image=false
             for _ in {1..6}; do
               if docker pull "${image}"; then
@@ -512,6 +590,8 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: Check out release notes
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Download release assets
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -535,21 +615,34 @@ jobs:
           - OCI chart: oci://ghcr.io/${GITHUB_REPOSITORY_OWNER}/charts/kova
           - controller, runner, and worker images
 
-          Install the exact chart version:
+          Fresh install (enable Service and authentication in your reviewed values):
 
               export KOVA_VERSION=${GITHUB_REF_NAME}
               helm show crds oci://ghcr.io/${GITHUB_REPOSITORY_OWNER}/charts/kova --version "\${KOVA_VERSION#v}" | kubectl apply -f -
-              helm upgrade --install kova oci://ghcr.io/${GITHUB_REPOSITORY_OWNER}/charts/kova --version "\${KOVA_VERSION#v}" --namespace kova --create-namespace --wait
+              helm install kova oci://ghcr.io/${GITHUB_REPOSITORY_OWNER}/charts/kova --version "\${KOVA_VERSION#v}" --namespace kova --create-namespace --values your-reviewed-values.yaml --wait
 
           Verify downloaded assets with checksums.txt. Apply the selected
           release CRDs before every Helm upgrade because Helm does not upgrade CRDs
           from a chart's crds/ directory.
+
+          Existing installations: do NOT perform a live rolling upgrade from
+          rc.9. Stop submissions, drain and confirm all active builds/runner Pods
+          are gone, back up ledgers and receipts, apply and round-trip the new
+          CRD status fields, select a fresh runner namespace for the new admission
+          contract, then upgrade all three roles together. Never delete a ledger
+          to reset capacity. Follow docs/service.md and docs/releases.md at this tag.
           EOF
+          notes_file=$(mktemp)
+          printf '%s\n' "${introduction}" > "${notes_file}"
+          if [[ -f "docs/release-notes/${GITHUB_REF_NAME}.md" ]]; then
+            printf '\n' >> "${notes_file}"
+            cat "docs/release-notes/${GITHUB_REF_NAME}.md" >> "${notes_file}"
+          fi
           args=(
             release create "${GITHUB_REF_NAME}"
             --verify-tag
             --generate-notes
-            --notes "${introduction}"
+            --notes-file "${notes_file}"
             --title "${GITHUB_REF_NAME}"
           )
           if [[ "${GITHUB_REF_NAME}" == *-* ]]; then

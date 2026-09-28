@@ -6,6 +6,8 @@ import tarfile
 import zipfile
 from pathlib import Path, PurePosixPath
 
+from packaging.version import Version
+
 PACKAGE_FILES = {
     "kova_client/__init__.py",
     "kova_client/_client.py",
@@ -21,18 +23,21 @@ DIST_INFO_FILES = {"METADATA", "RECORD", "WHEEL", "licenses/LICENSE"}
 
 
 def main() -> None:
-    if len(sys.argv) != 2:
-        raise SystemExit("usage: check-python-package.py DIST_DIRECTORY")
+    if len(sys.argv) not in (2, 3):
+        raise SystemExit("usage: check-python-package.py DIST_DIRECTORY [EXPECTED_TAG]")
     directory = Path(sys.argv[1])
     wheels = list(directory.glob("kova_client-*.whl"))
     sdists = list(directory.glob("kova_client-*.tar.gz"))
     if len(wheels) != 1 or len(sdists) != 1:
         raise SystemExit("expected exactly one kova-client wheel and one source distribution")
-    check_wheel(wheels[0])
-    check_sdist(sdists[0])
+    expected = str(Version(sys.argv[2].removeprefix("v"))) if len(sys.argv) == 3 else None
+    wheel_version = check_wheel(wheels[0], expected)
+    sdist_version = check_sdist(sdists[0], expected)
+    if wheel_version != sdist_version:
+        raise SystemExit("wheel and source distribution versions disagree")
 
 
-def check_wheel(path: Path) -> None:
+def check_wheel(path: Path, expected: str | None = None) -> str:
     with zipfile.ZipFile(path) as archive:
         files = {name for name in archive.namelist() if not name.endswith("/")}
         package_files = {name for name in files if name.startswith("kova_client/")}
@@ -54,19 +59,36 @@ def check_wheel(path: Path) -> None:
             raise SystemExit(f"{path}: missing Apache-2.0 license expression")
         if metadata.get_all("Requires-Dist") != ["httpx<1,>=0.27"]:
             raise SystemExit(f"{path}: unexpected runtime dependencies")
+        return check_version(path, metadata["Version"], expected)
 
 
-def check_sdist(path: Path) -> None:
+def check_sdist(path: Path, expected: str | None = None) -> str:
     with tarfile.open(path) as archive:
         files = {member.name for member in archive.getmembers() if member.isfile()}
+        metadata_members = [name for name in files if name.endswith("/PKG-INFO")]
+        if len(metadata_members) != 1:
+            raise SystemExit(f"{path}: expected one PKG-INFO file")
+        metadata_file = archive.extractfile(metadata_members[0])
+        if metadata_file is None:
+            raise SystemExit(f"{path}: missing source package metadata")
+        metadata = email.parser.BytesParser().parsebytes(metadata_file.read())
     roots = {PurePosixPath(name).parts[0] for name in files}
     if len(roots) != 1:
         raise SystemExit(f"{path}: source distribution has multiple roots")
     root = next(iter(roots))
     relative = {name.removeprefix(root + "/") for name in files}
-    expected = SDIST_ROOT_FILES | {f"src/{name}" for name in PACKAGE_FILES}
-    if relative != expected:
-        fail(path, "source distribution files", relative, expected)
+    expected_files = SDIST_ROOT_FILES | {f"src/{name}" for name in PACKAGE_FILES}
+    if relative != expected_files:
+        fail(path, "source distribution files", relative, expected_files)
+    return check_version(path, metadata["Version"], expected)
+
+
+def check_version(path: Path, actual: str | None, expected: str | None) -> str:
+    if actual is None:
+        raise SystemExit(f"{path}: missing package version")
+    if expected is not None and str(Version(actual)) != expected:
+        raise SystemExit(f"{path}: package version {actual!r} does not match release {expected!r}")
+    return actual
 
 
 def fail(path: Path, label: str, actual: set[str], expected: set[str]) -> None:

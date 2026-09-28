@@ -30,7 +30,11 @@ uv run --python "${python_version}" --directory "${sdk_dir}" --locked ruff forma
 uv run --python "${python_version}" --directory "${sdk_dir}" --locked mypy src/kova_client "${repo_root}/examples/service-sdk/python/main.py"
 uv run --python "${python_version}" --directory "${sdk_dir}" --locked pytest
 uv run --python "${python_version}" --directory "${sdk_dir}" --locked python -m build --outdir "${output_dir}"
-uv run --python "${python_version}" --directory "${sdk_dir}" --locked python "${repo_root}/scripts/ci/check-python-package.py" "${output_dir}"
+package_args=("${output_dir}")
+if [[ -n "${KOVA_EXPECTED_VERSION:-}" ]]; then
+  package_args+=("${KOVA_EXPECTED_VERSION}")
+fi
+uv run --python "${python_version}" --directory "${sdk_dir}" --locked python "${repo_root}/scripts/ci/check-python-package.py" "${package_args[@]}"
 
 wheel=$(find "${output_dir}" -maxdepth 1 -type f -name 'kova_client-*.whl' -print -quit)
 uv venv --no-project --python "${python_version}" "${temporary_install}/venv"
