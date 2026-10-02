@@ -28,9 +28,13 @@ const (
 	permitAction      = "drain-discard-only"
 	workerProofType   = "worker-pool-retired-v1"
 	workerAssertion   = "no-old-buildkit-execution-or-network-path-can-resume-v1"
+	writersProofType  = "old-writers-stopped-v1"
+	writersAssertion  = "ingress-frozen-old-processes-joined-no-uninstrumented-writers-or-post-confirmation-effects-v1"
 	maxPermitBytes    = 128 * 1024
 	maxReceiptRefs    = 4096
 	maxWorkerIDs      = 512
+	maxWriterObjects  = 256
+	maxServicePods    = 512
 	maxOpaqueIDBytes  = 256
 	maxWorkerIDBytes  = 128
 	maxIncidentIDSize = 128
@@ -172,6 +176,88 @@ type WorkerPoolRetired struct {
 	CutoffAt       string   `json:"cutoffAt"`
 }
 
+// KubeObjectRef pins the old route/control object, including its original UID.
+type KubeObjectRef struct {
+	Namespace string `json:"namespace"`
+	Name      string `json:"name"`
+	UID       string `json:"uid"`
+}
+
+func (o KubeObjectRef) validate() error {
+	if len(validation.IsDNS1123Label(o.Namespace)) != 0 ||
+		len(validation.IsDNS1123Subdomain(o.Name)) != 0 ||
+		!safeID(o.UID, maxOpaqueIDBytes) {
+		return ErrUnqualified
+	}
+	return nil
+}
+
+func orderedObjects(values []KubeObjectRef, limit int) bool {
+	if len(values) == 0 || len(values) > limit {
+		return false
+	}
+	for i, value := range values {
+		if value.validate() != nil || i > 0 &&
+			(values[i-1].Namespace > value.Namespace ||
+				values[i-1].Namespace == value.Namespace && values[i-1].Name >= value.Name) {
+			return false
+		}
+	}
+	return true
+}
+
+// ServiceProcessRef pins every old Service Pod/process generation that could
+// receive a receipt confirmation and issue a later CR or Pod side effect.
+type ServiceProcessRef struct {
+	Pod         KubeObjectRef `json:"pod"`
+	ContainerID string        `json:"containerId"`
+	ProcessID   string        `json:"processId"`
+}
+
+func orderedProcesses(values []ServiceProcessRef) bool {
+	if len(values) == 0 || len(values) > maxServicePods {
+		return false
+	}
+	for i, value := range values {
+		if value.Pod.validate() != nil || !safeID(value.ContainerID, maxOpaqueIDBytes) ||
+			!safeID(value.ProcessID, maxOpaqueIDBytes) ||
+			i > 0 && (values[i-1].Pod.Namespace > value.Pod.Namespace ||
+				values[i-1].Pod.Namespace == value.Pod.Namespace && values[i-1].Pod.Name >= value.Pod.Name) {
+			return false
+		}
+	}
+	return true
+}
+
+// OldWritersStopped is an external, typed assertion about ingress and the
+// old Service/API writers. It is required before a direct receipt inventory
+// can be treated as complete; a StopIntentRef alone is insufficient. Its
+// RetiredAt timestamp is audit data, not a quiescence timeout.
+type OldWritersStopped struct {
+	Type               string              `json:"type"`
+	StopIntent         StopIntentRef       `json:"stopIntent"`
+	IngressRoutes      []KubeObjectRef     `json:"ingressRoutes"`
+	ControlDeployments []KubeObjectRef     `json:"controlDeployments"`
+	ServiceProcesses   []ServiceProcessRef `json:"serviceProcesses"`
+	EvidenceDigest     string              `json:"evidenceDigest"`
+	Assertion          string              `json:"assertion"`
+	RetiredAt          string              `json:"retiredAt"`
+}
+
+func (w OldWritersStopped) validate(stop StopIntentRef) error {
+	if w.Type != writersProofType || w.StopIntent != stop ||
+		!orderedObjects(w.IngressRoutes, maxWriterObjects) ||
+		!orderedObjects(w.ControlDeployments, maxWriterObjects) ||
+		!orderedProcesses(w.ServiceProcesses) ||
+		!digestSHA256(w.EvidenceDigest) || w.Assertion != writersAssertion {
+		return ErrUnqualified
+	}
+	if _, err := time.Parse(time.RFC3339Nano, w.RetiredAt); err != nil {
+		return ErrUnqualified
+	}
+	return nil
+}
+
 func (w WorkerPoolRetired) validate(epoch EpochIdentity) error {
 	if w.Type != workerProofType || w.PoolID != epoch.WorkerPoolID || w.Epoch != epoch.Generation ||
 		len(w.WorkerIDs) == 0 || len(w.WorkerIDs) > maxWorkerIDs ||
@@ -195,18 +281,19 @@ func (w WorkerPoolRetired) validate(epoch EpochIdentity) error {
 // for already bounded old liabilities. It cannot authorize new capacity,
 // submission, retry, replay, or deletion of incident tombstones.
 type DrainPayload struct {
-	Version          string            `json:"version"`
-	Audience         string            `json:"audience"`
-	Action           string            `json:"action"`
-	Issuer           string            `json:"issuer"`
-	KeyID            string            `json:"keyId"`
-	IncidentID       string            `json:"incidentId"`
-	StopIntent       StopIntentRef     `json:"stopIntent"`
-	Epoch            EpochIdentity     `json:"epoch"`
-	ReceiptCount     int               `json:"receiptCount"`
-	ReceiptSetDigest string            `json:"receiptSetDigest"`
-	WorkerRetirement WorkerPoolRetired `json:"workerRetirement"`
-	IssuedAt         string            `json:"issuedAt"`
+	Version           string            `json:"version"`
+	Audience          string            `json:"audience"`
+	Action            string            `json:"action"`
+	Issuer            string            `json:"issuer"`
+	KeyID             string            `json:"keyId"`
+	IncidentID        string            `json:"incidentId"`
+	StopIntent        StopIntentRef     `json:"stopIntent"`
+	Epoch             EpochIdentity     `json:"epoch"`
+	ReceiptCount      int               `json:"receiptCount"`
+	ReceiptSetDigest  string            `json:"receiptSetDigest"`
+	WorkerRetirement  WorkerPoolRetired `json:"workerRetirement"`
+	OldWritersStopped OldWritersStopped `json:"oldWritersStopped"`
+	IssuedAt          string            `json:"issuedAt"`
 }
 
 type Envelope struct {
@@ -219,13 +306,16 @@ type Envelope struct {
 // Computing PermitDigest from the just-received untrusted envelope defeats
 // this pin and is not a supported recovery procedure.
 type Expectation struct {
-	PermitDigest  string
-	IncidentID    string
-	StopIntent    StopIntentRef
-	Epoch         EpochIdentity
-	Receipts      []ReceiptRef
-	WorkerIDs     []string
-	CapacitySlots int
+	PermitDigest       string
+	IncidentID         string
+	StopIntent         StopIntentRef
+	Epoch              EpochIdentity
+	Receipts           []ReceiptRef
+	WorkerIDs          []string
+	CapacitySlots      int
+	IngressRoutes      []KubeObjectRef
+	ControlDeployments []KubeObjectRef
+	ServiceProcesses   []ServiceProcessRef
 }
 
 // TrustRoots is a configured immutable issuer/key-ID allowlist containing
@@ -250,7 +340,10 @@ func VerifyDrainPermit(raw []byte, expected Expectation, roots TrustRoots) (Drai
 	if len(raw) == 0 || len(raw) > maxPermitBytes || !digestSHA256(expected.PermitDigest) ||
 		!safeID(expected.IncidentID, maxIncidentIDSize) || expected.StopIntent.validate() != nil ||
 		expected.Epoch.validate() != nil || expected.CapacitySlots < 1 || expected.CapacitySlots > 65535 ||
-		len(expected.WorkerIDs) == 0 || len(expected.WorkerIDs) > maxWorkerIDs {
+		len(expected.WorkerIDs) == 0 || len(expected.WorkerIDs) > maxWorkerIDs ||
+		!orderedObjects(expected.IngressRoutes, maxWriterObjects) ||
+		!orderedObjects(expected.ControlDeployments, maxWriterObjects) ||
+		!orderedProcesses(expected.ServiceProcesses) {
 		return DrainEvidence{}, ErrUnqualified
 	}
 	var envelope Envelope
@@ -273,8 +366,12 @@ func VerifyDrainPermit(raw []byte, expected Expectation, roots TrustRoots) (Drai
 		p.StopIntent.validate() != nil || p.Epoch.validate() != nil ||
 		p.ReceiptCount != len(expected.Receipts) || p.ReceiptCount > maxReceiptRefs ||
 		!digestSHA256(p.ReceiptSetDigest) || p.WorkerRetirement.validate(p.Epoch) != nil ||
+		p.OldWritersStopped.validate(p.StopIntent) != nil ||
 		p.WorkerRetirement.CapacitySlots != expected.CapacitySlots ||
-		!reflect.DeepEqual(p.WorkerRetirement.WorkerIDs, expected.WorkerIDs) {
+		!reflect.DeepEqual(p.WorkerRetirement.WorkerIDs, expected.WorkerIDs) ||
+		!reflect.DeepEqual(p.OldWritersStopped.IngressRoutes, expected.IngressRoutes) ||
+		!reflect.DeepEqual(p.OldWritersStopped.ControlDeployments, expected.ControlDeployments) ||
+		!reflect.DeepEqual(p.OldWritersStopped.ServiceProcesses, expected.ServiceProcesses) {
 		return DrainEvidence{}, ErrUnqualified
 	}
 	issuedAt, err := time.Parse(time.RFC3339Nano, p.IssuedAt)
@@ -282,7 +379,8 @@ func VerifyDrainPermit(raw []byte, expected Expectation, roots TrustRoots) (Drai
 		return DrainEvidence{}, ErrUnqualified
 	}
 	cutoffAt, _ := time.Parse(time.RFC3339Nano, p.WorkerRetirement.CutoffAt)
-	if issuedAt.Before(cutoffAt) { // ordering for audit, not quiescence proof.
+	writersAt, _ := time.Parse(time.RFC3339Nano, p.OldWritersStopped.RetiredAt)
+	if issuedAt.Before(cutoffAt) || issuedAt.Before(writersAt) { // audit ordering, never quiescence proof.
 		return DrainEvidence{}, ErrUnqualified
 	}
 	for i, id := range expected.WorkerIDs {

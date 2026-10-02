@@ -42,11 +42,25 @@ func fixturePermit(t *testing.T) (DrainPayload, Expectation, TrustRoots, ed25519
 			Disposition: "terminated", EvidenceDigest: "sha256:" + strings.Repeat("b", 64),
 			Assertion: workerAssertion, CutoffAt: "2020-01-01T00:00:00Z",
 		},
+		OldWritersStopped: OldWritersStopped{
+			Type: writersProofType, StopIntent: stop,
+			IngressRoutes:      []KubeObjectRef{{Namespace: "control-old", Name: "kova-old-route", UID: "route-original-uid"}},
+			ControlDeployments: []KubeObjectRef{{Namespace: "control-old", Name: "kova-service", UID: "deployment-original-uid"}},
+			ServiceProcesses: []ServiceProcessRef{{
+				Pod:         KubeObjectRef{Namespace: "control-old", Name: "kova-service-old", UID: "service-pod-original-uid"},
+				ContainerID: "containerd://old-container", ProcessID: "old-process-generation",
+			}},
+			EvidenceDigest: "sha256:" + strings.Repeat("a", 64), Assertion: writersAssertion,
+			RetiredAt: "2020-01-01T00:00:00Z",
+		},
 		IssuedAt: "2020-01-01T00:00:01Z",
 	}
 	expected := Expectation{
 		IncidentID: payload.IncidentID, StopIntent: stop, Epoch: epoch,
 		Receipts: receipts, WorkerIDs: []string{"worker-a", "worker-b"}, CapacitySlots: 16,
+		IngressRoutes:      append([]KubeObjectRef(nil), payload.OldWritersStopped.IngressRoutes...),
+		ControlDeployments: append([]KubeObjectRef(nil), payload.OldWritersStopped.ControlDeployments...),
+		ServiceProcesses:   append([]ServiceProcessRef(nil), payload.OldWritersStopped.ServiceProcesses...),
 	}
 	return payload, expected, TrustRoots{"environment-operator": {"key-one": public}}, private
 }
@@ -105,6 +119,12 @@ func TestVerifyDrainPermitRejectsChangedPayloadEvenWhenResigned(t *testing.T) {
 		{name: "missing evidence digest", mutate: func(p *DrainPayload) { p.WorkerRetirement.EvidenceDigest = "" }},
 		{name: "wrong worker epoch", mutate: func(p *DrainPayload) { p.WorkerRetirement.Epoch = strings.Repeat("f", 32) }},
 		{name: "unsupported disposition", mutate: func(p *DrainPayload) { p.WorkerRetirement.Disposition = "paused" }},
+		{name: "missing writer assertion", mutate: func(p *DrainPayload) { p.OldWritersStopped.Assertion = "unknown" }},
+		{name: "replacement ingress route", mutate: func(p *DrainPayload) { p.OldWritersStopped.IngressRoutes[0].UID = "replacement-uid" }},
+		{name: "replacement control deployment", mutate: func(p *DrainPayload) { p.OldWritersStopped.ControlDeployments[0].UID = "replacement-uid" }},
+		{name: "omitted service process", mutate: func(p *DrainPayload) { p.OldWritersStopped.ServiceProcesses = nil }},
+		{name: "wrong writer evidence", mutate: func(p *DrainPayload) { p.OldWritersStopped.EvidenceDigest = "" }},
+		{name: "wrong writer stop intent", mutate: func(p *DrainPayload) { p.OldWritersStopped.StopIntent.UID = "replacement-uid" }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			payload, expected, roots, key := fixturePermit(t)
