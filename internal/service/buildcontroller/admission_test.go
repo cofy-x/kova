@@ -1274,6 +1274,12 @@ func TestReservationSurvivesUnknownWriteAndRestart(t *testing.T) {
 	if len(pods.Items) != 1 || pods.Items[0].Labels["kova.cofy.dev/build-id"] != "a" {
 		t.Fatalf("recovered Pods = %#v", pods.Items)
 	}
+	// The controller-runtime fake client does not assign the UID that the API
+	// server assigns on Pod creation.
+	pods.Items[0].UID = types.UID("pod-uid-a")
+	if err := base.Update(context.Background(), &pods.Items[0]); err != nil {
+		t.Fatal(err)
+	}
 	var finished kovav1.KovaBuild
 	if err := base.Get(context.Background(), types.NamespacedName{Namespace: "jobs", Name: "a"}, &finished); err != nil {
 		t.Fatal(err)
@@ -1326,6 +1332,11 @@ func TestPodCreateUnknownResultAndStatusFailureHoldCapacity(t *testing.T) {
 			}
 			if len(pods.Items) != 1 || pods.Items[0].Labels["kova.cofy.dev/build-id"] != "a" {
 				t.Fatalf("capacity escaped after %s: %#v", mode, pods.Items)
+			}
+			// The controller-runtime fake client does not assign server UIDs.
+			pods.Items[0].UID = types.UID("pod-uid-a")
+			if err := base.Update(context.Background(), &pods.Items[0]); err != nil {
+				t.Fatal(err)
 			}
 			if mode == "status-update" {
 				if _, err := r2.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "jobs", Name: "a"}}); err != nil {

@@ -25,11 +25,13 @@ import (
 )
 
 type fakeKube struct {
-	deleted   []string
-	deleteErr error
-	podClient client.Client
-	execFn    func(kube.ExecOptions) error
-	execCalls [][]string
+	deleted         []string
+	deletedUIDs     []types.UID
+	deleteErr       error
+	beforeUIDDelete func(context.Context, string, string, types.UID) error
+	podClient       client.Client
+	execFn          func(kube.ExecOptions) error
+	execCalls       [][]string
 }
 
 func buildTargets(targets ...string) []kovav1.KovaBuildTargetSpec {
@@ -70,9 +72,42 @@ func (f *fakeKube) DeletePod(_ context.Context, namespace string, name string) e
 	return nil
 }
 
+func (f *fakeKube) DeletePodWithUID(ctx context.Context, namespace, name string, uid types.UID) error {
+	if uid == "" {
+		return errors.New("refusing to delete pod without UID")
+	}
+	if f.beforeUIDDelete != nil {
+		if err := f.beforeUIDDelete(ctx, namespace, name, uid); err != nil {
+			return err
+		}
+	}
+	if f.deleteErr != nil {
+		return f.deleteErr
+	}
+	if f.podClient != nil {
+		var pod corev1.Pod
+		err := f.podClient.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, &pod)
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if pod.UID != uid {
+			return apierrors.NewConflict(corev1.Resource("pods"), name, errors.New("runner Pod UID changed"))
+		}
+		if err := f.podClient.Delete(ctx, &pod, &client.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &uid}}); err != nil && !apierrors.IsNotFound(err) {
+			return err
+		}
+	}
+	f.deleted = append(f.deleted, namespace+"/"+name)
+	f.deletedUIDs = append(f.deletedUIDs, uid)
+	return nil
+}
+
 func testRunnerPod(build *kovav1.KovaBuild) *corev1.Pod {
 	return &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
-		Name: buildPodName(build.Name), Namespace: build.Namespace,
+		Name: buildPodName(build.Name), Namespace: build.Namespace, UID: types.UID("pod-uid-" + build.Name),
 		Labels:          map[string]string{"kova.cofy.dev/build-id": build.Name},
 		OwnerReferences: []metav1.OwnerReference{{APIVersion: kovav1.Group + "/" + kovav1.Version, Kind: "KovaBuild", Name: build.Name, UID: build.UID}},
 	}}
@@ -453,6 +488,9 @@ func TestReconcilerDeleteCleansPodAndFinalizer(t *testing.T) {
 	if len(kube.deleted) != 1 || kube.deleted[0] != "jobs/kova-job-abc" {
 		t.Fatalf("deleted pods = %#v", kube.deleted)
 	}
+	if len(kube.deletedUIDs) != 1 || kube.deletedUIDs[0] != "pod-uid-abc" {
+		t.Fatalf("deleted Pod UIDs = %#v", kube.deletedUIDs)
+	}
 	if len(build.Finalizers) != 0 {
 		t.Fatalf("finalizers = %#v", build.Finalizers)
 	}
@@ -480,6 +518,9 @@ func TestTerminalBuildDeletesRunnerButRetainsResultForTTL(t *testing.T) {
 	}
 	if len(kube.deleted) != 1 || kube.deleted[0] != "jobs/kova-job-completed" {
 		t.Fatalf("deleted pods = %#v", kube.deleted)
+	}
+	if len(kube.deletedUIDs) != 1 || kube.deletedUIDs[0] != "pod-uid-completed" {
+		t.Fatalf("deleted Pod UIDs = %#v", kube.deletedUIDs)
 	}
 	if result.RequeueAfter <= 0 || build.Status.Phase != kovav1.PhaseSucceeded || len(build.Status.Outputs) != 1 {
 		t.Fatalf("terminal result was not retained: result=%#v status=%#v", result, build.Status)

@@ -194,6 +194,9 @@ func (r *KovaBuildReconciler) cancelBuild(ctx context.Context, build *kovav1.Kov
 	if err := r.fenceReservation(ctx, build); err != nil {
 		return ctrl.Result{}, err
 	}
+	if err := validateRunnerPodStatusName(build); err != nil {
+		return ctrl.Result{}, err
+	}
 	if build.Status.Phase == kovav1.PhaseRunning && build.Status.RunnerPodName != "" {
 		// Cancellation remains effective when the daemon is already unavailable;
 		// deleting the runner Pod is the authoritative stop operation.
@@ -423,12 +426,24 @@ func (r *KovaBuildReconciler) clearPollFailure(ctx context.Context, build *kovav
 }
 
 func (r *KovaBuildReconciler) retryStatusObservation(ctx context.Context, build *kovav1.KovaBuild, observationErr error) (ctrl.Result, error) {
+	if build.Status.RunnerPodName == "" {
+		return ctrl.Result{}, fmt.Errorf("running KovaBuild %s/%s has no runner Pod name", build.Namespace, build.Name)
+	}
+	if err := validateRunnerPodStatusName(build); err != nil {
+		return ctrl.Result{}, err
+	}
 	var pod corev1.Pod
 	err := r.getRunnerPod(ctx, build, &pod)
 	if apierrors.IsNotFound(err) {
 		return ctrl.Result{}, r.finish(ctx, build, kovav1.PhaseFailed, "RunnerUnavailable", "runner Pod disappeared while build status was unavailable")
 	}
-	if err == nil && (pod.Status.Phase == corev1.PodFailed || pod.Status.Phase == corev1.PodSucceeded) {
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if !podOwnedByBuild(&pod, build) {
+		return ctrl.Result{}, fmt.Errorf("runner Pod %s/%s is not owned by KovaBuild UID %s", pod.Namespace, pod.Name, build.UID)
+	}
+	if pod.Status.Phase == corev1.PodFailed || pod.Status.Phase == corev1.PodSucceeded {
 		return ctrl.Result{}, r.finish(ctx, build, kovav1.PhaseFailed, "RunnerUnavailable", fmt.Sprintf("runner Pod terminated while build status was unavailable: %s", pod.Status.Phase))
 	}
 	now := metav1.Now()
@@ -436,7 +451,7 @@ func (r *KovaBuildReconciler) retryStatusObservation(ctx context.Context, build 
 		build.Status.PollFailureSince = &now
 	}
 	if r.Cfg.PollRetryWindow > 0 && time.Since(build.Status.PollFailureSince.Time) >= r.Cfg.PollRetryWindow {
-		if err := r.Kube.DeletePod(ctx, build.Namespace, build.Status.RunnerPodName); err != nil {
+		if err := r.deleteOwnedRunnerPodAndConfirm(ctx, build, &pod); err != nil {
 			return ctrl.Result{}, err
 		}
 		return ctrl.Result{}, r.finish(ctx, build, kovav1.PhaseFailed, "RunnerUnavailable", fmt.Sprintf("runner status unavailable for %s: %v", r.Cfg.PollRetryWindow, observationErr))
@@ -487,10 +502,13 @@ func (r *KovaBuildReconciler) expireActiveBuild(ctx context.Context, build *kova
 		return false, ctrl.Result{}, nil
 	}
 	if build.Status.RunnerPodName != "" {
+		if err := validateRunnerPodStatusName(build); err != nil {
+			return true, ctrl.Result{}, err
+		}
 		cancelCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		_ = (runnerexec.Client{Kube: r.Kube}).CancelBuild(cancelCtx, build)
 		cancel()
-		if err := r.Kube.DeletePod(ctx, build.Namespace, build.Status.RunnerPodName); err != nil {
+		if err := r.deleteRunnerAndConfirm(ctx, build); err != nil {
 			return true, ctrl.Result{}, err
 		}
 	}
@@ -534,7 +552,10 @@ func (r *KovaBuildReconciler) reconcileTerminal(ctx context.Context, build *kova
 	if remaining > 0 {
 		return ctrl.Result{RequeueAfter: remaining}, nil
 	}
-	if err := r.Delete(ctx, build); err != nil && !apierrors.IsNotFound(err) {
+	if build.UID == "" {
+		return ctrl.Result{}, fmt.Errorf("refusing to delete terminal KovaBuild %s/%s without a UID", build.Namespace, build.Name)
+	}
+	if err := r.Delete(ctx, build, &client.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &build.UID}}); err != nil && !apierrors.IsNotFound(err) {
 		return ctrl.Result{}, err
 	}
 	return ctrl.Result{}, nil
@@ -582,9 +603,22 @@ func (r *KovaBuildReconciler) reconcileDelete(ctx context.Context, build *kovav1
 }
 
 func (r *KovaBuildReconciler) deleteRunnerAndConfirm(ctx context.Context, build *kovav1.KovaBuild) error {
+	if err := validateRunnerPodStatusName(build); err != nil {
+		return err
+	}
 	pod, err := r.getOwnedPod(ctx, build)
 	if err != nil || pod == nil {
 		return err
+	}
+	return r.deleteOwnedRunnerPodAndConfirm(ctx, build, pod)
+}
+
+func (r *KovaBuildReconciler) deleteOwnedRunnerPodAndConfirm(ctx context.Context, build *kovav1.KovaBuild, pod *corev1.Pod) error {
+	if pod.Namespace != build.Namespace || pod.Name != buildPodName(build.Name) || !podOwnedByBuild(pod, build) {
+		return fmt.Errorf("refusing to delete runner Pod %s/%s not matching KovaBuild UID %s", pod.Namespace, pod.Name, build.UID)
+	}
+	if pod.UID == "" {
+		return fmt.Errorf("refusing to delete runner Pod %s/%s without a UID", pod.Namespace, pod.Name)
 	}
 	if observed := pod.Annotations[podCreateAttemptKey]; observed != "" {
 		if err := r.completePodCreate(ctx, build, observed); err != nil {
@@ -593,15 +627,27 @@ func (r *KovaBuildReconciler) deleteRunnerAndConfirm(ctx context.Context, build 
 	}
 	deleteCtx, cancel := context.WithTimeout(ctx, r.verificationAttemptTimeout())
 	defer cancel()
-	if err := r.Kube.DeletePod(deleteCtx, build.Namespace, buildPodName(build.Name)); err != nil {
+	if err := r.Kube.DeletePodWithUID(deleteCtx, pod.Namespace, pod.Name, pod.UID); err != nil {
 		return err
 	}
-	stillPresent, err := r.getOwnedPod(ctx, build)
+	var stillPresent corev1.Pod
+	err := r.reader().Get(ctx, types.NamespacedName{Namespace: pod.Namespace, Name: pod.Name}, &stillPresent)
+	if apierrors.IsNotFound(err) {
+		return nil
+	}
 	if err != nil {
 		return err
 	}
-	if stillPresent != nil {
-		return fmt.Errorf("runner Pod %s/%s still exists after deletion", build.Namespace, buildPodName(build.Name))
+	if stillPresent.UID != pod.UID {
+		return apierrors.NewConflict(corev1.Resource("pods"), pod.Name,
+			fmt.Errorf("runner Pod %s/%s was replaced after deletion: expected UID %s, observed UID %s", pod.Namespace, pod.Name, pod.UID, stillPresent.UID))
+	}
+	return fmt.Errorf("runner Pod %s/%s UID %s still exists after deletion", pod.Namespace, pod.Name, pod.UID)
+}
+
+func validateRunnerPodStatusName(build *kovav1.KovaBuild) error {
+	if build.Status.RunnerPodName != "" && build.Status.RunnerPodName != buildPodName(build.Name) {
+		return fmt.Errorf("KovaBuild %s/%s references unexpected runner Pod %q", build.Namespace, build.Name, build.Status.RunnerPodName)
 	}
 	return nil
 }

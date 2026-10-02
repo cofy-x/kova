@@ -3,14 +3,19 @@ package kube
 import (
 	"bytes"
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/fake"
+	ktesting "k8s.io/client-go/testing"
 )
 
 func TestGetSecretData(t *testing.T) {
@@ -48,6 +53,141 @@ func TestPodExists(t *testing.T) {
 	}
 	if exists {
 		t.Fatal("missing pod should not exist")
+	}
+}
+
+func TestDeletePodWithUIDRejectsEmptyUIDWithoutRequest(t *testing.T) {
+	clientset := fake.NewSimpleClientset()
+	kube := &Client{clientset: clientset}
+	if err := kube.DeletePodWithUID(context.Background(), "jobs", "runner", ""); err == nil {
+		t.Fatal("expected empty UID to fail closed")
+	}
+	if got := len(clientset.Actions()); got != 0 {
+		t.Fatalf("Kubernetes requests after empty UID = %d", got)
+	}
+}
+
+func TestDeletePodWithUIDUsesPreconditionAndHandlesNotFound(t *testing.T) {
+	uid := types.UID("original")
+	for _, present := range []bool{true, false} {
+		t.Run(map[bool]string{true: "present", false: "already-gone"}[present], func(t *testing.T) {
+			clientset := fake.NewSimpleClientset()
+			if present {
+				if err := clientset.Tracker().Create(corev1.SchemeGroupVersion.WithResource("pods"),
+					&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "runner", Namespace: "jobs", UID: uid}}, "jobs"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			kube := &Client{clientset: clientset}
+			if err := kube.DeletePodWithUID(context.Background(), "jobs", "runner", uid); err != nil {
+				t.Fatal(err)
+			}
+			if len(clientset.Actions()) < 2 {
+				t.Fatalf("expected DELETE and confirming GET, actions=%#v", clientset.Actions())
+			}
+			deleteAction, ok := clientset.Actions()[0].(ktesting.DeleteAction)
+			if !ok {
+				t.Fatalf("first action = %T, want DeleteAction", clientset.Actions()[0])
+			}
+			options := deleteAction.GetDeleteOptions()
+			if options.Preconditions == nil || options.Preconditions.UID == nil || *options.Preconditions.UID != uid {
+				t.Fatalf("DELETE preconditions = %#v, want UID %s", options.Preconditions, uid)
+			}
+		})
+	}
+}
+
+func TestDeletePodWithUIDConflictsWhenNameReplacedBeforeDelete(t *testing.T) {
+	uid := types.UID("original")
+	replacementUID := types.UID("replacement")
+	clientset := fake.NewSimpleClientset(&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "runner", Namespace: "jobs", UID: uid}})
+	clientset.PrependReactor("delete", "pods", func(action ktesting.Action) (bool, runtime.Object, error) {
+		options := action.(ktesting.DeleteAction).GetDeleteOptions()
+		if options.Preconditions == nil || options.Preconditions.UID == nil || *options.Preconditions.UID != uid {
+			t.Fatalf("DELETE was not pinned to original UID: %#v", options.Preconditions)
+		}
+		if err := clientset.Tracker().Delete(corev1.SchemeGroupVersion.WithResource("pods"), "jobs", "runner"); err != nil {
+			t.Fatal(err)
+		}
+		if err := clientset.Tracker().Create(corev1.SchemeGroupVersion.WithResource("pods"),
+			&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "runner", Namespace: "jobs", UID: replacementUID}}, "jobs"); err != nil {
+			t.Fatal(err)
+		}
+		return true, nil, apierrors.NewConflict(corev1.Resource("pods"), "runner", errors.New("UID precondition failed"))
+	})
+	kube := &Client{clientset: clientset}
+	if err := kube.DeletePodWithUID(context.Background(), "jobs", "runner", uid); !apierrors.IsConflict(err) {
+		t.Fatalf("replacement before DELETE error = %v, want Conflict", err)
+	}
+	pod, err := clientset.CoreV1().Pods("jobs").Get(context.Background(), "runner", metav1.GetOptions{})
+	if err != nil || pod.UID != replacementUID {
+		t.Fatalf("replacement Pod lost: pod=%#v err=%v", pod, err)
+	}
+}
+
+func TestDeletePodWithUIDConflictsWhenNameReplacedDuringWait(t *testing.T) {
+	uid := types.UID("original")
+	replacementUID := types.UID("replacement")
+	clientset := fake.NewSimpleClientset(&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "runner", Namespace: "jobs", UID: uid}})
+	clientset.PrependReactor("delete", "pods", func(ktesting.Action) (bool, runtime.Object, error) {
+		if err := clientset.Tracker().Delete(corev1.SchemeGroupVersion.WithResource("pods"), "jobs", "runner"); err != nil {
+			t.Fatal(err)
+		}
+		if err := clientset.Tracker().Create(corev1.SchemeGroupVersion.WithResource("pods"),
+			&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "runner", Namespace: "jobs", UID: replacementUID}}, "jobs"); err != nil {
+			t.Fatal(err)
+		}
+		return true, nil, nil
+	})
+	kube := &Client{clientset: clientset}
+	if err := kube.DeletePodWithUID(context.Background(), "jobs", "runner", uid); !apierrors.IsConflict(err) {
+		t.Fatalf("replacement while waiting error = %v, want Conflict", err)
+	}
+	pod, err := clientset.CoreV1().Pods("jobs").Get(context.Background(), "runner", metav1.GetOptions{})
+	if err != nil || pod.UID != replacementUID {
+		t.Fatalf("replacement Pod lost: pod=%#v err=%v", pod, err)
+	}
+}
+
+func TestDeletePodWithUIDWaitsForOriginalUIDToDisappear(t *testing.T) {
+	uid := types.UID("original")
+	clientset := fake.NewSimpleClientset(&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "runner", Namespace: "jobs", UID: uid}})
+	gets := 0
+	clientset.PrependReactor("get", "pods", func(ktesting.Action) (bool, runtime.Object, error) {
+		gets++
+		if gets == 1 {
+			return true, &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "runner", Namespace: "jobs", UID: uid}}, nil
+		}
+		return true, nil, apierrors.NewNotFound(corev1.Resource("pods"), "runner")
+	})
+	kube := &Client{clientset: clientset}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := kube.DeletePodWithUID(ctx, "jobs", "runner", uid); err != nil {
+		t.Fatal(err)
+	}
+	if gets != 2 {
+		t.Fatalf("confirmation GETs = %d, want retry then NotFound", gets)
+	}
+}
+
+func TestDeletePodWithUIDRetriesAfterConfirmationReadError(t *testing.T) {
+	uid := types.UID("original")
+	clientset := fake.NewSimpleClientset(&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "runner", Namespace: "jobs", UID: uid}})
+	failOnce := true
+	clientset.PrependReactor("get", "pods", func(ktesting.Action) (bool, runtime.Object, error) {
+		if failOnce {
+			failOnce = false
+			return true, nil, errors.New("temporary API read failure")
+		}
+		return false, nil, nil
+	})
+	kube := &Client{clientset: clientset}
+	if err := kube.DeletePodWithUID(context.Background(), "jobs", "runner", uid); err == nil {
+		t.Fatal("confirmation read failure should cause a retry")
+	}
+	if err := kube.DeletePodWithUID(context.Background(), "jobs", "runner", uid); err != nil {
+		t.Fatalf("retry after original Pod was deleted: %v", err)
 	}
 }
 
