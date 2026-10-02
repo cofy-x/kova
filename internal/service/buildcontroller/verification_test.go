@@ -79,6 +79,7 @@ func TestVerificationRetriesTransientExportAfterControllerRestartWithoutRepost(t
 	cfg := config.Config{VerificationAttemptTimeout: time.Second, VerificationWindow: time.Minute, RegistryPlainHTTP: []string{host}}
 	r := KovaBuildReconciler{Client: client, Scheme: testScheme(t), Kube: kubeClient, Cfg: cfg}
 	initializeAdmissionForTest(t, &r)
+	cfg = r.Cfg
 	key := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: build.Namespace, Name: build.Name}}
 	if _, err := r.Reconcile(context.Background(), key); err != nil {
 		t.Fatal(err)
