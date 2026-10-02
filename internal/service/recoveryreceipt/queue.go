@@ -65,6 +65,7 @@ type ObservedQueueIntent struct {
 	ReceiptName     string
 	ReceiptUID      string
 	ResourceVersion string
+	DataDigest      string
 }
 
 // ConfigMaps is implemented by client-go's typed, direct ConfigMap client.
@@ -175,9 +176,13 @@ func QualifyQueue(q QueueIntent, cm *corev1.ConfigMap) (ObservedQueueIntent, err
 			return ObservedQueueIntent{}, ErrChanged
 		}
 	}
+	digest, err := DigestData(cm.Data)
+	if err != nil {
+		return ObservedQueueIntent{}, ErrChanged
+	}
 	return ObservedQueueIntent{
 		Intent: q, ReceiptName: cm.Name,
-		ReceiptUID: string(cm.UID), ResourceVersion: cm.ResourceVersion,
+		ReceiptUID: string(cm.UID), ResourceVersion: cm.ResourceVersion, DataDigest: digest,
 	}, nil
 }
 

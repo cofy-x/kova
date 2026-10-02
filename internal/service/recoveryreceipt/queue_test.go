@@ -79,7 +79,7 @@ func TestQueueReceiptCreateAndDirectReadback(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if witness.ReceiptUID != string(cm.UID) || witness.ResourceVersion != cm.ResourceVersion || witness.Intent != q || api.puts != 1 || api.reads != 1 {
+	if witness.ReceiptUID != string(cm.UID) || witness.ResourceVersion != cm.ResourceVersion || witness.DataDigest == "" || witness.Intent != q || api.puts != 1 || api.reads != 1 {
 		t.Fatalf("incorrect receipt witness or call count: %+v, puts=%d reads=%d", witness, api.puts, api.reads)
 	}
 }
