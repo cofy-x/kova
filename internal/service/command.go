@@ -322,6 +322,10 @@ func configureKubeClientRateLimit(config *rest.Config, qps, burst int) {
 }
 
 func configureKubeClientRateLimits(config *rest.Config, qps, burst int) (*rest.Config, *rest.Config, *rest.Config) {
+	return configureKubeClientRateLimitsWithMetrics(config, qps, burst, serviceKubeClientMetrics)
+}
+
+func configureKubeClientRateLimitsWithMetrics(config *rest.Config, qps, burst int, metrics *kubeClientMetricSet) (*rest.Config, *rest.Config, *rest.Config) {
 	leaderConfig := rest.CopyConfig(config)
 	readinessConfig := rest.CopyConfig(config)
 	httpConfig := rest.CopyConfig(config)
@@ -329,6 +333,10 @@ func configureKubeClientRateLimits(config *rest.Config, qps, burst int) (*rest.C
 	configureKubeClientRateLimit(readinessConfig, 5, 10)
 	configureKubeClientRateLimit(httpConfig, qps, burst)
 	configureKubeClientRateLimit(config, qps, burst)
+	instrumentKubeClientConfig(leaderConfig, kubeClassLeader, metrics)
+	instrumentKubeClientConfig(readinessConfig, kubeClassReadiness, metrics)
+	instrumentKubeClientConfig(httpConfig, kubeClassHTTP, metrics)
+	instrumentKubeClientConfig(config, kubeClassController, metrics)
 	return leaderConfig, readinessConfig, httpConfig
 }
 

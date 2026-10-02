@@ -5,6 +5,7 @@ go 1.26.8
 require (
 	github.com/google/go-containerregistry v0.22.1
 	github.com/labstack/echo/v4 v4.15.4
+	github.com/prometheus/client_golang v1.24.0
 	github.com/urfave/cli/v2 v2.27.7
 	go.opentelemetry.io/otel v1.46.0
 	go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploggrpc v0.22.0
@@ -69,7 +70,6 @@ require (
 	github.com/opencontainers/go-digest v1.0.0 // indirect
 	github.com/opencontainers/image-spec v1.1.1 // indirect
 	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 // indirect
-	github.com/prometheus/client_golang v1.24.0 // indirect
 	github.com/prometheus/client_model v0.6.2 // indirect
 	github.com/prometheus/common v0.70.0 // indirect
 	github.com/prometheus/procfs v0.21.1 // indirect
