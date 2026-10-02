@@ -20,7 +20,8 @@ import (
 // listener or manager starts. A committed installation can only be observed;
 // only the original fresh Initializing installation may be completed.
 func prepareGenesisRuntime(ctx context.Context, cfg config.Config, receiptRaw []byte,
-	api admissiongenesis.CoreAPI, directReader client.Reader) (*admissiongenesis.Guard, error) {
+	api admissiongenesis.CoreAPI, directReader client.Reader,
+	receiptCheck func(context.Context) error) (*admissiongenesis.Guard, error) {
 	receipt, err := admissiongenesis.ParseReceipt(receiptRaw)
 	if err != nil {
 		return nil, err
@@ -40,7 +41,7 @@ func prepareGenesisRuntime(ctx context.Context, cfg config.Config, receiptRaw []
 		return nil, err
 	}
 	bootstrap := admissiongenesis.Bootstrapper{
-		API: api, Receipt: receipt,
+		API: api, Receipt: receipt, BeforeEffect: receiptCheck,
 		Active: admissiongenesis.LedgerTemplate{Role: admissiongenesis.Active,
 			DataKey: admissiongenesis.ActiveLedgerDataKey, EmptyData: activeEmpty,
 			Validate: func(cm *corev1.ConfigMap) error { return buildcontroller.ValidateAdmissionLedgerForGenesis(cm, cfg) }},
@@ -55,7 +56,15 @@ func prepareGenesisRuntime(ctx context.Context, cfg config.Config, receiptRaw []
 	if err != nil {
 		return nil, err
 	}
-	return admissiongenesis.NewGuard(ctx, bootstrap, binding)
+	guard, err := admissiongenesis.NewGuard(ctx, bootstrap, binding)
+	if err != nil {
+		return nil, err
+	}
+	guard.ReceiptCheck = receiptCheck
+	if err := guard.Check(ctx); err != nil {
+		return nil, err
+	}
+	return guard, nil
 }
 
 // A view reuses only the already qualified original receipt and binding. It
@@ -68,6 +77,7 @@ func forkGenesisGuard(ctx context.Context, original *admissiongenesis.Guard,
 	}
 	bootstrap := original.Bootstrap
 	bootstrap.API = api
+	bootstrap.BeforeEffect = receiptCheck
 	view, err := admissiongenesis.NewGuard(ctx, bootstrap, original.Original)
 	if err != nil {
 		return nil, err

@@ -217,12 +217,8 @@ func CLICommand() *cli.Command {
 			if err != nil {
 				return err
 			}
-			controllerGuard, err := prepareGenesisRuntime(ctx, cfg, receiptRaw, controllerDirect, controllerReader)
+			controllerGuard, err := prepareGenesisRuntime(ctx, cfg, receiptRaw, controllerDirect, controllerReader, checkControllerSecret)
 			if err != nil {
-				return err
-			}
-			controllerGuard.ReceiptCheck = checkControllerSecret
-			if err := controllerGuard.Check(ctx); err != nil {
 				return err
 			}
 			httpGuard, err := forkGenesisGuard(ctx, controllerGuard, httpDirect, receiptOptions.checkRaw(receiptRaw, httpDirect))

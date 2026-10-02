@@ -21,6 +21,25 @@ import (
 
 var errLostResponse = errors.New("simulated lost API response")
 
+func TestFreshBootstrapRechecksExternalReceiptBeforeEachEffect(t *testing.T) {
+	f, bootstrap := testBootstrap(t)
+	checks := 0
+	bootstrap.BeforeEffect = func(context.Context) error {
+		checks++
+		if checks == 2 {
+			return ErrChanged
+		}
+		return nil
+	}
+	if _, err := bootstrap.EnsureFresh(context.Background()); !errors.Is(err, ErrChanged) {
+		t.Fatalf("revoked receipt did not stop provisional Genesis pin: %v", err)
+	}
+	if checks != 2 || f.createCount[ActiveLedgerName] != 1 || f.patchCount[GenesisName] != 0 ||
+		f.createCount[QueueLedgerName] != 0 {
+		t.Fatalf("bootstrap continued after receipt revocation: checks=%d creates=%v patches=%v", checks, f.createCount, f.patchCount)
+	}
+}
+
 type responseEffect int
 
 const (

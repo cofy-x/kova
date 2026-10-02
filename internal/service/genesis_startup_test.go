@@ -159,7 +159,7 @@ func TestGenesisRuntimeConfigMustMatchReceiptBeforeBootstrap(t *testing.T) {
 				t.Fatal(err)
 			}
 			// A mismatch must stop before a direct API/client is even needed.
-			if guard, err := prepareGenesisRuntime(context.Background(), changed, raw, nil, nil); err == nil || guard != nil {
+			if guard, err := prepareGenesisRuntime(context.Background(), changed, raw, nil, nil, nil); err == nil || guard != nil {
 				t.Fatalf("bootstrap reached API with mismatched config: guard=%v err=%v", guard, err)
 			}
 		})
@@ -208,7 +208,7 @@ func TestPrepareGenesisRuntimeObservesExactCommittedPairWithoutLegacyWrites(t *t
 	if err != nil {
 		t.Fatal(err)
 	}
-	guard, err := prepareGenesisRuntime(context.Background(), cfg, receiptRaw, api, genesisTestReader(t))
+	guard, err := prepareGenesisRuntime(context.Background(), cfg, receiptRaw, api, genesisTestReader(t), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -262,7 +262,7 @@ func TestPrepareGenesisRuntimeCompletesOriginalInitializingPairAfterPartialResta
 	}, Status: corev1.NamespaceStatus{Phase: corev1.NamespaceActive}}
 	base := genesisTestClient(t, namespace, genesis)
 	api := &restartingGenesisCore{Client: base, failQueueCreateOnce: true}
-	if guard, err := prepareGenesisRuntime(ctx, cfg, receiptRaw, api, base); err == nil || guard != nil {
+	if guard, err := prepareGenesisRuntime(ctx, cfg, receiptRaw, api, base, nil); err == nil || guard != nil {
 		t.Fatalf("partial first startup unexpectedly routed: guard=%v err=%v", guard, err)
 	}
 	var pinned corev1.ConfigMap
@@ -278,7 +278,7 @@ func TestPrepareGenesisRuntimeCompletesOriginalInitializingPairAfterPartialResta
 		t.Fatalf("first startup did not retain the exact provisional pin: state=%+v creates=%v patches=%d",
 			partial, api.createNames, api.patches)
 	}
-	guard, err := prepareGenesisRuntime(ctx, cfg, receiptRaw, api, base)
+	guard, err := prepareGenesisRuntime(ctx, cfg, receiptRaw, api, base, nil)
 	if err != nil {
 		t.Fatalf("same-receipt restart could not finish fresh Initializing Genesis: %v", err)
 	}
@@ -324,7 +324,7 @@ func TestPrepareGenesisRuntimeCompletesOriginalInitializingPairAfterPartialResta
 		t.Fatal(err)
 	}
 	creates, patches := len(api.createNames), api.patches
-	if _, err := prepareGenesisRuntime(ctx, cfg, receiptRaw, api, base); err != nil {
+	if _, err := prepareGenesisRuntime(ctx, cfg, receiptRaw, api, base, nil); err != nil {
 		t.Fatalf("same-receipt committed restart failed: %v", err)
 	}
 	if len(api.createNames) != creates || api.patches != patches {
@@ -333,7 +333,7 @@ func TestPrepareGenesisRuntimeCompletesOriginalInitializingPairAfterPartialResta
 	if err := base.Delete(ctx, queue); err != nil {
 		t.Fatal(err)
 	}
-	if guard, err := prepareGenesisRuntime(ctx, cfg, receiptRaw, api, base); !apierrors.IsNotFound(err) || guard != nil {
+	if guard, err := prepareGenesisRuntime(ctx, cfg, receiptRaw, api, base, nil); !apierrors.IsNotFound(err) || guard != nil {
 		t.Fatalf("committed queue loss was repaired or misclassified: guard=%v err=%v", guard, err)
 	}
 	if len(api.createNames) != creates || api.patches != patches {

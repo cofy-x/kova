@@ -96,6 +96,10 @@ type Bootstrapper struct {
 	Active    LedgerTemplate
 	Queue     LedgerTemplate
 	Preflight func(context.Context) error
+	// BeforeEffect rechecks the external receipt before each fresh-install
+	// ConfigMap Create or Genesis pin/commit Patch. A runtime caller must set it;
+	// deterministic core-protocol fixtures may use nil.
+	BeforeEffect func(context.Context) error
 }
 
 func (b Bootstrapper) validate() error {
@@ -320,6 +324,11 @@ func (b Bootstrapper) ensureRole(ctx context.Context, template LedgerTemplate) e
 		if err != nil {
 			return err
 		}
+		if b.BeforeEffect != nil {
+			if err := b.BeforeEffect(ctx); err != nil {
+				return err
+			}
+		}
 		created, createErr := b.API.CreateConfigMap(ctx, b.Receipt.Namespace, request)
 		observed, readErr := b.readLedger(ctx, template, "", true)
 		if readErr != nil {
@@ -373,6 +382,11 @@ func (b Bootstrapper) pinRole(ctx context.Context, template LedgerTemplate, uid 
 	patch, err := genesisPatch(original, proposal, false)
 	if err != nil {
 		return err
+	}
+	if b.BeforeEffect != nil {
+		if err := b.BeforeEffect(ctx); err != nil {
+			return err
+		}
 	}
 	_, patchErr := b.API.PatchConfigMap(ctx, b.Receipt.Namespace, b.Receipt.GenesisName, patch)
 	_, observed, readErr := b.getOriginal(ctx)
@@ -434,6 +448,11 @@ func (b Bootstrapper) commit(ctx context.Context) (Binding, error) {
 	patch, err := genesisPatch(original, proposal, true)
 	if err != nil {
 		return Binding{}, err
+	}
+	if b.BeforeEffect != nil {
+		if err := b.BeforeEffect(ctx); err != nil {
+			return Binding{}, err
+		}
 	}
 	_, patchErr := b.API.PatchConfigMap(ctx, b.Receipt.Namespace, b.Receipt.GenesisName, patch)
 	binding, observeErr := b.ObserveCommitted(ctx)
