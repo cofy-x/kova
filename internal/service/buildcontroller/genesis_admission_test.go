@@ -4,11 +4,17 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"strings"
 	"testing"
 
 	kovav1 "github.com/cofy-x/kova/internal/apis/kova/v1alpha1"
+	"github.com/cofy-x/kova/internal/daemonclient"
+	"github.com/cofy-x/kova/internal/kube"
 	"github.com/cofy-x/kova/internal/service/admissiongenesis"
+	"github.com/cofy-x/kova/internal/service/buildresult"
 	"github.com/cofy-x/kova/internal/service/queueadmission"
+	"github.com/cofy-x/kova/internal/service/runnerexec"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -16,11 +22,21 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	crfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
 
 type controllerGenesisAPI struct {
 	client.Client
 	patches int
+}
+
+type failingGenesisPodReader struct{ client.Reader }
+
+func (r failingGenesisPodReader) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+	if _, ok := obj.(*corev1.Pod); ok {
+		return fmt.Errorf("transient direct Pod read failure")
+	}
+	return r.Reader.Get(ctx, key, obj, opts...)
 }
 
 func (a *controllerGenesisAPI) GetNamespace(ctx context.Context, name string) (*corev1.Namespace, error) {
@@ -99,7 +115,9 @@ func genesisAdmissionFixture(t *testing.T) (*KovaBuildReconciler, *controllerGen
 		Data: map[string]string{admissiongenesis.GenesisDataKey: string(data)}}
 	namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: cfg.Namespace, UID: types.UID(receipt.Contract.NamespaceUID)},
 		Status: corev1.NamespaceStatus{Phase: corev1.NamespaceActive}}
-	base := crfake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(namespace, genesis, active, queue, build).Build()
+	scheme := testScheme(t)
+	base := crfake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&kovav1.KovaBuild{}).
+		WithObjects(namespace, genesis, active, queue, build).Build()
 	api := &controllerGenesisAPI{Client: base}
 	bootstrap := admissiongenesis.Bootstrapper{API: api, Receipt: receipt,
 		Active: admissiongenesis.LedgerTemplate{Role: admissiongenesis.Active, DataKey: admissiongenesis.ActiveLedgerDataKey,
@@ -116,8 +134,325 @@ func genesisAdmissionFixture(t *testing.T) (*KovaBuildReconciler, *controllerGen
 	if err != nil {
 		t.Fatal(err)
 	}
-	r := &KovaBuildReconciler{Client: base, APIReader: base, Cfg: cfg, Genesis: guard}
+	r := &KovaBuildReconciler{Client: base, APIReader: base, Scheme: scheme, Cfg: cfg, Genesis: guard}
 	return r, api, build
+}
+
+func persistGenesisStartingWitness(t *testing.T, r *KovaBuildReconciler, api *controllerGenesisAPI, build *kovav1.KovaBuild) (*kovav1.KovaBuild, *corev1.Pod) {
+	t.Helper()
+	ctx := context.Background()
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: build.Namespace, Name: buildPodName(build.Name),
+		UID: "pod-original", Labels: map[string]string{"kova.cofy.dev/build-id": build.Name}},
+		Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "runner"}}}}
+	if err := controllerutil.SetControllerReference(build, pod, r.Scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.stampGenesisPod(ctx, build, pod, "dddddddddddddddddddddddddddddddd"); err != nil {
+		t.Fatal(err)
+	}
+	if err := api.Create(ctx, pod); err != nil {
+		t.Fatal(err)
+	}
+	var observed corev1.Pod
+	if err := api.Get(ctx, client.ObjectKeyFromObject(pod), &observed); err != nil {
+		t.Fatal(err)
+	}
+	witness, err := r.witnessFromPod(build, &observed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var current kovav1.KovaBuild
+	if err := api.Get(ctx, client.ObjectKeyFromObject(build), &current); err != nil {
+		t.Fatal(err)
+	}
+	current.Status.Phase = kovav1.PhaseStarting
+	current.Status.RunnerPodName = observed.Name
+	current.Status.AllocatedConcurrency = 1
+	current.Status.AdmissionGenesisWitness = witness
+	if err := api.Status().Update(ctx, &current); err != nil {
+		t.Fatal(err)
+	}
+	if err := api.Get(ctx, client.ObjectKeyFromObject(build), &current); err != nil {
+		t.Fatal(err)
+	}
+	return &current, &observed
+}
+
+func TestGenesisStartingWitnessRejectsForgedDirectCRWithoutGrant(t *testing.T) {
+	r, api, build := genesisAdmissionFixture(t)
+	starting, _ := persistGenesisStartingWitness(t, r, api, build)
+	if _, _, err := r.directGenesisWitness(context.Background(), starting); err != nil {
+		t.Fatalf("test did not persist independent Pod/CR witness: %v", err)
+	}
+	if _, _, err := r.directGenesisGrant(context.Background(), starting); err == nil {
+		t.Fatal("forged direct Starting CR obtained runner submission without an active grant")
+	}
+	r.Kube = &fakeKube{execFn: func(kube.ExecOptions) error {
+		t.Fatal("forged direct Starting CR contacted runner")
+		return nil
+	}}
+	if _, err := r.submitWhenReady(context.Background(), starting); err == nil {
+		t.Fatal("forged direct Starting CR unexpectedly reconciled")
+	}
+}
+
+func TestGenesisAcceptedBuildPreservesExactResultAfterLedgerLoss(t *testing.T) {
+	host, ref, digest := testVerifiedImage(t, "amd64")
+	ctx := context.Background()
+	r, api, build := genesisAdmissionFixture(t)
+	build.Spec.Targets = buildTargets(ref)
+	if err := api.Update(ctx, build); err != nil {
+		t.Fatal(err)
+	}
+	if err := api.Get(ctx, client.ObjectKeyFromObject(build), build); err != nil {
+		t.Fatal(err)
+	}
+	r.Cfg.RegistryPlainHTTP = []string{host}
+	if decision, err := r.admission(ctx, build); err != nil || !decision.Admitted {
+		t.Fatalf("pre-loss grant was not durable: decision=%+v err=%v", decision, err)
+	}
+	starting, _ := persistGenesisStartingWitness(t, r, api, build)
+	var queue corev1.ConfigMap
+	if err := api.Get(ctx, client.ObjectKey{Namespace: build.Namespace, Name: queueadmission.ConfigMapName}, &queue); err != nil {
+		t.Fatal(err)
+	}
+	if err := api.Delete(ctx, &queue); err != nil {
+		t.Fatal(err)
+	}
+	buildPosts, exports := 0, 0
+	kubeClient := &fakeKube{podClient: api.Client, execFn: func(opts kube.ExecOptions) error {
+		command := strings.Join(opts.Command, " ")
+		switch {
+		case strings.Contains(command, "--method GET"):
+			_, _ = fmt.Fprintf(opts.Stdout, `{"status":"completed","requestId":%q}`, string(build.UID))
+		case strings.Contains(command, "/api/v1/export"):
+			exports++
+			_, _ = fmt.Fprintf(opts.Stdout, "{\"target\":%q,\"success\":true,\"manifest_digest\":%q}\n", ref, digest)
+		case strings.Contains(command, "--method POST"):
+			buildPosts++
+		default:
+			_, _ = io.WriteString(opts.Stdout, "")
+		}
+		return nil
+	}}
+	r.Kube = kubeClient
+	if _, err := r.submitWhenReady(ctx, starting); err != nil {
+		t.Fatalf("accepted pre-loss work was not observed: %v", err)
+	}
+	var verifying kovav1.KovaBuild
+	if err := api.Get(ctx, client.ObjectKeyFromObject(build), &verifying); err != nil {
+		t.Fatal(err)
+	}
+	if verifying.Status.Phase != kovav1.PhaseVerifying {
+		t.Fatalf("pre-loss accepted runner was not preserved as Verifying: %s", verifying.Status.Phase)
+	}
+	if _, err := r.reconcileVerifying(ctx, &verifying); err != nil {
+		t.Fatalf("witness-bound receipt verification failed: %v", err)
+	}
+	var finished kovav1.KovaBuild
+	if err := api.Get(ctx, client.ObjectKeyFromObject(build), &finished); err != nil {
+		t.Fatal(err)
+	}
+	if finished.Status.Phase != kovav1.PhaseSucceeded || len(finished.Status.Outputs) != 1 ||
+		finished.Status.Outputs[0].ManifestDigest != digest || buildPosts != 0 || exports != 1 {
+		t.Fatalf("result not exact or new work escaped loss gate: phase=%s outputs=%+v buildPosts=%d exports=%d",
+			finished.Status.Phase, finished.Status.Outputs, buildPosts, exports)
+	}
+	if _, err := r.reconcileTerminal(ctx, &finished); err == nil {
+		t.Fatal("terminal cleanup released capacity after committed queue loss")
+	}
+	if len(kubeClient.deleted) != 0 || len(finished.Finalizers) == 0 {
+		t.Fatalf("finalizer or runner Pod was removed after loss: deleted=%v finalizers=%v", kubeClient.deleted, finished.Finalizers)
+	}
+	var active corev1.ConfigMap
+	if err := api.Get(ctx, client.ObjectKey{Namespace: build.Namespace, Name: AdmissionLedgerName}, &active); err != nil {
+		t.Fatal(err)
+	}
+	state, err := decodeReservations(&active)
+	if err != nil || len(state.Active) != 1 {
+		t.Fatalf("accepted charge was lost: active=%+v err=%v", state.Active, err)
+	}
+}
+
+func TestGenesisStartingSubmissionRequiresDirectStatusReadback(t *testing.T) {
+	ctx := context.Background()
+	r, api, build := genesisAdmissionFixture(t)
+	if decision, err := r.admission(ctx, build); err != nil || !decision.Admitted {
+		t.Fatalf("failed to persist test grant: decision=%+v err=%v", decision, err)
+	}
+	starting, _ := persistGenesisStartingWitness(t, r, api, build)
+	if _, _, err := r.directGenesisGrant(ctx, starting); err != nil {
+		t.Fatalf("legitimate direct status/Pod/grant proof was refused: %v", err)
+	}
+	stale := starting.DeepCopy()
+	stale.Status.AdmissionGenesisWitness = nil
+	if _, _, err := r.directGenesisGrant(ctx, stale); err == nil {
+		t.Fatal("runner submission ignored unknown Starting witness persistence")
+	}
+}
+
+func TestGenesisStartingWitnessRejectsMutablePodOrSameNameReplacement(t *testing.T) {
+	for _, mode := range []string{"annotation mutation", "UID fence removed", "UID fence forged", "same-name replacement"} {
+		t.Run(mode, func(t *testing.T) {
+			r, api, build := genesisAdmissionFixture(t)
+			starting, pod := persistGenesisStartingWitness(t, r, api, build)
+			ctx := context.Background()
+			switch mode {
+			case "annotation mutation":
+				pod.Annotations[genesisActiveUIDKey] = "forged-ledger"
+				if err := api.Update(ctx, pod); err != nil {
+					t.Fatal(err)
+				}
+			case "UID fence removed", "UID fence forged":
+				runner := &pod.Spec.Containers[0]
+				if mode == "UID fence removed" {
+					runner.Env = nil
+				} else {
+					runner.Env[0].ValueFrom.FieldRef.FieldPath = "metadata.name"
+				}
+				if err := api.Update(ctx, pod); err != nil {
+					t.Fatal(err)
+				}
+			case "same-name replacement":
+				if err := api.Delete(ctx, pod); err != nil {
+					t.Fatal(err)
+				}
+				pod.ResourceVersion = ""
+				pod.UID = "replacement-pod"
+				if err := api.Create(ctx, pod); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, _, err := r.directGenesisWitness(ctx, starting); err == nil {
+				t.Fatal("mutated or replaced Pod passed independent witness check")
+			}
+		})
+	}
+}
+
+func TestGenesisPodStampRefusesReservedRunnerEnvCollision(t *testing.T) {
+	r, _, build := genesisAdmissionFixture(t)
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: build.Namespace, Name: buildPodName(build.Name),
+		Labels: map[string]string{"kova.cofy.dev/build-id": build.Name}},
+		Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "runner", Env: []corev1.EnvVar{
+			{Name: daemonclient.RunnerPodUIDEnv, Value: "forged"},
+		}}}}}
+	if err := controllerutil.SetControllerReference(build, pod, r.Scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.stampGenesisPod(context.Background(), build, pod, "dddddddddddddddddddddddddddddddd"); err == nil {
+		t.Fatal("configured env override displaced the Downward API Pod UID fence")
+	}
+	if len(pod.Annotations) != 0 || len(pod.Spec.Containers[0].Env) != 1 {
+		t.Fatal("refused Pod stamp partially wrote identity data")
+	}
+}
+
+func TestGenesisFinishRetainsAcceptedWitnessOnPodUncertainty(t *testing.T) {
+	for _, mode := range []string{"transient Pod read", "same-name replacement", "tampered CR witness", "missing original Pod"} {
+		t.Run(mode, func(t *testing.T) {
+			ctx := context.Background()
+			r, api, build := genesisAdmissionFixture(t)
+			if decision, err := r.admission(ctx, build); err != nil || !decision.Admitted {
+				t.Fatalf("failed to persist original active charge: decision=%+v err=%v", decision, err)
+			}
+			starting, pod := persistGenesisStartingWitness(t, r, api, build)
+			switch mode {
+			case "transient Pod read":
+				r.APIReader = failingGenesisPodReader{Reader: api.Client}
+			case "same-name replacement", "missing original Pod":
+				if err := api.Delete(ctx, pod); err != nil {
+					t.Fatal(err)
+				}
+				if mode == "same-name replacement" {
+					replacement := pod.DeepCopy()
+					replacement.ResourceVersion = ""
+					replacement.UID = "replacement-pod"
+					if err := api.Create(ctx, replacement); err != nil {
+						t.Fatal(err)
+					}
+				}
+			case "tampered CR witness":
+				starting.Status.AdmissionGenesisWitness.RunnerRequestID = "wrong-request"
+			}
+			if err := r.finish(ctx, starting, kovav1.PhaseFailed, "RunnerUnavailable", "uncertain runner"); err == nil {
+				t.Fatal("accepted build terminalized without original runner witness")
+			}
+			var current kovav1.KovaBuild
+			if err := api.Get(ctx, client.ObjectKeyFromObject(build), &current); err != nil {
+				t.Fatal(err)
+			}
+			if current.Status.Phase != kovav1.PhaseStarting || current.Status.AdmissionGenesisWitness == nil {
+				t.Fatalf("accepted witness/status was not retained: phase=%s witness=%+v", current.Status.Phase, current.Status.AdmissionGenesisWitness)
+			}
+			var active corev1.ConfigMap
+			if err := api.Get(ctx, client.ObjectKey{Namespace: build.Namespace, Name: AdmissionLedgerName}, &active); err != nil {
+				t.Fatal(err)
+			}
+			state, err := decodeReservations(&active)
+			if err != nil || len(state.Active) != 1 {
+				t.Fatalf("accepted active charge was lost: state=%+v err=%v", state, err)
+			}
+		})
+	}
+}
+
+func TestGenesisRunnerStatusRejectsWrongRequestOrPodReplacementDuringExec(t *testing.T) {
+	for _, mode := range []string{"wrong request", "Pod replaced during Exec"} {
+		t.Run(mode, func(t *testing.T) {
+			ctx := context.Background()
+			r, api, build := genesisAdmissionFixture(t)
+			starting, pod := persistGenesisStartingWitness(t, r, api, build)
+			r.Kube = &fakeKube{podClient: api.Client, execFn: func(opts kube.ExecOptions) error {
+				if mode == "Pod replaced during Exec" {
+					if err := api.Delete(ctx, pod); err != nil {
+						return err
+					}
+					replacement := pod.DeepCopy()
+					replacement.ResourceVersion = ""
+					replacement.UID = "replacement-pod"
+					if err := api.Create(ctx, replacement); err != nil {
+						return err
+					}
+				}
+				requestID := string(build.UID)
+				if mode == "wrong request" {
+					requestID = "another-build"
+				}
+				_, _ = fmt.Fprintf(opts.Stdout, `{"status":"running","requestId":%q}`, requestID)
+				return nil
+			}}
+			if _, err := r.observeBuildStatus(ctx, runnerexec.Client{Kube: r.Kube}, starting); err == nil {
+				t.Fatal("unbound runner status was accepted")
+			}
+		})
+	}
+}
+
+func TestGenesisExportTargetsRejectsUnexpectedOrDuplicateResults(t *testing.T) {
+	_, _, build := genesisAdmissionFixture(t)
+	build.Spec.Targets = buildTargets("registry.example/app:tag")
+	results := buildresult.Pending(build)
+	if len(results) != 1 {
+		t.Fatalf("test expected one result target, got %d", len(results))
+	}
+	query := "with-fail=true&summary=true"
+	if results[0].Format == "oci" {
+		query += "&oci=true"
+	}
+	good := fmt.Sprintf("{\"target\":%q,\"success\":true}\n", results[0].Repository)
+	for _, data := range []string{
+		"{\"target\":\"other.example/app:tag\",\"success\":true}\n",
+		good + good,
+		"not-json\n",
+	} {
+		if err := validateGenesisExportTargets([]byte(data), build, query); err == nil {
+			t.Fatalf("unsafe export target passed: %q", data)
+		}
+	}
+	if err := validateGenesisExportTargets([]byte(good), build, query); err != nil {
+		t.Fatalf("exact export target was refused: %v", err)
+	}
 }
 
 func TestGenesisDirectBuildRefusesMissingOrReplacedLedger(t *testing.T) {

@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	kovav1 "github.com/cofy-x/kova/internal/apis/kova/v1alpha1"
+	"github.com/cofy-x/kova/internal/daemonclient"
 	"github.com/cofy-x/kova/internal/service/admissiongenesis"
 	"github.com/cofy-x/kova/internal/service/buildcontroller"
 	"github.com/cofy-x/kova/internal/service/config"
@@ -66,6 +67,9 @@ func validateGenesisRuntimeConfig(cfg config.Config, receipt admissiongenesis.Re
 		cfg.MaxQueuedJobs != limits.MaxQueuedJobs ||
 		cfg.MaxQueuedJobsPerRequester != limits.MaxQueuedJobsPerRequester {
 		return fmt.Errorf("admission Genesis receipt differs from runtime namespace or capacity configuration")
+	}
+	if _, collision := cfg.RunnerEnv[daemonclient.RunnerPodUIDEnv]; collision {
+		return fmt.Errorf("admission Genesis runner environment collides with reserved Pod UID fence")
 	}
 	return nil
 }

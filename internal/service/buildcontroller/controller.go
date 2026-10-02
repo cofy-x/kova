@@ -63,6 +63,11 @@ func (r *KovaBuildReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return r.reconcileDelete(ctx, &build)
 	}
 	if controllerutil.AddFinalizer(&build, cleanupFinalizer) {
+		if r.Genesis != nil {
+			if err := r.Genesis.Check(ctx); err != nil {
+				return ctrl.Result{}, err
+			}
+		}
 		if err := r.Update(ctx, &build); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -78,6 +83,11 @@ func (r *KovaBuildReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	}
 	switch build.Status.Phase {
 	case "", kovav1.PhaseQueued:
+		if r.Genesis != nil {
+			if err := r.Genesis.Check(ctx); err != nil {
+				return ctrl.Result{}, err
+			}
+		}
 		if _, err := buildcontract.NormalizeTargetSpecs(contractTargets(build.Spec.Targets)); err != nil {
 			return ctrl.Result{}, r.finish(ctx, &build, kovav1.PhaseFailed, "InvalidTargets", err.Error())
 		}

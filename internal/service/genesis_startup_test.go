@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	kovav1 "github.com/cofy-x/kova/internal/apis/kova/v1alpha1"
+	"github.com/cofy-x/kova/internal/daemonclient"
 	"github.com/cofy-x/kova/internal/service/admissiongenesis"
 	"github.com/cofy-x/kova/internal/service/buildcontroller"
 	"github.com/cofy-x/kova/internal/service/config"
@@ -76,6 +77,9 @@ func TestGenesisRuntimeConfigMustMatchReceiptBeforeBootstrap(t *testing.T) {
 		"queued":    func(c *config.Config) { c.MaxQueuedJobs-- },
 		"q-requester": func(c *config.Config) {
 			c.MaxQueuedJobsPerRequester--
+		},
+		"reserved runner UID env": func(c *config.Config) {
+			c.RunnerEnv = map[string]string{daemonclient.RunnerPodUIDEnv: "forged"}
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
