@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/cofy-x/kova/internal/admissioncontract"
 	kovav1 "github.com/cofy-x/kova/internal/apis/kova/v1alpha1"
 	"github.com/cofy-x/kova/internal/service/admissiongenesis"
 	"github.com/cofy-x/kova/internal/service/config"
@@ -38,7 +39,7 @@ type lostActiveCreateResponse struct {
 }
 
 func (c *lostActiveCreateResponse) CreateConfigMap(ctx context.Context, namespace string, request *corev1.ConfigMap) (*corev1.ConfigMap, error) {
-	if request.Name != admissiongenesis.ActiveLedgerName {
+	if request.Name != admissioncontract.ActiveLedgerName {
 		return c.CoreAPI.CreateConfigMap(ctx, namespace, request)
 	}
 	c.activeCreateAttempts++
@@ -67,7 +68,7 @@ func TestRealAPIGenesisBootstrapAndStatusRoundTrip(t *testing.T) {
 	if err := genesisOldWorkVeto(ctx, target.Client, target.Namespace); err != nil {
 		t.Fatalf("dedicated test Namespace is not empty of old work: %v", err)
 	}
-	for _, name := range []string{admissiongenesis.GenesisName, admissiongenesis.ActiveLedgerName, admissiongenesis.QueueLedgerName} {
+	for _, name := range []string{admissioncontract.GenesisName, admissioncontract.ActiveLedgerName, admissioncontract.QueueLedgerName} {
 		var existing corev1.ConfigMap
 		if err := target.Client.Get(ctx, client.ObjectKey{Namespace: target.Namespace, Name: name}, &existing); !apierrors.IsNotFound(err) {
 			t.Fatalf("refusing to adopt existing ConfigMap %s: %v", name, err)
@@ -91,9 +92,9 @@ func TestRealAPIGenesisBootstrapAndStatusRoundTrip(t *testing.T) {
 	}
 	cfg := config.Config{Namespace: target.Namespace, MaxActiveJobs: 2, MaxActiveJobsPerRequester: 1,
 		WorkerSlots: 2, MaxQueuedJobs: 10, MaxQueuedJobsPerRequester: 2}
-	spec := admissiongenesis.InstallationSpec{Namespace: target.Namespace,
+	spec := admissioncontract.InstallationSpec{Namespace: target.Namespace,
 		NamespaceUID: os.Getenv("KOVA_GENESIS_REAL_API_NAMESPACE_UID"), Generation: hex.EncodeToString(nonce[:]),
-		Limits: admissiongenesis.Limits{MaxActiveJobs: cfg.MaxActiveJobs,
+		Limits: admissioncontract.Limits{MaxActiveJobs: cfg.MaxActiveJobs,
 			MaxActiveJobsPerRequester: cfg.MaxActiveJobsPerRequester, WorkerSlots: cfg.WorkerSlots,
 			MaxQueuedJobs: cfg.MaxQueuedJobs, MaxQueuedJobsPerRequester: cfg.MaxQueuedJobsPerRequester}}
 	genesisManifest, err := spec.RenderInitializingGenesis(ctx, direct)
@@ -119,7 +120,7 @@ func TestRealAPIGenesisBootstrapAndStatusRoundTrip(t *testing.T) {
 		t.Fatalf("create-only receipt Secret result is uncertain; leave Namespace for inspection: %v", err)
 	}
 	path := filepath.Join(t.TempDir(), "receipt.json")
-	if err := os.WriteFile(path, secret.Data[admissiongenesis.ReceiptSecretDataKey], 0600); err != nil {
+	if err := os.WriteFile(path, secret.Data[admissioncontract.ReceiptSecretDataKey], 0600); err != nil {
 		t.Fatal(err)
 	}
 	options := genesisReceiptOptions{File: path, SecretNamespace: target.Namespace,
@@ -155,13 +156,13 @@ func TestRealAPIGenesisBootstrapAndStatusRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	partial, err := receipt.QualifyGenesis(partialGenesis)
-	if err != nil || partial.Phase != admissiongenesis.PhaseInitializing || partial.ActiveLedgerUID != string(lostResponse.activeUID) || partial.QueueLedgerUID != "" {
+	if err != nil || partial.Phase != admissioncontract.PhaseInitializing || partial.ActiveLedgerUID != string(lostResponse.activeUID) || partial.QueueLedgerUID != "" {
 		t.Fatalf("original Genesis did not retain only the provisional active pin: %v, %+v", err, partial)
 	}
-	if _, err := direct.GetConfigMap(ctx, target.Namespace, admissiongenesis.QueueLedgerName); !apierrors.IsNotFound(err) {
+	if _, err := direct.GetConfigMap(ctx, target.Namespace, admissioncontract.QueueLedgerName); !apierrors.IsNotFound(err) {
 		t.Fatalf("queue ledger was written before interruption: %v", err)
 	}
-	partialActive, err := direct.GetConfigMap(ctx, target.Namespace, admissiongenesis.ActiveLedgerName)
+	partialActive, err := direct.GetConfigMap(ctx, target.Namespace, admissioncontract.ActiveLedgerName)
 	if err != nil || partialActive.UID != lostResponse.activeUID {
 		t.Fatalf("lost active Create response did not resolve to the original UID: %v, %+v", err, partialActive)
 	}
@@ -180,11 +181,11 @@ func TestRealAPIGenesisBootstrapAndStatusRoundTrip(t *testing.T) {
 	if err != nil || committed.UID != genesis.UID || committed.Immutable == nil || !*committed.Immutable {
 		t.Fatalf("original Genesis was not immutably committed: %v, %+v", err, committed)
 	}
-	active, err := direct.GetConfigMap(ctx, target.Namespace, admissiongenesis.ActiveLedgerName)
+	active, err := direct.GetConfigMap(ctx, target.Namespace, admissioncontract.ActiveLedgerName)
 	if err != nil {
 		t.Fatal(err)
 	}
-	queue, err := direct.GetConfigMap(ctx, target.Namespace, admissiongenesis.QueueLedgerName)
+	queue, err := direct.GetConfigMap(ctx, target.Namespace, admissioncontract.QueueLedgerName)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -193,16 +194,16 @@ func TestRealAPIGenesisBootstrapAndStatusRoundTrip(t *testing.T) {
 	}
 	// Exercise the actual API server's JSON Patch UID/RV/data CAS, without a
 	// build, Pod, registry, or queue intent.
-	proposed := strings.Replace(active.Data[admissiongenesis.ActiveLedgerDataKey], `"fence":0`, `"fence":1`, 1)
-	if proposed == active.Data[admissiongenesis.ActiveLedgerDataKey] {
+	proposed := strings.Replace(active.Data[admissioncontract.ActiveLedgerDataKey], `"fence":0`, `"fence":1`, 1)
+	if proposed == active.Data[admissioncontract.ActiveLedgerDataKey] {
 		t.Fatal("active ledger fixture lacks a fence to advance")
 	}
 	target.Check(t)
-	if err := guard.PatchLedgerData(ctx, active, admissiongenesis.Active, proposed); err != nil {
+	if err := guard.PatchLedgerData(ctx, active, admissioncontract.Active, proposed); err != nil {
 		t.Fatalf("real API conditional active-ledger Patch failed: %v", err)
 	}
 	active, err = direct.GetConfigMap(ctx, target.Namespace, active.Name)
-	if err != nil || active.Data[admissiongenesis.ActiveLedgerDataKey] != proposed || string(active.UID) != guard.Original.ActiveLedgerUID {
+	if err != nil || active.Data[admissioncontract.ActiveLedgerDataKey] != proposed || string(active.UID) != guard.Original.ActiveLedgerUID {
 		t.Fatalf("conditional Patch did not retain original ledger identity: %v", err)
 	}
 

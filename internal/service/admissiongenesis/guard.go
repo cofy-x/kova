@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"net/http"
 
+	"github.com/cofy-x/kova/internal/admissioncontract"
+
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -36,7 +38,7 @@ func NewGuard(ctx context.Context, bootstrap Bootstrapper, original Binding) (*G
 	}
 	if original.NamespaceUID != bootstrap.Receipt.Contract.NamespaceUID ||
 		original.GenesisUID != bootstrap.Receipt.GenesisUID ||
-		!validUID(original.ActiveLedgerUID) || !validUID(original.QueueLedgerUID) {
+		!admissioncontract.ValidUID(original.ActiveLedgerUID) || !admissioncontract.ValidUID(original.QueueLedgerUID) {
 		return nil, fmt.Errorf("%w: startup binding differs from admission receipt", ErrChanged)
 	}
 	guard := &Guard{Bootstrap: bootstrap, Original: original}
@@ -68,7 +70,7 @@ func (g *Guard) Check(ctx context.Context) error {
 	return nil
 }
 
-func (g *Guard) CheckLedger(cm *corev1.ConfigMap, role Role) error {
+func (g *Guard) CheckLedger(cm *corev1.ConfigMap, role admissioncontract.Role) error {
 	if g == nil {
 		return fmt.Errorf("admission Genesis guard is missing")
 	}
@@ -77,9 +79,9 @@ func (g *Guard) CheckLedger(cm *corev1.ConfigMap, role Role) error {
 	}
 	var expected string
 	switch role {
-	case Active:
+	case admissioncontract.Active:
 		expected = g.Original.ActiveLedgerUID
-	case Queue:
+	case admissioncontract.Queue:
 		expected = g.Original.QueueLedgerUID
 	default:
 		return fmt.Errorf("invalid admission ledger role")
@@ -95,7 +97,7 @@ func (g *Guard) CheckLedger(cm *corev1.ConfigMap, role Role) error {
 // API operation that replaces the data. A stale writer therefore cannot
 // mutate a same-name replacement, even if an ordinary Update were to accept
 // its old UID. The direct CoreAPI transport must make one wire attempt.
-func (g *Guard) PatchLedgerData(ctx context.Context, cm *corev1.ConfigMap, role Role, nextData string) error {
+func (g *Guard) PatchLedgerData(ctx context.Context, cm *corev1.ConfigMap, role admissioncontract.Role, nextData string) error {
 	if err := g.CheckLedger(cm, role); err != nil {
 		return err
 	}
@@ -104,9 +106,9 @@ func (g *Guard) PatchLedgerData(ctx context.Context, cm *corev1.ConfigMap, role 
 	}
 	var template LedgerTemplate
 	switch role {
-	case Active:
+	case admissioncontract.Active:
 		template = g.Bootstrap.Active
-	case Queue:
+	case admissioncontract.Queue:
 		template = g.Bootstrap.Queue
 	default:
 		return fmt.Errorf("invalid admission ledger role")
@@ -164,7 +166,7 @@ func (g *Guard) PatchLedgerData(ctx context.Context, cm *corev1.ConfigMap, role 
 // this same original ledger advanced; unchanged state retains the rejection,
 // while replacement/loss remains a hard refusal. Callers then recompute a
 // fresh proposal in their bounded CAS loop rather than replaying this Patch.
-func (g *Guard) classifyLedgerPatchError(ctx context.Context, cm *corev1.ConfigMap, role Role, template LedgerTemplate, patchErr error) error {
+func (g *Guard) classifyLedgerPatchError(ctx context.Context, cm *corev1.ConfigMap, role admissioncontract.Role, template LedgerTemplate, patchErr error) error {
 	var status apierrors.APIStatus
 	if !errors.As(patchErr, &status) || status.Status().Code != http.StatusUnprocessableEntity {
 		return patchErr

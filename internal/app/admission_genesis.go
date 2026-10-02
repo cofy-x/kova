@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cofy-x/kova/internal/service/admissiongenesis"
+	"github.com/cofy-x/kova/internal/admissioncontract"
 
 	"github.com/urfave/cli/v2"
 	"k8s.io/client-go/kubernetes"
@@ -87,9 +87,9 @@ func admissionGenesisIdentityFlags() []cli.Flag {
 	}
 }
 
-func admissionGenesisInputs(c *cli.Context) (admissiongenesis.InstallationSpec, admissiongenesis.DirectClient, error) {
-	var empty admissiongenesis.InstallationSpec
-	var noReader admissiongenesis.DirectClient
+func admissionGenesisInputs(c *cli.Context) (admissioncontract.InstallationSpec, admissioncontract.DirectReader, error) {
+	var empty admissioncontract.InstallationSpec
+	var noReader admissioncontract.DirectReader
 	if !c.IsSet("namespace") || !c.IsSet("kubeconfig") ||
 		strings.TrimSpace(c.String("namespace")) == "" || strings.TrimSpace(c.String("kubeconfig")) == "" {
 		return empty, noReader, fmt.Errorf("explicit global --namespace and --kubeconfig are required")
@@ -100,9 +100,9 @@ func admissionGenesisInputs(c *cli.Context) (admissiongenesis.InstallationSpec, 
 			return empty, noReader, fmt.Errorf("explicit --%s is required", name)
 		}
 	}
-	spec := admissiongenesis.InstallationSpec{
+	spec := admissioncontract.InstallationSpec{
 		Namespace: c.String("namespace"), NamespaceUID: c.String("namespace-uid"),
-		Generation: c.String("generation"), Limits: admissiongenesis.Limits{
+		Generation: c.String("generation"), Limits: admissioncontract.Limits{
 			MaxActiveJobs:             c.Int("max-active-jobs"),
 			MaxActiveJobsPerRequester: c.Int("max-active-jobs-per-requester"),
 			WorkerSlots:               c.Int("worker-slots"),
@@ -123,7 +123,7 @@ func admissionGenesisInputs(c *cli.Context) (admissiongenesis.InstallationSpec, 
 	if err != nil {
 		return empty, noReader, err
 	}
-	return spec, admissiongenesis.DirectClient{Client: clientset}, nil
+	return spec, admissioncontract.NewDirectReader(clientset), nil
 }
 
 func encodeAdmissionManifest(c *cli.Context, manifest any) error {

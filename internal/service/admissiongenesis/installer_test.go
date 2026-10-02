@@ -7,34 +7,35 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/cofy-x/kova/internal/admissioncontract"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 )
 
 func TestExternalInstallerPinsCallerSuppliedIdentities(t *testing.T) {
 	receipt := testReceipt()
-	spec := InstallationSpec{Namespace: receipt.Namespace, NamespaceUID: receipt.Contract.NamespaceUID,
+	spec := admissioncontract.InstallationSpec{Namespace: receipt.Namespace, NamespaceUID: receipt.Contract.NamespaceUID,
 		Generation: receipt.Contract.Generation, Limits: receipt.Contract.Limits}
 	api := newFakeCore(t, receipt)
-	originalGenesis := api.objects[GenesisName]
-	delete(api.objects, GenesisName)
+	originalGenesis := api.objects[admissioncontract.GenesisName]
+	delete(api.objects, admissioncontract.GenesisName)
 	manifest, err := spec.RenderInitializingGenesis(context.Background(), api)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if manifest.Name != GenesisName || manifest.Namespace != receipt.Namespace || manifest.UID != "" ||
+	if manifest.Name != admissioncontract.GenesisName || manifest.Namespace != receipt.Namespace || manifest.UID != "" ||
 		manifest.Immutable != nil || len(manifest.Data) != 1 || len(manifest.BinaryData) != 0 {
 		t.Fatalf("unexpected declarative Genesis manifest: %+v", manifest)
 	}
-	var initial GenesisData
-	if err := json.Unmarshal([]byte(manifest.Data[GenesisDataKey]), &initial); err != nil {
+	var initial admissioncontract.GenesisData
+	if err := json.Unmarshal([]byte(manifest.Data[admissioncontract.GenesisDataKey]), &initial); err != nil {
 		t.Fatal(err)
 	}
-	if initial.Contract != receipt.Contract || initial.Phase != PhaseInitializing ||
+	if initial.Contract != receipt.Contract || initial.Phase != admissioncontract.PhaseInitializing ||
 		initial.ActiveLedgerUID != "" || initial.QueueLedgerUID != "" {
 		t.Fatalf("Genesis manifest changed explicit installation facts: %+v", initial)
 	}
-	api.objects[GenesisName] = originalGenesis
+	api.objects[admissioncontract.GenesisName] = originalGenesis
 	if _, err := spec.RenderInitializingGenesis(context.Background(), api); err == nil {
 		t.Fatal("render helper accepted an existing Genesis")
 	}
@@ -51,8 +52,8 @@ func TestExternalInstallerPinsCallerSuppliedIdentities(t *testing.T) {
 		t.Fatalf("receipt manifest was not an immutable external Secret: %+v", secret)
 	}
 	secret.UID = types.UID("receipt-secret-original")
-	if err := ValidateReceiptSecret(secret, "service-57", "kova-admission-receipt", string(secret.UID),
-		secret.Data[ReceiptSecretDataKey]); err != nil {
+	if err := admissioncontract.ValidateReceiptSecret(secret, "service-57", "kova-admission-receipt", string(secret.UID),
+		secret.Data[admissioncontract.ReceiptSecretDataKey]); err != nil {
 		t.Fatal(err)
 	}
 
@@ -87,10 +88,10 @@ func TestImmutableReceiptSecretRefusesRebinding(t *testing.T) {
 		t.Fatal(err)
 	}
 	secret.UID = types.UID("secret-original")
-	raw := bytes.Clone(secret.Data[ReceiptSecretDataKey])
+	raw := bytes.Clone(secret.Data[admissioncontract.ReceiptSecretDataKey])
 	check := func(changed *corev1.Secret, mounted []byte) {
 		t.Helper()
-		if err := ValidateReceiptSecret(changed, "service-57", "receipt-57", "secret-original", mounted); err == nil {
+		if err := admissioncontract.ValidateReceiptSecret(changed, "service-57", "receipt-57", "secret-original", mounted); err == nil {
 			t.Fatal("changed original receipt Secret was accepted")
 		}
 	}
@@ -101,7 +102,7 @@ func TestImmutableReceiptSecretRefusesRebinding(t *testing.T) {
 	changed.Immutable = nil
 	check(changed, raw)
 	changed = secret.DeepCopy()
-	changed.Data[ReceiptSecretDataKey] = []byte(`{}`)
+	changed.Data[admissioncontract.ReceiptSecretDataKey] = []byte(`{}`)
 	check(changed, raw)
 	changed = secret.DeepCopy()
 	changed.Data["extra"] = []byte("x")
@@ -110,7 +111,7 @@ func TestImmutableReceiptSecretRefusesRebinding(t *testing.T) {
 	changed.Namespace = "other-service"
 	check(changed, raw)
 	check(secret, append(bytes.Clone(raw), ' '))
-	if err := ValidateReceiptSecret(secret, "service-57", "receipt-57", "secret-original", raw); err != nil {
+	if err := admissioncontract.ValidateReceiptSecret(secret, "service-57", "receipt-57", "secret-original", raw); err != nil {
 		t.Fatal(err)
 	}
 }

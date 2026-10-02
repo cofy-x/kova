@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/cofy-x/kova/internal/service/admissiongenesis"
+	"github.com/cofy-x/kova/internal/admissioncontract"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -46,7 +46,7 @@ func TestGenesisReceiptRequiresCompletePinnedImmutableSecret(t *testing.T) {
 	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{
 		Namespace: "service-57", Name: "receipt-57", UID: types.UID("secret-original"),
 	}, Immutable: &immutable, Type: corev1.SecretTypeOpaque,
-		Data: map[string][]byte{admissiongenesis.ReceiptSecretDataKey: raw}}
+		Data: map[string][]byte{admissioncontract.ReceiptSecretDataKey: raw}}
 	reader := &receiptSecretFake{secret: secret}
 	options := genesisReceiptOptions{File: path, SecretNamespace: "service-57", SecretName: "receipt-57", SecretUID: "secret-original"}
 	loaded, check, err := options.loadAndCheck(context.Background(), reader)

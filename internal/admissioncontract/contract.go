@@ -1,6 +1,6 @@
-// Package admissiongenesis models an externally provisioned admission epoch.
-// Nothing in this package creates Genesis or makes a runtime path authoritative.
-package admissiongenesis
+// Package admissioncontract models an externally provisioned admission epoch.
+// It contains immutable identity and pure validation, not runtime writers.
+package admissioncontract
 
 import (
 	"crypto/sha256"
@@ -9,7 +9,7 @@ import (
 	"fmt"
 	"unicode/utf8"
 
-	"github.com/cofy-x/kova/internal/service/admissionjson"
+	"github.com/cofy-x/kova/internal/admissionjson"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -25,9 +25,9 @@ const (
 	GenesisDataKey       = "genesis.json"
 	PhaseInitializing    = "Initializing"
 	PhaseCommitted       = "Committed"
-	maxContractJSONBytes = 8192
+	MaxContractJSONBytes = 8192
 	maxOpaqueUIDBytes    = 256
-	maxLedgerDataBytes   = 768 * 1024
+	MaxLedgerDataBytes   = 768 * 1024
 	annotationPrefix     = "kova.cofy.dev/"
 	annotationNamespace  = annotationPrefix + "admission-namespace-uid"
 	annotationGenesis    = annotationPrefix + "admission-genesis-uid"
@@ -80,7 +80,7 @@ const (
 	Queue  Role = "queue"
 )
 
-func validUID(uid string) bool {
+func ValidUID(uid string) bool {
 	return uid != "" && len(uid) <= maxOpaqueUIDBytes && utf8.ValidString(uid)
 }
 
@@ -104,15 +104,15 @@ func (l Limits) validate() error {
 		l.WorkerSlots < 1 || l.WorkerSlots > 65535 ||
 		l.MaxQueuedJobs < 1 || l.MaxQueuedJobs > 1000 ||
 		l.MaxQueuedJobsPerRequester < 1 || l.MaxQueuedJobsPerRequester > l.MaxQueuedJobs ||
-		8192+3456*l.MaxActiveJobs > maxLedgerDataBytes ||
-		4096+512*l.MaxQueuedJobs > maxLedgerDataBytes {
+		8192+3456*l.MaxActiveJobs > MaxLedgerDataBytes ||
+		4096+512*l.MaxQueuedJobs > MaxLedgerDataBytes {
 		return fmt.Errorf("admission receipt has unsupported limits")
 	}
 	return nil
 }
 
 func (c Contract) validate() error {
-	if c.Version != 1 || !validUID(c.NamespaceUID) || !validNonce(c.Generation) ||
+	if c.Version != 1 || !ValidUID(c.NamespaceUID) || !validNonce(c.Generation) ||
 		c.ActiveLedgerName != ActiveLedgerName || c.ActiveLedgerSchema != 1 ||
 		c.QueueLedgerName != QueueLedgerName || c.QueueLedgerSchema != 1 {
 		return fmt.Errorf("admission receipt has unsupported contract")
@@ -121,7 +121,7 @@ func (c Contract) validate() error {
 }
 
 func (r Receipt) Validate() error {
-	if len(validation.IsDNS1123Label(r.Namespace)) != 0 || r.GenesisName != GenesisName || !validUID(r.GenesisUID) {
+	if len(validation.IsDNS1123Label(r.Namespace)) != 0 || r.GenesisName != GenesisName || !ValidUID(r.GenesisUID) {
 		return fmt.Errorf("admission receipt has invalid original identity")
 	}
 	return r.Contract.validate()
@@ -162,7 +162,7 @@ func allowContract(path []string, key string) bool {
 	return false
 }
 
-func requireKeys(raw []byte, keys ...string) error {
+func RequireKeys(raw []byte, keys ...string) error {
 	var values map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &values); err != nil {
 		return err
@@ -179,25 +179,25 @@ func requireKeys(raw []byte, keys ...string) error {
 }
 
 func requireContractKeys(raw []byte) error {
-	if err := requireKeys(raw, "version", "namespaceUID", "generation", "activeLedgerName", "activeLedgerSchema", "queueLedgerName", "queueLedgerSchema", "limits"); err != nil {
+	if err := RequireKeys(raw, "version", "namespaceUID", "generation", "activeLedgerName", "activeLedgerSchema", "queueLedgerName", "queueLedgerSchema", "limits"); err != nil {
 		return err
 	}
 	var values map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &values); err != nil {
 		return err
 	}
-	return requireKeys(values["limits"], "maxActiveJobs", "maxActiveJobsPerRequester", "workerSlots", "maxQueuedJobs", "maxQueuedJobsPerRequester")
+	return RequireKeys(values["limits"], "maxActiveJobs", "maxActiveJobsPerRequester", "workerSlots", "maxQueuedJobs", "maxQueuedJobsPerRequester")
 }
 
 func ParseReceipt(raw []byte) (Receipt, error) {
-	if len(raw) == 0 || len(raw) > maxContractJSONBytes {
+	if len(raw) == 0 || len(raw) > MaxContractJSONBytes {
 		return Receipt{}, fmt.Errorf("admission receipt exceeds size limit")
 	}
 	var r Receipt
 	if err := admissionjson.Decode(raw, &r, allowContract); err != nil {
 		return Receipt{}, err
 	}
-	if err := requireKeys(raw, "namespace", "genesisName", "genesisUID", "contract"); err != nil {
+	if err := RequireKeys(raw, "namespace", "genesisName", "genesisUID", "contract"); err != nil {
 		return Receipt{}, err
 	}
 	var values map[string]json.RawMessage
@@ -212,14 +212,14 @@ func ParseReceipt(raw []byte) (Receipt, error) {
 }
 
 func decodeGenesis(raw []byte, r Receipt) (GenesisData, error) {
-	if len(raw) == 0 || len(raw) > maxContractJSONBytes {
+	if len(raw) == 0 || len(raw) > MaxContractJSONBytes {
 		return GenesisData{}, fmt.Errorf("admission Genesis exceeds size limit")
 	}
 	var state GenesisData
 	if err := admissionjson.Decode(raw, &state, allowContract); err != nil {
 		return GenesisData{}, err
 	}
-	if err := requireKeys(raw, "contract", "phase", "activeLedgerUID", "queueLedgerUID"); err != nil {
+	if err := RequireKeys(raw, "contract", "phase", "activeLedgerUID", "queueLedgerUID"); err != nil {
 		return GenesisData{}, err
 	}
 	var values map[string]json.RawMessage
@@ -228,8 +228,8 @@ func decodeGenesis(raw []byte, r Receipt) (GenesisData, error) {
 		return GenesisData{}, err
 	}
 	if state.Contract != r.Contract || (state.Phase != PhaseInitializing && state.Phase != PhaseCommitted) ||
-		(state.ActiveLedgerUID != "" && !validUID(state.ActiveLedgerUID)) ||
-		(state.QueueLedgerUID != "" && !validUID(state.QueueLedgerUID)) ||
+		(state.ActiveLedgerUID != "" && !ValidUID(state.ActiveLedgerUID)) ||
+		(state.QueueLedgerUID != "" && !ValidUID(state.QueueLedgerUID)) ||
 		(state.Phase == PhaseCommitted && (state.ActiveLedgerUID == "" || state.QueueLedgerUID == "")) {
 		return GenesisData{}, fmt.Errorf("admission Genesis has invalid contract or phase")
 	}
@@ -266,7 +266,7 @@ func (r Receipt) QualifyGenesis(cm *corev1.ConfigMap) (GenesisData, error) {
 	return state, nil
 }
 
-func (r Receipt) roleFacts(role Role) (name string, schema int, err error) {
+func (r Receipt) RoleFacts(role Role) (name string, schema int, err error) {
 	switch role {
 	case Active:
 		return r.Contract.ActiveLedgerName, r.Contract.ActiveLedgerSchema, nil
@@ -281,7 +281,7 @@ func (r Receipt) ledgerAnnotations(role Role, attempt string) (map[string]string
 	if err := r.Validate(); err != nil {
 		return nil, err
 	}
-	_, schema, err := r.roleFacts(role)
+	_, schema, err := r.RoleFacts(role)
 	if err != nil || !validNonce(attempt) {
 		return nil, fmt.Errorf("invalid admission ledger creation attempt")
 	}
@@ -302,8 +302,8 @@ func (r Receipt) ledgerAnnotations(role Role, attempt string) (map[string]string
 
 // NewLedgerObject only constructs a request body; it never sends a Create.
 func (r Receipt) NewLedgerObject(role Role, dataKey, emptyData, attempt string) (*corev1.ConfigMap, error) {
-	name, _, err := r.roleFacts(role)
-	if err != nil || dataKey == "" || emptyData == "" || len(emptyData) > maxLedgerDataBytes {
+	name, _, err := r.RoleFacts(role)
+	if err != nil || dataKey == "" || emptyData == "" || len(emptyData) > MaxLedgerDataBytes {
 		return nil, fmt.Errorf("invalid admission ledger template")
 	}
 	annotations, err := r.ledgerAnnotations(role, attempt)
@@ -317,11 +317,11 @@ func (r Receipt) NewLedgerObject(role Role, dataKey, emptyData, attempt string) 
 }
 
 func (r Receipt) QualifyLedgerIdentity(cm *corev1.ConfigMap, role Role) error {
-	name, schema, err := r.roleFacts(role)
+	name, schema, err := r.RoleFacts(role)
 	if err != nil || r.Validate() != nil {
 		return fmt.Errorf("invalid admission ledger receipt")
 	}
-	if cm == nil || cm.Namespace != r.Namespace || cm.Name != name || !validUID(string(cm.UID)) ||
+	if cm == nil || cm.Namespace != r.Namespace || cm.Name != name || !ValidUID(string(cm.UID)) ||
 		cm.ResourceVersion == "" || cm.DeletionTimestamp != nil || (cm.Immutable != nil && *cm.Immutable) ||
 		len(cm.Annotations) != 7 {
 		return fmt.Errorf("admission ledger original identity is unavailable or changed")

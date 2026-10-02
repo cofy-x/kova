@@ -13,9 +13,10 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/cofy-x/kova/internal/admissioncontract"
+	"github.com/cofy-x/kova/internal/admissionjson"
 	kovav1 "github.com/cofy-x/kova/internal/apis/kova/v1alpha1"
 	"github.com/cofy-x/kova/internal/service/admissiongenesis"
-	"github.com/cofy-x/kova/internal/service/admissionjson"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -214,7 +215,7 @@ func (s Store) read(ctx context.Context) (*corev1.ConfigMap, state, error) {
 		return nil, state{}, err
 	}
 	if s.Genesis != nil {
-		if err := s.Genesis.CheckLedger(&cm, admissiongenesis.Queue); err != nil {
+		if err := s.Genesis.CheckLedger(&cm, admissioncontract.Queue); err != nil {
 			return nil, state{}, err
 		}
 	}
@@ -298,7 +299,7 @@ func (s Store) write(ctx context.Context, cm *corev1.ConfigMap, next state) erro
 		return err
 	}
 	if s.Genesis != nil {
-		return s.Genesis.PatchLedgerData(ctx, cm, admissiongenesis.Queue, string(data))
+		return s.Genesis.PatchLedgerData(ctx, cm, admissioncontract.Queue, string(data))
 	}
 	copy := cm.DeepCopy()
 	copy.Data = map[string]string{dataKey: string(data)}

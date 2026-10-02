@@ -11,9 +11,9 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/cofy-x/kova/internal/admissioncontract"
+	"github.com/cofy-x/kova/internal/admissionjson"
 	kovav1 "github.com/cofy-x/kova/internal/apis/kova/v1alpha1"
-	"github.com/cofy-x/kova/internal/service/admissiongenesis"
-	"github.com/cofy-x/kova/internal/service/admissionjson"
 	"github.com/cofy-x/kova/internal/service/config"
 	"github.com/cofy-x/kova/internal/service/queueadmission"
 
@@ -117,7 +117,7 @@ func (r *KovaBuildReconciler) readReservations(ctx context.Context, namespace st
 		return nil, reservationState{}, err
 	}
 	if r.Genesis != nil {
-		if err := r.Genesis.CheckLedger(&cm, admissiongenesis.Active); err != nil {
+		if err := r.Genesis.CheckLedger(&cm, admissioncontract.Active); err != nil {
 			return nil, reservationState{}, err
 		}
 	}
@@ -395,7 +395,7 @@ func (r *KovaBuildReconciler) writeReservations(ctx context.Context, cm *corev1.
 		return err
 	}
 	if r.Genesis != nil {
-		return r.Genesis.PatchLedgerData(ctx, cm, admissiongenesis.Active, string(data))
+		return r.Genesis.PatchLedgerData(ctx, cm, admissioncontract.Active, string(data))
 	}
 	copy := cm.DeepCopy()
 	copy.Data = map[string]string{reservationDataKey: string(data)}
@@ -672,7 +672,7 @@ func (r *KovaBuildReconciler) reservationCovered(ctx context.Context, namespace 
 		return false, err
 	}
 	if r.Genesis != nil {
-		if err := r.Genesis.CheckLedger(&latest, admissiongenesis.Active); err != nil {
+		if err := r.Genesis.CheckLedger(&latest, admissioncontract.Active); err != nil {
 			return false, err
 		}
 	}

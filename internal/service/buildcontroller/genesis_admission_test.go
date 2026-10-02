@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/cofy-x/kova/internal/admissioncontract"
 	kovav1 "github.com/cofy-x/kova/internal/apis/kova/v1alpha1"
 	"github.com/cofy-x/kova/internal/daemonclient"
 	"github.com/cofy-x/kova/internal/kube"
@@ -76,12 +77,12 @@ func genesisAdmissionFixture(t *testing.T) (*KovaBuildReconciler, *controllerGen
 	cfg := admissionConfig()
 	cfg.Namespace = "jobs"
 	build := queuedBuild("direct", "alice", 1, 1)
-	receipt := admissiongenesis.Receipt{Namespace: cfg.Namespace, GenesisName: admissiongenesis.GenesisName,
-		GenesisUID: "genesis-original", Contract: admissiongenesis.Contract{
+	receipt := admissioncontract.Receipt{Namespace: cfg.Namespace, GenesisName: admissioncontract.GenesisName,
+		GenesisUID: "genesis-original", Contract: admissioncontract.Contract{
 			Version: 1, NamespaceUID: "namespace-original", Generation: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-			ActiveLedgerName: admissiongenesis.ActiveLedgerName, ActiveLedgerSchema: 1,
-			QueueLedgerName: admissiongenesis.QueueLedgerName, QueueLedgerSchema: 1,
-			Limits: admissiongenesis.Limits{MaxActiveJobs: cfg.MaxActiveJobs, MaxActiveJobsPerRequester: cfg.MaxActiveJobsPerRequester,
+			ActiveLedgerName: admissioncontract.ActiveLedgerName, ActiveLedgerSchema: 1,
+			QueueLedgerName: admissioncontract.QueueLedgerName, QueueLedgerSchema: 1,
+			Limits: admissioncontract.Limits{MaxActiveJobs: cfg.MaxActiveJobs, MaxActiveJobsPerRequester: cfg.MaxActiveJobsPerRequester,
 				WorkerSlots: cfg.WorkerSlots, MaxQueuedJobs: cfg.MaxQueuedJobs, MaxQueuedJobsPerRequester: cfg.MaxQueuedJobsPerRequester},
 		}}
 	activeData, err := GenesisEmptyAdmissionData(cfg)
@@ -92,19 +93,19 @@ func genesisAdmissionFixture(t *testing.T) (*KovaBuildReconciler, *controllerGen
 	if err != nil {
 		t.Fatal(err)
 	}
-	active, err := receipt.NewLedgerObject(admissiongenesis.Active, admissiongenesis.ActiveLedgerDataKey, activeData,
+	active, err := receipt.NewLedgerObject(admissioncontract.Active, admissioncontract.ActiveLedgerDataKey, activeData,
 		"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
 	if err != nil {
 		t.Fatal(err)
 	}
-	queue, err := receipt.NewLedgerObject(admissiongenesis.Queue, admissiongenesis.QueueLedgerDataKey, queueData,
+	queue, err := receipt.NewLedgerObject(admissioncontract.Queue, admissioncontract.QueueLedgerDataKey, queueData,
 		"cccccccccccccccccccccccccccccccc")
 	if err != nil {
 		t.Fatal(err)
 	}
 	active.UID, active.ResourceVersion = "active-original", "11"
 	queue.UID, queue.ResourceVersion = "queue-original", "12"
-	data, err := json.Marshal(admissiongenesis.GenesisData{Contract: receipt.Contract, Phase: admissiongenesis.PhaseCommitted,
+	data, err := json.Marshal(admissioncontract.GenesisData{Contract: receipt.Contract, Phase: admissioncontract.PhaseCommitted,
 		ActiveLedgerUID: string(active.UID), QueueLedgerUID: string(queue.UID)})
 	if err != nil {
 		t.Fatal(err)
@@ -112,7 +113,7 @@ func genesisAdmissionFixture(t *testing.T) (*KovaBuildReconciler, *controllerGen
 	immutable := true
 	genesis := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Namespace: cfg.Namespace, Name: receipt.GenesisName,
 		UID: types.UID(receipt.GenesisUID), ResourceVersion: "13"}, Immutable: &immutable,
-		Data: map[string]string{admissiongenesis.GenesisDataKey: string(data)}}
+		Data: map[string]string{admissioncontract.GenesisDataKey: string(data)}}
 	namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: cfg.Namespace, UID: types.UID(receipt.Contract.NamespaceUID)},
 		Status: corev1.NamespaceStatus{Phase: corev1.NamespaceActive}}
 	scheme := testScheme(t)
@@ -120,9 +121,9 @@ func genesisAdmissionFixture(t *testing.T) (*KovaBuildReconciler, *controllerGen
 		WithObjects(namespace, genesis, active, queue, build).Build()
 	api := &controllerGenesisAPI{Client: base}
 	bootstrap := admissiongenesis.Bootstrapper{API: api, Receipt: receipt,
-		Active: admissiongenesis.LedgerTemplate{Role: admissiongenesis.Active, DataKey: admissiongenesis.ActiveLedgerDataKey,
+		Active: admissiongenesis.LedgerTemplate{Role: admissioncontract.Active, DataKey: admissioncontract.ActiveLedgerDataKey,
 			EmptyData: activeData, Validate: func(cm *corev1.ConfigMap) error { return ValidateAdmissionLedgerForGenesis(cm, cfg) }},
-		Queue: admissiongenesis.LedgerTemplate{Role: admissiongenesis.Queue, DataKey: admissiongenesis.QueueLedgerDataKey,
+		Queue: admissiongenesis.LedgerTemplate{Role: admissioncontract.Queue, DataKey: admissioncontract.QueueLedgerDataKey,
 			EmptyData: queueData, Validate: func(cm *corev1.ConfigMap) error {
 				return queueadmission.ValidateQueueLedgerForGenesis(cm, cfg.MaxQueuedJobs, cfg.MaxQueuedJobsPerRequester)
 			}},
@@ -720,10 +721,10 @@ func TestGenesisDirectBuildRefusesMissingOrReplacedLedger(t *testing.T) {
 		name, ledger string
 		replace      bool
 	}{
-		{"active lost", admissiongenesis.ActiveLedgerName, false},
-		{"queue lost", admissiongenesis.QueueLedgerName, false},
-		{"active replaced", admissiongenesis.ActiveLedgerName, true},
-		{"queue replaced", admissiongenesis.QueueLedgerName, true},
+		{"active lost", admissioncontract.ActiveLedgerName, false},
+		{"queue lost", admissioncontract.QueueLedgerName, false},
+		{"active replaced", admissioncontract.ActiveLedgerName, true},
+		{"queue replaced", admissioncontract.QueueLedgerName, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
@@ -749,7 +750,7 @@ func TestGenesisDirectBuildRefusesMissingOrReplacedLedger(t *testing.T) {
 			if api.patches != 0 {
 				t.Fatalf("patched admission ledger after pair loss: %d", api.patches)
 			}
-			if tc.ledger == admissiongenesis.QueueLedgerName && !tc.replace {
+			if tc.ledger == admissioncontract.QueueLedgerName && !tc.replace {
 				if err := r.queueStoreForNamespace(build.Namespace).EnsureInitialized(ctx); err == nil {
 					t.Fatal("Genesis queue store recreated lost ledger")
 				}

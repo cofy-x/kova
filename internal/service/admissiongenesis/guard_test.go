@@ -7,17 +7,18 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/cofy-x/kova/internal/admissioncontract"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 )
 
-func committedGuardFixture(t *testing.T) (*fakeCore, Bootstrapper, *Guard, map[Role]string) {
+func committedGuardFixture(t *testing.T) (*fakeCore, Bootstrapper, *Guard, map[admissioncontract.Role]string) {
 	t.Helper()
 	f, b := testBootstrap(t)
-	next := map[Role]string{
-		Active: strings.Replace(b.Active.EmptyData, `"fence":0`, `"fence":1`, 1),
-		Queue:  strings.Replace(b.Queue.EmptyData, `"intents":{}`, `"intents":{ }`, 1),
+	next := map[admissioncontract.Role]string{
+		admissioncontract.Active: strings.Replace(b.Active.EmptyData, `"fence":0`, `"fence":1`, 1),
+		admissioncontract.Queue:  strings.Replace(b.Queue.EmptyData, `"intents":{}`, `"intents":{ }`, 1),
 	}
 	for _, template := range []LedgerTemplate{b.Active, b.Queue} {
 		if next[template.Role] == template.EmptyData {
@@ -30,15 +31,15 @@ func committedGuardFixture(t *testing.T) (*fakeCore, Bootstrapper, *Guard, map[R
 			}
 			return nil
 		}
-		if role == Active {
+		if role == admissioncontract.Active {
 			b.Active.Validate = validate
 		} else {
 			b.Queue.Validate = validate
 		}
 	}
-	f.objects[ActiveLedgerName] = installedLedger(t, b, b.Active, "active-original")
-	f.objects[QueueLedgerName] = installedLedger(t, b, b.Queue, "queue-original")
-	setGenesis(t, f, b, GenesisData{Contract: b.Receipt.Contract, Phase: PhaseCommitted,
+	f.objects[admissioncontract.ActiveLedgerName] = installedLedger(t, b, b.Active, "active-original")
+	f.objects[admissioncontract.QueueLedgerName] = installedLedger(t, b, b.Queue, "queue-original")
+	setGenesis(t, f, b, admissioncontract.GenesisData{Contract: b.Receipt.Contract, Phase: admissioncontract.PhaseCommitted,
 		ActiveLedgerUID: "active-original", QueueLedgerUID: "queue-original"}, boolPtr(true))
 	binding := Binding{NamespaceUID: b.Receipt.Contract.NamespaceUID, GenesisUID: b.Receipt.GenesisUID,
 		ActiveLedgerUID: "active-original", QueueLedgerUID: "queue-original"}
@@ -69,12 +70,12 @@ func TestGuardRechecksExternalReceiptAtEachEdge(t *testing.T) {
 
 func TestGuardedLedgerPatchUsesOriginalUIDAndResourceVersion(t *testing.T) {
 	for _, tc := range []struct {
-		role Role
+		role admissioncontract.Role
 		name string
 		key  string
 	}{
-		{Active, ActiveLedgerName, ActiveLedgerDataKey},
-		{Queue, QueueLedgerName, QueueLedgerDataKey},
+		{admissioncontract.Active, admissioncontract.ActiveLedgerName, admissioncontract.ActiveLedgerDataKey},
+		{admissioncontract.Queue, admissioncontract.QueueLedgerName, admissioncontract.QueueLedgerDataKey},
 	} {
 		t.Run(string(tc.role), func(t *testing.T) {
 			f, b, guard, next := committedGuardFixture(t)
@@ -101,36 +102,36 @@ func TestGuardedLedgerPatchRefusesStaleOrReplacedState(t *testing.T) {
 	for _, mode := range []string{"stale RV", "stale data", "replacement during patch", "queue lost before patch"} {
 		t.Run(mode, func(t *testing.T) {
 			f, b, guard, next := committedGuardFixture(t)
-			original, err := f.GetConfigMap(context.Background(), b.Receipt.Namespace, ActiveLedgerName)
+			original, err := f.GetConfigMap(context.Background(), b.Receipt.Namespace, admissioncontract.ActiveLedgerName)
 			if err != nil {
 				t.Fatal(err)
 			}
 			switch mode {
 			case "stale RV":
-				f.objects[ActiveLedgerName].ResourceVersion = "21"
+				f.objects[admissioncontract.ActiveLedgerName].ResourceVersion = "21"
 			case "stale data":
-				f.objects[ActiveLedgerName].Data[ActiveLedgerDataKey] = next[Active]
+				f.objects[admissioncontract.ActiveLedgerName].Data[admissioncontract.ActiveLedgerDataKey] = next[admissioncontract.Active]
 			case "replacement during patch":
-				f.beforePatch[ActiveLedgerName] = func(f *fakeCore) {
-					f.objects[ActiveLedgerName].UID = types.UID("active-replacement")
+				f.beforePatch[admissioncontract.ActiveLedgerName] = func(f *fakeCore) {
+					f.objects[admissioncontract.ActiveLedgerName].UID = types.UID("active-replacement")
 				}
 			case "queue lost before patch":
-				delete(f.objects, QueueLedgerName)
+				delete(f.objects, admissioncontract.QueueLedgerName)
 			}
-			err = guard.PatchLedgerData(context.Background(), original, Active, next[Active])
+			err = guard.PatchLedgerData(context.Background(), original, admissioncontract.Active, next[admissioncontract.Active])
 			if err == nil {
 				t.Fatalf("%s was allowed to patch", mode)
 			}
 			if mode == "queue lost before patch" {
-				if f.patchCount[ActiveLedgerName] != 0 {
-					t.Fatalf("patched after pair loss: %d", f.patchCount[ActiveLedgerName])
+				if f.patchCount[admissioncontract.ActiveLedgerName] != 0 {
+					t.Fatalf("patched after pair loss: %d", f.patchCount[admissioncontract.ActiveLedgerName])
 				}
 			} else if mode == "replacement during patch" {
-				if !errors.Is(err, ErrChanged) || f.patchCount[ActiveLedgerName] != 1 {
-					t.Fatalf("replacement was treated as retryable contention: patches=%d err=%v", f.patchCount[ActiveLedgerName], err)
+				if !errors.Is(err, ErrChanged) || f.patchCount[admissioncontract.ActiveLedgerName] != 1 {
+					t.Fatalf("replacement was treated as retryable contention: patches=%d err=%v", f.patchCount[admissioncontract.ActiveLedgerName], err)
 				}
-			} else if !apierrors.IsConflict(err) || f.patchCount[ActiveLedgerName] != 1 {
-				t.Fatalf("stale RFC6902 test was not classified as one retryable conflict: patches=%d err=%v", f.patchCount[ActiveLedgerName], err)
+			} else if !apierrors.IsConflict(err) || f.patchCount[admissioncontract.ActiveLedgerName] != 1 {
+				t.Fatalf("stale RFC6902 test was not classified as one retryable conflict: patches=%d err=%v", f.patchCount[admissioncontract.ActiveLedgerName], err)
 			}
 		})
 	}
@@ -138,28 +139,28 @@ func TestGuardedLedgerPatchRefusesStaleOrReplacedState(t *testing.T) {
 
 func TestGuardedLedgerUnchanged422IsNotRetryableConflict(t *testing.T) {
 	f, b, guard, next := committedGuardFixture(t)
-	original, err := f.GetConfigMap(context.Background(), b.Receipt.Namespace, ActiveLedgerName)
+	original, err := f.GetConfigMap(context.Background(), b.Receipt.Namespace, admissioncontract.ActiveLedgerName)
 	if err != nil {
 		t.Fatal(err)
 	}
-	f.patchEffects[ActiveLedgerName] = []responseEffect{rejectInvalidBeforeWrite}
-	err = guard.PatchLedgerData(context.Background(), original, Active, next[Active])
-	if !apierrors.IsInvalid(err) || apierrors.IsConflict(err) || f.patchCount[ActiveLedgerName] != 1 {
-		t.Fatalf("unchanged original ledger turned arbitrary 422 into conflict: err=%v patches=%d", err, f.patchCount[ActiveLedgerName])
+	f.patchEffects[admissioncontract.ActiveLedgerName] = []responseEffect{rejectInvalidBeforeWrite}
+	err = guard.PatchLedgerData(context.Background(), original, admissioncontract.Active, next[admissioncontract.Active])
+	if !apierrors.IsInvalid(err) || apierrors.IsConflict(err) || f.patchCount[admissioncontract.ActiveLedgerName] != 1 {
+		t.Fatalf("unchanged original ledger turned arbitrary 422 into conflict: err=%v patches=%d", err, f.patchCount[admissioncontract.ActiveLedgerName])
 	}
-	current := f.objects[ActiveLedgerName]
-	if current.ResourceVersion != original.ResourceVersion || current.Data[ActiveLedgerDataKey] != original.Data[ActiveLedgerDataKey] {
+	current := f.objects[admissioncontract.ActiveLedgerName]
+	if current.ResourceVersion != original.ResourceVersion || current.Data[admissioncontract.ActiveLedgerDataKey] != original.Data[admissioncontract.ActiveLedgerDataKey] {
 		t.Fatalf("test 422 unexpectedly changed ledger: %+v", current)
 	}
 }
 
 func TestGuardedLedgerConcurrentCASReportsOriginalPairConflict(t *testing.T) {
-	for _, role := range []Role{Active, Queue} {
+	for _, role := range []admissioncontract.Role{admissioncontract.Active, admissioncontract.Queue} {
 		t.Run(string(role), func(t *testing.T) {
 			f, b, guard, next := committedGuardFixture(t)
-			name := ActiveLedgerName
-			if role == Queue {
-				name = QueueLedgerName
+			name := admissioncontract.ActiveLedgerName
+			if role == admissioncontract.Queue {
+				name = admissioncontract.QueueLedgerName
 			}
 			original, err := f.GetConfigMap(context.Background(), b.Receipt.Namespace, name)
 			if err != nil {
@@ -187,16 +188,16 @@ func TestGuardedLedgerConcurrentCASReportsOriginalPairConflict(t *testing.T) {
 
 func TestGuardedLedgerLostPatchResponseIsNotReplayed(t *testing.T) {
 	f, b, guard, next := committedGuardFixture(t)
-	original, err := f.GetConfigMap(context.Background(), b.Receipt.Namespace, ActiveLedgerName)
+	original, err := f.GetConfigMap(context.Background(), b.Receipt.Namespace, admissioncontract.ActiveLedgerName)
 	if err != nil {
 		t.Fatal(err)
 	}
-	f.patchEffects[ActiveLedgerName] = []responseEffect{loseAfterWrite}
-	if err := guard.PatchLedgerData(context.Background(), original, Active, next[Active]); !errors.Is(err, errLostResponse) {
+	f.patchEffects[admissioncontract.ActiveLedgerName] = []responseEffect{loseAfterWrite}
+	if err := guard.PatchLedgerData(context.Background(), original, admissioncontract.Active, next[admissioncontract.Active]); !errors.Is(err, errLostResponse) {
 		t.Fatalf("lost response was treated as success: %v", err)
 	}
-	if f.patchCount[ActiveLedgerName] != 1 || f.objects[ActiveLedgerName].Data[ActiveLedgerDataKey] != next[Active] {
-		t.Fatalf("lost response was replayed or not committed: patches=%d ledger=%+v", f.patchCount[ActiveLedgerName], f.objects[ActiveLedgerName])
+	if f.patchCount[admissioncontract.ActiveLedgerName] != 1 || f.objects[admissioncontract.ActiveLedgerName].Data[admissioncontract.ActiveLedgerDataKey] != next[admissioncontract.Active] {
+		t.Fatalf("lost response was replayed or not committed: patches=%d ledger=%+v", f.patchCount[admissioncontract.ActiveLedgerName], f.objects[admissioncontract.ActiveLedgerName])
 	}
 }
 
@@ -213,13 +214,13 @@ func TestGuardPinsStartupPairAndRefusesCommittedLoss(t *testing.T) {
 	if err := guard.Check(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if err := guard.CheckLedger(f.objects[ActiveLedgerName], Active); err != nil {
+	if err := guard.CheckLedger(f.objects[admissioncontract.ActiveLedgerName], admissioncontract.Active); err != nil {
 		t.Fatal(err)
 	}
-	for _, role := range []Role{Active, Queue} {
-		name := ActiveLedgerName
-		if role == Queue {
-			name = QueueLedgerName
+	for _, role := range []admissioncontract.Role{admissioncontract.Active, admissioncontract.Queue} {
+		name := admissioncontract.ActiveLedgerName
+		if role == admissioncontract.Queue {
+			name = admissioncontract.QueueLedgerName
 		}
 		original := f.objects[name]
 		delete(f.objects, name)
@@ -258,7 +259,7 @@ func TestGuardCannotAdoptDifferentStartupBinding(t *testing.T) {
 	}
 	wrong = binding
 	wrong.QueueLedgerUID = "other-queue"
-	if _, err := NewGuard(context.Background(), committedBootstrap, wrong); err == nil || f.patchCount[GenesisName] != 3 {
+	if _, err := NewGuard(context.Background(), committedBootstrap, wrong); err == nil || f.patchCount[admissioncontract.GenesisName] != 3 {
 		t.Fatalf("changed startup pair qualified or wrote: %v", err)
 	}
 }

@@ -11,6 +11,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/cofy-x/kova/internal/admissioncontract"
 	jsonpatch "github.com/evanphx/json-patch/v5"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -34,8 +35,8 @@ func TestFreshBootstrapRechecksExternalReceiptBeforeEachEffect(t *testing.T) {
 	if _, err := bootstrap.EnsureFresh(context.Background()); !errors.Is(err, ErrChanged) {
 		t.Fatalf("revoked receipt did not stop provisional Genesis pin: %v", err)
 	}
-	if checks != 2 || f.createCount[ActiveLedgerName] != 1 || f.patchCount[GenesisName] != 0 ||
-		f.createCount[QueueLedgerName] != 0 {
+	if checks != 2 || f.createCount[admissioncontract.ActiveLedgerName] != 1 || f.patchCount[admissioncontract.GenesisName] != 0 ||
+		f.createCount[admissioncontract.QueueLedgerName] != 0 {
 		t.Fatalf("bootstrap continued after receipt revocation: checks=%d creates=%v patches=%v", checks, f.createCount, f.patchCount)
 	}
 }
@@ -66,13 +67,13 @@ type fakeCore struct {
 	beforePatch   map[string]func(*fakeCore)
 }
 
-func newFakeCore(t *testing.T, r Receipt) *fakeCore {
+func newFakeCore(t *testing.T, r admissioncontract.Receipt) *fakeCore {
 	t.Helper()
 	return &fakeCore{
 		namespace: &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: r.Namespace, UID: types.UID(r.Contract.NamespaceUID)},
 			Status: corev1.NamespaceStatus{Phase: corev1.NamespaceActive}},
 		objects: map[string]*corev1.ConfigMap{r.GenesisName: genesisObject(t, r,
-			GenesisData{Contract: r.Contract, Phase: PhaseInitializing}, nil)},
+			admissioncontract.GenesisData{Contract: r.Contract, Phase: admissioncontract.PhaseInitializing}, nil)},
 		nextUID: 1, nextRV: 1,
 		createEffects: map[string][]responseEffect{}, patchEffects: map[string][]responseEffect{},
 		createCount: map[string]int{}, patchCount: map[string]int{}, beforeGet: map[string]func(*fakeCore){},
@@ -200,10 +201,10 @@ func testBootstrap(t *testing.T) (*fakeCore, Bootstrapper) {
 		}
 	}
 	b := Bootstrapper{API: f, Receipt: r,
-		Active: LedgerTemplate{Role: Active, DataKey: ActiveLedgerDataKey, EmptyData: activeEmpty,
-			Validate: validate(ActiveLedgerDataKey, activeEmpty)},
-		Queue: LedgerTemplate{Role: Queue, DataKey: QueueLedgerDataKey, EmptyData: queueEmpty,
-			Validate: validate(QueueLedgerDataKey, queueEmpty)},
+		Active: LedgerTemplate{Role: admissioncontract.Active, DataKey: admissioncontract.ActiveLedgerDataKey, EmptyData: activeEmpty,
+			Validate: validate(admissioncontract.ActiveLedgerDataKey, activeEmpty)},
+		Queue: LedgerTemplate{Role: admissioncontract.Queue, DataKey: admissioncontract.QueueLedgerDataKey, EmptyData: queueEmpty,
+			Validate: validate(admissioncontract.QueueLedgerDataKey, queueEmpty)},
 		Preflight: func(context.Context) error { return nil },
 	}
 	return f, b
@@ -215,7 +216,7 @@ func TestInvalidSecondCanonicalTemplateCannotWriteFirstLedger(t *testing.T) {
 	if _, err := b.EnsureFresh(context.Background()); err == nil {
 		t.Fatal("malformed second template passed bootstrap validation")
 	}
-	if f.createCount[ActiveLedgerName] != 0 || f.createCount[QueueLedgerName] != 0 || f.patchCount[GenesisName] != 0 {
+	if f.createCount[admissioncontract.ActiveLedgerName] != 0 || f.createCount[admissioncontract.QueueLedgerName] != 0 || f.patchCount[admissioncontract.GenesisName] != 0 {
 		t.Fatalf("first ledger was written before both templates qualified: creates=%v patches=%v", f.createCount, f.patchCount)
 	}
 }
@@ -223,21 +224,21 @@ func TestInvalidSecondCanonicalTemplateCannotWriteFirstLedger(t *testing.T) {
 func TestCanonicalEmptyCapacityMustMatchAllFiveReceiptLimits(t *testing.T) {
 	for _, tc := range []struct {
 		name, before, after string
-		role                Role
+		role                admissioncontract.Role
 	}{
-		{name: "active jobs", role: Active, before: `"maxJobs":128`, after: `"maxJobs":127`},
-		{name: "active requester", role: Active, before: `"maxPerRequester":8`, after: `"maxPerRequester":7`},
-		{name: "worker slots", role: Active, before: `"workerSlots":65535`, after: `"workerSlots":65534`},
-		{name: "queued jobs", role: Queue, before: `"globalLimit":1000`, after: `"globalLimit":999`},
-		{name: "queued requester", role: Queue, before: `"requesterLimit":100`, after: `"requesterLimit":99`},
+		{name: "active jobs", role: admissioncontract.Active, before: `"maxJobs":128`, after: `"maxJobs":127`},
+		{name: "active requester", role: admissioncontract.Active, before: `"maxPerRequester":8`, after: `"maxPerRequester":7`},
+		{name: "worker slots", role: admissioncontract.Active, before: `"workerSlots":65535`, after: `"workerSlots":65534`},
+		{name: "queued jobs", role: admissioncontract.Queue, before: `"globalLimit":1000`, after: `"globalLimit":999`},
+		{name: "queued requester", role: admissioncontract.Queue, before: `"requesterLimit":100`, after: `"requesterLimit":99`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f, b := testBootstrap(t)
 			// A mistakenly matched schema callback can find the mutated ledger
-			// self-consistent. Receipt equality must be independent of it.
+			// self-consistent. admissioncontract.Receipt equality must be independent of it.
 			b.Active.Validate = func(*corev1.ConfigMap) error { return nil }
 			b.Queue.Validate = func(*corev1.ConfigMap) error { return nil }
-			if tc.role == Active {
+			if tc.role == admissioncontract.Active {
 				b.Active.EmptyData = strings.Replace(b.Active.EmptyData, tc.before, tc.after, 1)
 				if !strings.Contains(b.Active.EmptyData, tc.after) {
 					t.Fatal("test did not mutate active header")
@@ -251,7 +252,7 @@ func TestCanonicalEmptyCapacityMustMatchAllFiveReceiptLimits(t *testing.T) {
 			if _, err := b.EnsureFresh(context.Background()); err == nil || !strings.Contains(err.Error(), "differs from admission receipt") {
 				t.Fatalf("capacity mismatch was not refused by independent check: %v", err)
 			}
-			if f.createCount[ActiveLedgerName] != 0 || f.createCount[QueueLedgerName] != 0 || f.patchCount[GenesisName] != 0 {
+			if f.createCount[admissioncontract.ActiveLedgerName] != 0 || f.createCount[admissioncontract.QueueLedgerName] != 0 || f.patchCount[admissioncontract.GenesisName] != 0 {
 				t.Fatalf("capacity mismatch wrote admission state: creates=%v patches=%v", f.createCount, f.patchCount)
 			}
 		})
@@ -259,12 +260,12 @@ func TestCanonicalEmptyCapacityMustMatchAllFiveReceiptLimits(t *testing.T) {
 }
 
 func TestBootstrapRejectsWrongRoleDataKeysBeforeAnyWrite(t *testing.T) {
-	for _, role := range []Role{Active, Queue} {
+	for _, role := range []admissioncontract.Role{admissioncontract.Active, admissioncontract.Queue} {
 		t.Run(string(role), func(t *testing.T) {
 			f, b := testBootstrap(t)
 			b.Active.Validate = func(*corev1.ConfigMap) error { return nil }
 			b.Queue.Validate = func(*corev1.ConfigMap) error { return nil }
-			if role == Active {
+			if role == admissioncontract.Active {
 				b.Active.DataKey = "foo"
 			} else {
 				b.Queue.DataKey = "bar"
@@ -272,7 +273,7 @@ func TestBootstrapRejectsWrongRoleDataKeysBeforeAnyWrite(t *testing.T) {
 			if _, err := b.EnsureFresh(context.Background()); err == nil {
 				t.Fatal("self-consistent wrong ledger data key qualified")
 			}
-			if f.createCount[ActiveLedgerName] != 0 || f.createCount[QueueLedgerName] != 0 || f.patchCount[GenesisName] != 0 {
+			if f.createCount[admissioncontract.ActiveLedgerName] != 0 || f.createCount[admissioncontract.QueueLedgerName] != 0 || f.patchCount[admissioncontract.GenesisName] != 0 {
 				t.Fatalf("wrong role data key wrote admission state: creates=%v patches=%v", f.createCount, f.patchCount)
 			}
 		})
@@ -284,9 +285,9 @@ func TestNonemptyReadRaceRequiresValidCommittedPeerPair(t *testing.T) {
 	for _, mode := range []string{"valid", "malformed", "replaced"} {
 		t.Run(mode, func(t *testing.T) {
 			f, b := testBootstrap(t)
-			f.objects[ActiveLedgerName] = installedLedger(t, b, b.Active, "active-first")
-			f.objects[QueueLedgerName] = installedLedger(t, b, b.Queue, "queue-first")
-			initial := GenesisData{Contract: b.Receipt.Contract, Phase: PhaseInitializing,
+			f.objects[admissioncontract.ActiveLedgerName] = installedLedger(t, b, b.Active, "active-first")
+			f.objects[admissioncontract.QueueLedgerName] = installedLedger(t, b, b.Queue, "queue-first")
+			initial := admissioncontract.GenesisData{Contract: b.Receipt.Contract, Phase: admissioncontract.PhaseInitializing,
 				ActiveLedgerUID: "active-first", QueueLedgerUID: "queue-first"}
 			setGenesis(t, f, b, initial, nil)
 			originalValidate := b.Active.Validate
@@ -298,18 +299,18 @@ func TestNonemptyReadRaceRequiresValidCommittedPeerPair(t *testing.T) {
 			}
 			// The losing replica has already read Initializing when its first
 			// ledger GET is intercepted by the peer's commit and first grant.
-			f.beforeGet[ActiveLedgerName] = func(f *fakeCore) {
+			f.beforeGet[admissioncontract.ActiveLedgerName] = func(f *fakeCore) {
 				committed := initial
-				committed.Phase = PhaseCommitted
+				committed.Phase = admissioncontract.PhaseCommitted
 				cm := genesisObject(t, b.Receipt, committed, boolPtr(true))
 				cm.ResourceVersion = "22"
-				f.objects[GenesisName] = cm
-				f.objects[ActiveLedgerName].Data[b.Active.DataKey] = nonemptyActive
+				f.objects[admissioncontract.GenesisName] = cm
+				f.objects[admissioncontract.ActiveLedgerName].Data[b.Active.DataKey] = nonemptyActive
 				switch mode {
 				case "malformed":
-					f.objects[ActiveLedgerName].Data[b.Active.DataKey] = `{"bad":true}`
+					f.objects[admissioncontract.ActiveLedgerName].Data[b.Active.DataKey] = `{"bad":true}`
 				case "replaced":
-					f.objects[ActiveLedgerName].UID = "active-replacement"
+					f.objects[admissioncontract.ActiveLedgerName].UID = "active-replacement"
 				}
 			}
 			binding, err := b.EnsureFresh(context.Background())
@@ -320,7 +321,7 @@ func TestNonemptyReadRaceRequiresValidCommittedPeerPair(t *testing.T) {
 			} else if err == nil {
 				t.Fatalf("%s committed peer incorrectly qualified", mode)
 			}
-			if f.createCount[ActiveLedgerName] != 0 || f.createCount[QueueLedgerName] != 0 || f.patchCount[GenesisName] != 0 {
+			if f.createCount[admissioncontract.ActiveLedgerName] != 0 || f.createCount[admissioncontract.QueueLedgerName] != 0 || f.patchCount[admissioncontract.GenesisName] != 0 {
 				t.Fatalf("losing replica wrote during peer handoff: creates=%v patches=%v", f.createCount, f.patchCount)
 			}
 		})
@@ -329,18 +330,18 @@ func TestNonemptyReadRaceRequiresValidCommittedPeerPair(t *testing.T) {
 
 func TestPreflightVetoRemainsAuthoritativeAcrossPeerCommit(t *testing.T) {
 	f, b := testBootstrap(t)
-	f.objects[ActiveLedgerName] = installedLedger(t, b, b.Active, "active-first")
-	f.objects[QueueLedgerName] = installedLedger(t, b, b.Queue, "queue-first")
+	f.objects[admissioncontract.ActiveLedgerName] = installedLedger(t, b, b.Active, "active-first")
+	f.objects[admissioncontract.QueueLedgerName] = installedLedger(t, b, b.Queue, "queue-first")
 	veto := errors.New("visible old runner Pod")
 	b.Preflight = func(context.Context) error {
-		setGenesis(t, f, b, GenesisData{Contract: b.Receipt.Contract, Phase: PhaseCommitted,
+		setGenesis(t, f, b, admissioncontract.GenesisData{Contract: b.Receipt.Contract, Phase: admissioncontract.PhaseCommitted,
 			ActiveLedgerUID: "active-first", QueueLedgerUID: "queue-first"}, boolPtr(true))
 		return veto
 	}
 	if _, err := b.EnsureFresh(context.Background()); !errors.Is(err, veto) {
 		t.Fatalf("old-work veto was overridden by committed peer: %v", err)
 	}
-	if f.createCount[ActiveLedgerName] != 0 || f.patchCount[GenesisName] != 0 {
+	if f.createCount[admissioncontract.ActiveLedgerName] != 0 || f.patchCount[admissioncontract.GenesisName] != 0 {
 		t.Fatal("wrote after old-work veto")
 	}
 }
@@ -357,7 +358,7 @@ func installedLedger(t *testing.T, b Bootstrapper, template LedgerTemplate, uid 
 	return cm
 }
 
-func setGenesis(t *testing.T, f *fakeCore, b Bootstrapper, state GenesisData, immutable *bool) {
+func setGenesis(t *testing.T, f *fakeCore, b Bootstrapper, state admissioncontract.GenesisData, immutable *bool) {
 	t.Helper()
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -366,7 +367,7 @@ func setGenesis(t *testing.T, f *fakeCore, b Bootstrapper, state GenesisData, im
 	f.objects[b.Receipt.GenesisName] = cm
 }
 
-func currentGenesis(t *testing.T, f *fakeCore, b Bootstrapper) GenesisData {
+func currentGenesis(t *testing.T, f *fakeCore, b Bootstrapper) admissioncontract.GenesisData {
 	t.Helper()
 	cm, err := f.GetConfigMap(context.Background(), b.Receipt.Namespace, b.Receipt.GenesisName)
 	if err != nil {
@@ -386,7 +387,7 @@ func TestFreshBootstrapCommitsExactOriginalPair(t *testing.T) {
 		t.Fatal(err)
 	}
 	state := currentGenesis(t, f, b)
-	if state.Phase != PhaseCommitted || state.ActiveLedgerUID == "" || state.QueueLedgerUID == "" ||
+	if state.Phase != admissioncontract.PhaseCommitted || state.ActiveLedgerUID == "" || state.QueueLedgerUID == "" ||
 		binding.ActiveLedgerUID != state.ActiveLedgerUID || binding.QueueLedgerUID != state.QueueLedgerUID ||
 		binding.GenesisUID != b.Receipt.GenesisUID || binding.NamespaceUID != b.Receipt.Contract.NamespaceUID {
 		t.Fatalf("unbound commit: binding=%+v state=%+v", binding, state)
@@ -394,11 +395,11 @@ func TestFreshBootstrapCommitsExactOriginalPair(t *testing.T) {
 	if cm := f.objects[b.Receipt.GenesisName]; cm.Immutable == nil || !*cm.Immutable {
 		t.Fatal("committed Genesis is not immutable")
 	}
-	if f.createCount[ActiveLedgerName] != 1 || f.createCount[QueueLedgerName] != 1 || f.patchCount[GenesisName] != 3 {
+	if f.createCount[admissioncontract.ActiveLedgerName] != 1 || f.createCount[admissioncontract.QueueLedgerName] != 1 || f.patchCount[admissioncontract.GenesisName] != 3 {
 		t.Fatalf("unexpected writes: create=%v patch=%v", f.createCount, f.patchCount)
 	}
 	if again, err := b.EnsureFresh(context.Background()); err != nil || again != binding ||
-		f.createCount[ActiveLedgerName] != 1 || f.createCount[QueueLedgerName] != 1 || f.patchCount[GenesisName] != 3 {
+		f.createCount[admissioncontract.ActiveLedgerName] != 1 || f.createCount[admissioncontract.QueueLedgerName] != 1 || f.patchCount[admissioncontract.GenesisName] != 3 {
 		t.Fatalf("committed observation wrote or drifted: %+v, %v", again, err)
 	}
 }
@@ -429,7 +430,7 @@ func TestConcurrentBootstrapPeersConvergeOnOnePair(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got := currentGenesis(t, f, b); got.Phase != PhaseCommitted ||
+		if got := currentGenesis(t, f, b); got.Phase != admissioncontract.PhaseCommitted ||
 			got.ActiveLedgerUID != binding.ActiveLedgerUID || got.QueueLedgerUID != binding.QueueLedgerUID {
 			t.Fatalf("peers did not converge: %+v, %+v", got, binding)
 		}
@@ -444,15 +445,15 @@ func TestBootstrapRecoversCreatedAndPinnedPartialPair(t *testing.T) {
 	} {
 		t.Run(fmt.Sprintf("a%t-q%t-ap%t-qp%t", tc.active, tc.queue, tc.activePin, tc.queuePin), func(t *testing.T) {
 			f, b := testBootstrap(t)
-			state := GenesisData{Contract: b.Receipt.Contract, Phase: PhaseInitializing}
+			state := admissioncontract.GenesisData{Contract: b.Receipt.Contract, Phase: admissioncontract.PhaseInitializing}
 			if tc.active {
-				f.objects[ActiveLedgerName] = installedLedger(t, b, b.Active, "first-active")
+				f.objects[admissioncontract.ActiveLedgerName] = installedLedger(t, b, b.Active, "first-active")
 				if tc.activePin {
 					state.ActiveLedgerUID = "first-active"
 				}
 			}
 			if tc.queue {
-				f.objects[QueueLedgerName] = installedLedger(t, b, b.Queue, "first-queue")
+				f.objects[admissioncontract.QueueLedgerName] = installedLedger(t, b, b.Queue, "first-queue")
 				if tc.queuePin {
 					state.QueueLedgerUID = "first-queue"
 				}
@@ -468,10 +469,10 @@ func TestBootstrapRecoversCreatedAndPinnedPartialPair(t *testing.T) {
 			if tc.queue && binding.QueueLedgerUID != "first-queue" {
 				t.Fatalf("queue UID overwritten: %+v", binding)
 			}
-			if tc.active && f.createCount[ActiveLedgerName] != 0 {
+			if tc.active && f.createCount[admissioncontract.ActiveLedgerName] != 0 {
 				t.Fatal("recreated existing active ledger")
 			}
-			if tc.queue && f.createCount[QueueLedgerName] != 0 {
+			if tc.queue && f.createCount[admissioncontract.QueueLedgerName] != 0 {
 				t.Fatal("recreated existing queue ledger")
 			}
 		})
@@ -483,8 +484,8 @@ func TestBootstrapLostCreateAndPinResponses(t *testing.T) {
 		name    string
 		effects map[string][]responseEffect
 	}{
-		{name: "active Create", effects: map[string][]responseEffect{ActiveLedgerName: {loseAfterWrite}}},
-		{name: "queue Create", effects: map[string][]responseEffect{QueueLedgerName: {loseAfterWrite}}},
+		{name: "active Create", effects: map[string][]responseEffect{admissioncontract.ActiveLedgerName: {loseAfterWrite}}},
+		{name: "queue Create", effects: map[string][]responseEffect{admissioncontract.QueueLedgerName: {loseAfterWrite}}},
 	} {
 		t.Run(lost.name, func(t *testing.T) {
 			f, b := testBootstrap(t)
@@ -492,38 +493,38 @@ func TestBootstrapLostCreateAndPinResponses(t *testing.T) {
 			if _, err := b.EnsureFresh(context.Background()); err != nil {
 				t.Fatal(err)
 			}
-			if currentGenesis(t, f, b).Phase != PhaseCommitted {
+			if currentGenesis(t, f, b).Phase != admissioncontract.PhaseCommitted {
 				t.Fatal("lost Create response prevented verified commit")
 			}
 		})
 	}
 	t.Run("unpersisted Create has unknown outcome", func(t *testing.T) {
 		f, b := testBootstrap(t)
-		f.createEffects[ActiveLedgerName] = []responseEffect{rejectBeforeWrite}
+		f.createEffects[admissioncontract.ActiveLedgerName] = []responseEffect{rejectBeforeWrite}
 		if _, err := b.EnsureFresh(context.Background()); !errors.Is(err, ErrUnknownCreate) {
 			t.Fatalf("expected unknown Create, got %v", err)
 		}
-		if f.objects[ActiveLedgerName] != nil || currentGenesis(t, f, b).Phase != PhaseInitializing || f.createCount[QueueLedgerName] != 0 {
+		if f.objects[admissioncontract.ActiveLedgerName] != nil || currentGenesis(t, f, b).Phase != admissioncontract.PhaseInitializing || f.createCount[admissioncontract.QueueLedgerName] != 0 {
 			t.Fatal("advanced after absent read of uncertain Create")
 		}
 	})
 	t.Run("persisted pin with lost response", func(t *testing.T) {
 		f, b := testBootstrap(t)
-		f.patchEffects[GenesisName] = []responseEffect{loseAfterWrite}
+		f.patchEffects[admissioncontract.GenesisName] = []responseEffect{loseAfterWrite}
 		if _, err := b.EnsureFresh(context.Background()); err != nil {
 			t.Fatal(err)
 		}
-		if currentGenesis(t, f, b).Phase != PhaseCommitted {
+		if currentGenesis(t, f, b).Phase != admissioncontract.PhaseCommitted {
 			t.Fatal("verified pin was not reused")
 		}
 	})
 	t.Run("unpersisted pin has unknown outcome", func(t *testing.T) {
 		f, b := testBootstrap(t)
-		f.patchEffects[GenesisName] = []responseEffect{rejectBeforeWrite}
+		f.patchEffects[admissioncontract.GenesisName] = []responseEffect{rejectBeforeWrite}
 		if _, err := b.EnsureFresh(context.Background()); !errors.Is(err, ErrUnknownPin) {
 			t.Fatalf("expected unknown pin, got %v", err)
 		}
-		if currentGenesis(t, f, b).Phase != PhaseInitializing || f.createCount[QueueLedgerName] != 0 {
+		if currentGenesis(t, f, b).Phase != admissioncontract.PhaseInitializing || f.createCount[admissioncontract.QueueLedgerName] != 0 {
 			t.Fatal("advanced after an unverified provisional pin")
 		}
 		if _, err := b.EnsureFresh(context.Background()); err != nil {
@@ -536,18 +537,18 @@ func TestBootstrapLostCommitResponse(t *testing.T) {
 	for _, effect := range []responseEffect{loseAfterWrite, rejectBeforeWrite} {
 		t.Run(fmt.Sprintf("effect-%d", effect), func(t *testing.T) {
 			f, b := testBootstrap(t)
-			f.objects[ActiveLedgerName] = installedLedger(t, b, b.Active, "active-first")
-			f.objects[QueueLedgerName] = installedLedger(t, b, b.Queue, "queue-first")
-			setGenesis(t, f, b, GenesisData{Contract: b.Receipt.Contract, Phase: PhaseInitializing,
+			f.objects[admissioncontract.ActiveLedgerName] = installedLedger(t, b, b.Active, "active-first")
+			f.objects[admissioncontract.QueueLedgerName] = installedLedger(t, b, b.Queue, "queue-first")
+			setGenesis(t, f, b, admissioncontract.GenesisData{Contract: b.Receipt.Contract, Phase: admissioncontract.PhaseInitializing,
 				ActiveLedgerUID: "active-first", QueueLedgerUID: "queue-first"}, nil)
-			f.patchEffects[GenesisName] = []responseEffect{effect}
+			f.patchEffects[admissioncontract.GenesisName] = []responseEffect{effect}
 			binding, err := b.EnsureFresh(context.Background())
 			if effect == loseAfterWrite {
-				if err != nil || binding.ActiveLedgerUID != "active-first" || currentGenesis(t, f, b).Phase != PhaseCommitted {
+				if err != nil || binding.ActiveLedgerUID != "active-first" || currentGenesis(t, f, b).Phase != admissioncontract.PhaseCommitted {
 					t.Fatalf("persisted commit not qualified: %+v, %v", binding, err)
 				}
 			} else {
-				if !errors.Is(err, ErrUnknownCommit) || currentGenesis(t, f, b).Phase != PhaseInitializing {
+				if !errors.Is(err, ErrUnknownCommit) || currentGenesis(t, f, b).Phase != admissioncontract.PhaseInitializing {
 					t.Fatalf("unpersisted commit not uncertain: %+v, %v", binding, err)
 				}
 				if _, err := b.EnsureFresh(context.Background()); err != nil {
@@ -580,20 +581,20 @@ func TestBootstrapRefusesPinnedOrCommittedLossWithoutCreate(t *testing.T) {
 				active.Data[b.Active.DataKey] = `{"version":1,"active":{"unexpected":true}}`
 			}
 			if !tc.missing {
-				f.objects[ActiveLedgerName] = active
+				f.objects[admissioncontract.ActiveLedgerName] = active
 			}
-			f.objects[QueueLedgerName] = queue
-			state := GenesisData{Contract: b.Receipt.Contract, Phase: PhaseInitializing,
+			f.objects[admissioncontract.QueueLedgerName] = queue
+			state := admissioncontract.GenesisData{Contract: b.Receipt.Contract, Phase: admissioncontract.PhaseInitializing,
 				ActiveLedgerUID: "active-first", QueueLedgerUID: "queue-first"}
 			var immutable *bool
 			if tc.committed {
-				state.Phase, immutable = PhaseCommitted, boolPtr(true)
+				state.Phase, immutable = admissioncontract.PhaseCommitted, boolPtr(true)
 			}
 			setGenesis(t, f, b, state, immutable)
 			if _, err := b.EnsureFresh(context.Background()); err == nil {
 				t.Fatal("unsafe pair qualified")
 			}
-			if f.createCount[ActiveLedgerName] != 0 || f.createCount[QueueLedgerName] != 0 || f.patchCount[GenesisName] != 0 {
+			if f.createCount[admissioncontract.ActiveLedgerName] != 0 || f.createCount[admissioncontract.QueueLedgerName] != 0 || f.patchCount[admissioncontract.GenesisName] != 0 {
 				t.Fatalf("unsafe pair was mutated: creates=%v patches=%v", f.createCount, f.patchCount)
 			}
 		})
@@ -606,8 +607,8 @@ func TestDelayedOldCreateAfterCommittedLossCannotRebind(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	delete(f.objects, ActiveLedgerName) // privileged deletion outside protocol
-	late, err := b.Receipt.NewLedgerObject(Active, b.Active.DataKey, b.Active.EmptyData,
+	delete(f.objects, admissioncontract.ActiveLedgerName) // privileged deletion outside protocol
+	late, err := b.Receipt.NewLedgerObject(admissioncontract.Active, b.Active.DataKey, b.Active.EmptyData,
 		"cccccccccccccccccccccccccccccccc")
 	if err != nil {
 		t.Fatal(err)
@@ -615,14 +616,14 @@ func TestDelayedOldCreateAfterCommittedLossCannotRebind(t *testing.T) {
 	if _, err := f.CreateConfigMap(context.Background(), b.Receipt.Namespace, late); err != nil {
 		t.Fatal(err)
 	}
-	if f.objects[ActiveLedgerName].UID == types.UID(first.ActiveLedgerUID) {
+	if f.objects[admissioncontract.ActiveLedgerName].UID == types.UID(first.ActiveLedgerUID) {
 		t.Fatal("fake API did not assign a new UID")
 	}
-	creates := f.createCount[ActiveLedgerName]
+	creates := f.createCount[admissioncontract.ActiveLedgerName]
 	if _, err := b.ObserveCommitted(context.Background()); err == nil {
 		t.Fatal("replacement ledger qualified under original committed binding")
 	}
-	if _, err := b.EnsureFresh(context.Background()); err == nil || f.createCount[ActiveLedgerName] != creates {
+	if _, err := b.EnsureFresh(context.Background()); err == nil || f.createCount[admissioncontract.ActiveLedgerName] != creates {
 		t.Fatalf("committed loss was repaired or qualified: %v", err)
 	}
 }
@@ -636,11 +637,11 @@ func TestBootstrapRefusesOriginalIdentityAndPreflightVeto(t *testing.T) {
 		{name: "Genesis replacement", alter: func(f *fakeCore, b Bootstrapper) { f.objects[b.Receipt.GenesisName].UID = "other-genesis" }},
 		{name: "Genesis limit drift", alter: func(f *fakeCore, b Bootstrapper) {
 			cm := f.objects[b.Receipt.GenesisName]
-			var state GenesisData
-			_ = json.Unmarshal([]byte(cm.Data[GenesisDataKey]), &state)
+			var state admissioncontract.GenesisData
+			_ = json.Unmarshal([]byte(cm.Data[admissioncontract.GenesisDataKey]), &state)
 			state.Contract.Limits.MaxActiveJobs--
 			encoded, _ := json.Marshal(state)
-			cm.Data[GenesisDataKey] = string(encoded)
+			cm.Data[admissioncontract.GenesisDataKey] = string(encoded)
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -649,7 +650,7 @@ func TestBootstrapRefusesOriginalIdentityAndPreflightVeto(t *testing.T) {
 			if _, err := b.EnsureFresh(context.Background()); err == nil {
 				t.Fatal("replacement or drift qualified")
 			}
-			if f.createCount[ActiveLedgerName] != 0 || f.patchCount[GenesisName] != 0 {
+			if f.createCount[admissioncontract.ActiveLedgerName] != 0 || f.patchCount[admissioncontract.GenesisName] != 0 {
 				t.Fatal("mutation after original identity drift")
 			}
 		})
@@ -659,7 +660,7 @@ func TestBootstrapRefusesOriginalIdentityAndPreflightVeto(t *testing.T) {
 	if _, err := b.EnsureFresh(context.Background()); err == nil {
 		t.Fatal("old-work veto was ignored")
 	}
-	if f.createCount[ActiveLedgerName] != 0 || f.patchCount[GenesisName] != 0 {
+	if f.createCount[admissioncontract.ActiveLedgerName] != 0 || f.patchCount[admissioncontract.GenesisName] != 0 {
 		t.Fatal("wrote after old-work veto")
 	}
 }
@@ -667,9 +668,9 @@ func TestBootstrapRefusesOriginalIdentityAndPreflightVeto(t *testing.T) {
 func TestGenesisPatchRequiresOriginalUIDVersionAndData(t *testing.T) {
 	r := testReceipt()
 	for _, immutable := range []*bool{nil, boolPtr(false)} {
-		original := genesisObject(t, r, GenesisData{Contract: r.Contract, Phase: PhaseInitializing}, immutable)
+		original := genesisObject(t, r, admissioncontract.GenesisData{Contract: r.Contract, Phase: admissioncontract.PhaseInitializing}, immutable)
 		original.ResourceVersion = "7"
-		next := GenesisData{Contract: r.Contract, Phase: PhaseCommitted,
+		next := admissioncontract.GenesisData{Contract: r.Contract, Phase: admissioncontract.PhaseCommitted,
 			ActiveLedgerUID: "active-first", QueueLedgerUID: "queue-first"}
 		patch, err := genesisPatch(original, next, true)
 		if err != nil {
@@ -710,7 +711,7 @@ func TestGenesisPatchRequiresOriginalUIDVersionAndData(t *testing.T) {
 		for _, drift := range []func(*corev1.ConfigMap){
 			func(cm *corev1.ConfigMap) { cm.UID = "replacement" },
 			func(cm *corev1.ConfigMap) { cm.ResourceVersion = "8" },
-			func(cm *corev1.ConfigMap) { cm.Data[GenesisDataKey] = `{"phase":"different"}` },
+			func(cm *corev1.ConfigMap) { cm.Data[admissioncontract.GenesisDataKey] = `{"phase":"different"}` },
 		} {
 			changed := original.DeepCopy()
 			drift(changed)

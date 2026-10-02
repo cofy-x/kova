@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/cofy-x/kova/internal/admissioncontract"
 	kovav1 "github.com/cofy-x/kova/internal/apis/kova/v1alpha1"
 	"github.com/cofy-x/kova/internal/daemonclient"
 	"github.com/cofy-x/kova/internal/service/admissiongenesis"
@@ -22,7 +23,7 @@ import (
 func prepareGenesisRuntime(ctx context.Context, cfg config.Config, receiptRaw []byte,
 	api admissiongenesis.CoreAPI, directReader client.Reader,
 	receiptCheck func(context.Context) error) (*admissiongenesis.Guard, error) {
-	receipt, err := admissiongenesis.ParseReceipt(receiptRaw)
+	receipt, err := admissioncontract.ParseReceipt(receiptRaw)
 	if err != nil {
 		return nil, err
 	}
@@ -42,11 +43,11 @@ func prepareGenesisRuntime(ctx context.Context, cfg config.Config, receiptRaw []
 	}
 	bootstrap := admissiongenesis.Bootstrapper{
 		API: api, Receipt: receipt, BeforeEffect: receiptCheck,
-		Active: admissiongenesis.LedgerTemplate{Role: admissiongenesis.Active,
-			DataKey: admissiongenesis.ActiveLedgerDataKey, EmptyData: activeEmpty,
+		Active: admissiongenesis.LedgerTemplate{Role: admissioncontract.Active,
+			DataKey: admissioncontract.ActiveLedgerDataKey, EmptyData: activeEmpty,
 			Validate: func(cm *corev1.ConfigMap) error { return buildcontroller.ValidateAdmissionLedgerForGenesis(cm, cfg) }},
-		Queue: admissiongenesis.LedgerTemplate{Role: admissiongenesis.Queue,
-			DataKey: admissiongenesis.QueueLedgerDataKey, EmptyData: queueEmpty,
+		Queue: admissiongenesis.LedgerTemplate{Role: admissioncontract.Queue,
+			DataKey: admissioncontract.QueueLedgerDataKey, EmptyData: queueEmpty,
 			Validate: func(cm *corev1.ConfigMap) error {
 				return queueadmission.ValidateQueueLedgerForGenesis(cm, cfg.MaxQueuedJobs, cfg.MaxQueuedJobsPerRequester)
 			}},
@@ -89,7 +90,7 @@ func forkGenesisGuard(ctx context.Context, original *admissiongenesis.Guard,
 	return view, nil
 }
 
-func validateGenesisRuntimeConfig(cfg config.Config, receipt admissiongenesis.Receipt) error {
+func validateGenesisRuntimeConfig(cfg config.Config, receipt admissioncontract.Receipt) error {
 	limits := receipt.Contract.Limits
 	if cfg.Namespace != receipt.Namespace ||
 		cfg.MaxActiveJobs != limits.MaxActiveJobs ||

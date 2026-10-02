@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/cofy-x/kova/internal/service/admissiongenesis"
+	"github.com/cofy-x/kova/internal/admissioncontract"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -46,23 +46,23 @@ func TestAdmissionGenesisCLIRequiresExplicitTrustInputsBeforeAPI(t *testing.T) {
 }
 
 func TestAdmissionGenesisCLIUsesExplicitGlobalFlagsAndGETOnlyAPI(t *testing.T) {
-	receipt := admissiongenesis.Receipt{
-		Namespace: "jobs-57", GenesisName: admissiongenesis.GenesisName, GenesisUID: "genesis-original",
-		Contract: admissiongenesis.Contract{
+	receipt := admissioncontract.Receipt{
+		Namespace: "jobs-57", GenesisName: admissioncontract.GenesisName, GenesisUID: "genesis-original",
+		Contract: admissioncontract.Contract{
 			Version: 1, NamespaceUID: "namespace-original", Generation: strings.Repeat("a", 32),
-			ActiveLedgerName: admissiongenesis.ActiveLedgerName, ActiveLedgerSchema: 1,
-			QueueLedgerName: admissiongenesis.QueueLedgerName, QueueLedgerSchema: 1,
-			Limits: admissiongenesis.Limits{MaxActiveJobs: 20, MaxActiveJobsPerRequester: 4,
+			ActiveLedgerName: admissioncontract.ActiveLedgerName, ActiveLedgerSchema: 1,
+			QueueLedgerName: admissioncontract.QueueLedgerName, QueueLedgerSchema: 1,
+			Limits: admissioncontract.Limits{MaxActiveJobs: 20, MaxActiveJobsPerRequester: 4,
 				WorkerSlots: 20, MaxQueuedJobs: 1000, MaxQueuedJobsPerRequester: 100},
 		},
 	}
-	state, err := json.Marshal(admissiongenesis.GenesisData{Contract: receipt.Contract, Phase: admissiongenesis.PhaseInitializing})
+	state, err := json.Marshal(admissioncontract.GenesisData{Contract: receipt.Contract, Phase: admissioncontract.PhaseInitializing})
 	if err != nil {
 		t.Fatal(err)
 	}
 	genesis := corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{
 		Namespace: receipt.Namespace, Name: receipt.GenesisName, UID: types.UID(receipt.GenesisUID), ResourceVersion: "1",
-	}, Data: map[string]string{admissiongenesis.GenesisDataKey: string(state)}}
+	}, Data: map[string]string{admissioncontract.GenesisDataKey: string(state)}}
 	exists := false
 	var calls []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

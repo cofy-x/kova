@@ -6,25 +6,26 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/cofy-x/kova/internal/admissioncontract"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 )
 
-func testReceipt() Receipt {
-	return Receipt{
-		Namespace: "jobs-57", GenesisName: GenesisName, GenesisUID: "genesis-uid",
-		Contract: Contract{
+func testReceipt() admissioncontract.Receipt {
+	return admissioncontract.Receipt{
+		Namespace: "jobs-57", GenesisName: admissioncontract.GenesisName, GenesisUID: "genesis-uid",
+		Contract: admissioncontract.Contract{
 			Version: 1, NamespaceUID: "namespace-uid", Generation: strings.Repeat("a", 32),
-			ActiveLedgerName: ActiveLedgerName, ActiveLedgerSchema: 1,
-			QueueLedgerName: QueueLedgerName, QueueLedgerSchema: 1,
-			Limits: Limits{MaxActiveJobs: 128, MaxActiveJobsPerRequester: 8, WorkerSlots: 65535,
+			ActiveLedgerName: admissioncontract.ActiveLedgerName, ActiveLedgerSchema: 1,
+			QueueLedgerName: admissioncontract.QueueLedgerName, QueueLedgerSchema: 1,
+			Limits: admissioncontract.Limits{MaxActiveJobs: 128, MaxActiveJobsPerRequester: 8, WorkerSlots: 65535,
 				MaxQueuedJobs: 1000, MaxQueuedJobsPerRequester: 100},
 		},
 	}
 }
 
-func genesisObject(t *testing.T, r Receipt, state GenesisData, immutable *bool) *corev1.ConfigMap {
+func genesisObject(t *testing.T, r admissioncontract.Receipt, state admissioncontract.GenesisData, immutable *bool) *corev1.ConfigMap {
 	t.Helper()
 	encoded, err := json.Marshal(state)
 	if err != nil {
@@ -32,7 +33,7 @@ func genesisObject(t *testing.T, r Receipt, state GenesisData, immutable *bool) 
 	}
 	return &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{
 		Namespace: r.Namespace, Name: r.GenesisName, UID: types.UID(r.GenesisUID), ResourceVersion: "opaque-rv",
-	}, Data: map[string]string{GenesisDataKey: string(encoded)}, Immutable: immutable}
+	}, Data: map[string]string{admissioncontract.GenesisDataKey: string(encoded)}, Immutable: immutable}
 }
 
 func TestReceiptRejectsLossyOrDriftedContract(t *testing.T) {
@@ -42,7 +43,7 @@ func TestReceiptRejectsLossyOrDriftedContract(t *testing.T) {
 		t.Fatal(err)
 	}
 	copyRaw := bytes.Clone(raw)
-	parsed, err := ParseReceipt(raw)
+	parsed, err := admissioncontract.ParseReceipt(raw)
 	if err != nil || parsed != r {
 		t.Fatalf("valid receipt: %#v, %v", parsed, err)
 	}
@@ -61,19 +62,19 @@ func TestReceiptRejectsLossyOrDriftedContract(t *testing.T) {
 		"surrogate":         bytes.Replace(raw, []byte(`"namespace":"jobs-57"`), []byte(`"namespace":"\ud800"`), 1),
 	} {
 		t.Run(name, func(t *testing.T) {
-			if got, err := ParseReceipt(changed); err == nil || got != (Receipt{}) {
+			if got, err := admissioncontract.ParseReceipt(changed); err == nil || got != (admissioncontract.Receipt{}) {
 				t.Fatalf("bad receipt accepted: %#v, %v", got, err)
 			}
 		})
 	}
-	if _, err := ParseReceipt(append(raw, bytes.Repeat([]byte(" "), maxContractJSONBytes)...)); err == nil {
+	if _, err := admissioncontract.ParseReceipt(append(raw, bytes.Repeat([]byte(" "), admissioncontract.MaxContractJSONBytes)...)); err == nil {
 		t.Fatal("oversized receipt accepted")
 	}
 }
 
 func TestGenesisProvisionalPinsAndImmutablePhase(t *testing.T) {
 	r := testReceipt()
-	state := GenesisData{Contract: r.Contract, Phase: PhaseInitializing}
+	state := admissioncontract.GenesisData{Contract: r.Contract, Phase: admissioncontract.PhaseInitializing}
 	for _, immutable := range []*bool{nil, boolPtr(false)} {
 		cm := genesisObject(t, r, state, immutable)
 		if got, err := r.QualifyGenesis(cm); err != nil || got != state {
@@ -87,14 +88,14 @@ func TestGenesisProvisionalPinsAndImmutablePhase(t *testing.T) {
 	}
 	committed := state
 	committed.QueueLedgerUID = "first-queue-uid"
-	committed.Phase = PhaseCommitted
+	committed.Phase = admissioncontract.PhaseCommitted
 	if _, err := r.QualifyGenesis(genesisObject(t, r, committed, boolPtr(true))); err != nil {
 		t.Fatal(err)
 	}
 	for name, cm := range map[string]*corev1.ConfigMap{
 		"initial immutable": genesisObject(t, r, state, boolPtr(true)),
 		"committed mutable": genesisObject(t, r, committed, nil),
-		"incomplete commit": genesisObject(t, r, GenesisData{Contract: r.Contract, Phase: PhaseCommitted, ActiveLedgerUID: "first-active-uid"}, boolPtr(true)),
+		"incomplete commit": genesisObject(t, r, admissioncontract.GenesisData{Contract: r.Contract, Phase: admissioncontract.PhaseCommitted, ActiveLedgerUID: "first-active-uid"}, boolPtr(true)),
 		"changed contract": func() *corev1.ConfigMap {
 			bad := state
 			bad.Contract.Limits.MaxActiveJobs = 1
@@ -113,7 +114,7 @@ func TestGenesisProvisionalPinsAndImmutablePhase(t *testing.T) {
 		})
 	}
 	cm := genesisObject(t, r, state, nil)
-	cm.Data[GenesisDataKey] = strings.Replace(cm.Data[GenesisDataKey], `"phase":"Initializing"`, `"phase":"Initializing","phase":"Committed"`, 1)
+	cm.Data[admissioncontract.GenesisDataKey] = strings.Replace(cm.Data[admissioncontract.GenesisDataKey], `"phase":"Initializing"`, `"phase":"Initializing","phase":"Committed"`, 1)
 	if _, err := r.QualifyGenesis(cm); err == nil {
 		t.Fatal("duplicate phase qualified")
 	}
@@ -135,7 +136,7 @@ func TestOriginalNamespaceAndLedgerIdentities(t *testing.T) {
 	if err := r.QualifyNamespace(ns); err == nil {
 		t.Fatal("deleting Namespace qualified")
 	}
-	for _, role := range []Role{Active, Queue} {
+	for _, role := range []admissioncontract.Role{admissioncontract.Active, admissioncontract.Queue} {
 		cm, err := r.NewLedgerObject(role, "ledger.json", `{}`, strings.Repeat("b", 32))
 		if err != nil {
 			t.Fatal(err)
@@ -145,12 +146,12 @@ func TestOriginalNamespaceAndLedgerIdentities(t *testing.T) {
 			t.Fatalf("%s ledger identity: %v", role, err)
 		}
 		bad := cm.DeepCopy()
-		bad.Annotations[annotationGeneration] = strings.Repeat("c", 32)
+		bad.Annotations["kova.cofy.dev/admission-generation"] = strings.Repeat("c", 32)
 		if err := r.QualifyLedgerIdentity(bad, role); err == nil {
 			t.Fatal("changed ledger generation qualified")
 		}
 		bad = cm.DeepCopy()
-		bad.Annotations[annotationAttempt] = "bad"
+		bad.Annotations["kova.cofy.dev/admission-bootstrap"] = "bad"
 		if err := r.QualifyLedgerIdentity(bad, role); err == nil {
 			t.Fatal("malformed attempt qualified")
 		}

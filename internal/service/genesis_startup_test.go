@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/cofy-x/kova/internal/admissioncontract"
 	kovav1 "github.com/cofy-x/kova/internal/apis/kova/v1alpha1"
 	"github.com/cofy-x/kova/internal/daemonclient"
 	"github.com/cofy-x/kova/internal/service/admissiongenesis"
@@ -64,14 +65,14 @@ func (f *restartingGenesisCore) GetConfigMap(ctx context.Context, namespace, nam
 
 func (f *restartingGenesisCore) CreateConfigMap(ctx context.Context, namespace string, cm *corev1.ConfigMap) (*corev1.ConfigMap, error) {
 	f.createNames = append(f.createNames, cm.Name)
-	if cm.Name == admissiongenesis.QueueLedgerName && f.failQueueCreateOnce {
+	if cm.Name == admissioncontract.QueueLedgerName && f.failQueueCreateOnce {
 		f.failQueueCreateOnce = false
 		return nil, errors.New("injected queue Create failure before the request reached the API")
 	}
 	created := cm.DeepCopy()
-	if cm.Name == admissiongenesis.ActiveLedgerName {
+	if cm.Name == admissioncontract.ActiveLedgerName {
 		created.UID = types.UID("active-created-once")
-	} else if cm.Name == admissiongenesis.QueueLedgerName {
+	} else if cm.Name == admissioncontract.QueueLedgerName {
 		created.UID = types.UID("queue-created-once")
 	} else {
 		return nil, errors.New("runtime attempted an unexpected ConfigMap Create")
@@ -83,7 +84,7 @@ func (f *restartingGenesisCore) CreateConfigMap(ctx context.Context, namespace s
 }
 
 func (f *restartingGenesisCore) PatchConfigMap(ctx context.Context, namespace, name string, body []byte) (*corev1.ConfigMap, error) {
-	if name != admissiongenesis.GenesisName {
+	if name != admissioncontract.GenesisName {
 		return nil, errors.New("runtime attempted an unexpected ConfigMap Patch")
 	}
 	f.patches++
@@ -115,15 +116,15 @@ func (f *staticGenesisCore) PatchConfigMap(context.Context, string, string, []by
 	return nil, errors.New("unexpected Patch")
 }
 
-func genesisTestReceiptAndConfig() (admissiongenesis.Receipt, config.Config) {
+func genesisTestReceiptAndConfig() (admissioncontract.Receipt, config.Config) {
 	cfg := config.Config{Namespace: "jobs-57", MaxActiveJobs: 20, MaxActiveJobsPerRequester: 4,
 		WorkerSlots: 20, MaxQueuedJobs: 1000, MaxQueuedJobsPerRequester: 100}
-	r := admissiongenesis.Receipt{Namespace: cfg.Namespace, GenesisName: admissiongenesis.GenesisName,
-		GenesisUID: "genesis-original", Contract: admissiongenesis.Contract{
+	r := admissioncontract.Receipt{Namespace: cfg.Namespace, GenesisName: admissioncontract.GenesisName,
+		GenesisUID: "genesis-original", Contract: admissioncontract.Contract{
 			Version: 1, NamespaceUID: "namespace-original", Generation: strings.Repeat("a", 32),
-			ActiveLedgerName: admissiongenesis.ActiveLedgerName, ActiveLedgerSchema: 1,
-			QueueLedgerName: admissiongenesis.QueueLedgerName, QueueLedgerSchema: 1,
-			Limits: admissiongenesis.Limits{MaxActiveJobs: cfg.MaxActiveJobs,
+			ActiveLedgerName: admissioncontract.ActiveLedgerName, ActiveLedgerSchema: 1,
+			QueueLedgerName: admissioncontract.QueueLedgerName, QueueLedgerSchema: 1,
+			Limits: admissioncontract.Limits{MaxActiveJobs: cfg.MaxActiveJobs,
 				MaxActiveJobsPerRequester: cfg.MaxActiveJobsPerRequester, WorkerSlots: cfg.WorkerSlots,
 				MaxQueuedJobs: cfg.MaxQueuedJobs, MaxQueuedJobsPerRequester: cfg.MaxQueuedJobsPerRequester},
 		}}
@@ -176,19 +177,19 @@ func TestPrepareGenesisRuntimeObservesExactCommittedPairWithoutLegacyWrites(t *t
 	if err != nil {
 		t.Fatal(err)
 	}
-	active, err := receipt.NewLedgerObject(admissiongenesis.Active, admissiongenesis.ActiveLedgerDataKey,
+	active, err := receipt.NewLedgerObject(admissioncontract.Active, admissioncontract.ActiveLedgerDataKey,
 		activeData, strings.Repeat("b", 32))
 	if err != nil {
 		t.Fatal(err)
 	}
-	queue, err := receipt.NewLedgerObject(admissiongenesis.Queue, admissiongenesis.QueueLedgerDataKey,
+	queue, err := receipt.NewLedgerObject(admissioncontract.Queue, admissioncontract.QueueLedgerDataKey,
 		queueData, strings.Repeat("c", 32))
 	if err != nil {
 		t.Fatal(err)
 	}
 	active.UID, active.ResourceVersion = "active-original", "1"
 	queue.UID, queue.ResourceVersion = "queue-original", "2"
-	state := admissiongenesis.GenesisData{Contract: receipt.Contract, Phase: admissiongenesis.PhaseCommitted,
+	state := admissioncontract.GenesisData{Contract: receipt.Contract, Phase: admissioncontract.PhaseCommitted,
 		ActiveLedgerUID: string(active.UID), QueueLedgerUID: string(queue.UID)}
 	encoded, err := json.Marshal(state)
 	if err != nil {
@@ -197,7 +198,7 @@ func TestPrepareGenesisRuntimeObservesExactCommittedPairWithoutLegacyWrites(t *t
 	immutable := true
 	genesis := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Namespace: cfg.Namespace,
 		Name: receipt.GenesisName, UID: types.UID(receipt.GenesisUID), ResourceVersion: "3"},
-		Data: map[string]string{admissiongenesis.GenesisDataKey: string(encoded)}, Immutable: &immutable}
+		Data: map[string]string{admissioncontract.GenesisDataKey: string(encoded)}, Immutable: &immutable}
 	api := &staticGenesisCore{namespace: &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{
 		Name: cfg.Namespace, UID: types.UID(receipt.Contract.NamespaceUID)},
 		Status: corev1.NamespaceStatus{Phase: corev1.NamespaceActive}},
@@ -245,7 +246,7 @@ func TestPrepareGenesisRuntimeObservesExactCommittedPairWithoutLegacyWrites(t *t
 func TestPrepareGenesisRuntimeCompletesOriginalInitializingPairAfterPartialRestart(t *testing.T) {
 	ctx := context.Background()
 	receipt, cfg := genesisTestReceiptAndConfig()
-	initial := admissiongenesis.GenesisData{Contract: receipt.Contract, Phase: admissiongenesis.PhaseInitializing}
+	initial := admissioncontract.GenesisData{Contract: receipt.Contract, Phase: admissioncontract.PhaseInitializing}
 	initialRaw, err := json.Marshal(initial)
 	if err != nil {
 		t.Fatal(err)
@@ -256,7 +257,7 @@ func TestPrepareGenesisRuntimeCompletesOriginalInitializingPairAfterPartialResta
 	}
 	genesis := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{
 		Namespace: cfg.Namespace, Name: receipt.GenesisName, UID: types.UID(receipt.GenesisUID), ResourceVersion: "1",
-	}, Data: map[string]string{admissiongenesis.GenesisDataKey: string(initialRaw)}}
+	}, Data: map[string]string{admissioncontract.GenesisDataKey: string(initialRaw)}}
 	namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{
 		Name: cfg.Namespace, UID: types.UID(receipt.Contract.NamespaceUID),
 	}, Status: corev1.NamespaceStatus{Phase: corev1.NamespaceActive}}
@@ -269,11 +270,11 @@ func TestPrepareGenesisRuntimeCompletesOriginalInitializingPairAfterPartialResta
 	if err := base.Get(ctx, client.ObjectKey{Namespace: cfg.Namespace, Name: receipt.GenesisName}, &pinned); err != nil {
 		t.Fatal(err)
 	}
-	var partial admissiongenesis.GenesisData
-	if err := json.Unmarshal([]byte(pinned.Data[admissiongenesis.GenesisDataKey]), &partial); err != nil {
+	var partial admissioncontract.GenesisData
+	if err := json.Unmarshal([]byte(pinned.Data[admissioncontract.GenesisDataKey]), &partial); err != nil {
 		t.Fatal(err)
 	}
-	if partial.Phase != admissiongenesis.PhaseInitializing || partial.ActiveLedgerUID != "active-created-once" ||
+	if partial.Phase != admissioncontract.PhaseInitializing || partial.ActiveLedgerUID != "active-created-once" ||
 		partial.QueueLedgerUID != "" || len(api.createNames) != 2 || api.patches != 1 {
 		t.Fatalf("first startup did not retain the exact provisional pin: state=%+v creates=%v patches=%d",
 			partial, api.createNames, api.patches)
@@ -283,15 +284,15 @@ func TestPrepareGenesisRuntimeCompletesOriginalInitializingPairAfterPartialResta
 		t.Fatalf("same-receipt restart could not finish fresh Initializing Genesis: %v", err)
 	}
 	if guard.Original.ActiveLedgerUID != "active-created-once" || guard.Original.QueueLedgerUID != "queue-created-once" ||
-		len(api.createNames) != 3 || api.createNames[2] != admissiongenesis.QueueLedgerName || api.patches != 3 {
+		len(api.createNames) != 3 || api.createNames[2] != admissioncontract.QueueLedgerName || api.patches != 3 {
 		t.Fatalf("restart replaced original ledger or missed commit: binding=%+v creates=%v patches=%d",
 			guard.Original, api.createNames, api.patches)
 	}
-	active, err := api.GetConfigMap(ctx, cfg.Namespace, admissiongenesis.ActiveLedgerName)
+	active, err := api.GetConfigMap(ctx, cfg.Namespace, admissioncontract.ActiveLedgerName)
 	if err != nil {
 		t.Fatal(err)
 	}
-	queue, err := api.GetConfigMap(ctx, cfg.Namespace, admissiongenesis.QueueLedgerName)
+	queue, err := api.GetConfigMap(ctx, cfg.Namespace, admissioncontract.QueueLedgerName)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -303,8 +304,8 @@ func TestPrepareGenesisRuntimeCompletesOriginalInitializingPairAfterPartialResta
 	if err != nil {
 		t.Fatal(err)
 	}
-	if active.Data[admissiongenesis.ActiveLedgerDataKey] != activeEmpty ||
-		queue.Data[admissiongenesis.QueueLedgerDataKey] != queueEmpty ||
+	if active.Data[admissioncontract.ActiveLedgerDataKey] != activeEmpty ||
+		queue.Data[admissioncontract.QueueLedgerDataKey] != queueEmpty ||
 		buildcontroller.ValidateAdmissionLedgerForGenesis(active, cfg) != nil ||
 		queueadmission.ValidateQueueLedgerForGenesis(queue, cfg.MaxQueuedJobs, cfg.MaxQueuedJobsPerRequester) != nil {
 		t.Fatal("restarted Service did not commit canonical #58-bounded ledgers")
@@ -313,11 +314,11 @@ func TestPrepareGenesisRuntimeCompletesOriginalInitializingPairAfterPartialResta
 	if err != nil {
 		t.Fatal(err)
 	}
-	var committedData admissiongenesis.GenesisData
-	if err := json.Unmarshal([]byte(committed.Data[admissiongenesis.GenesisDataKey]), &committedData); err != nil {
+	var committedData admissioncontract.GenesisData
+	if err := json.Unmarshal([]byte(committed.Data[admissioncontract.GenesisDataKey]), &committedData); err != nil {
 		t.Fatal(err)
 	}
-	if committedData.Phase != admissiongenesis.PhaseCommitted || committed.Immutable == nil || !*committed.Immutable {
+	if committedData.Phase != admissioncontract.PhaseCommitted || committed.Immutable == nil || !*committed.Immutable {
 		t.Fatalf("restart did not atomically commit immutable Genesis: data=%+v immutable=%v", committedData, committed.Immutable)
 	}
 	if err := guard.Check(ctx); err != nil {

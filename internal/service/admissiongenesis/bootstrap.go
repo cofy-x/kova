@@ -8,6 +8,8 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/cofy-x/kova/internal/admissioncontract"
+
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -75,7 +77,7 @@ func (c DirectClient) PatchConfigMap(ctx context.Context, namespace, name string
 }
 
 type LedgerTemplate struct {
-	Role      Role
+	Role      admissioncontract.Role
 	DataKey   string
 	EmptyData string
 	Validate  func(*corev1.ConfigMap) error
@@ -92,7 +94,7 @@ type Binding struct {
 // empty List is never the source of initialization authority.
 type Bootstrapper struct {
 	API       CoreAPI
-	Receipt   Receipt
+	Receipt   admissioncontract.Receipt
 	Active    LedgerTemplate
 	Queue     LedgerTemplate
 	Preflight func(context.Context) error
@@ -110,13 +112,13 @@ func (b Bootstrapper) validate() error {
 		return err
 	}
 	for _, template := range []LedgerTemplate{b.Active, b.Queue} {
-		if (template.Role != Active && template.Role != Queue) || template.Validate == nil ||
-			template.DataKey == "" || template.EmptyData == "" || len(template.EmptyData) > maxLedgerDataBytes {
+		if (template.Role != admissioncontract.Active && template.Role != admissioncontract.Queue) || template.Validate == nil ||
+			template.DataKey == "" || template.EmptyData == "" || len(template.EmptyData) > admissioncontract.MaxLedgerDataBytes {
 			return fmt.Errorf("admission bootstrap has invalid ledger template")
 		}
 	}
-	if b.Active.Role != Active || b.Queue.Role != Queue ||
-		b.Active.DataKey != ActiveLedgerDataKey || b.Queue.DataKey != QueueLedgerDataKey {
+	if b.Active.Role != admissioncontract.Active || b.Queue.Role != admissioncontract.Queue ||
+		b.Active.DataKey != admissioncontract.ActiveLedgerDataKey || b.Queue.DataKey != admissioncontract.QueueLedgerDataKey {
 		return fmt.Errorf("admission bootstrap ledger roles or data keys are invalid")
 	}
 	// Validate both canonical request bodies before either role can Create or
@@ -137,27 +139,27 @@ func (b Bootstrapper) validate() error {
 	return nil
 }
 
-func (b Bootstrapper) getOriginal(ctx context.Context) (*corev1.ConfigMap, GenesisData, error) {
+func (b Bootstrapper) getOriginal(ctx context.Context) (*corev1.ConfigMap, admissioncontract.GenesisData, error) {
 	ns, err := b.API.GetNamespace(ctx, b.Receipt.Namespace)
 	if err != nil {
-		return nil, GenesisData{}, err
+		return nil, admissioncontract.GenesisData{}, err
 	}
 	if err := b.Receipt.QualifyNamespace(ns); err != nil {
-		return nil, GenesisData{}, err
+		return nil, admissioncontract.GenesisData{}, err
 	}
 	cm, err := b.API.GetConfigMap(ctx, b.Receipt.Namespace, b.Receipt.GenesisName)
 	if err != nil {
-		return nil, GenesisData{}, err
+		return nil, admissioncontract.GenesisData{}, err
 	}
 	state, err := b.Receipt.QualifyGenesis(cm)
 	if err != nil {
-		return nil, GenesisData{}, err
+		return nil, admissioncontract.GenesisData{}, err
 	}
 	return cm.DeepCopy(), state, nil
 }
 
 func (b Bootstrapper) readLedger(ctx context.Context, template LedgerTemplate, pinnedUID string, empty bool) (*corev1.ConfigMap, error) {
-	name, _, _ := b.Receipt.roleFacts(template.Role)
+	name, _, _ := b.Receipt.RoleFacts(template.Role)
 	cm, err := b.API.GetConfigMap(ctx, b.Receipt.Namespace, name)
 	if apierrors.IsNotFound(err) && pinnedUID == "" {
 		return nil, nil
@@ -194,15 +196,15 @@ func (b Bootstrapper) resolveNonemptyReadRace(ctx context.Context, readErr error
 	}
 }
 
-func pinnedUID(state GenesisData, role Role) string {
-	if role == Active {
+func pinnedUID(state admissioncontract.GenesisData, role admissioncontract.Role) string {
+	if role == admissioncontract.Active {
 		return state.ActiveLedgerUID
 	}
 	return state.QueueLedgerUID
 }
 
-func setPinnedUID(state *GenesisData, role Role, uid string) {
-	if role == Active {
+func setPinnedUID(state *admissioncontract.GenesisData, role admissioncontract.Role, uid string) {
+	if role == admissioncontract.Active {
 		state.ActiveLedgerUID = uid
 	} else {
 		state.QueueLedgerUID = uid
@@ -223,18 +225,18 @@ type patchOp struct {
 	Value any    `json:"value"`
 }
 
-func genesisPatch(original *corev1.ConfigMap, next GenesisData, commit bool) ([]byte, error) {
+func genesisPatch(original *corev1.ConfigMap, next admissioncontract.GenesisData, commit bool) ([]byte, error) {
 	if original == nil || original.UID == "" || original.ResourceVersion == "" {
 		return nil, fmt.Errorf("Genesis CAS lacks original UID or resourceVersion")
 	}
 	data, err := json.Marshal(next)
-	if err != nil || len(data) > maxContractJSONBytes {
+	if err != nil || len(data) > admissioncontract.MaxContractJSONBytes {
 		return nil, fmt.Errorf("Genesis CAS proposal exceeds contract")
 	}
 	ops := []patchOp{
 		{Op: "test", Path: "/metadata/uid", Value: string(original.UID)},
 		{Op: "test", Path: "/metadata/resourceVersion", Value: original.ResourceVersion},
-		{Op: "test", Path: "/data/genesis.json", Value: original.Data[GenesisDataKey]},
+		{Op: "test", Path: "/data/genesis.json", Value: original.Data[admissioncontract.GenesisDataKey]},
 	}
 	if original.Immutable != nil {
 		if *original.Immutable {
@@ -261,7 +263,7 @@ func (b Bootstrapper) ObserveCommitted(ctx context.Context) (Binding, error) {
 	if err != nil {
 		return Binding{}, err
 	}
-	if state.Phase != PhaseCommitted {
+	if state.Phase != admissioncontract.PhaseCommitted {
 		return Binding{}, ErrUncommitted
 	}
 	if _, err := b.readLedger(ctx, b.Active, state.ActiveLedgerUID, false); err != nil {
@@ -286,7 +288,7 @@ func (b Bootstrapper) ensureRole(ctx context.Context, template LedgerTemplate) e
 	if err != nil {
 		return err
 	}
-	if state.Phase == PhaseCommitted {
+	if state.Phase == admissioncontract.PhaseCommitted {
 		return errPeerCommitted
 	}
 	currentPin := pinnedUID(state, template.Role)
@@ -307,7 +309,7 @@ func (b Bootstrapper) ensureRole(ctx context.Context, template LedgerTemplate) e
 		if err != nil {
 			return err
 		}
-		if latest.Phase == PhaseCommitted {
+		if latest.Phase == admissioncontract.PhaseCommitted {
 			return errPeerCommitted
 		}
 		if pin := pinnedUID(latest, template.Role); pin != "" {
@@ -354,7 +356,7 @@ func (b Bootstrapper) pinRole(ctx context.Context, template LedgerTemplate, uid 
 	if err != nil {
 		return err
 	}
-	if state.Phase == PhaseCommitted {
+	if state.Phase == admissioncontract.PhaseCommitted {
 		if pinnedUID(state, template.Role) != uid {
 			return fmt.Errorf("%w: committed %s ledger UID differs", ErrChanged, template.Role)
 		}
@@ -399,7 +401,7 @@ func (b Bootstrapper) pinRole(ctx context.Context, template LedgerTemplate, uid 
 	if pinnedUID(observed, template.Role) != uid {
 		return fmt.Errorf("%w: %s pin is not yet observed: %v", ErrUnknownPin, template.Role, patchErr)
 	}
-	verified, err := b.readLedger(ctx, template, uid, observed.Phase == PhaseInitializing)
+	verified, err := b.readLedger(ctx, template, uid, observed.Phase == admissioncontract.PhaseInitializing)
 	if err != nil {
 		resolved := b.resolveNonemptyReadRace(ctx, err)
 		if errors.Is(resolved, errPeerCommitted) {
@@ -410,7 +412,7 @@ func (b Bootstrapper) pinRole(ctx context.Context, template LedgerTemplate, uid 
 	if err != nil || verified == nil {
 		return fmt.Errorf("%w: %s pinned ledger changed: %v", ErrChanged, template.Role, err)
 	}
-	if observed.Phase == PhaseCommitted {
+	if observed.Phase == admissioncontract.PhaseCommitted {
 		return errPeerCommitted
 	}
 	return nil
@@ -421,7 +423,7 @@ func (b Bootstrapper) commit(ctx context.Context) (Binding, error) {
 	if err != nil {
 		return Binding{}, err
 	}
-	if state.Phase == PhaseCommitted {
+	if state.Phase == admissioncontract.PhaseCommitted {
 		return b.ObserveCommitted(ctx)
 	}
 	if state.ActiveLedgerUID == "" || state.QueueLedgerUID == "" {
@@ -444,7 +446,7 @@ func (b Bootstrapper) commit(ctx context.Context) (Binding, error) {
 		}
 	}
 	proposal := state
-	proposal.Phase = PhaseCommitted
+	proposal.Phase = admissioncontract.PhaseCommitted
 	patch, err := genesisPatch(original, proposal, true)
 	if err != nil {
 		return Binding{}, err
@@ -478,7 +480,7 @@ func (b Bootstrapper) EnsureFresh(ctx context.Context) (Binding, error) {
 	if err != nil {
 		return Binding{}, err
 	}
-	if state.Phase == PhaseCommitted {
+	if state.Phase == admissioncontract.PhaseCommitted {
 		return b.ObserveCommitted(ctx)
 	}
 	if err := b.Preflight(ctx); err != nil {

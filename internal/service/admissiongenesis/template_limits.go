@@ -3,7 +3,8 @@ package admissiongenesis
 import (
 	"fmt"
 
-	"github.com/cofy-x/kova/internal/service/admissionjson"
+	"github.com/cofy-x/kova/internal/admissioncontract"
+	"github.com/cofy-x/kova/internal/admissionjson"
 )
 
 // These are only the immutable capacity/header projections of the two empty
@@ -48,15 +49,15 @@ func allowEmptyQueueHeader(path []string, key string) bool {
 	return false
 }
 
-func validateCanonicalEmptyLimits(template LedgerTemplate, limits Limits) error {
+func validateCanonicalEmptyLimits(template LedgerTemplate, limits admissioncontract.Limits) error {
 	raw := []byte(template.EmptyData)
 	switch template.Role {
-	case Active:
+	case admissioncontract.Active:
 		var state activeEmptyHeader
 		if err := admissionjson.Decode(raw, &state, allowEmptyActiveHeader); err != nil {
 			return fmt.Errorf("active canonical empty header: %w", err)
 		}
-		if err := requireKeys(raw, "version", "fence", "maxJobs", "maxPerRequester", "workerSlots", "active"); err != nil {
+		if err := admissioncontract.RequireKeys(raw, "version", "fence", "maxJobs", "maxPerRequester", "workerSlots", "active"); err != nil {
 			return fmt.Errorf("active canonical empty header: %w", err)
 		}
 		if state.Version != 1 || state.Fence != 0 || state.Active == nil || len(state.Active) != 0 ||
@@ -64,12 +65,12 @@ func validateCanonicalEmptyLimits(template LedgerTemplate, limits Limits) error 
 			state.WorkerSlots != limits.WorkerSlots {
 			return fmt.Errorf("active canonical empty capacity differs from admission receipt")
 		}
-	case Queue:
+	case admissioncontract.Queue:
 		var state queueEmptyHeader
 		if err := admissionjson.Decode(raw, &state, allowEmptyQueueHeader); err != nil {
 			return fmt.Errorf("queue canonical empty header: %w", err)
 		}
-		if err := requireKeys(raw, "version", "globalLimit", "requesterLimit", "intents"); err != nil {
+		if err := admissioncontract.RequireKeys(raw, "version", "globalLimit", "requesterLimit", "intents"); err != nil {
 			return fmt.Errorf("queue canonical empty header: %w", err)
 		}
 		if state.Version != 1 || state.Intents == nil || len(state.Intents) != 0 ||

@@ -1,4 +1,4 @@
-package admissiongenesis
+package admissioncontract
 
 import (
 	"bytes"
@@ -49,7 +49,7 @@ func (s InstallationSpec) contract() (Contract, error) {
 	return contract, nil
 }
 
-func (s InstallationSpec) qualifyNamespace(ctx context.Context, reader CoreAPI) error {
+func (s InstallationSpec) qualifyNamespace(ctx context.Context, reader Reader) error {
 	if reader == nil {
 		return fmt.Errorf("admission installation lacks a direct API reader")
 	}
@@ -67,7 +67,7 @@ func (s InstallationSpec) qualifyNamespace(ctx context.Context, reader CoreAPI) 
 // RenderInitializingGenesis produces a declarative ConfigMap for an external
 // installer to apply. It checks the exact preexisting Namespace by a direct
 // named read and never creates a Namespace, Genesis, ledger, or Secret.
-func (s InstallationSpec) RenderInitializingGenesis(ctx context.Context, reader CoreAPI) (*corev1.ConfigMap, error) {
+func (s InstallationSpec) RenderInitializingGenesis(ctx context.Context, reader Reader) (*corev1.ConfigMap, error) {
 	contract, err := s.contract()
 	if err != nil {
 		return nil, err
@@ -109,7 +109,7 @@ func (s InstallationSpec) ReceiptFor(expectedGenesisUID string) (Receipt, error)
 // ExportReceiptSecret verifies the explicitly pinned Namespace and Genesis
 // before rendering an immutable Secret manifest. The Secret is created by the
 // environment installer, never by the Service or this helper.
-func (r Receipt) ExportReceiptSecret(ctx context.Context, reader CoreAPI, serviceNamespace, secretName string) (*corev1.Secret, error) {
+func (r Receipt) ExportReceiptSecret(ctx context.Context, reader Reader, serviceNamespace, secretName string) (*corev1.Secret, error) {
 	if err := r.Validate(); err != nil {
 		return nil, err
 	}
@@ -155,7 +155,7 @@ func (r Receipt) ExportReceiptSecret(ctx context.Context, reader CoreAPI, servic
 // externally installed immutable Secret UID. Recreating the same Secret name
 // or changing the configured generation cannot silently rebind the Service.
 func ValidateReceiptSecret(secret *corev1.Secret, serviceNamespace, secretName, expectedUID string, receiptRaw []byte) error {
-	if !validUID(expectedUID) || len(validation.IsDNS1123Label(serviceNamespace)) != 0 ||
+	if !ValidUID(expectedUID) || len(validation.IsDNS1123Label(serviceNamespace)) != 0 ||
 		len(validation.IsDNS1123Subdomain(secretName)) != 0 {
 		return fmt.Errorf("admission receipt Secret has invalid expected identity")
 	}

@@ -6,7 +6,7 @@ import (
 	"io"
 	"os"
 
-	"github.com/cofy-x/kova/internal/service/admissiongenesis"
+	"github.com/cofy-x/kova/internal/admissioncontract"
 	corev1 "k8s.io/api/core/v1"
 )
 
@@ -69,6 +69,6 @@ func (o genesisReceiptOptions) checkRaw(raw []byte, reader genesisSecretReader) 
 		if err != nil {
 			return err
 		}
-		return admissiongenesis.ValidateReceiptSecret(secret, o.SecretNamespace, o.SecretName, o.SecretUID, raw)
+		return admissioncontract.ValidateReceiptSecret(secret, o.SecretNamespace, o.SecretName, o.SecretUID, raw)
 	}
 }
