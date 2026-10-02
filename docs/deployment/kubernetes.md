@@ -152,21 +152,45 @@ order with an older chart before upgrading to the current controller; run
 For a live, isolated old-CRD-to-new-controller smoke, see
 [CRD upgrade testing](../testing.md#crd-upgrade-smoke).
 
-The proposed [admission Genesis recovery protocol](../service-genesis-recovery-proposal.md)
-is not a deployable Service mode yet. Its local bootstrap tests show that a
-Service can finish the same externally authorized fresh `Initializing`
-generation after a partial write, but they do not establish the installation
-boundary. Before any future enablement, an environment installer must stop
-every old Service writer and direct/admin submission route, use a previously
-unused runner Namespace **name**, and create its `Initializing` Genesis. It
-must directly read and preserve the new Namespace and Genesis UIDs, random
-generation, exact ledger schema names, and all five capacity limits in one
-trusted receipt outside the Service process. Every replica must receive that
-same receipt before starting; runtime must not infer it from empty lists or
-create/replace Genesis. A mounted immutable Secret is one possible delivery
-mechanism, but the current chart does not mount one or grant the required
-Genesis/Namespace API permissions. Do not route traffic using a hand-written
-or post-effect receipt.
+The opt-in [admission Genesis protocol](../service-genesis-recovery-proposal.md)
+requires an external, stopped-writer installation. It is not the default
+upgrade path and is not yet qualified for the next RC: the live serving-API
+status round-trip and committed-ledger-loss repair gates below remain open.
+Before considering enablement, stop **every** old Service writer and
+direct/admin submission route, use a never-before-used runner Namespace
+**name**, and retain the original Namespace UID, Genesis UID, random
+generation, all five limits, and ledger schemas outside the Service process.
+An empty List is only a veto check, never proof of a fresh installation.
+
+The `kova admission-genesis` helper makes read-only, declarative proposals.
+Supply explicit global `--kubeconfig` and `--namespace` before the command,
+then `--namespace-uid`, `--generation` (32 lowercase hex characters), and
+all five `--max-active-jobs`, `--max-active-jobs-per-requester`,
+`--worker-slots`, `--max-queued-jobs`, and
+`--max-queued-jobs-per-requester` flags after its subcommand. After an
+external installer has created the fresh Namespace and recorded its UID:
+
+1. Run `render-genesis` with those exact inputs and save its ConfigMap JSON
+   privately. It directly checks the Namespace and refuses an existing
+   Genesis. Create the manifest with **`kubectl create -f`**, never `apply` or
+   replace. A failed/unknown create needs operator investigation, not a new
+   generation or retry that could erase provisional UID pins.
+2. Directly read and record the created Genesis UID. Run
+   `export-receipt-secret` with the same flags plus explicit `--genesis-uid`,
+   `--service-namespace`, and `--secret-name`. It accepts only that original,
+   untouched `Initializing` Genesis and renders one immutable Secret. Create
+   it with **`kubectl create -f`** in the Service Namespace; record its UID.
+   Keep the private manifest and receipt outside Git.
+3. Only after the CRD serving and drain gates pass, set
+   `serviceDaemon.runnerNamespace` to the new Namespace and set
+   `serviceDaemon.admissionGenesis.enabled=true`,
+   `receiptSecret.name`, and the original `receiptSecret.uid` in the chart.
+   The chart mounts the existing Secret; it never creates one. Missing receipt
+   values fail Helm rendering, and a missing Secret/key prevents Pod startup.
+   Each Service process directly checks the immutable Secret UID and exact
+   mounted bytes before admission or controller startup, then rechecks it at
+   runtime. Namespace/Genesis/ledger loss or replacement refuses authority;
+   do not switch back to the old Namespace to recover.
 
 The matching CRD must be applied before any such Service starts, then the
 serving `/status` API must round-trip both `admissionGenesisWitness` and
@@ -176,7 +200,8 @@ fields, **not** those Genesis fields; it is not sufficient for this gate.
 Committed-ledger loss still retains capacity and finalizers without a bounded
 repair path, so Genesis remains out of the next RC. The separately tracked
 drain-only recovery work does not retroactively make a deleted original
-ledger safe to recreate.
+ledger safe to recreate. The local fake-API tests and Helm rendering are not
+substitutes for these live gates.
 
 Replace `vX.Y.Z` with an exact tag from the
 [GitHub release page](https://github.com/cofy-x/kova/releases). Keep the same

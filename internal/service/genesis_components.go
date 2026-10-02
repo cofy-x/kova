@@ -7,9 +7,9 @@ import (
 	"github.com/cofy-x/kova/internal/service/admissiongenesis"
 )
 
-// startServiceComponents is the shared startup barrier. A future Genesis
-// caller must pass the same guard to this barrier and the HTTP/controller
-// components; nil retains the current legacy startup until all gates exist.
+// startServiceComponents is the shared startup barrier. Genesis runtime passes
+// the same guard to this barrier and the HTTP/controller components; nil
+// retains legacy startup for an explicitly unconfigured installation.
 func startServiceComponents(ctx context.Context, stop context.CancelFunc, guard admissiongenesis.Checker,
 	managerStart, httpStart func(context.Context) error) error {
 	if guard != nil {

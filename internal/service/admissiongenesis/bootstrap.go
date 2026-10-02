@@ -35,9 +35,8 @@ type CoreAPI interface {
 }
 
 // DirectClient uses named typed client-go API reads/writes, not a cache or
-// resourceVersion=0. Runtime wiring must supply a one-attempt mutation
-// transport; an arbitrary clientset may replay POST/PATCH after an unknown
-// response. Runtime wiring is deliberately not part of this slice.
+// resourceVersion=0. Runtime wiring supplies a one-attempt mutation transport;
+// an arbitrary clientset may replay POST/PATCH after an unknown response.
 type DirectClient struct{ Client kubernetes.Interface }
 
 func (c DirectClient) GetNamespace(ctx context.Context, name string) (*corev1.Namespace, error) {
@@ -52,6 +51,13 @@ func (c DirectClient) GetConfigMap(ctx context.Context, namespace, name string) 
 		return nil, fmt.Errorf("admission direct client is missing")
 	}
 	return c.Client.CoreV1().ConfigMaps(namespace).Get(ctx, name, metav1.GetOptions{})
+}
+
+func (c DirectClient) GetSecret(ctx context.Context, namespace, name string) (*corev1.Secret, error) {
+	if c.Client == nil {
+		return nil, fmt.Errorf("admission direct client is missing")
+	}
+	return c.Client.CoreV1().Secrets(namespace).Get(ctx, name, metav1.GetOptions{})
 }
 
 func (c DirectClient) CreateConfigMap(ctx context.Context, namespace string, cm *corev1.ConfigMap) (*corev1.ConfigMap, error) {
@@ -82,8 +88,7 @@ type Binding struct {
 	QueueLedgerUID  string
 }
 
-// Bootstrapper is unused by running Service paths until the later integration
-// slice. Preflight is a required one-way veto for visible old CRs and Pods; an
+// Preflight is a required one-way veto for visible old CRs and Pods; an
 // empty List is never the source of initialization authority.
 type Bootstrapper struct {
 	API       CoreAPI

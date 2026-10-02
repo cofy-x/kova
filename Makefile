@@ -245,6 +245,18 @@ lint-scripts:
 helm-template:
 	bash scripts/chart/verify-worker-cache.sh
 	bash scripts/chart/verify-service-metrics.sh
+	helm template $(RELEASE_NAME) ./charts/kova \
+		--set serviceDaemon.enabled=true \
+		--set serviceDaemon.runnerNamespace=kova-runner-genesis-test \
+		--set serviceDaemon.admissionGenesis.enabled=true \
+		--set serviceDaemon.admissionGenesis.receiptSecret.name=original-receipt \
+		--set serviceDaemon.admissionGenesis.receiptSecret.uid=original-secret-uid >/dev/null
+	@if helm template $(RELEASE_NAME) ./charts/kova \
+		--set serviceDaemon.enabled=true \
+		--set serviceDaemon.runnerNamespace=kova-runner-genesis-test \
+		--set serviceDaemon.admissionGenesis.enabled=true >/dev/null 2>&1; then \
+		echo "Genesis chart accepted a missing immutable receipt identity" >&2; exit 1; \
+	fi
 	helm template $(RELEASE_NAME) ./charts/kova -f deploy/kind-values.yaml >/dev/null
 	helm template $(RELEASE_NAME) ./charts/kova -f deploy/production-values.yaml >/dev/null
 	helm template $(RELEASE_NAME) ./charts/kova \

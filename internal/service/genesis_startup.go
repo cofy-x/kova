@@ -16,9 +16,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// prepareGenesisRuntime is intentionally not called by CLICommand yet. The
-// legacy HTTP/controller paths remain the only routable mode until every
-// side-effect and evidence-only gate is wired and reviewed together.
+// prepareGenesisRuntime qualifies the externally supplied receipt before any
+// listener or manager starts. A committed installation can only be observed;
+// only the original fresh Initializing installation may be completed.
 func prepareGenesisRuntime(ctx context.Context, cfg config.Config, receiptRaw []byte,
 	api admissiongenesis.CoreAPI, directReader client.Reader) (*admissiongenesis.Guard, error) {
 	receipt, err := admissiongenesis.ParseReceipt(receiptRaw)

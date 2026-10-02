@@ -7,6 +7,7 @@ import (
 	"fmt"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/validation"
 )
@@ -72,6 +73,11 @@ func (s InstallationSpec) RenderInitializingGenesis(ctx context.Context, reader 
 		return nil, err
 	}
 	if err := s.qualifyNamespace(ctx, reader); err != nil {
+		return nil, err
+	}
+	if _, err := reader.GetConfigMap(ctx, s.Namespace, GenesisName); err == nil {
+		return nil, fmt.Errorf("admission Genesis already exists; render never replaces it")
+	} else if !apierrors.IsNotFound(err) {
 		return nil, err
 	}
 	encoded, err := json.Marshal(GenesisData{Contract: contract, Phase: PhaseInitializing})

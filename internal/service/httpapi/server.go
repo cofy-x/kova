@@ -74,8 +74,8 @@ func NewServer(cfg config.Config, kube kubeAPI, crClient client.Client, crReader
 	return &Server{cfg: cfg, kube: kube, client: crClient, reader: crReader, readinessReader: readinessReader, auth: authenticator, authz: authorizer}
 }
 
-// WithGenesisGuard is an internal opt-in until all controller and cleanup
-// side-effect gates are wired. The default constructor retains legacy mode.
+// WithGenesisGuard binds this HTTP server and its queue writer to the original
+// externally receipted admission installation.
 func (s *Server) WithGenesisGuard(guard *admissiongenesis.Guard) *Server {
 	s.genesis = guard
 	s.genesisLedger = guard

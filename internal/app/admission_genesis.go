@@ -1,9 +1,11 @@
 package app
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/cofy-x/kova/internal/service/admissiongenesis"
 
@@ -11,6 +13,8 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
 )
+
+const admissionGenesisCommandTimeout = 30 * time.Second
 
 func admissionGenesisCLICommand() *cli.Command {
 	return &cli.Command{
@@ -22,11 +26,13 @@ func admissionGenesisCLICommand() *cli.Command {
 				Usage: "read the explicit original Namespace and render an Initializing Genesis ConfigMap JSON manifest",
 				Flags: admissionGenesisIdentityFlags(),
 				Action: func(c *cli.Context) error {
+					ctx, cancel := context.WithTimeout(c.Context, admissionGenesisCommandTimeout)
+					defer cancel()
 					spec, reader, err := admissionGenesisInputs(c)
 					if err != nil {
 						return err
 					}
-					manifest, err := spec.RenderInitializingGenesis(c.Context, reader)
+					manifest, err := spec.RenderInitializingGenesis(ctx, reader)
 					if err != nil {
 						return err
 					}
@@ -42,6 +48,8 @@ func admissionGenesisCLICommand() *cli.Command {
 					&cli.StringFlag{Name: "secret-name", Usage: "name of the externally installed immutable receipt Secret (required)"},
 				),
 				Action: func(c *cli.Context) error {
+					ctx, cancel := context.WithTimeout(c.Context, admissionGenesisCommandTimeout)
+					defer cancel()
 					if strings.TrimSpace(c.String("genesis-uid")) == "" ||
 						strings.TrimSpace(c.String("service-namespace")) == "" ||
 						strings.TrimSpace(c.String("secret-name")) == "" {
@@ -55,7 +63,7 @@ func admissionGenesisCLICommand() *cli.Command {
 					if err != nil {
 						return err
 					}
-					manifest, err := receipt.ExportReceiptSecret(c.Context, reader,
+					manifest, err := receipt.ExportReceiptSecret(ctx, reader,
 						c.String("service-namespace"), c.String("secret-name"))
 					if err != nil {
 						return err
@@ -110,6 +118,7 @@ func admissionGenesisInputs(c *cli.Context) (admissiongenesis.InstallationSpec, 
 	if err != nil {
 		return empty, noReader, err
 	}
+	config.Timeout = 10 * time.Second
 	clientset, err := kubernetes.NewForConfig(config)
 	if err != nil {
 		return empty, noReader, err

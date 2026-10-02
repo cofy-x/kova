@@ -16,6 +16,8 @@ func TestExternalInstallerPinsCallerSuppliedIdentities(t *testing.T) {
 	spec := InstallationSpec{Namespace: receipt.Namespace, NamespaceUID: receipt.Contract.NamespaceUID,
 		Generation: receipt.Contract.Generation, Limits: receipt.Contract.Limits}
 	api := newFakeCore(t, receipt)
+	originalGenesis := api.objects[GenesisName]
+	delete(api.objects, GenesisName)
 	manifest, err := spec.RenderInitializingGenesis(context.Background(), api)
 	if err != nil {
 		t.Fatal(err)
@@ -31,6 +33,10 @@ func TestExternalInstallerPinsCallerSuppliedIdentities(t *testing.T) {
 	if initial.Contract != receipt.Contract || initial.Phase != PhaseInitializing ||
 		initial.ActiveLedgerUID != "" || initial.QueueLedgerUID != "" {
 		t.Fatalf("Genesis manifest changed explicit installation facts: %+v", initial)
+	}
+	api.objects[GenesisName] = originalGenesis
+	if _, err := spec.RenderInitializingGenesis(context.Background(), api); err == nil {
+		t.Fatal("render helper accepted an existing Genesis")
 	}
 	proposed, err := spec.ReceiptFor(receipt.GenesisUID)
 	if err != nil || proposed != receipt {

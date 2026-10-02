@@ -16,6 +16,7 @@ import (
 	"github.com/cofy-x/kova/internal/buildcontract"
 	"github.com/cofy-x/kova/internal/kube"
 	"github.com/cofy-x/kova/internal/runner"
+	"github.com/cofy-x/kova/internal/service/admissiongenesis"
 	serviceauth "github.com/cofy-x/kova/internal/service/auth"
 	"github.com/cofy-x/kova/internal/service/buildcontroller"
 	"github.com/cofy-x/kova/internal/service/config"
@@ -77,9 +78,23 @@ func CLICommand() *cli.Command {
 			&cli.StringFlag{Name: "metrics-bind-address", Value: "0", Usage: "disabled by default; optional loopback controller-runtime Prometheus metrics address"},
 			&cli.BoolFlag{Name: "leader-elect", Value: true, Usage: "enable controller-runtime leader election"},
 			&cli.StringFlag{Name: "leader-election-namespace", Usage: "namespace used for controller leader election leases; defaults to --namespace"},
+			&cli.StringFlag{Name: "admission-genesis-receipt-file", Usage: "read-only mounted immutable admission receipt Secret data file"},
+			&cli.StringFlag{Name: "admission-genesis-receipt-secret-namespace", Usage: "original receipt Secret namespace"},
+			&cli.StringFlag{Name: "admission-genesis-receipt-secret-name", Usage: "original receipt Secret name"},
+			&cli.StringFlag{Name: "admission-genesis-receipt-secret-uid", Usage: "original immutable receipt Secret UID"},
 		},
 		Action: func(c *cli.Context) error {
 			ctrl.SetLogger(ctrlzap.New(ctrlzap.UseDevMode(false), ctrlzap.WriteTo(os.Stderr)))
+			receiptOptions := genesisReceiptOptions{
+				File:            c.String("admission-genesis-receipt-file"),
+				SecretNamespace: c.String("admission-genesis-receipt-secret-namespace"),
+				SecretName:      c.String("admission-genesis-receipt-secret-name"),
+				SecretUID:       c.String("admission-genesis-receipt-secret-uid"),
+			}
+			genesisEnabled, err := receiptOptions.enabled()
+			if err != nil {
+				return err
+			}
 			if err := validateKubeClientRateLimit(c.Int("kube-client-qps"), c.Int("kube-client-burst")); err != nil {
 				return err
 			}
@@ -180,6 +195,22 @@ func CLICommand() *cli.Command {
 			if err := validateCapacityConfig(cfg); err != nil {
 				return err
 			}
+			var genesisGuard *admissiongenesis.Guard
+			if genesisEnabled {
+				direct := admissiongenesis.DirectClient{Client: clientset}
+				receiptRaw, checkSecret, err := receiptOptions.loadAndCheck(ctx, direct)
+				if err != nil {
+					return err
+				}
+				genesisGuard, err = prepareGenesisRuntime(ctx, cfg, receiptRaw, direct, readinessReader)
+				if err != nil {
+					return err
+				}
+				genesisGuard.ReceiptCheck = checkSecret
+				if err := genesisGuard.Check(ctx); err != nil {
+					return err
+				}
+			}
 			authenticator, err := serviceauth.New(cfg.AuthMode, cfg.AuthToken, cfg.AuthStaticPrincipal, clientset.AuthenticationV1().TokenReviews())
 			if err != nil {
 				return err
@@ -212,6 +243,7 @@ func CLICommand() *cli.Command {
 				return err
 			}
 			admissionPump := buildcontroller.NewAdmissionPump(mgr.GetAPIReader(), cfg)
+			admissionPump.Genesis = genesisGuard
 			if err := admissionPump.SetupWithManager(mgr); err != nil {
 				return err
 			}
@@ -221,12 +253,16 @@ func CLICommand() *cli.Command {
 				Scheme:    mgr.GetScheme(),
 				Kube:      controllerKubeClient,
 				Cfg:       cfg,
+				Genesis:   genesisGuard,
 				Recorder:  mgr.GetEventRecorderFor("kova-service"),
 			}).SetupWithManager(mgr, admissionPump.WakeEvents()); err != nil {
 				return err
 			}
 			server := httpapi.NewServer(cfg, httpKubeClient, httpClient, httpClient, readinessReader, authenticator, authorizer)
-			return startServiceComponents(ctx, stop, nil, mgr.Start, server.Start)
+			if genesisGuard != nil {
+				server.WithGenesisGuard(genesisGuard)
+			}
+			return startServiceComponents(ctx, stop, genesisGuard, mgr.Start, server.Start)
 		},
 	}
 }

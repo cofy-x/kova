@@ -19,6 +19,9 @@ import (
 type Guard struct {
 	Bootstrap Bootstrapper
 	Original  Binding
+	// ReceiptCheck retains the external, immutable receipt Secret identity.
+	// Runtime installs it before exposing any Service component.
+	ReceiptCheck func(context.Context) error
 }
 
 // Checker is the read-only authority check used at runtime side-effect edges.
@@ -47,12 +50,20 @@ func (g *Guard) Check(ctx context.Context) error {
 	if g == nil {
 		return fmt.Errorf("admission Genesis guard is missing")
 	}
+	if g.ReceiptCheck != nil {
+		if err := g.ReceiptCheck(ctx); err != nil {
+			return err
+		}
+	}
 	current, err := g.Bootstrap.ObserveCommitted(ctx)
 	if err != nil {
 		return err
 	}
 	if current != g.Original {
 		return fmt.Errorf("%w: committed admission pair differs from startup binding", ErrChanged)
+	}
+	if g.ReceiptCheck != nil {
+		return g.ReceiptCheck(ctx)
 	}
 	return nil
 }

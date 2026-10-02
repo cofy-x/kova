@@ -45,6 +45,12 @@ rules:
     resources: ["configmaps"]
     resourceNames: ["kova-service-admission", "kova-service-queue-admission"]
     verbs: ["get", "update"]
+  {{- if .Values.serviceDaemon.admissionGenesis.enabled }}
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["kova-service-admission-genesis"]
+    verbs: ["get", "patch"]
+  {{- end }}
   - apiGroups: [""]
     resources: ["configmaps"]
     resourceNames: ["kova-service-admission"]
@@ -132,6 +138,64 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
   name: {{ $name }}-leader-election
+{{- if .Values.serviceDaemon.admissionGenesis.enabled }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $name }}-admission-receipt
+  namespace: {{ $serviceNamespace }}
+  labels:
+    {{- include "kova.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: [{{ .Values.serviceDaemon.admissionGenesis.receiptSecret.name | quote }}]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $name }}-admission-receipt
+  namespace: {{ $serviceNamespace }}
+  labels:
+    {{- include "kova.labels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ $saName }}
+    namespace: {{ $serviceNamespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $name }}-admission-receipt
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ $name }}-admission-namespace
+  labels:
+    {{- include "kova.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    resourceNames: [{{ $runnerNamespace | quote }}]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ $name }}-admission-namespace
+  labels:
+    {{- include "kova.labels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ $saName }}
+    namespace: {{ $serviceNamespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ $name }}-admission-namespace
+{{- end }}
 {{- if ne .Values.serviceDaemon.authentication.mode "unsafe-none" }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1

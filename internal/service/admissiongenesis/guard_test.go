@@ -49,6 +49,24 @@ func committedGuardFixture(t *testing.T) (*fakeCore, Bootstrapper, *Guard, map[R
 	return f, b, guard, next
 }
 
+func TestGuardRechecksExternalReceiptAtEachEdge(t *testing.T) {
+	_, _, guard, _ := committedGuardFixture(t)
+	checks := 0
+	guard.ReceiptCheck = func(context.Context) error {
+		checks++
+		if checks > 2 {
+			return ErrChanged
+		}
+		return nil
+	}
+	if err := guard.Check(context.Background()); err != nil || checks != 2 {
+		t.Fatalf("receipt was not checked around committed pair: checks=%d err=%v", checks, err)
+	}
+	if err := guard.Check(context.Background()); !errors.Is(err, ErrChanged) || checks != 3 {
+		t.Fatalf("changed receipt remained authorized: checks=%d err=%v", checks, err)
+	}
+}
+
 func TestGuardedLedgerPatchUsesOriginalUIDAndResourceVersion(t *testing.T) {
 	for _, tc := range []struct {
 		role Role
