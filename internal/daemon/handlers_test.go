@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/cofy-x/kova/internal/batch"
+	"github.com/cofy-x/kova/internal/daemonclient"
 	"github.com/cofy-x/kova/internal/source"
 
 	"github.com/labstack/echo/v4"
@@ -63,7 +64,7 @@ func TestBuildStatusAdvertisesIdempotentRequestCapability(t *testing.T) {
 		t.Fatalf("status response=%d body=%s", rec.Code, rec.Body.String())
 	}
 	state := decodeDaemonState(t, rec)
-	if state.Status != "idle" || len(state.Capabilities) != 2 || state.Capabilities[0] != "idempotent-build-request-v1" || state.Capabilities[1] != exactBuildRetireCapability {
+	if state.Status != "idle" || len(state.Capabilities) != 2 || state.Capabilities[0] != "idempotent-build-request-v1" || state.Capabilities[1] != daemonclient.ExactBuildRetireCapability {
 		t.Fatalf("status response=%#v", state)
 	}
 }
@@ -250,11 +251,13 @@ func TestHandleBuildPostDoesNotReusePartiallySubstitutedSourceOnRetry(t *testing
 }
 
 func TestHandleBuildCancelCancelsRunningBuild(t *testing.T) {
+	buildStarted := make(chan struct{})
 	buildDone := make(chan struct{})
 	srv := testDaemonServer(serverBackend{
 		validateBuildArchive: func(string) (int, error) { return 1, nil },
 		extractZip:           func(string, string) error { return nil },
 		runBuild: func(opts batch.Options) error {
+			close(buildStarted)
 			<-opts.Ctx.Done()
 			close(buildDone)
 			return opts.Ctx.Err()
@@ -265,6 +268,11 @@ func TestHandleBuildCancelCancelsRunningBuild(t *testing.T) {
 	rec := performEchoRequest(t, e, http.MethodPost, "/api/v1/build", "zip-body", srv.handleBuildPost)
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("expected build accepted, got %d", rec.Code)
+	}
+	select {
+	case <-buildStarted:
+	case <-time.After(time.Second):
+		t.Fatal("expected build to start before cancellation")
 	}
 
 	cancelRec := performEchoRequest(t, e, http.MethodPost, "/api/v1/build/cancel", "", srv.handleBuildCancel)

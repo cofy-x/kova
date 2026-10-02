@@ -6,15 +6,18 @@ import (
 	"github.com/labstack/echo/v4"
 )
 
-const exactBuildRetireCapability = "exact-build-retire-v1"
-
-// retireState confirms a local admission barrier and, separately, whether the
-// daemon's accepted build invocation has returned. A locally joined invocation
-// is not evidence that a remote BuildKit operation has been settled.
+// retireState confirms a process-local admission barrier and, separately,
+// whether the daemon's accepted build invocation has returned. The barrier is
+// not restart-persistent. Recovery must pin this daemon to the original Pod
+// UID, rely on the runner's RestartPolicyNever, and retain an independent
+// durable stop intent. A locally joined invocation is never evidence that a
+// remote BuildKit operation has been settled.
 type retireState struct {
-	RequestID string      `json:"requestId"`
-	Phase     string      `json:"phase"`
-	Build     daemonState `json:"build"`
+	RequestID           string      `json:"requestId"`
+	Phase               string      `json:"phase"`
+	LocalSettled        bool        `json:"localSettled"`
+	RemoteWorkerSettled bool        `json:"remoteWorkerSettled"`
+	Build               daemonState `json:"build"`
 }
 
 func retireRequestID(c echo.Context) (string, bool) {
@@ -56,8 +59,18 @@ func (s *daemonServer) handleBuildRetirePost(c echo.Context) error {
 		s.buildCancel()
 		s.build = daemonState{Status: "cancelling", Error: "retire requested", RequestID: s.buildRequestID}
 	}
+	// Set the original HTTP connection's read deadline while ownership is
+	// still held. This interrupts a body read even if the upload client has
+	// stopped sending bytes and will never close its side of the socket.
+	if s.buildReadDeadline != nil {
+		s.buildReadDeadline()
+	}
+	body := s.buildBody
 	state := s.retireStateLocked()
 	s.mu.Unlock()
+	if body != nil {
+		_ = body.Close()
+	}
 
 	if state.Phase == "retiring" {
 		return c.JSON(http.StatusAccepted, state)
@@ -101,5 +114,11 @@ func (s *daemonServer) retireStateLocked() retireState {
 			phase = "retiring"
 		}
 	}
-	return retireState{RequestID: s.retiredRequestID, Phase: phase, Build: s.build}
+	return retireState{
+		RequestID:           s.retiredRequestID,
+		Phase:               phase,
+		LocalSettled:        phase == "locally-joined",
+		RemoteWorkerSettled: false,
+		Build:               s.build,
+	}
 }

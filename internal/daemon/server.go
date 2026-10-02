@@ -21,19 +21,7 @@ import (
 
 func runDaemon(socketPath, defaultAddrs string) error {
 	srv := newDaemonServer(defaultAddrs, daemonResultDB, daemonLogsFile, serverBackend{})
-
-	e := echo.New()
-	e.HideBanner = true
-	e.HidePort = true
-	e.Use(observabilityMiddleware)
-	e.GET("/api/v1/health", srv.handleHealth)
-	e.POST("/api/v1/build", srv.handleBuildPost)
-	e.POST("/api/v1/build/cancel", srv.handleBuildCancel)
-	e.GET("/api/v1/build/status", srv.handleBuildStatus)
-	e.POST("/api/v1/build/retire", srv.handleBuildRetirePost)
-	e.GET("/api/v1/build/retire", srv.handleBuildRetireGet)
-	e.POST("/api/v1/export", srv.handleExport)
-	e.POST("/api/v1/preheat", srv.handlePreheat)
+	e := newDaemonRouter(srv)
 
 	_ = os.Remove(socketPath)
 	ln, err := net.Listen("unix", socketPath)
@@ -70,6 +58,22 @@ func runDaemon(socketPath, defaultAddrs string) error {
 		return err
 	}
 	return nil
+}
+
+func newDaemonRouter(srv *daemonServer) *echo.Echo {
+	e := echo.New()
+	e.HideBanner = true
+	e.HidePort = true
+	e.Use(observabilityMiddleware)
+	e.GET("/api/v1/health", srv.handleHealth)
+	e.POST("/api/v1/build", srv.handleBuildPost)
+	e.POST("/api/v1/build/cancel", srv.handleBuildCancel)
+	e.GET("/api/v1/build/status", srv.handleBuildStatus)
+	e.POST("/api/v1/build/retire", srv.handleBuildRetirePost)
+	e.GET("/api/v1/build/retire", srv.handleBuildRetireGet)
+	e.POST("/api/v1/export", srv.handleExport)
+	e.POST("/api/v1/preheat", srv.handlePreheat)
+	return e
 }
 
 func newDaemonServer(defaultAddrs string, resultDB string, logsFile string, backend serverBackend) *daemonServer {

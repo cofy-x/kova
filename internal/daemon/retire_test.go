@@ -5,11 +5,13 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/cofy-x/kova/internal/batch"
+	"github.com/cofy-x/kova/internal/source"
 	"github.com/labstack/echo/v4"
 )
 
@@ -83,6 +85,30 @@ func TestRetireBeforeBuildAdmissionBlocksEveryLaterPost(t *testing.T) {
 	}
 	if readback := performEchoRequest(t, e, http.MethodGet, path, "", srv.handleBuildRetireGet); readback.Code != http.StatusOK {
 		t.Fatalf("retire readback=%d body=%s", readback.Code, readback.Body.String())
+	}
+}
+
+func TestRetireAfterRejectedUploadHasNoStaleBodyOwner(t *testing.T) {
+	srv := testDaemonServer(serverBackend{})
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/build?request-id=bad-upload", io.NopCloser(strings.NewReader("short")))
+	req.ContentLength = source.MaxArchiveBytes + 1
+	rec := httptest.NewRecorder()
+	if err := srv.handleBuildPost(e.NewContext(req, rec)); err != nil {
+		t.Fatal(err)
+	}
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("rejected upload=%d body=%s", rec.Code, rec.Body.String())
+	}
+	srv.mu.RLock()
+	staleBody := srv.buildBody != nil || srv.buildReadDeadline != nil || srv.buildUploadDone != nil
+	srv.mu.RUnlock()
+	if staleBody {
+		t.Fatal("rejected upload left an owned request Body behind")
+	}
+	retire := performEchoRequest(t, e, http.MethodPost, "/api/v1/build/retire?request-id=bad-upload", "", srv.handleBuildRetirePost)
+	if retire.Code != http.StatusOK || !decodeRetireState(t, retire).LocalSettled {
+		t.Fatalf("retire after rejected upload=%d body=%s", retire.Code, retire.Body.String())
 	}
 }
 

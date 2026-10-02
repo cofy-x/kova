@@ -1,6 +1,10 @@
 // Package recoveryreceipt records bounded admission facts independently of
 // the quota ledgers. A receipt is evidence of a pre-effect intent, never a
-// permit to replay an uncertain Kubernetes Create or release capacity.
+// permit to replay an uncertain Kubernetes Create or release capacity. Normal
+// settled builds must eventually delete their receipts with a UID precondition,
+// after all related CR/Pod effects are closed; incident evidence must remain
+// until an authorized disposition. This package deliberately does not impose a
+// TTL or turn receipts into a durable per-build workflow history.
 package recoveryreceipt
 
 import (
