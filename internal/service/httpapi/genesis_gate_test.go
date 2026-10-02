@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	kovav1 "github.com/cofy-x/kova/internal/apis/kova/v1alpha1"
+	"github.com/cofy-x/kova/internal/service/admissiongenesis"
 	"github.com/cofy-x/kova/internal/service/queueadmission"
 
 	corev1 "k8s.io/api/core/v1"
@@ -19,6 +20,19 @@ import (
 type genesisCheckFunc func(context.Context) error
 
 func (f genesisCheckFunc) Check(ctx context.Context) error { return f(ctx) }
+
+func TestGenesisHTTPGuardViewsRequireOneOriginalBinding(t *testing.T) {
+	srv := newTestServer(t, &fakeKube{})
+	httpGuard := &admissiongenesis.Guard{Original: admissiongenesis.Binding{NamespaceUID: "original"}}
+	readinessGuard := &admissiongenesis.Guard{Original: admissiongenesis.Binding{NamespaceUID: "replacement"}}
+	if err := srv.WithGenesisGuards(httpGuard, readinessGuard); err == nil || srv.genesis != nil {
+		t.Fatal("mismatched Genesis guards were installed")
+	}
+	readinessGuard.Original = httpGuard.Original
+	if err := srv.WithGenesisGuards(httpGuard, readinessGuard); err != nil || srv.genesis != httpGuard || srv.readinessGenesis != readinessGuard {
+		t.Fatalf("matching Genesis guard views were not installed: %v", err)
+	}
+}
 
 func TestGenesisReadinessUsesIndependentGuard(t *testing.T) {
 	srv := newTestServer(t, &fakeKube{})

@@ -77,11 +77,15 @@ func NewServer(cfg config.Config, kube kubeAPI, crClient client.Client, crReader
 
 // WithGenesisGuards gives HTTP admission and readiness independent API budgets
 // while retaining the same externally receipted original binding.
-func (s *Server) WithGenesisGuards(httpGuard, readinessGuard *admissiongenesis.Guard) *Server {
+func (s *Server) WithGenesisGuards(httpGuard, readinessGuard *admissiongenesis.Guard) error {
+	if httpGuard == nil || readinessGuard == nil || httpGuard.Original != readinessGuard.Original ||
+		httpGuard.Bootstrap.Receipt != readinessGuard.Bootstrap.Receipt {
+		return fmt.Errorf("HTTP and readiness Genesis guards must share the exact original receipt and binding")
+	}
 	s.genesis = httpGuard
 	s.genesisLedger = httpGuard
 	s.readinessGenesis = readinessGuard
-	return s
+	return nil
 }
 
 // withGenesisChecker injects an edge failure in package tests. Runtime

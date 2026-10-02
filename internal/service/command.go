@@ -277,7 +277,9 @@ func CLICommand() *cli.Command {
 				return err
 			}
 			server := httpapi.NewServer(cfg, httpKubeClient, httpClient, httpClient, readinessReader, authenticator, authorizer)
-			server.WithGenesisGuards(httpGuard, readinessGuard)
+			if err := server.WithGenesisGuards(httpGuard, readinessGuard); err != nil {
+				return err
+			}
 			return startServiceComponents(ctx, stop, controllerGuard, mgr.Start, server.Start)
 		},
 	}
