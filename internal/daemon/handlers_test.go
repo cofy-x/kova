@@ -63,7 +63,7 @@ func TestBuildStatusAdvertisesIdempotentRequestCapability(t *testing.T) {
 		t.Fatalf("status response=%d body=%s", rec.Code, rec.Body.String())
 	}
 	state := decodeDaemonState(t, rec)
-	if state.Status != "idle" || len(state.Capabilities) != 1 || state.Capabilities[0] != "idempotent-build-request-v1" {
+	if state.Status != "idle" || len(state.Capabilities) != 2 || state.Capabilities[0] != "idempotent-build-request-v1" || state.Capabilities[1] != exactBuildRetireCapability {
 		t.Fatalf("status response=%#v", state)
 	}
 }

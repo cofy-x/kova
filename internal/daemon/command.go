@@ -47,6 +47,11 @@ type daemonServer struct {
 	buildRequestID string
 	buildCancel    context.CancelFunc
 	buildDone      chan struct{}
+	// A retire barrier is sticky for the life of this single-use runner. It is
+	// installed under the same lock that admits build POSTs.
+	retiredRequestID string
+	retireDone       chan struct{}
+	retireUnjoinable bool
 }
 
 func CLICommand() *cli.Command {

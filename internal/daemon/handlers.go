@@ -21,7 +21,7 @@ func (s *daemonServer) handleHealth(c echo.Context) error {
 
 func (s *daemonServer) handleBuildStatus(c echo.Context) error {
 	state := s.getBuildState()
-	state.Capabilities = []string{daemonclient.IdempotentBuildRequestCapability}
+	state.Capabilities = []string{daemonclient.IdempotentBuildRequestCapability, exactBuildRetireCapability}
 	return c.JSON(http.StatusOK, state)
 }
 
@@ -48,6 +48,10 @@ func (s *daemonServer) handleBuildPost(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, daemonState{Status: "error", Error: "request-id is too long"})
 	}
 	s.mu.Lock()
+	if s.retiredRequestID != "" {
+		s.mu.Unlock()
+		return c.JSON(http.StatusConflict, daemonState{Status: "error", Error: "runner has an installed retire barrier"})
+	}
 	if requestID != "" && requestID == s.buildRequestID {
 		state := s.build
 		s.mu.Unlock()
@@ -140,8 +144,8 @@ func (s *daemonServer) handleBuildPost(c echo.Context) error {
 }
 
 func (s *daemonServer) runBuildAsync(buildCtx context.Context, zipPath string, q url.Values, done chan struct{}) {
-	defer close(done)
 	defer s.clearBuildExecution(done)
+	defer close(done)
 	defer os.Remove(zipPath)
 	defer func() {
 		_ = os.RemoveAll(daemonImageDir)
@@ -185,12 +189,6 @@ func (s *daemonServer) runBuildAsync(buildCtx context.Context, zipPath string, q
 		s.setBuildState(daemonState{Status: "failed", Error: err.Error()})
 		return
 	}
-	if errors.Is(buildCtx.Err(), context.Canceled) {
-		logging.Infof("Async build cancelled")
-		s.setBuildState(daemonState{Status: "cancelled", Error: "build cancelled"})
-		return
-	}
-
 	logging.Infof("Async build completed successfully")
 	s.setBuildState(daemonState{Status: "completed"})
 }

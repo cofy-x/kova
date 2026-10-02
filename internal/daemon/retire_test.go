@@ -1,0 +1,266 @@
+package daemon
+
+import (
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/cofy-x/kova/internal/batch"
+	"github.com/labstack/echo/v4"
+)
+
+func decodeRetireState(t *testing.T, rec *httptest.ResponseRecorder) retireState {
+	t.Helper()
+	var state retireState
+	if err := json.Unmarshal(rec.Body.Bytes(), &state); err != nil {
+		t.Fatalf("decode retire state: %v; body=%s", err, rec.Body.String())
+	}
+	return state
+}
+
+func waitForLocalJoin(t *testing.T, srv *daemonServer, requestID string) retireState {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		rec := performEchoRequest(t, echo.New(), http.MethodGet, "/api/v1/build/retire?request-id="+requestID, "", srv.handleBuildRetireGet)
+		if rec.Code == http.StatusOK {
+			state := decodeRetireState(t, rec)
+			if state.Phase != "locally-joined" {
+				t.Fatalf("joined response has phase %q", state.Phase)
+			}
+			return state
+		}
+		if rec.Code != http.StatusAccepted {
+			t.Fatalf("retire readback=%d body=%s", rec.Code, rec.Body.String())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("timed out waiting for local build join")
+	return retireState{}
+}
+
+func TestRetireBeforeBuildAdmissionBlocksEveryLaterPost(t *testing.T) {
+	var builds atomic.Int32
+	srv := testDaemonServer(serverBackend{runBuild: func(batch.Options) error {
+		builds.Add(1)
+		return nil
+	}})
+	e := echo.New()
+	path := "/api/v1/build/retire?request-id=exact-request"
+
+	before := performEchoRequest(t, e, http.MethodGet, path, "", srv.handleBuildRetireGet)
+	if before.Code != http.StatusNotFound {
+		t.Fatalf("uninstalled readback=%d body=%s", before.Code, before.Body.String())
+	}
+	for _, badPath := range []string{"/api/v1/build/retire", "/api/v1/build/retire?request-id=", "/api/v1/build/retire?request-id=a&request-id=b"} {
+		bad := performEchoRequest(t, e, http.MethodPost, badPath, "", srv.handleBuildRetirePost)
+		if bad.Code != http.StatusBadRequest {
+			t.Fatalf("bad retire %q=%d body=%s", badPath, bad.Code, bad.Body.String())
+		}
+	}
+	installed := performEchoRequest(t, e, http.MethodPost, path, "", srv.handleBuildRetirePost)
+	if installed.Code != http.StatusOK {
+		t.Fatalf("install=%d body=%s", installed.Code, installed.Body.String())
+	}
+	if state := decodeRetireState(t, installed); state.RequestID != "exact-request" || state.Phase != "locally-joined" || state.Build.Status != "idle" {
+		t.Fatalf("installed state=%#v", state)
+	}
+	for _, buildPath := range []string{"/api/v1/build?request-id=exact-request", "/api/v1/build?request-id=other-request", "/api/v1/build"} {
+		post := performEchoRequest(t, e, http.MethodPost, buildPath, "zip-body", srv.handleBuildPost)
+		if post.Code != http.StatusConflict {
+			t.Fatalf("build after barrier %q=%d body=%s", buildPath, post.Code, post.Body.String())
+		}
+	}
+	if builds.Load() != 0 {
+		t.Fatalf("build ran %d times after retire", builds.Load())
+	}
+	if repeat := performEchoRequest(t, e, http.MethodPost, path, "", srv.handleBuildRetirePost); repeat.Code != http.StatusOK {
+		t.Fatalf("repeat retire=%d body=%s", repeat.Code, repeat.Body.String())
+	}
+	if readback := performEchoRequest(t, e, http.MethodGet, path, "", srv.handleBuildRetireGet); readback.Code != http.StatusOK {
+		t.Fatalf("retire readback=%d body=%s", readback.Code, readback.Body.String())
+	}
+}
+
+func TestRetireAcceptedBuildCancelsButJoinsOnlyAfterReturn(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	srv := testDaemonServer(serverBackend{
+		validateBuildArchive: func(string) (int, error) { return 1, nil },
+		extractZip:           func(string, string) error { return nil },
+		runBuild: func(opts batch.Options) error {
+			close(started)
+			<-opts.Ctx.Done()
+			<-release
+			return opts.Ctx.Err()
+		},
+	})
+	e := echo.New()
+	build := performEchoRequest(t, e, http.MethodPost, "/api/v1/build?request-id=exact-request", "zip-body", srv.handleBuildPost)
+	if build.Code != http.StatusAccepted {
+		t.Fatalf("build=%d body=%s", build.Code, build.Body.String())
+	}
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("build did not start")
+	}
+
+	path := "/api/v1/build/retire?request-id=exact-request"
+	retire := performEchoRequest(t, e, http.MethodPost, path, "", srv.handleBuildRetirePost)
+	if retire.Code != http.StatusAccepted {
+		t.Fatalf("retire before join=%d body=%s", retire.Code, retire.Body.String())
+	}
+	if state := decodeRetireState(t, retire); state.Phase != "retiring" || state.Build.Status != "cancelling" {
+		t.Fatalf("retiring state=%#v", state)
+	}
+	readback := performEchoRequest(t, e, http.MethodGet, path, "", srv.handleBuildRetireGet)
+	if readback.Code != http.StatusAccepted {
+		t.Fatalf("unjoined readback=%d body=%s", readback.Code, readback.Body.String())
+	}
+	lateBuild := performEchoRequest(t, e, http.MethodPost, "/api/v1/build?request-id=exact-request", "zip-body", srv.handleBuildPost)
+	if lateBuild.Code != http.StatusConflict {
+		t.Fatalf("same-ID build after retire=%d body=%s", lateBuild.Code, lateBuild.Body.String())
+	}
+	close(release)
+	state := waitForLocalJoin(t, srv, "exact-request")
+	if state.Build.Status != "cancelled" {
+		t.Fatalf("joined build state=%#v", state.Build)
+	}
+}
+
+func TestRetireWaitsForBuildStillUploading(t *testing.T) {
+	srv := testDaemonServer(serverBackend{
+		validateBuildArchive: func(string) (int, error) { return 1, nil },
+		extractZip:           func(string, string) error { return nil },
+		runBuild: func(opts batch.Options) error {
+			return opts.Ctx.Err()
+		},
+	})
+	e := echo.New()
+	reader, writer := io.Pipe()
+	defer writer.Close()
+	type postResult struct {
+		status int
+		err    error
+	}
+	posted := make(chan postResult, 1)
+	go func() {
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/build?request-id=uploading-request", reader)
+		rec := httptest.NewRecorder()
+		err := srv.handleBuildPost(e.NewContext(req, rec))
+		posted <- postResult{status: rec.Code, err: err}
+	}()
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		srv.mu.RLock()
+		admitted := srv.buildRequestID == "uploading-request" && srv.buildDone != nil
+		srv.mu.RUnlock()
+		if admitted {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	srv.mu.RLock()
+	admitted := srv.buildRequestID == "uploading-request" && srv.buildDone != nil
+	srv.mu.RUnlock()
+	if !admitted {
+		t.Fatal("build was not admitted before upload completed")
+	}
+
+	path := "/api/v1/build/retire?request-id=uploading-request"
+	retire := performEchoRequest(t, e, http.MethodPost, path, "", srv.handleBuildRetirePost)
+	if retire.Code != http.StatusAccepted || decodeRetireState(t, retire).Phase != "retiring" {
+		t.Fatalf("retire during upload=%d body=%s", retire.Code, retire.Body.String())
+	}
+	if readback := performEchoRequest(t, e, http.MethodGet, path, "", srv.handleBuildRetireGet); readback.Code != http.StatusAccepted {
+		t.Fatalf("readback during upload=%d body=%s", readback.Code, readback.Body.String())
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case result := <-posted:
+		if result.err != nil || result.status != http.StatusAccepted {
+			t.Fatalf("upload completion=%d error=%v", result.status, result.err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("build POST did not finish uploading")
+	}
+	state := waitForLocalJoin(t, srv, "uploading-request")
+	if state.Build.Status != "cancelled" {
+		t.Fatalf("joined uploaded build state=%#v", state.Build)
+	}
+}
+
+func TestRetireRejectsDifferentOrAnonymousBuild(t *testing.T) {
+	for _, requestID := range []string{"first-request", ""} {
+		t.Run(requestID, func(t *testing.T) {
+			release := make(chan struct{})
+			srv := testDaemonServer(serverBackend{
+				validateBuildArchive: func(string) (int, error) { return 1, nil },
+				extractZip:           func(string, string) error { return nil },
+				runBuild: func(batch.Options) error {
+					<-release
+					return nil
+				},
+			})
+			e := echo.New()
+			path := "/api/v1/build"
+			if requestID != "" {
+				path += "?request-id=" + requestID
+			}
+			build := performEchoRequest(t, e, http.MethodPost, path, "zip-body", srv.handleBuildPost)
+			if build.Code != http.StatusAccepted {
+				t.Fatalf("build=%d body=%s", build.Code, build.Body.String())
+			}
+			wrong := performEchoRequest(t, e, http.MethodPost, "/api/v1/build/retire?request-id=other-request", "", srv.handleBuildRetirePost)
+			if wrong.Code != http.StatusConflict {
+				t.Fatalf("wrong retire=%d body=%s", wrong.Code, wrong.Body.String())
+			}
+			if srv.retiredRequestID != "" {
+				t.Fatalf("wrong retire installed barrier %q", srv.retiredRequestID)
+			}
+			close(release)
+			waitForState(t, srv, "completed")
+		})
+	}
+}
+
+func TestRetireDoesNotRewriteSuccessfulBuildAsCancelled(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	srv := testDaemonServer(serverBackend{
+		validateBuildArchive: func(string) (int, error) { return 1, nil },
+		extractZip:           func(string, string) error { return nil },
+		runBuild: func(batch.Options) error {
+			close(started)
+			<-release
+			return nil
+		},
+	})
+	e := echo.New()
+	build := performEchoRequest(t, e, http.MethodPost, "/api/v1/build?request-id=exact-request", "zip-body", srv.handleBuildPost)
+	if build.Code != http.StatusAccepted {
+		t.Fatalf("build=%d body=%s", build.Code, build.Body.String())
+	}
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("build did not start")
+	}
+	retire := performEchoRequest(t, e, http.MethodPost, "/api/v1/build/retire?request-id=exact-request", "", srv.handleBuildRetirePost)
+	if retire.Code != http.StatusAccepted {
+		t.Fatalf("retire=%d body=%s", retire.Code, retire.Body.String())
+	}
+	close(release)
+	state := waitForLocalJoin(t, srv, "exact-request")
+	if state.Build.Status != "completed" {
+		t.Fatalf("successful build was rewritten as %#v", state.Build)
+	}
+}

@@ -30,6 +30,8 @@ func runDaemon(socketPath, defaultAddrs string) error {
 	e.POST("/api/v1/build", srv.handleBuildPost)
 	e.POST("/api/v1/build/cancel", srv.handleBuildCancel)
 	e.GET("/api/v1/build/status", srv.handleBuildStatus)
+	e.POST("/api/v1/build/retire", srv.handleBuildRetirePost)
+	e.GET("/api/v1/build/retire", srv.handleBuildRetireGet)
 	e.POST("/api/v1/export", srv.handleExport)
 	e.POST("/api/v1/preheat", srv.handlePreheat)
 
