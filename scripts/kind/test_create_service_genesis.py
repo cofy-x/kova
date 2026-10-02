@@ -243,6 +243,9 @@ class InstallerTests(unittest.TestCase):
         for key, value in (
             ("endpoint", "https://api.example.com:6443"),
             ("endpoint", "http://127.0.0.1:6443"),
+            ("endpoint", "https://127.0.0.2:6443"),
+            ("endpoint", "https://[::1]:6443"),
+            ("endpoint", "https://localhost:6443"),
             ("proxy", "https://proxy.example.com"),
         ):
             with self.subTest(key=key, value=value):

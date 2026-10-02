@@ -11,7 +11,6 @@ from __future__ import annotations
 import argparse
 import base64
 import hashlib
-import ipaddress
 import json
 import os
 import re
@@ -46,16 +45,9 @@ def strict_object(pairs: list[tuple[str, object]]) -> dict:
 
 def local_endpoint(value: str) -> bool:
     endpoint = urlsplit(value)
-    try:
-        loopback = (
-            endpoint.hostname == "localhost"
-            or ipaddress.ip_address(endpoint.hostname or "").is_loopback
-        )
-    except ValueError:
-        loopback = False
     return (
         endpoint.scheme == "https"
-        and loopback
+        and endpoint.hostname == "127.0.0.1"
         and not (endpoint.username or endpoint.password or endpoint.query or endpoint.fragment)
         and endpoint.path in ("", "/")
     )
