@@ -14,6 +14,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/serializer"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
@@ -27,6 +28,7 @@ type API interface {
 	CreatePod(ctx context.Context, pod *corev1.Pod) error
 	WaitPodReady(ctx context.Context, namespace string, name string, timeout time.Duration) error
 	DeletePod(ctx context.Context, namespace string, name string) error
+	DeletePodWithUID(ctx context.Context, namespace string, name string, uid types.UID) error
 	WritePodLogsTail(ctx context.Context, namespace string, name string, tailLines int64, out io.Writer) error
 	ListPods(ctx context.Context, namespace string, out io.Writer, wide bool) error
 	ListPodsWithOptions(ctx context.Context, namespace string, out io.Writer, opts ListPodsOptions) error
@@ -150,6 +152,44 @@ func (k *Client) DeletePod(ctx context.Context, namespace string, name string) (
 		select {
 		case <-ctx.Done():
 			return fmt.Errorf("timed out waiting for pod %s/%s deletion", namespace, name)
+		case <-ticker.C:
+		}
+	}
+}
+
+// DeletePodWithUID is used by the Service after it has read and verified a
+// runner Pod. The precondition closes the race between that read and deletion;
+// a replacement with the same name must not be deleted or mistaken for the
+// original Pod during confirmation.
+func (k *Client) DeletePodWithUID(ctx context.Context, namespace string, name string, uid types.UID) (err error) {
+	ctx, op := kubeOperation(ctx, "delete_pod_with_uid", namespace, name)
+	defer func() { op.End(err) }()
+	if uid == "" {
+		return fmt.Errorf("refusing to delete pod %s/%s without a UID", namespace, name)
+	}
+	err = k.clientset.CoreV1().Pods(namespace).Delete(ctx, name, metav1.DeleteOptions{
+		Preconditions: &metav1.Preconditions{UID: &uid},
+	})
+	if err != nil && !apierrors.IsNotFound(err) {
+		return err
+	}
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	for {
+		pod, getErr := k.clientset.CoreV1().Pods(namespace).Get(ctx, name, metav1.GetOptions{})
+		if apierrors.IsNotFound(getErr) {
+			return nil
+		}
+		if getErr != nil {
+			return getErr
+		}
+		if pod.UID != uid {
+			return apierrors.NewConflict(corev1.Resource("pods"), name,
+				fmt.Errorf("pod %s/%s was replaced: expected UID %s, observed UID %s", namespace, name, uid, pod.UID))
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("timed out waiting for pod %s/%s UID %s deletion: %w", namespace, name, uid, ctx.Err())
 		case <-ticker.C:
 		}
 	}

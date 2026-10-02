@@ -49,13 +49,12 @@ func (w *failRunningStatusWriter) Update(ctx context.Context, obj client.Object,
 	return w.SubResourceWriter.Update(ctx, obj, opts...)
 }
 
-func readyLifecyclePod(name string) *corev1.Pod {
-	return &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "jobs"},
-		Status: corev1.PodStatus{Phase: corev1.PodRunning, Conditions: []corev1.PodCondition{{
-			Type: corev1.PodReady, Status: corev1.ConditionTrue,
-		}}},
-	}
+func readyLifecyclePod(build *kovav1.KovaBuild) *corev1.Pod {
+	pod := testRunnerPod(build)
+	pod.Status = corev1.PodStatus{Phase: corev1.PodRunning, Conditions: []corev1.PodCondition{{
+		Type: corev1.PodReady, Status: corev1.ConditionTrue,
+	}}}
+	return pod
 }
 
 func lifecycleBuild(name, phase string) *kovav1.KovaBuild {
@@ -78,7 +77,7 @@ func storedLifecycleBuild(t *testing.T, c client.Client, name string) *kovav1.Ko
 func TestSubmitRejectsLegacyIdleRunnerBeforePost(t *testing.T) {
 	scheme := testScheme(t)
 	build := lifecycleBuild("legacy-idle", kovav1.PhaseStarting)
-	crClient := crfake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&kovav1.KovaBuild{}).WithObjects(build, readyLifecyclePod(build.Status.RunnerPodName)).Build()
+	crClient := crfake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&kovav1.KovaBuild{}).WithObjects(build, readyLifecyclePod(build)).Build()
 	inspects, submits := 0, 0
 	kubeClient := &fakeKube{execFn: func(opts kube.ExecOptions) error {
 		command := strings.Join(opts.Command, " ")
@@ -108,7 +107,7 @@ func TestSubmitRejectsLegacyIdleRunnerBeforePost(t *testing.T) {
 func TestSubmitObservesAlreadyRunningLegacyRunner(t *testing.T) {
 	scheme := testScheme(t)
 	build := lifecycleBuild("legacy-running", kovav1.PhaseStarting)
-	crClient := crfake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&kovav1.KovaBuild{}).WithObjects(build, readyLifecyclePod(build.Status.RunnerPodName)).Build()
+	crClient := crfake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&kovav1.KovaBuild{}).WithObjects(build, readyLifecyclePod(build)).Build()
 	status := "running"
 	buildPosts := 0
 	kubeClient := &fakeKube{execFn: func(opts kube.ExecOptions) error {
@@ -143,7 +142,7 @@ func TestSubmitObservesAlreadyRunningLegacyRunner(t *testing.T) {
 func TestSubmitRecoversAfterAcceptedPostAndStatusWriteFailure(t *testing.T) {
 	scheme := testScheme(t)
 	build := lifecycleBuild("ambiguous", kovav1.PhaseStarting)
-	pod := readyLifecyclePod(build.Status.RunnerPodName)
+	pod := readyLifecyclePod(build)
 	base := crfake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&kovav1.KovaBuild{}).WithObjects(build, pod).Build()
 	crClient := &failRunningStatusClient{Client: base, failures: 1}
 	state := "idle"
@@ -187,7 +186,7 @@ func TestSubmitRecoversAfterAcceptedPostAndStatusWriteFailure(t *testing.T) {
 func TestSubmitTreatsLostPostResponseAsUncertainUntilRunnerIsObserved(t *testing.T) {
 	scheme := testScheme(t)
 	build := lifecycleBuild("lost-response", kovav1.PhaseStarting)
-	crClient := crfake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&kovav1.KovaBuild{}).WithObjects(build, readyLifecyclePod(build.Status.RunnerPodName)).Build()
+	crClient := crfake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&kovav1.KovaBuild{}).WithObjects(build, readyLifecyclePod(build)).Build()
 	accepted := false
 	submits := 0
 	kubeClient := &fakeKube{execFn: func(opts kube.ExecOptions) error {
@@ -223,7 +222,7 @@ func TestSubmitRetriesSourceInspectTransportFailure(t *testing.T) {
 	build := lifecycleBuild("inspect-retry", kovav1.PhaseStarting)
 	started := metav1.Now()
 	build.Status.StartedAt = &started
-	crClient := crfake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&kovav1.KovaBuild{}).WithObjects(build, readyLifecyclePod(build.Status.RunnerPodName)).Build()
+	crClient := crfake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&kovav1.KovaBuild{}).WithObjects(build, readyLifecyclePod(build)).Build()
 	inspects := 0
 	submits := 0
 	kubeClient := &fakeKube{execFn: func(opts kube.ExecOptions) error {
@@ -264,7 +263,7 @@ func TestSubmitRetriesSourceInspectTransportFailure(t *testing.T) {
 func TestPollRetriesTransientExecFailureWhilePodLives(t *testing.T) {
 	scheme := testScheme(t)
 	build := lifecycleBuild("transient", kovav1.PhaseRunning)
-	pod := readyLifecyclePod(build.Status.RunnerPodName)
+	pod := readyLifecyclePod(build)
 	crClient := crfake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&kovav1.KovaBuild{}).WithObjects(build, pod).Build()
 	calls := 0
 	kubeClient := &fakeKube{execFn: func(opts kube.ExecOptions) error {
@@ -297,7 +296,7 @@ func TestPollChecksLiveAPIWhenCachedPodIsMissing(t *testing.T) {
 	scheme := testScheme(t)
 	build := lifecycleBuild("stale-cache", kovav1.PhaseRunning)
 	cache := crfake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&kovav1.KovaBuild{}).WithObjects(build).Build()
-	apiReader := crfake.NewClientBuilder().WithScheme(scheme).WithObjects(readyLifecyclePod(build.Status.RunnerPodName)).Build()
+	apiReader := crfake.NewClientBuilder().WithScheme(scheme).WithObjects(readyLifecyclePod(build)).Build()
 	kubeClient := &fakeKube{execFn: func(kube.ExecOptions) error { return errors.New("temporary exec failure") }}
 	r := KovaBuildReconciler{Client: cache, APIReader: apiReader, Scheme: scheme, Kube: kubeClient, Cfg: config.Config{PollRetryWindow: time.Minute}}
 	result, err := r.pollBuild(context.Background(), build)
@@ -328,7 +327,7 @@ func TestPollFailsWhenRunnerPodIsLost(t *testing.T) {
 func TestPollFailsWhenRunnerPodTerminates(t *testing.T) {
 	scheme := testScheme(t)
 	build := lifecycleBuild("terminated", kovav1.PhaseRunning)
-	pod := readyLifecyclePod(build.Status.RunnerPodName)
+	pod := readyLifecyclePod(build)
 	pod.Status.Phase = corev1.PodFailed
 	crClient := crfake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&kovav1.KovaBuild{}).WithObjects(build, pod).Build()
 	kubeClient := &fakeKube{execFn: func(kube.ExecOptions) error { return errors.New("exec unavailable") }}
@@ -348,8 +347,8 @@ func TestPollFailureWindowStopsRunner(t *testing.T) {
 	since := metav1.NewTime(time.Now().Add(-2 * time.Minute))
 	build.Status.PollFailureSince = &since
 	build.Status.PollFailureCount = 3
-	crClient := crfake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&kovav1.KovaBuild{}).WithObjects(build, readyLifecyclePod(build.Status.RunnerPodName)).Build()
-	kubeClient := &fakeKube{execFn: func(kube.ExecOptions) error { return errors.New("exec unavailable") }}
+	crClient := crfake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&kovav1.KovaBuild{}).WithObjects(build, readyLifecyclePod(build)).Build()
+	kubeClient := &fakeKube{podClient: crClient, execFn: func(kube.ExecOptions) error { return errors.New("exec unavailable") }}
 	r := KovaBuildReconciler{Client: crClient, Scheme: scheme, Kube: kubeClient, Cfg: config.Config{PollRetryWindow: time.Minute}}
 	if _, err := r.pollBuild(context.Background(), build); err != nil {
 		t.Fatal(err)
@@ -357,6 +356,9 @@ func TestPollFailureWindowStopsRunner(t *testing.T) {
 	stored := storedLifecycleBuild(t, crClient, "unobservable")
 	if stored.Status.Phase != kovav1.PhaseFailed || stored.Status.Reason != "RunnerUnavailable" || len(kubeClient.deleted) != 1 {
 		t.Fatalf("status=%#v deleted=%#v", stored.Status, kubeClient.deleted)
+	}
+	if len(kubeClient.deletedUIDs) != 1 || kubeClient.deletedUIDs[0] != "pod-uid-unobservable" {
+		t.Fatalf("deleted Pod UIDs = %#v", kubeClient.deletedUIDs)
 	}
 }
 
@@ -419,8 +421,8 @@ func TestBuildDurationExpiryDeletesPodAndReleasesSlot(t *testing.T) {
 	build.Status.StartedAt = &started
 	queued := lifecycleBuild("next", kovav1.PhaseQueued)
 	queued.Status.RunnerPodName = ""
-	crClient := crfake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&kovav1.KovaBuild{}).WithObjects(build, queued).Build()
-	kubeClient := &fakeKube{}
+	crClient := crfake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&kovav1.KovaBuild{}).WithObjects(build, queued, readyLifecyclePod(build)).Build()
+	kubeClient := &fakeKube{podClient: crClient}
 	r := KovaBuildReconciler{Client: crClient, Scheme: scheme, Kube: kubeClient, Cfg: config.Config{MaxBuildDuration: time.Minute, MaxActiveJobs: 1, WorkerSlots: 1}}
 	initializeAdmissionForTest(t, &r)
 	if _, err := r.pollBuild(context.Background(), build); err != nil {
@@ -429,6 +431,9 @@ func TestBuildDurationExpiryDeletesPodAndReleasesSlot(t *testing.T) {
 	stored := storedLifecycleBuild(t, crClient, "expired")
 	if stored.Status.Phase != kovav1.PhaseFailed || stored.Status.Reason != "BuildTimedOut" || len(kubeClient.deleted) != 1 {
 		t.Fatalf("status=%#v deleted=%#v", stored.Status, kubeClient.deleted)
+	}
+	if len(kubeClient.deletedUIDs) != 1 || kubeClient.deletedUIDs[0] != "pod-uid-expired" {
+		t.Fatalf("deleted Pod UIDs = %#v", kubeClient.deletedUIDs)
 	}
 	// A terminal reconcile confirms cleanup before releasing the active grant.
 	if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "jobs", Name: "expired"}}); err != nil {
@@ -445,8 +450,8 @@ func TestBuildDurationExpiryKeepsSlotUntilPodCleanupSucceeds(t *testing.T) {
 	build := lifecycleBuild("cleanup-failed", kovav1.PhaseRunning)
 	started := metav1.NewTime(time.Now().Add(-2 * time.Minute))
 	build.Status.StartedAt = &started
-	crClient := crfake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&kovav1.KovaBuild{}).WithObjects(build).Build()
-	kubeClient := &fakeKube{deleteErr: errors.New("delete temporarily unavailable")}
+	crClient := crfake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&kovav1.KovaBuild{}).WithObjects(build, readyLifecyclePod(build)).Build()
+	kubeClient := &fakeKube{podClient: crClient, deleteErr: errors.New("delete temporarily unavailable")}
 	r := KovaBuildReconciler{Client: crClient, Scheme: scheme, Kube: kubeClient, Cfg: config.Config{MaxBuildDuration: time.Minute}}
 	initializeAdmissionForTest(t, &r)
 	if _, err := r.pollBuild(context.Background(), build); err == nil {
