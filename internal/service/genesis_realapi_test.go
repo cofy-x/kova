@@ -1,8 +1,10 @@
 package service
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -21,6 +23,32 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
+
+var (
+	errGenesisAPILostResponse = errors.New("test-only lost active-ledger Create response")
+	errGenesisAPIInterrupted  = errors.New("test-only interruption before queue-ledger Create")
+)
+
+// The API server persists the first ledger, but the bootstrap caller sees no
+// Create response. Its direct named read must resolve that single attempt.
+type lostActiveCreateResponse struct {
+	admissiongenesis.CoreAPI
+	activeCreateAttempts int
+	activeUID            types.UID
+}
+
+func (c *lostActiveCreateResponse) CreateConfigMap(ctx context.Context, namespace string, request *corev1.ConfigMap) (*corev1.ConfigMap, error) {
+	if request.Name != admissiongenesis.ActiveLedgerName {
+		return c.CoreAPI.CreateConfigMap(ctx, namespace, request)
+	}
+	c.activeCreateAttempts++
+	created, err := c.CoreAPI.CreateConfigMap(ctx, namespace, request)
+	if err != nil || created == nil || created.UID == "" {
+		return created, err
+	}
+	c.activeUID = created.UID
+	return nil, errGenesisAPILostResponse
+}
 
 // This opt-in gate uses only a supplied dedicated Kind API/Namespace and
 // synthetic CR status. It creates no Namespace, cluster, registry, Pod, or
@@ -100,9 +128,50 @@ func TestRealAPIGenesisBootstrapAndStatusRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Simulate a lost HTTP response after the first ledger really persisted,
+	// then stop at the next ledger's pre-effect gate. A fresh runtime must
+	// converge from the original provisional pin, not create a replacement.
+	lostResponse := &lostActiveCreateResponse{CoreAPI: direct}
+	effects := 0
+	interruptBeforeQueue := func(ctx context.Context) error {
+		if err := checkSecret(ctx); err != nil {
+			return err
+		}
+		effects++
+		if effects == 3 {
+			return errGenesisAPIInterrupted
+		}
+		return nil
+	}
+	target.Check(t)
+	if _, err := prepareGenesisRuntime(ctx, cfg, receiptRaw, lostResponse, target.Client, interruptBeforeQueue); !errors.Is(err, errGenesisAPIInterrupted) {
+		t.Fatalf("bootstrap did not stop before second ledger Create: %v; leave Namespace for inspection", err)
+	}
+	if effects != 3 || lostResponse.activeCreateAttempts != 1 || lostResponse.activeUID == "" {
+		t.Fatalf("lost-response/stop fixture did not reach exactly one active Create: effects=%d creates=%d UID=%s", effects, lostResponse.activeCreateAttempts, lostResponse.activeUID)
+	}
+	partialGenesis, err := direct.GetConfigMap(ctx, target.Namespace, genesis.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	partial, err := receipt.QualifyGenesis(partialGenesis)
+	if err != nil || partial.Phase != admissiongenesis.PhaseInitializing || partial.ActiveLedgerUID != string(lostResponse.activeUID) || partial.QueueLedgerUID != "" {
+		t.Fatalf("original Genesis did not retain only the provisional active pin: %v, %+v", err, partial)
+	}
+	if _, err := direct.GetConfigMap(ctx, target.Namespace, admissiongenesis.QueueLedgerName); !apierrors.IsNotFound(err) {
+		t.Fatalf("queue ledger was written before interruption: %v", err)
+	}
+	partialActive, err := direct.GetConfigMap(ctx, target.Namespace, admissiongenesis.ActiveLedgerName)
+	if err != nil || partialActive.UID != lostResponse.activeUID {
+		t.Fatalf("lost active Create response did not resolve to the original UID: %v, %+v", err, partialActive)
+	}
+	target.Check(t)
 	guard, err := prepareGenesisRuntime(ctx, cfg, receiptRaw, direct, target.Client, checkSecret)
 	if err != nil {
-		t.Fatalf("real API could not commit original Genesis: %v; leave Namespace for inspection", err)
+		t.Fatalf("real API could not recover and commit original Genesis: %v; leave Namespace for inspection", err)
+	}
+	if guard.Original.ActiveLedgerUID != string(lostResponse.activeUID) {
+		t.Fatal("restart replaced the active ledger after a lost Create response")
 	}
 	if err := guard.Check(ctx); err != nil {
 		t.Fatal(err)
