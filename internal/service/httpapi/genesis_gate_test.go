@@ -20,6 +20,18 @@ type genesisCheckFunc func(context.Context) error
 
 func (f genesisCheckFunc) Check(ctx context.Context) error { return f(ctx) }
 
+func TestGenesisReadinessUsesIndependentGuard(t *testing.T) {
+	srv := newTestServer(t, &fakeKube{})
+	srv.genesis = genesisCheckFunc(func(context.Context) error { return errors.New("HTTP API budget exhausted") })
+	srv.readinessGenesis = genesisCheckFunc(func(context.Context) error { return nil })
+	if code := readinessCode(srv); code != http.StatusOK {
+		t.Fatalf("HTTP admission budget blocked readiness: %d", code)
+	}
+	if err := srv.checkGenesis(context.Background()); err == nil {
+		t.Fatal("HTTP admission guard did not use its own failed budget")
+	}
+}
+
 func TestGenesisHTTPStartupNeverRunsLegacyBothMissingBootstrap(t *testing.T) {
 	srv := newTestServer(t, &fakeKube{})
 	deleteReadinessLedger(t, srv, "kova-service-admission")

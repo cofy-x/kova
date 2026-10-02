@@ -56,15 +56,19 @@ func (o genesisReceiptOptions) loadAndCheck(ctx context.Context, reader genesisS
 	if len(raw) > 16*1024 {
 		return nil, nil, fmt.Errorf("admission Genesis receipt exceeds 16 KiB")
 	}
-	check := func(ctx context.Context) error {
+	check := o.checkRaw(raw, reader)
+	if err := check(ctx); err != nil {
+		return nil, nil, err
+	}
+	return raw, check, nil
+}
+
+func (o genesisReceiptOptions) checkRaw(raw []byte, reader genesisSecretReader) func(context.Context) error {
+	return func(ctx context.Context) error {
 		secret, err := reader.GetSecret(ctx, o.SecretNamespace, o.SecretName)
 		if err != nil {
 			return err
 		}
 		return admissiongenesis.ValidateReceiptSecret(secret, o.SecretNamespace, o.SecretName, o.SecretUID, raw)
 	}
-	if err := check(ctx); err != nil {
-		return nil, nil, err
-	}
-	return raw, check, nil
 }

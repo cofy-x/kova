@@ -1,11 +1,13 @@
 {{- if .Values.serviceDaemon.enabled }}
+{{- if not .Values.serviceDaemon.admissionGenesis.enabled }}
+{{- fail "serviceDaemon.enabled requires externally installed admission Genesis; legacy Service admission is not supported" }}
+{{- end }}
 {{- if not (has .Values.serviceDaemon.authentication.mode (list "tokenreview" "static" "unsafe-none")) }}
 {{- fail "serviceDaemon.authentication.mode must be tokenreview, static, or unsafe-none" }}
 {{- end }}
 {{- if lt (int .Values.serviceDaemon.kubeClientBurst) (int .Values.serviceDaemon.kubeClientQPS) }}
 {{- fail "serviceDaemon.kubeClientBurst must be at least serviceDaemon.kubeClientQPS" }}
 {{- end }}
-{{- if .Values.serviceDaemon.admissionGenesis.enabled }}
 {{- if not .Values.serviceDaemon.runnerNamespace }}
 {{- fail "serviceDaemon.admissionGenesis requires an explicit fresh runnerNamespace" }}
 {{- end }}
@@ -14,9 +16,6 @@
 {{- end }}
 {{- if not .Values.serviceDaemon.admissionGenesis.receiptSecret.uid }}
 {{- fail "serviceDaemon.admissionGenesis requires the original immutable receipt Secret UID" }}
-{{- end }}
-{{- else if or .Values.serviceDaemon.admissionGenesis.receiptSecret.name .Values.serviceDaemon.admissionGenesis.receiptSecret.uid }}
-{{- fail "serviceDaemon.admissionGenesis receipt identity is set but Genesis is disabled" }}
 {{- end }}
 {{- if ne .Values.serviceDaemon.metricsBindAddress "0" }}
 {{- $metricsPort := int (last (splitList ":" .Values.serviceDaemon.metricsBindAddress)) }}

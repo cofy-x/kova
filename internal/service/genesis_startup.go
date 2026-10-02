@@ -58,6 +58,27 @@ func prepareGenesisRuntime(ctx context.Context, cfg config.Config, receiptRaw []
 	return admissiongenesis.NewGuard(ctx, bootstrap, binding)
 }
 
+// A view reuses only the already qualified original receipt and binding. It
+// never enters bootstrap again; each traffic class gets its own direct client
+// and rate limiter, so controller backlog cannot starve HTTP or readiness.
+func forkGenesisGuard(ctx context.Context, original *admissiongenesis.Guard,
+	api admissiongenesis.CoreAPI, receiptCheck func(context.Context) error) (*admissiongenesis.Guard, error) {
+	if original == nil || api == nil || receiptCheck == nil {
+		return nil, fmt.Errorf("admission Genesis guard view lacks an original binding or direct reader")
+	}
+	bootstrap := original.Bootstrap
+	bootstrap.API = api
+	view, err := admissiongenesis.NewGuard(ctx, bootstrap, original.Original)
+	if err != nil {
+		return nil, err
+	}
+	view.ReceiptCheck = receiptCheck
+	if err := view.Check(ctx); err != nil {
+		return nil, err
+	}
+	return view, nil
+}
+
 func validateGenesisRuntimeConfig(cfg config.Config, receipt admissiongenesis.Receipt) error {
 	limits := receipt.Contract.Limits
 	if cfg.Namespace != receipt.Namespace ||

@@ -28,15 +28,16 @@ type kubeAPI interface {
 }
 
 type Server struct {
-	cfg             config.Config
-	kube            kubeAPI
-	client          client.Client
-	reader          client.Reader
-	readinessReader client.Reader
-	auth            serviceauth.Authenticator
-	authz           serviceauth.Authorizer
-	genesis         admissiongenesis.Checker
-	genesisLedger   *admissiongenesis.Guard
+	cfg              config.Config
+	kube             kubeAPI
+	client           client.Client
+	reader           client.Reader
+	readinessReader  client.Reader
+	auth             serviceauth.Authenticator
+	authz            serviceauth.Authorizer
+	genesis          admissiongenesis.Checker
+	genesisLedger    *admissiongenesis.Guard
+	readinessGenesis admissiongenesis.Checker
 }
 
 var (
@@ -74,11 +75,12 @@ func NewServer(cfg config.Config, kube kubeAPI, crClient client.Client, crReader
 	return &Server{cfg: cfg, kube: kube, client: crClient, reader: crReader, readinessReader: readinessReader, auth: authenticator, authz: authorizer}
 }
 
-// WithGenesisGuard binds this HTTP server and its queue writer to the original
-// externally receipted admission installation.
-func (s *Server) WithGenesisGuard(guard *admissiongenesis.Guard) *Server {
-	s.genesis = guard
-	s.genesisLedger = guard
+// WithGenesisGuards gives HTTP admission and readiness independent API budgets
+// while retaining the same externally receipted original binding.
+func (s *Server) WithGenesisGuards(httpGuard, readinessGuard *admissiongenesis.Guard) *Server {
+	s.genesis = httpGuard
+	s.genesisLedger = httpGuard
+	s.readinessGenesis = readinessGuard
 	return s
 }
 
@@ -88,6 +90,7 @@ func (s *Server) WithGenesisGuard(guard *admissiongenesis.Guard) *Server {
 func (s *Server) withGenesisChecker(checker admissiongenesis.Checker) *Server {
 	s.genesis = checker
 	s.genesisLedger = nil
+	s.readinessGenesis = checker
 	return s
 }
 
@@ -267,8 +270,8 @@ func (s *Server) routes() *echo.Echo {
 		if err := s.readinessReader.List(c.Request().Context(), &builds, client.InNamespace(s.cfg.Namespace), client.Limit(1)); err != nil {
 			return serviceUnavailable(c, err)
 		}
-		if s.genesis != nil {
-			if err := s.genesis.Check(c.Request().Context()); err != nil {
+		if s.readinessGenesis != nil {
+			if err := s.readinessGenesis.Check(c.Request().Context()); err != nil {
 				return serviceUnavailable(c, err)
 			}
 		} else {

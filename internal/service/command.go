@@ -95,6 +95,9 @@ func CLICommand() *cli.Command {
 			if err != nil {
 				return err
 			}
+			if !genesisEnabled {
+				return fmt.Errorf("kova service requires an externally installed admission Genesis receipt; legacy admission is not a shipped runtime mode")
+			}
 			if err := validateKubeClientRateLimit(c.Int("kube-client-qps"), c.Int("kube-client-burst")); err != nil {
 				return err
 			}
@@ -149,6 +152,14 @@ func CLICommand() *cli.Command {
 			if err != nil {
 				return err
 			}
+			controllerClientset, err := kubernetes.NewForConfig(restConfig)
+			if err != nil {
+				return err
+			}
+			readinessClientset, err := kubernetes.NewForConfig(readinessConfig)
+			if err != nil {
+				return err
+			}
 			scheme := runtime.NewScheme()
 			utilruntime.Must(corev1.AddToScheme(scheme))
 			utilruntime.Must(kovav1.AddToScheme(scheme))
@@ -195,21 +206,32 @@ func CLICommand() *cli.Command {
 			if err := validateCapacityConfig(cfg); err != nil {
 				return err
 			}
-			var genesisGuard *admissiongenesis.Guard
-			if genesisEnabled {
-				direct := admissiongenesis.DirectClient{Client: clientset}
-				receiptRaw, checkSecret, err := receiptOptions.loadAndCheck(ctx, direct)
-				if err != nil {
-					return err
-				}
-				genesisGuard, err = prepareGenesisRuntime(ctx, cfg, receiptRaw, direct, readinessReader)
-				if err != nil {
-					return err
-				}
-				genesisGuard.ReceiptCheck = checkSecret
-				if err := genesisGuard.Check(ctx); err != nil {
-					return err
-				}
+			controllerReader, err := ctrlclient.New(restConfig, ctrlclient.Options{Scheme: scheme})
+			if err != nil {
+				return err
+			}
+			controllerDirect := admissiongenesis.DirectClient{Client: controllerClientset}
+			httpDirect := admissiongenesis.DirectClient{Client: clientset}
+			readinessDirect := admissiongenesis.DirectClient{Client: readinessClientset}
+			receiptRaw, checkControllerSecret, err := receiptOptions.loadAndCheck(ctx, controllerDirect)
+			if err != nil {
+				return err
+			}
+			controllerGuard, err := prepareGenesisRuntime(ctx, cfg, receiptRaw, controllerDirect, controllerReader)
+			if err != nil {
+				return err
+			}
+			controllerGuard.ReceiptCheck = checkControllerSecret
+			if err := controllerGuard.Check(ctx); err != nil {
+				return err
+			}
+			httpGuard, err := forkGenesisGuard(ctx, controllerGuard, httpDirect, receiptOptions.checkRaw(receiptRaw, httpDirect))
+			if err != nil {
+				return err
+			}
+			readinessGuard, err := forkGenesisGuard(ctx, controllerGuard, readinessDirect, receiptOptions.checkRaw(receiptRaw, readinessDirect))
+			if err != nil {
+				return err
 			}
 			authenticator, err := serviceauth.New(cfg.AuthMode, cfg.AuthToken, cfg.AuthStaticPrincipal, clientset.AuthenticationV1().TokenReviews())
 			if err != nil {
@@ -243,7 +265,7 @@ func CLICommand() *cli.Command {
 				return err
 			}
 			admissionPump := buildcontroller.NewAdmissionPump(mgr.GetAPIReader(), cfg)
-			admissionPump.Genesis = genesisGuard
+			admissionPump.Genesis = controllerGuard
 			if err := admissionPump.SetupWithManager(mgr); err != nil {
 				return err
 			}
@@ -253,16 +275,14 @@ func CLICommand() *cli.Command {
 				Scheme:    mgr.GetScheme(),
 				Kube:      controllerKubeClient,
 				Cfg:       cfg,
-				Genesis:   genesisGuard,
+				Genesis:   controllerGuard,
 				Recorder:  mgr.GetEventRecorderFor("kova-service"),
 			}).SetupWithManager(mgr, admissionPump.WakeEvents()); err != nil {
 				return err
 			}
 			server := httpapi.NewServer(cfg, httpKubeClient, httpClient, httpClient, readinessReader, authenticator, authorizer)
-			if genesisGuard != nil {
-				server.WithGenesisGuard(genesisGuard)
-			}
-			return startServiceComponents(ctx, stop, genesisGuard, mgr.Start, server.Start)
+			server.WithGenesisGuards(httpGuard, readinessGuard)
+			return startServiceComponents(ctx, stop, controllerGuard, mgr.Start, server.Start)
 		},
 	}
 }

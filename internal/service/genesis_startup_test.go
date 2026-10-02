@@ -29,6 +29,12 @@ type staticGenesisCore struct {
 	writes    int
 }
 
+type exhaustedControllerCore struct{ admissiongenesis.CoreAPI }
+
+func (exhaustedControllerCore) GetNamespace(context.Context, string) (*corev1.Namespace, error) {
+	return nil, errors.New("controller API budget exhausted")
+}
+
 // This is a deterministic API-backed startup fixture, not a Kubernetes
 // apiserver. It assigns ledger UIDs and applies the production JSON Patch
 // through controller-runtime's fake client so a second Service startup sees
@@ -209,6 +215,27 @@ func TestPrepareGenesisRuntimeObservesExactCommittedPairWithoutLegacyWrites(t *t
 	if guard.Original.ActiveLedgerUID != string(active.UID) || guard.Original.QueueLedgerUID != string(queue.UID) || api.writes != 0 {
 		t.Fatalf("startup pair or writes differ: %+v, writes=%d", guard.Original, api.writes)
 	}
+	httpAPI := &staticGenesisCore{namespace: api.namespace, objects: api.objects}
+	readinessAPI := &staticGenesisCore{namespace: api.namespace, objects: api.objects}
+	httpView, err := forkGenesisGuard(context.Background(), guard, httpAPI, func(context.Context) error { return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	readinessView, err := forkGenesisGuard(context.Background(), guard, readinessAPI, func(context.Context) error { return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	guard.Bootstrap.API = exhaustedControllerCore{CoreAPI: api}
+	if err := guard.Check(context.Background()); err == nil {
+		t.Fatal("test controller budget was not exhausted")
+	}
+	if err := httpView.Check(context.Background()); err != nil {
+		t.Fatalf("controller budget blocked HTTP admission: %v", err)
+	}
+	if err := readinessView.Check(context.Background()); err != nil {
+		t.Fatalf("controller budget blocked readiness: %v", err)
+	}
+	guard.Bootstrap.API = api
 	delete(api.objects, queue.Name)
 	if err := guard.Check(context.Background()); err == nil || api.writes != 0 {
 		t.Fatalf("committed queue loss gained authority or triggered a write: %v, writes=%d", err, api.writes)
