@@ -134,6 +134,37 @@ spec:
             type: object
           status:
             properties:
+              admissionGenesisStopIntent:
+                description: |-
+                  AdmissionGenesisStopIntent is durably recorded before a UID-scoped
+                  forced stop. An absent Pod alone can never manufacture this intent.
+                properties:
+                  buildUID:
+                    maxLength: 256
+                    type: string
+                  podCreateAttempt:
+                    maxLength: 32
+                    pattern: ^[a-f0-9]{32}$
+                    type: string
+                  podUID:
+                    maxLength: 256
+                    type: string
+                  reason:
+                    enum:
+                    - Cancelled
+                    - Deleted
+                    - BuildTimedOut
+                    type: string
+                  runnerRequestID:
+                    maxLength: 256
+                    type: string
+                required:
+                - buildUID
+                - podCreateAttempt
+                - podUID
+                - reason
+                - runnerRequestID
+                type: object
               admissionGenesisWitness:
                 description: |-
                   AdmissionGenesisWitness is recorded only for a runner created under an

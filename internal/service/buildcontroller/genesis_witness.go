@@ -72,10 +72,14 @@ func (r *KovaBuildReconciler) stampGenesisPod(ctx context.Context, build *kovav1
 // stamps. It does not inspect admission ledgers and therefore cannot grant
 // new work after those ledgers disappear.
 func (r *KovaBuildReconciler) witnessFromPod(build *kovav1.KovaBuild, pod *corev1.Pod) (*kovav1.AdmissionGenesisWitness, error) {
+	return r.witnessFromPodMode(build, pod, false)
+}
+
+func (r *KovaBuildReconciler) witnessFromPodMode(build *kovav1.KovaBuild, pod *corev1.Pod, allowTerminating bool) (*kovav1.AdmissionGenesisWitness, error) {
 	if r.Genesis == nil || build == nil || pod == nil || build.UID == "" || len(build.UID) > 256 ||
 		pod.UID == "" || len(pod.UID) > 256 || pod.Namespace != build.Namespace ||
 		pod.Name != buildPodName(build.Name) || pod.Labels["kova.cofy.dev/build-id"] != build.Name ||
-		!podOwnedByBuild(pod, build) || pod.DeletionTimestamp != nil {
+		!podOwnedByBuild(pod, build) || (!allowTerminating && pod.DeletionTimestamp != nil) {
 		return nil, fmt.Errorf("Genesis runner Pod lacks a live exact UID and CR owner")
 	}
 	runnerContainer, err := genesisRunnerContainer(pod)
@@ -139,6 +143,17 @@ func genesisRunnerContainer(pod *corev1.Pod) (*corev1.Container, error) {
 // CR status and a direct Pod read. A forged direct/admin Starting CR with no
 // controller-issued grant/Pod cannot manufacture runner authority.
 func (r *KovaBuildReconciler) directGenesisWitness(ctx context.Context, build *kovav1.KovaBuild) (*kovav1.KovaBuild, *corev1.Pod, error) {
+	return r.directGenesisWitnessMode(ctx, build, false, false)
+}
+
+// Cleanup may retry after a UID-preconditioned delete has made the original
+// Pod Terminating or after the CR has a deletion timestamp. Neither state can
+// authorize another runner operation; only the exact stored witness is read.
+func (r *KovaBuildReconciler) directGenesisCleanupWitness(ctx context.Context, build *kovav1.KovaBuild) (*kovav1.KovaBuild, *corev1.Pod, error) {
+	return r.directGenesisWitnessMode(ctx, build, true, true)
+}
+
+func (r *KovaBuildReconciler) directGenesisWitnessMode(ctx context.Context, build *kovav1.KovaBuild, allowDeleting, allowTerminating bool) (*kovav1.KovaBuild, *corev1.Pod, error) {
 	if r.Genesis == nil || r.APIReader == nil || build == nil || build.UID == "" {
 		return nil, nil, fmt.Errorf("Genesis witness requires an original CR and direct API reader")
 	}
@@ -146,7 +161,7 @@ func (r *KovaBuildReconciler) directGenesisWitness(ctx context.Context, build *k
 	if err := r.APIReader.Get(ctx, client.ObjectKeyFromObject(build), &current); err != nil {
 		return nil, nil, err
 	}
-	if current.UID != build.UID || current.DeletionTimestamp != nil ||
+	if current.UID != build.UID || (!allowDeleting && current.DeletionTimestamp != nil) ||
 		current.Status.AdmissionGenesisWitness == nil || build.Status.AdmissionGenesisWitness == nil ||
 		*current.Status.AdmissionGenesisWitness != *build.Status.AdmissionGenesisWitness ||
 		current.Status.RunnerPodName != current.Status.AdmissionGenesisWitness.PodName ||
@@ -157,7 +172,7 @@ func (r *KovaBuildReconciler) directGenesisWitness(ctx context.Context, build *k
 	if err != nil {
 		return nil, nil, err
 	}
-	witness, err := r.witnessFromPod(&current, pod)
+	witness, err := r.witnessFromPodMode(&current, pod, allowTerminating)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -182,16 +197,30 @@ func (r *KovaBuildReconciler) directGenesisGrant(ctx context.Context, build *kov
 	if current.Status.Phase != kovav1.PhaseStarting || cancellationRequested(current) {
 		return nil, nil, fmt.Errorf("Genesis runner submission requires a live Starting CR")
 	}
-	_, state, err := r.readReservations(ctx, current.Namespace)
+	entry, err := r.directGenesisCharge(ctx, current)
 	if err != nil {
 		return nil, nil, err
 	}
-	entry, found := state.Active[reservationKey(current)]
-	if !found || entry.BuildName != current.Name || entry.Requester != requesterKey(current) ||
-		entry.Closing || len(entry.InFlight) != 0 || entry.Slots != int(current.Status.AllocatedConcurrency) {
-		return nil, nil, fmt.Errorf("Genesis runner submission lacks a live exact active grant")
+	if entry.Closing || len(entry.InFlight) != 0 {
+		return nil, nil, fmt.Errorf("Genesis runner submission lacks an open active grant")
 	}
 	return current, pod, nil
+}
+
+// A healthy original pair can prove the exact active charge even when the
+// entry is Closing during cancellation. Evidence-only observation after pair
+// loss instead requires the pre-loss independent Pod/CR witness.
+func (r *KovaBuildReconciler) directGenesisCharge(ctx context.Context, build *kovav1.KovaBuild) (activeReservation, error) {
+	_, state, err := r.readReservations(ctx, build.Namespace)
+	if err != nil {
+		return activeReservation{}, err
+	}
+	entry, found := state.Active[reservationKey(build)]
+	if !found || entry.BuildName != build.Name || entry.Requester != requesterKey(build) ||
+		entry.Slots != int(build.Status.AllocatedConcurrency) {
+		return activeReservation{}, fmt.Errorf("Genesis runner has no exact active charge")
+	}
+	return entry, nil
 }
 
 func samePodUID(left, right *corev1.Pod) bool {
@@ -199,11 +228,11 @@ func samePodUID(left, right *corev1.Pod) bool {
 }
 
 // The protected base includes #61 UID-preconditioned Pod deletion. Until the
-// Genesis terminal-first stop path is integrated, reject legacy stop entry
-// points rather than treating UID-safe deletion alone as stop authority.
+// Genesis terminal-first stop path is used, reject legacy stop entry points
+// rather than treating UID-safe deletion alone as stop authority.
 func (r *KovaBuildReconciler) requireUIDSafePodStop() error {
 	if r.Genesis != nil {
-		return fmt.Errorf("Genesis runner stop requires a durable terminal or stop witness")
+		return fmt.Errorf("Genesis runner stop requires the terminal-first stop path")
 	}
 	return nil
 }

@@ -73,9 +73,20 @@ func (r *KovaBuildReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		}
 		return ctrl.Result{Requeue: true}, nil
 	}
+	// A persisted stop decision survives the UID delete and a lost terminal
+	// status response. Resume it before any runner GET or fresh cancellation.
+	if r.Genesis != nil && build.Status.AdmissionGenesisStopIntent != nil && !isTerminalPhase(build.Status.Phase) {
+		return r.resumeGenesisStop(ctx, &build)
+	}
 	// Once the runner reported failure, cancellation cannot rewrite that
 	// outcome; only bounded partial-receipt verification remains.
 	if cancellationRequested(&build) && !isTerminalPhase(build.Status.Phase) && build.Status.Phase != kovav1.PhaseFailedVerifying {
+		if r.Genesis != nil && build.Status.AdmissionGenesisWitness != nil {
+			switch build.Status.Phase {
+			case kovav1.PhaseStarting, kovav1.PhaseRunning, kovav1.PhaseVerifying:
+				return r.reconcileGenesisCancellation(ctx, &build)
+			}
+		}
 		return r.cancelBuild(ctx, &build)
 	}
 	if isTerminalPhase(build.Status.Phase) {

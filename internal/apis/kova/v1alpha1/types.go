@@ -128,6 +128,9 @@ type KovaBuildStatus struct {
 	// externally committed admission Genesis. It binds a directly observed Pod
 	// UID and the runner request to the original CR and ledger installation.
 	AdmissionGenesisWitness *AdmissionGenesisWitness `json:"admissionGenesisWitness,omitempty"`
+	// AdmissionGenesisStopIntent is durably recorded before a UID-scoped
+	// forced stop. An absent Pod alone can never manufacture this intent.
+	AdmissionGenesisStopIntent *AdmissionGenesisStopIntent `json:"admissionGenesisStopIntent,omitempty"`
 	// +kubebuilder:validation:MaxLength=128
 	Reason string `json:"reason,omitempty"`
 	// +kubebuilder:validation:MaxLength=2048
@@ -179,6 +182,23 @@ type AdmissionGenesisWitness struct {
 	PodCreateAttempt string `json:"podCreateAttempt"`
 	// +kubebuilder:validation:MaxLength=256
 	RunnerRequestID string `json:"runnerRequestID"`
+}
+
+// AdmissionGenesisStopIntent binds an explicit forced-stop decision to the
+// independently witnessed original runner. It is written only after the
+// original admission pair and active charge are directly requalified.
+type AdmissionGenesisStopIntent struct {
+	// +kubebuilder:validation:MaxLength=256
+	BuildUID string `json:"buildUID"`
+	// +kubebuilder:validation:MaxLength=256
+	PodUID string `json:"podUID"`
+	// +kubebuilder:validation:MaxLength=32
+	// +kubebuilder:validation:Pattern=`^[a-f0-9]{32}$`
+	PodCreateAttempt string `json:"podCreateAttempt"`
+	// +kubebuilder:validation:MaxLength=256
+	RunnerRequestID string `json:"runnerRequestID"`
+	// +kubebuilder:validation:Enum=Cancelled;Deleted;BuildTimedOut
+	Reason string `json:"reason"`
 }
 
 type BuildOutput struct {

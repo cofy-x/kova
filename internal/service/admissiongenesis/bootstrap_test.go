@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"strconv"
 	"strings"
 	"sync"
@@ -25,6 +26,7 @@ type responseEffect int
 const (
 	respondNormally responseEffect = iota
 	rejectBeforeWrite
+	rejectInvalidBeforeWrite
 	loseAfterWrite
 )
 
@@ -125,6 +127,9 @@ func (f *fakeCore) PatchConfigMap(_ context.Context, _, name string, body []byte
 	if effect == rejectBeforeWrite {
 		return nil, errLostResponse
 	}
+	if effect == rejectInvalidBeforeWrite {
+		return nil, apierrors.NewGenericServerResponse(http.StatusUnprocessableEntity, "", schema.GroupResource{}, "", "rejected valid-shape patch", 0, false)
+	}
 	original := f.objects[name]
 	if original == nil {
 		return nil, apierrors.NewNotFound(schema.GroupResource{Resource: "configmaps"}, name)
@@ -139,7 +144,7 @@ func (f *fakeCore) PatchConfigMap(_ context.Context, _, name string, body []byte
 	}
 	updatedRaw, err := patch.Apply(raw)
 	if err != nil {
-		return nil, apierrors.NewConflict(schema.GroupResource{Resource: "configmaps"}, name, err)
+		return nil, apierrors.NewGenericServerResponse(http.StatusUnprocessableEntity, "", schema.GroupResource{}, "", err.Error(), 0, false)
 	}
 	var updated corev1.ConfigMap
 	if err := json.Unmarshal(updatedRaw, &updated); err != nil {

@@ -152,6 +152,32 @@ order with an older chart before upgrading to the current controller; run
 For a live, isolated old-CRD-to-new-controller smoke, see
 [CRD upgrade testing](../testing.md#crd-upgrade-smoke).
 
+The proposed [admission Genesis recovery protocol](../service-genesis-recovery-proposal.md)
+is not a deployable Service mode yet. Its local bootstrap tests show that a
+Service can finish the same externally authorized fresh `Initializing`
+generation after a partial write, but they do not establish the installation
+boundary. Before any future enablement, an environment installer must stop
+every old Service writer and direct/admin submission route, use a previously
+unused runner Namespace **name**, and create its `Initializing` Genesis. It
+must directly read and preserve the new Namespace and Genesis UIDs, random
+generation, exact ledger schema names, and all five capacity limits in one
+trusted receipt outside the Service process. Every replica must receive that
+same receipt before starting; runtime must not infer it from empty lists or
+create/replace Genesis. A mounted immutable Secret is one possible delivery
+mechanism, but the current chart does not mount one or grant the required
+Genesis/Namespace API permissions. Do not route traffic using a hand-written
+or post-effect receipt.
+
+The matching CRD must be applied before any such Service starts, then the
+serving `/status` API must round-trip both `admissionGenesisWitness` and
+`admissionGenesisStopIntent` without pruning. The current
+`probe-kovabuild-status.sh --expect-persisted` checks older verification
+fields, **not** those Genesis fields; it is not sufficient for this gate.
+Committed-ledger loss still retains capacity and finalizers without a bounded
+repair path, so Genesis remains out of the next RC. The separately tracked
+drain-only recovery work does not retroactively make a deleted original
+ledger safe to recreate.
+
 Replace `vX.Y.Z` with an exact tag from the
 [GitHub release page](https://github.com/cofy-x/kova/releases). Keep the same
 value for the CLI and runtime images used with this deployment.

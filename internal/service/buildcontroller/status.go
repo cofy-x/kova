@@ -55,10 +55,9 @@ func (r *KovaBuildReconciler) finish(ctx context.Context, build *kovav1.KovaBuil
 			}
 		} else {
 			if _, _, err := r.directGenesisWitness(ctx, build); err != nil {
-				// A healthy ledger pair does not turn a missing, changed, or
-				// temporarily unreadable Pod into proof that accepted work stopped.
-				// Until UID-scoped absence evidence is implemented, retain its
-				// witness and active charge for operator recovery.
+				// A healthy pair does not turn a missing or changed Pod into
+				// proof that accepted work stopped. Forced stops use the separate
+				// durable-intent and UID-absence path below.
 				return err
 			}
 			if phase == kovav1.PhaseSucceeded {
@@ -72,6 +71,10 @@ func (r *KovaBuildReconciler) finish(ctx context.Context, build *kovav1.KovaBuil
 			}
 		}
 	}
+	return r.writeTerminalStatus(ctx, build, phase, reason, message)
+}
+
+func (r *KovaBuildReconciler) writeTerminalStatus(ctx context.Context, build *kovav1.KovaBuild, phase, reason, message string) error {
 	now := metav1.Now()
 	build.Status.Phase = phase
 	build.Status.ObservedGeneration = build.Generation

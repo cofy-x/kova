@@ -15,6 +15,7 @@ import (
 	"github.com/cofy-x/kova/internal/service/queueadmission"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -26,6 +27,65 @@ type staticGenesisCore struct {
 	namespace *corev1.Namespace
 	objects   map[string]*corev1.ConfigMap
 	writes    int
+}
+
+// This is a deterministic API-backed startup fixture, not a Kubernetes
+// apiserver. It assigns ledger UIDs and applies the production JSON Patch
+// through controller-runtime's fake client so a second Service startup sees
+// the exact objects left by the first one.
+type restartingGenesisCore struct {
+	client.Client
+	createNames         []string
+	patches             int
+	failQueueCreateOnce bool
+}
+
+func (f *restartingGenesisCore) GetNamespace(ctx context.Context, name string) (*corev1.Namespace, error) {
+	var ns corev1.Namespace
+	if err := f.Get(ctx, client.ObjectKey{Name: name}, &ns); err != nil {
+		return nil, err
+	}
+	return &ns, nil
+}
+
+func (f *restartingGenesisCore) GetConfigMap(ctx context.Context, namespace, name string) (*corev1.ConfigMap, error) {
+	var cm corev1.ConfigMap
+	if err := f.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, &cm); err != nil {
+		return nil, err
+	}
+	return &cm, nil
+}
+
+func (f *restartingGenesisCore) CreateConfigMap(ctx context.Context, namespace string, cm *corev1.ConfigMap) (*corev1.ConfigMap, error) {
+	f.createNames = append(f.createNames, cm.Name)
+	if cm.Name == admissiongenesis.QueueLedgerName && f.failQueueCreateOnce {
+		f.failQueueCreateOnce = false
+		return nil, errors.New("injected queue Create failure before the request reached the API")
+	}
+	created := cm.DeepCopy()
+	if cm.Name == admissiongenesis.ActiveLedgerName {
+		created.UID = types.UID("active-created-once")
+	} else if cm.Name == admissiongenesis.QueueLedgerName {
+		created.UID = types.UID("queue-created-once")
+	} else {
+		return nil, errors.New("runtime attempted an unexpected ConfigMap Create")
+	}
+	if err := f.Create(ctx, created); err != nil {
+		return nil, err
+	}
+	return f.GetConfigMap(ctx, namespace, cm.Name)
+}
+
+func (f *restartingGenesisCore) PatchConfigMap(ctx context.Context, namespace, name string, body []byte) (*corev1.ConfigMap, error) {
+	if name != admissiongenesis.GenesisName {
+		return nil, errors.New("runtime attempted an unexpected ConfigMap Patch")
+	}
+	f.patches++
+	cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: name}}
+	if err := f.Patch(ctx, cm, client.RawPatch(types.JSONPatchType, body)); err != nil {
+		return nil, err
+	}
+	return f.GetConfigMap(ctx, namespace, name)
 }
 
 func (f *staticGenesisCore) GetNamespace(context.Context, string) (*corev1.Namespace, error) {
@@ -155,7 +215,106 @@ func TestPrepareGenesisRuntimeObservesExactCommittedPairWithoutLegacyWrites(t *t
 	}
 }
 
-func genesisTestReader(t *testing.T, objects ...client.Object) client.Reader {
+func TestPrepareGenesisRuntimeCompletesOriginalInitializingPairAfterPartialRestart(t *testing.T) {
+	ctx := context.Background()
+	receipt, cfg := genesisTestReceiptAndConfig()
+	initial := admissiongenesis.GenesisData{Contract: receipt.Contract, Phase: admissiongenesis.PhaseInitializing}
+	initialRaw, err := json.Marshal(initial)
+	if err != nil {
+		t.Fatal(err)
+	}
+	receiptRaw, err := json.Marshal(receipt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	genesis := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{
+		Namespace: cfg.Namespace, Name: receipt.GenesisName, UID: types.UID(receipt.GenesisUID), ResourceVersion: "1",
+	}, Data: map[string]string{admissiongenesis.GenesisDataKey: string(initialRaw)}}
+	namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{
+		Name: cfg.Namespace, UID: types.UID(receipt.Contract.NamespaceUID),
+	}, Status: corev1.NamespaceStatus{Phase: corev1.NamespaceActive}}
+	base := genesisTestClient(t, namespace, genesis)
+	api := &restartingGenesisCore{Client: base, failQueueCreateOnce: true}
+	if guard, err := prepareGenesisRuntime(ctx, cfg, receiptRaw, api, base); err == nil || guard != nil {
+		t.Fatalf("partial first startup unexpectedly routed: guard=%v err=%v", guard, err)
+	}
+	var pinned corev1.ConfigMap
+	if err := base.Get(ctx, client.ObjectKey{Namespace: cfg.Namespace, Name: receipt.GenesisName}, &pinned); err != nil {
+		t.Fatal(err)
+	}
+	var partial admissiongenesis.GenesisData
+	if err := json.Unmarshal([]byte(pinned.Data[admissiongenesis.GenesisDataKey]), &partial); err != nil {
+		t.Fatal(err)
+	}
+	if partial.Phase != admissiongenesis.PhaseInitializing || partial.ActiveLedgerUID != "active-created-once" ||
+		partial.QueueLedgerUID != "" || len(api.createNames) != 2 || api.patches != 1 {
+		t.Fatalf("first startup did not retain the exact provisional pin: state=%+v creates=%v patches=%d",
+			partial, api.createNames, api.patches)
+	}
+	guard, err := prepareGenesisRuntime(ctx, cfg, receiptRaw, api, base)
+	if err != nil {
+		t.Fatalf("same-receipt restart could not finish fresh Initializing Genesis: %v", err)
+	}
+	if guard.Original.ActiveLedgerUID != "active-created-once" || guard.Original.QueueLedgerUID != "queue-created-once" ||
+		len(api.createNames) != 3 || api.createNames[2] != admissiongenesis.QueueLedgerName || api.patches != 3 {
+		t.Fatalf("restart replaced original ledger or missed commit: binding=%+v creates=%v patches=%d",
+			guard.Original, api.createNames, api.patches)
+	}
+	active, err := api.GetConfigMap(ctx, cfg.Namespace, admissiongenesis.ActiveLedgerName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	queue, err := api.GetConfigMap(ctx, cfg.Namespace, admissiongenesis.QueueLedgerName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	activeEmpty, err := buildcontroller.GenesisEmptyAdmissionData(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	queueEmpty, err := queueadmission.GenesisEmptyQueueData(cfg.MaxQueuedJobs, cfg.MaxQueuedJobsPerRequester)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if active.Data[admissiongenesis.ActiveLedgerDataKey] != activeEmpty ||
+		queue.Data[admissiongenesis.QueueLedgerDataKey] != queueEmpty ||
+		buildcontroller.ValidateAdmissionLedgerForGenesis(active, cfg) != nil ||
+		queueadmission.ValidateQueueLedgerForGenesis(queue, cfg.MaxQueuedJobs, cfg.MaxQueuedJobsPerRequester) != nil {
+		t.Fatal("restarted Service did not commit canonical #58-bounded ledgers")
+	}
+	committed, err := api.GetConfigMap(ctx, cfg.Namespace, receipt.GenesisName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var committedData admissiongenesis.GenesisData
+	if err := json.Unmarshal([]byte(committed.Data[admissiongenesis.GenesisDataKey]), &committedData); err != nil {
+		t.Fatal(err)
+	}
+	if committedData.Phase != admissiongenesis.PhaseCommitted || committed.Immutable == nil || !*committed.Immutable {
+		t.Fatalf("restart did not atomically commit immutable Genesis: data=%+v immutable=%v", committedData, committed.Immutable)
+	}
+	if err := guard.Check(ctx); err != nil {
+		t.Fatal(err)
+	}
+	creates, patches := len(api.createNames), api.patches
+	if _, err := prepareGenesisRuntime(ctx, cfg, receiptRaw, api, base); err != nil {
+		t.Fatalf("same-receipt committed restart failed: %v", err)
+	}
+	if len(api.createNames) != creates || api.patches != patches {
+		t.Fatalf("committed restart performed a bootstrap write: creates=%v patches=%d", api.createNames, api.patches)
+	}
+	if err := base.Delete(ctx, queue); err != nil {
+		t.Fatal(err)
+	}
+	if guard, err := prepareGenesisRuntime(ctx, cfg, receiptRaw, api, base); !apierrors.IsNotFound(err) || guard != nil {
+		t.Fatalf("committed queue loss was repaired or misclassified: guard=%v err=%v", guard, err)
+	}
+	if len(api.createNames) != creates || api.patches != patches {
+		t.Fatalf("committed loss triggered a replacement write: creates=%v patches=%d", api.createNames, api.patches)
+	}
+}
+
+func genesisTestClient(t *testing.T, objects ...client.Object) client.Client {
 	t.Helper()
 	scheme := runtime.NewScheme()
 	if err := corev1.AddToScheme(scheme); err != nil {
@@ -165,6 +324,10 @@ func genesisTestReader(t *testing.T, objects ...client.Object) client.Reader {
 		t.Fatal(err)
 	}
 	return fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).Build()
+}
+
+func genesisTestReader(t *testing.T, objects ...client.Object) client.Reader {
+	return genesisTestClient(t, objects...)
 }
 
 func TestGenesisPreflightVetoesVisibleOldCRsAndRunnerPods(t *testing.T) {

@@ -107,8 +107,61 @@ func TestGuardedLedgerPatchRefusesStaleOrReplacedState(t *testing.T) {
 				if f.patchCount[ActiveLedgerName] != 0 {
 					t.Fatalf("patched after pair loss: %d", f.patchCount[ActiveLedgerName])
 				}
+			} else if mode == "replacement during patch" {
+				if !errors.Is(err, ErrChanged) || f.patchCount[ActiveLedgerName] != 1 {
+					t.Fatalf("replacement was treated as retryable contention: patches=%d err=%v", f.patchCount[ActiveLedgerName], err)
+				}
 			} else if !apierrors.IsConflict(err) || f.patchCount[ActiveLedgerName] != 1 {
-				t.Fatalf("expected one failed atomic test, got patches=%d err=%v", f.patchCount[ActiveLedgerName], err)
+				t.Fatalf("stale RFC6902 test was not classified as one retryable conflict: patches=%d err=%v", f.patchCount[ActiveLedgerName], err)
+			}
+		})
+	}
+}
+
+func TestGuardedLedgerUnchanged422IsNotRetryableConflict(t *testing.T) {
+	f, b, guard, next := committedGuardFixture(t)
+	original, err := f.GetConfigMap(context.Background(), b.Receipt.Namespace, ActiveLedgerName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.patchEffects[ActiveLedgerName] = []responseEffect{rejectInvalidBeforeWrite}
+	err = guard.PatchLedgerData(context.Background(), original, Active, next[Active])
+	if !apierrors.IsInvalid(err) || apierrors.IsConflict(err) || f.patchCount[ActiveLedgerName] != 1 {
+		t.Fatalf("unchanged original ledger turned arbitrary 422 into conflict: err=%v patches=%d", err, f.patchCount[ActiveLedgerName])
+	}
+	current := f.objects[ActiveLedgerName]
+	if current.ResourceVersion != original.ResourceVersion || current.Data[ActiveLedgerDataKey] != original.Data[ActiveLedgerDataKey] {
+		t.Fatalf("test 422 unexpectedly changed ledger: %+v", current)
+	}
+}
+
+func TestGuardedLedgerConcurrentCASReportsOriginalPairConflict(t *testing.T) {
+	for _, role := range []Role{Active, Queue} {
+		t.Run(string(role), func(t *testing.T) {
+			f, b, guard, next := committedGuardFixture(t)
+			name := ActiveLedgerName
+			if role == Queue {
+				name = QueueLedgerName
+			}
+			original, err := f.GetConfigMap(context.Background(), b.Receipt.Namespace, name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			start := make(chan struct{})
+			results := make(chan error, 2)
+			for range 2 {
+				go func() {
+					<-start
+					results <- guard.PatchLedgerData(context.Background(), original, role, next[role])
+				}()
+			}
+			close(start)
+			first, second := <-results, <-results
+			if !((first == nil && apierrors.IsConflict(second)) || (second == nil && apierrors.IsConflict(first))) {
+				t.Fatalf("concurrent original-ledger CAS = (%v, %v), want one commit and one typed conflict", first, second)
+			}
+			if f.patchCount[name] != 2 {
+				t.Fatalf("concurrent writers sent %d Patches, want one each", f.patchCount[name])
 			}
 		})
 	}

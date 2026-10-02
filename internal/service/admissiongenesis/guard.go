@@ -3,9 +3,13 @@ package admissiongenesis
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net/http"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
 // Guard retains the original pair qualified at startup. A later read can
@@ -119,10 +123,7 @@ func (g *Guard) PatchLedgerData(ctx context.Context, cm *corev1.ConfigMap, role 
 	}
 	updated, err := g.Bootstrap.API.PatchConfigMap(ctx, cm.Namespace, cm.Name, body)
 	if err != nil {
-		// A failed test, timeout, or lost response is not permission to
-		// retry blindly. Callers use their existing exact-intent/nonce
-		// readback rules; a later loop iteration requalifies the pair.
-		return err
+		return g.classifyLedgerPatchError(ctx, cm, role, template, err)
 	}
 	if err := g.CheckLedger(updated, role); err != nil {
 		return err
@@ -144,4 +145,34 @@ func (g *Guard) PatchLedgerData(ctx context.Context, cm *corev1.ConfigMap, role 
 		return err
 	}
 	return g.Check(ctx)
+}
+
+// Kubernetes reports an RFC6902 failed `test` as HTTP 422, not 409. Its
+// generic StatusError also discards the operation-specific failure text, so
+// 422 alone is never classified as contention. A direct read must prove that
+// this same original ledger advanced; unchanged state retains the rejection,
+// while replacement/loss remains a hard refusal. Callers then recompute a
+// fresh proposal in their bounded CAS loop rather than replaying this Patch.
+func (g *Guard) classifyLedgerPatchError(ctx context.Context, cm *corev1.ConfigMap, role Role, template LedgerTemplate, patchErr error) error {
+	var status apierrors.APIStatus
+	if !errors.As(patchErr, &status) || status.Status().Code != http.StatusUnprocessableEntity {
+		return patchErr
+	}
+	current, err := g.Bootstrap.API.GetConfigMap(ctx, cm.Namespace, cm.Name)
+	if err != nil {
+		return errors.Join(patchErr, fmt.Errorf("%s ledger 422 readback failed: %w", role, err))
+	}
+	if err := g.CheckLedger(current, role); err != nil {
+		return err
+	}
+	if err := template.Validate(current); err != nil {
+		return fmt.Errorf("%w: %s ledger changed to invalid state: %v", ErrChanged, role, err)
+	}
+	if err := g.Check(ctx); err != nil {
+		return err
+	}
+	if current.ResourceVersion == cm.ResourceVersion && current.Data[template.DataKey] == cm.Data[template.DataKey] {
+		return patchErr
+	}
+	return apierrors.NewConflict(schema.GroupResource{Resource: "configmaps"}, cm.Name, patchErr)
 }

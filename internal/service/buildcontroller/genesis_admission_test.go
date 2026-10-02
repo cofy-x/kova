@@ -178,6 +178,27 @@ func persistGenesisStartingWitness(t *testing.T, r *KovaBuildReconciler, api *co
 	return &current, &observed
 }
 
+func persistGenesisRunningCancellation(t *testing.T, r *KovaBuildReconciler, api *controllerGenesisAPI, build *kovav1.KovaBuild) *kovav1.KovaBuild {
+	t.Helper()
+	ctx := context.Background()
+	current, _ := persistGenesisStartingWitness(t, r, api, build)
+	current.Annotations = map[string]string{kovav1.CancellationRequestedAnnotation: "true"}
+	if err := api.Update(ctx, current); err != nil {
+		t.Fatal(err)
+	}
+	if err := api.Get(ctx, client.ObjectKeyFromObject(build), current); err != nil {
+		t.Fatal(err)
+	}
+	current.Status.Phase = kovav1.PhaseRunning
+	if err := api.Status().Update(ctx, current); err != nil {
+		t.Fatal(err)
+	}
+	if err := api.Get(ctx, client.ObjectKeyFromObject(build), current); err != nil {
+		t.Fatal(err)
+	}
+	return current
+}
+
 func TestGenesisStartingWitnessRejectsForgedDirectCRWithoutGrant(t *testing.T) {
 	r, api, build := genesisAdmissionFixture(t)
 	starting, _ := persistGenesisStartingWitness(t, r, api, build)
@@ -271,6 +292,245 @@ func TestGenesisAcceptedBuildPreservesExactResultAfterLedgerLoss(t *testing.T) {
 	state, err := decodeReservations(&active)
 	if err != nil || len(state.Active) != 1 {
 		t.Fatalf("accepted charge was lost: active=%+v err=%v", state.Active, err)
+	}
+}
+
+func TestGenesisCancellationAfterPairLossPreservesAcceptedExactResult(t *testing.T) {
+	host, ref, digest := testVerifiedImage(t, "amd64")
+	ctx := context.Background()
+	r, api, build := genesisAdmissionFixture(t)
+	build.Spec.Targets = buildTargets(ref)
+	if err := api.Update(ctx, build); err != nil {
+		t.Fatal(err)
+	}
+	if err := api.Get(ctx, client.ObjectKeyFromObject(build), build); err != nil {
+		t.Fatal(err)
+	}
+	r.Cfg.RegistryPlainHTTP = []string{host}
+	if decision, err := r.admission(ctx, build); err != nil || !decision.Admitted {
+		t.Fatalf("pre-loss grant was not durable: decision=%+v err=%v", decision, err)
+	}
+	starting, _ := persistGenesisStartingWitness(t, r, api, build)
+	starting.Annotations = map[string]string{kovav1.CancellationRequestedAnnotation: "true"}
+	if err := api.Update(ctx, starting); err != nil {
+		t.Fatal(err)
+	}
+	var queue corev1.ConfigMap
+	if err := api.Get(ctx, client.ObjectKey{Namespace: build.Namespace, Name: queueadmission.ConfigMapName}, &queue); err != nil {
+		t.Fatal(err)
+	}
+	if err := api.Delete(ctx, &queue); err != nil {
+		t.Fatal(err)
+	}
+	buildPosts, exports := 0, 0
+	kubeClient := &fakeKube{podClient: api.Client, execFn: func(opts kube.ExecOptions) error {
+		command := strings.Join(opts.Command, " ")
+		switch {
+		case strings.Contains(command, "--method GET"):
+			_, _ = fmt.Fprintf(opts.Stdout, `{"status":"completed","requestId":%q}`, string(build.UID))
+		case strings.Contains(command, "/api/v1/export"):
+			exports++
+			_, _ = fmt.Fprintf(opts.Stdout, "{\"target\":%q,\"success\":true,\"manifest_digest\":%q}\n", ref, digest)
+		case strings.Contains(command, "--method POST"):
+			buildPosts++
+		default:
+			_, _ = io.WriteString(opts.Stdout, "")
+		}
+		return nil
+	}}
+	r.Kube = kubeClient
+	key := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(build)}
+	if _, err := r.Reconcile(ctx, key); err != nil {
+		t.Fatalf("cancel intent hid a completed accepted runner: %v", err)
+	}
+	var verifying kovav1.KovaBuild
+	if err := api.Get(ctx, client.ObjectKeyFromObject(build), &verifying); err != nil {
+		t.Fatal(err)
+	}
+	if verifying.Status.Phase != kovav1.PhaseVerifying || !cancellationRequested(&verifying) {
+		t.Fatalf("cancel intent or verified evidence transition was lost: phase=%s annotations=%v", verifying.Status.Phase, verifying.Annotations)
+	}
+	if _, err := r.Reconcile(ctx, key); err != nil {
+		t.Fatalf("cancel intent blocked exact receipt verification: %v", err)
+	}
+	var finished kovav1.KovaBuild
+	if err := api.Get(ctx, client.ObjectKeyFromObject(build), &finished); err != nil {
+		t.Fatal(err)
+	}
+	if finished.Status.Phase != kovav1.PhaseSucceeded || len(finished.Status.Outputs) != 1 ||
+		finished.Status.Outputs[0].ManifestDigest != digest || !cancellationRequested(&finished) ||
+		buildPosts != 0 || exports != 1 {
+		t.Fatalf("cancel/loss result not exact: phase=%s outputs=%+v cancel=%t buildPosts=%d exports=%d",
+			finished.Status.Phase, finished.Status.Outputs, cancellationRequested(&finished), buildPosts, exports)
+	}
+	if _, err := r.Reconcile(ctx, key); err == nil {
+		t.Fatal("terminal cleanup released charge after committed pair loss")
+	}
+	if len(kubeClient.deleted) != 0 || len(finished.Finalizers) == 0 {
+		t.Fatalf("cancel/loss removed runner or finalizer: deleted=%v finalizers=%v", kubeClient.deleted, finished.Finalizers)
+	}
+	var active corev1.ConfigMap
+	if err := api.Get(ctx, client.ObjectKey{Namespace: build.Namespace, Name: AdmissionLedgerName}, &active); err != nil {
+		t.Fatal(err)
+	}
+	state, err := decodeReservations(&active)
+	if err != nil || len(state.Active) != 1 {
+		t.Fatalf("accepted charge was lost under cancellation: active=%+v err=%v", state.Active, err)
+	}
+}
+
+func TestGenesisHealthyCancellationObservesCompletedRunnerBeforeStop(t *testing.T) {
+	host, ref, digest := testVerifiedImage(t, "amd64")
+	ctx := context.Background()
+	r, api, build := genesisAdmissionFixture(t)
+	build.Spec.Targets = buildTargets(ref)
+	if err := api.Update(ctx, build); err != nil {
+		t.Fatal(err)
+	}
+	if err := api.Get(ctx, client.ObjectKeyFromObject(build), build); err != nil {
+		t.Fatal(err)
+	}
+	r.Cfg.RegistryPlainHTTP = []string{host}
+	if decision, err := r.admission(ctx, build); err != nil || !decision.Admitted {
+		t.Fatalf("original grant was not durable: decision=%+v err=%v", decision, err)
+	}
+	persistGenesisRunningCancellation(t, r, api, build)
+	buildPosts, cancelPosts, exports := 0, 0, 0
+	kubeClient := &fakeKube{podClient: api.Client, execFn: func(opts kube.ExecOptions) error {
+		command := strings.Join(opts.Command, " ")
+		switch {
+		case strings.Contains(command, "--method GET"):
+			_, _ = fmt.Fprintf(opts.Stdout, `{"status":"completed","requestId":%q}`, string(build.UID))
+		case strings.Contains(command, "/api/v1/export"):
+			exports++
+			_, _ = fmt.Fprintf(opts.Stdout, "{\"target\":%q,\"success\":true,\"manifest_digest\":%q}\n", ref, digest)
+		case strings.Contains(command, "/api/v1/build/cancel"):
+			cancelPosts++
+		case strings.Contains(command, "--method POST"):
+			buildPosts++
+		}
+		return nil
+	}}
+	r.Kube = kubeClient
+	key := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(build)}
+	if _, err := r.Reconcile(ctx, key); err != nil {
+		t.Fatalf("completed runner was stopped before observation: %v", err)
+	}
+	var verifying kovav1.KovaBuild
+	if err := api.Get(ctx, client.ObjectKeyFromObject(build), &verifying); err != nil {
+		t.Fatal(err)
+	}
+	if verifying.Status.Phase != kovav1.PhaseVerifying || !cancellationRequested(&verifying) {
+		t.Fatalf("completed runner was not preserved for verification: phase=%s cancel=%t", verifying.Status.Phase, cancellationRequested(&verifying))
+	}
+	if _, err := r.Reconcile(ctx, key); err != nil {
+		t.Fatalf("completed runner receipts were lost to cancel: %v", err)
+	}
+	var finished kovav1.KovaBuild
+	if err := api.Get(ctx, client.ObjectKeyFromObject(build), &finished); err != nil {
+		t.Fatal(err)
+	}
+	if finished.Status.Phase != kovav1.PhaseSucceeded || len(finished.Status.Outputs) != 1 ||
+		finished.Status.Outputs[0].ManifestDigest != digest || !cancellationRequested(&finished) ||
+		buildPosts != 0 || cancelPosts != 0 || exports != 1 || len(kubeClient.deleted) != 0 {
+		t.Fatalf("completed runner result or stop boundary was wrong: phase=%s outputs=%+v posts=%d cancels=%d exports=%d deleted=%v",
+			finished.Status.Phase, finished.Status.Outputs, buildPosts, cancelPosts, exports, kubeClient.deleted)
+	}
+}
+
+func TestGenesisHealthyCancellationKeepsUncertainRunnerAndCharge(t *testing.T) {
+	ctx := context.Background()
+	r, api, build := genesisAdmissionFixture(t)
+	if decision, err := r.admission(ctx, build); err != nil || !decision.Admitted {
+		t.Fatalf("original grant was not durable: decision=%+v err=%v", decision, err)
+	}
+	persistGenesisRunningCancellation(t, r, api, build)
+	execCalls := 0
+	kubeClient := &fakeKube{podClient: api.Client, execFn: func(opts kube.ExecOptions) error {
+		execCalls++
+		if !strings.Contains(strings.Join(opts.Command, " "), "--method GET") {
+			t.Fatal("uncertain runner status triggered a new POST")
+		}
+		return fmt.Errorf("runner status transport unavailable")
+	}}
+	r.Kube = kubeClient
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(build)}); err == nil {
+		t.Fatal("uncertain status was treated as permission to stop or terminalize")
+	}
+	var current kovav1.KovaBuild
+	if err := api.Get(ctx, client.ObjectKeyFromObject(build), &current); err != nil {
+		t.Fatal(err)
+	}
+	if current.Status.Phase != kovav1.PhaseRunning || current.Status.AdmissionGenesisWitness == nil ||
+		len(kubeClient.deleted) != 0 || execCalls != 1 {
+		t.Fatalf("uncertain runner changed state or was stopped: phase=%s witness=%+v deleted=%v exec=%d",
+			current.Status.Phase, current.Status.AdmissionGenesisWitness, kubeClient.deleted, execCalls)
+	}
+	var active corev1.ConfigMap
+	if err := api.Get(ctx, client.ObjectKey{Namespace: build.Namespace, Name: AdmissionLedgerName}, &active); err != nil {
+		t.Fatal(err)
+	}
+	state, err := decodeReservations(&active)
+	if err != nil || len(state.Active) != 1 || state.Active[reservationKey(build)].Closing {
+		t.Fatalf("uncertain status released or fenced charge: state=%+v err=%v", state.Active, err)
+	}
+}
+
+func TestGenesisHealthyCancellationCannotObserveForgedWitnessWithoutGrant(t *testing.T) {
+	r, api, build := genesisAdmissionFixture(t)
+	persistGenesisRunningCancellation(t, r, api, build)
+	r.Kube = &fakeKube{podClient: api.Client, execFn: func(kube.ExecOptions) error {
+		t.Fatal("forged cancellation witness contacted the runner without an active grant")
+		return nil
+	}}
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(build)}); err == nil {
+		t.Fatal("forged cancellation witness bypassed the original active grant")
+	}
+}
+
+func TestGenesisCancellationAfterPairLossObservesRunningButCannotStop(t *testing.T) {
+	ctx := context.Background()
+	r, api, build := genesisAdmissionFixture(t)
+	if decision, err := r.admission(ctx, build); err != nil || !decision.Admitted {
+		t.Fatalf("original grant was not durable: decision=%+v err=%v", decision, err)
+	}
+	persistGenesisRunningCancellation(t, r, api, build)
+	var queue corev1.ConfigMap
+	if err := api.Get(ctx, client.ObjectKey{Namespace: build.Namespace, Name: queueadmission.ConfigMapName}, &queue); err != nil {
+		t.Fatal(err)
+	}
+	if err := api.Delete(ctx, &queue); err != nil {
+		t.Fatal(err)
+	}
+	gets := 0
+	kubeClient := &fakeKube{podClient: api.Client, execFn: func(opts kube.ExecOptions) error {
+		if !strings.Contains(strings.Join(opts.Command, " "), "--method GET") {
+			t.Fatal("committed pair loss triggered a new runner POST")
+		}
+		gets++
+		_, _ = fmt.Fprintf(opts.Stdout, `{"status":"running","requestId":%q}`, string(build.UID))
+		return nil
+	}}
+	r.Kube = kubeClient
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(build)}); err == nil {
+		t.Fatal("still-running accepted job was stopped after committed pair loss")
+	}
+	var current kovav1.KovaBuild
+	if err := api.Get(ctx, client.ObjectKeyFromObject(build), &current); err != nil {
+		t.Fatal(err)
+	}
+	if current.Status.Phase != kovav1.PhaseRunning || current.Status.AdmissionGenesisWitness == nil ||
+		len(kubeClient.deleted) != 0 || gets != 1 || len(current.Finalizers) == 0 {
+		t.Fatalf("pair loss changed accepted running evidence: phase=%s witness=%+v deleted=%v gets=%d finalizers=%v",
+			current.Status.Phase, current.Status.AdmissionGenesisWitness, kubeClient.deleted, gets, current.Finalizers)
+	}
+	var active corev1.ConfigMap
+	if err := api.Get(ctx, client.ObjectKey{Namespace: build.Namespace, Name: AdmissionLedgerName}, &active); err != nil {
+		t.Fatal(err)
+	}
+	state, err := decodeReservations(&active)
+	if err != nil || len(state.Active) != 1 || state.Active[reservationKey(build)].Closing {
+		t.Fatalf("pair loss released or fenced charge: active=%+v err=%v", state.Active, err)
 	}
 }
 
