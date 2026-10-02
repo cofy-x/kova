@@ -160,7 +160,8 @@ func queuedAdmissionCandidates(builds []kovav1.KovaBuild, active map[string]acti
 		// Deleting and cancellation-requested builds can remain Queued while
 		// cleanup is blocked. They will never receive a real grant, so they
 		// must not consume one in the virtual fair-share allocation either.
-		if item.DeletionTimestamp.IsZero() && !cancellationRequested(item) &&
+		if item.Labels["kova.cofy.dev/recovery-tombstone"] == "" &&
+			item.DeletionTimestamp.IsZero() && !cancellationRequested(item) &&
 			(item.Status.Phase == "" || item.Status.Phase == kovav1.PhaseQueued) && active[reservationKey(item)].Slots == 0 {
 			queued = append(queued, item)
 		}

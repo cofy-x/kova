@@ -57,6 +57,11 @@ func (r *KovaBuildReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	if err := r.Get(ctx, req.NamespacedName, &build); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
+	// A recovery tombstone only occupies an old, pre-receipted name. It must
+	// never acquire a runner, finalizer workflow, admission grant, or status.
+	if build.Labels["kova.cofy.dev/recovery-tombstone"] != "" {
+		return ctrl.Result{}, nil
+	}
 	if !build.ObjectMeta.DeletionTimestamp.IsZero() {
 		return r.reconcileDelete(ctx, &build)
 	}
