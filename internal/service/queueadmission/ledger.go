@@ -14,10 +14,12 @@ import (
 	"time"
 
 	kovav1 "github.com/cofy-x/kova/internal/apis/kova/v1alpha1"
+	"github.com/cofy-x/kova/internal/service/admissionjson"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -26,6 +28,8 @@ const (
 	IntentAnnotation = "kova.cofy.dev/queue-intent"
 	dataKey          = "queue.json"
 	maxLedgerBytes   = 768 * 1024
+	maxHeaderBytes   = 4096
+	maxIntentBytes   = 512
 	maxCASAttempts   = 16
 )
 
@@ -91,30 +95,101 @@ func (s Store) freshState() state {
 	return state{Version: 1, GlobalLimit: s.GlobalLimit, RequesterLimit: s.RequesterLimit, Intents: map[string]Intent{}}
 }
 
+// A 253-byte DNS build ID, two 64-byte hashes, one 32-byte nonce, a
+// 19-digit positive timestamp and all JSON punctuation fit within 512 bytes.
+// The header reserves the largest configured integers and field names. Thus
+// every accepted 1000-intent table remains below the 768 KiB data guard.
+func validateLimits(global, requester int) error {
+	if global < 1 || global > 1000 || requester < 1 || requester > global ||
+		maxHeaderBytes+global*maxIntentBytes > maxLedgerBytes {
+		return fmt.Errorf("unsupported queue admission capacity")
+	}
+	return nil
+}
+
+func validLowerHex(value string, length int) bool {
+	if len(value) != length {
+		return false
+	}
+	for _, c := range value {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+func validateState(current state) error {
+	if current.Version != 1 || current.Intents == nil ||
+		validateLimits(current.GlobalLimit, current.RequesterLimit) != nil || len(current.Intents) > current.GlobalLimit {
+		return fmt.Errorf("unsupported queue admission state")
+	}
+	requesterCounts := make(map[string]int)
+	for id, entry := range current.Intents {
+		if len(id) == 0 || len(id) > 253 || len(validation.IsDNS1123Subdomain(id)) != 0 ||
+			!validLowerHex(entry.RequesterHash, 64) || !validLowerHex(entry.RequestDigest, 64) ||
+			!validLowerHex(entry.Nonce, 32) || entry.CreatedAtUnix < 1 {
+			return fmt.Errorf("queue admission state has an invalid intent")
+		}
+		requesterCounts[entry.RequesterHash]++
+		if requesterCounts[entry.RequesterHash] > current.RequesterLimit {
+			return fmt.Errorf("queue admission state exceeds requester capacity")
+		}
+	}
+	return nil
+}
+
+func encodeState(current state) ([]byte, error) {
+	if err := validateState(current); err != nil {
+		return nil, err
+	}
+	data, err := json.Marshal(current)
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > maxLedgerBytes {
+		return nil, fmt.Errorf("queue ledger would exceed %d bytes", maxLedgerBytes)
+	}
+	return data, nil
+}
+
+func allowedQueueField(path []string, key string) bool {
+	switch len(path) {
+	case 0:
+		switch key {
+		case "version", "globalLimit", "requesterLimit", "intents":
+			return true
+		}
+	case 1:
+		return path[0] == "intents"
+	case 2:
+		if path[0] == "intents" {
+			switch key {
+			case "requesterHash", "requestDigest", "nonce", "createdAtUnix":
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func (s Store) read(ctx context.Context) (*corev1.ConfigMap, state, error) {
 	var cm corev1.ConfigMap
 	if err := s.reader().Get(ctx, s.key(), &cm); err != nil {
 		return nil, state{}, err
 	}
-	if len(cm.Data[dataKey]) > maxLedgerBytes {
-		return nil, state{}, fmt.Errorf("queue ledger %s exceeds its size guard", s.key())
+	if len(cm.Data) != 1 || len(cm.Data[dataKey]) == 0 || len(cm.Data[dataKey]) > maxLedgerBytes || len(cm.BinaryData) != 0 {
+		return nil, state{}, fmt.Errorf("queue ledger %s has invalid data keys or size", s.key())
 	}
 	var result state
-	if err := json.Unmarshal([]byte(cm.Data[dataKey]), &result); err != nil {
+	if err := admissionjson.Decode([]byte(cm.Data[dataKey]), &result, allowedQueueField); err != nil {
 		return nil, state{}, fmt.Errorf("queue ledger %s is invalid: %w", s.key(), err)
 	}
-	if result.Version != 1 || result.Intents == nil || result.GlobalLimit != s.GlobalLimit || result.RequesterLimit != s.RequesterLimit || s.GlobalLimit < 1 || s.GlobalLimit > 1000 || s.RequesterLimit < 1 || s.RequesterLimit > s.GlobalLimit || len(result.Intents) > s.GlobalLimit {
+	if result.GlobalLimit != s.GlobalLimit || result.RequesterLimit != s.RequesterLimit {
 		return nil, state{}, fmt.Errorf("queue ledger %s has invalid state or mismatched replica limits", s.key())
 	}
-	requesterCounts := make(map[string]int)
-	for id, entry := range result.Intents {
-		if id == "" || len(entry.RequesterHash) != 64 || len(entry.RequestDigest) != 64 || len(entry.Nonce) != 32 || entry.CreatedAtUnix < 1 {
-			return nil, state{}, fmt.Errorf("queue ledger %s has an invalid intent", s.key())
-		}
-		requesterCounts[entry.RequesterHash]++
-		if requesterCounts[entry.RequesterHash] > s.RequesterLimit {
-			return nil, state{}, fmt.Errorf("queue ledger %s exceeds its per-requester limit", s.key())
-		}
+	if err := validateState(result); err != nil {
+		return nil, state{}, fmt.Errorf("queue ledger %s has unsupported state: %w", s.key(), err)
 	}
 	return &cm, result, nil
 }
@@ -131,7 +206,7 @@ func (s Store) CheckReady(ctx context.Context) error {
 // Service startup must run this before creating the active ledger, otherwise
 // rejecting legacy builds here would leave an unusable half-initialized pair.
 func (s Store) PreflightInitialization(ctx context.Context) error {
-	if s.GlobalLimit < 1 || s.GlobalLimit > 1000 || s.RequesterLimit < 1 || s.RequesterLimit > s.GlobalLimit {
+	if err := validateLimits(s.GlobalLimit, s.RequesterLimit); err != nil {
 		return fmt.Errorf("queue ledger %s has invalid replica limits", s.key())
 	}
 	if _, _, err := s.read(ctx); err == nil {
@@ -163,7 +238,7 @@ func (s Store) initialize(ctx context.Context) error {
 	if err := s.PreflightInitialization(ctx); err != nil {
 		return err
 	}
-	data, err := json.Marshal(s.freshState())
+	data, err := encodeState(s.freshState())
 	if err != nil {
 		return err
 	}
@@ -172,12 +247,12 @@ func (s Store) initialize(ctx context.Context) error {
 }
 
 func (s Store) write(ctx context.Context, cm *corev1.ConfigMap, next state) error {
-	data, err := json.Marshal(next)
+	if cm == nil || len(cm.Data) != 1 || len(cm.Data[dataKey]) == 0 || len(cm.BinaryData) != 0 {
+		return fmt.Errorf("queue ledger has unsupported data keys")
+	}
+	data, err := encodeState(next)
 	if err != nil {
 		return err
-	}
-	if len(data) > maxLedgerBytes {
-		return fmt.Errorf("queue ledger would exceed %d bytes", maxLedgerBytes)
 	}
 	copy := cm.DeepCopy()
 	copy.Data = map[string]string{dataKey: string(data)}

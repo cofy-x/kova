@@ -80,6 +80,7 @@ func TestFailedRunnerPartialReceiptRetriesRegistryAcrossLeaderAndNeverSucceeds(t
 	cfg := config.Config{RegistryPlainHTTP: []string{host}, VerificationAttemptTimeout: 150 * time.Millisecond, VerificationWindow: time.Minute}
 	r := KovaBuildReconciler{Client: crClient, Scheme: testScheme(t), Kube: kubeClient, Cfg: cfg}
 	initializeAdmissionForTest(t, &r)
+	cfg = r.Cfg
 	if _, err := r.finishObservedBuild(context.Background(), build, runnerexec.Client{Kube: kubeClient}, runner.BuildState{Status: "failed", Error: "one target failed"}); err != nil {
 		t.Fatal(err)
 	}
@@ -136,6 +137,7 @@ func TestFailedRunnerRetriesTransientExportButNeverReportsSuccess(t *testing.T) 
 	cfg := config.Config{RegistryPlainHTTP: []string{host}, VerificationWindow: time.Minute}
 	r := KovaBuildReconciler{Client: crClient, Scheme: testScheme(t), Kube: kubeClient, Cfg: cfg}
 	initializeAdmissionForTest(t, &r)
+	cfg = r.Cfg
 	if _, err := r.finishObservedBuild(context.Background(), build, runnerexec.Client{Kube: kubeClient}, runner.BuildState{Status: "failed", Error: "later step failed"}); err != nil {
 		t.Fatal(err)
 	}
@@ -239,6 +241,7 @@ func TestFailedRunnerTerminalWriteFaultKeepsReceiptAndRetriesPastDeadline(t *tes
 	cfg := config.Config{RegistryPlainHTTP: []string{host}, VerificationAttemptTimeout: time.Second}
 	r := KovaBuildReconciler{Client: statusClient, Scheme: testScheme(t), Kube: kubeClient, Cfg: cfg}
 	initializeAdmissionForTest(t, &r)
+	cfg = r.Cfg
 	if _, err := r.Reconcile(context.Background(), failedVerificationRequest(build)); err == nil || !strings.Contains(err.Error(), "injected failed terminal write rejection") {
 		t.Fatalf("terminal write fault = %v", err)
 	}

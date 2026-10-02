@@ -4,9 +4,11 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"net/http"
 	"reflect"
 	"strings"
+	"unicode/utf8"
 
 	kovav1 "github.com/cofy-x/kova/internal/apis/kova/v1alpha1"
 	"github.com/cofy-x/kova/internal/logging"
@@ -22,6 +24,12 @@ func (s *Server) handleCreateBuild(c echo.Context) error {
 	principal := principalFromContext(c)
 	if err := s.authorize(c.Request().Context(), principal, "create", ""); err != nil {
 		return authorizationFailure(c, err)
+	}
+	// The CRD bounds these identities by Unicode characters. Reject an
+	// unsupported authenticated identity before writing a durable queue intent.
+	if principal.Username == "" || !utf8.ValidString(principal.Username) || utf8.RuneCountInString(principal.Username) > 253 ||
+		!utf8.ValidString(principal.UID) || utf8.RuneCountInString(principal.UID) > 253 {
+		return invalidRequest(c, fmt.Errorf("authenticated requester identity exceeds the KovaBuild contract"))
 	}
 	if strings.TrimSpace(s.cfg.RunnerImage) == "" {
 		return internalContractError(c, &configurationError{message: "runner image is required"})

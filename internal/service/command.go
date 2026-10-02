@@ -300,8 +300,8 @@ func validateCapacityConfig(cfg config.Config) error {
 	if cfg.MaxBuildDuration > time.Duration(1<<63-1)-cfg.VerificationWindow {
 		return fmt.Errorf("max-build-duration plus verification-window overflows")
 	}
-	if cfg.MaxActiveJobs < 1 {
-		return fmt.Errorf("max-active-jobs must be at least 1")
+	if cfg.MaxActiveJobs < 1 || cfg.MaxActiveJobs > buildcontroller.MaxActiveJobs {
+		return fmt.Errorf("max-active-jobs must be between 1 and %d", buildcontroller.MaxActiveJobs)
 	}
 	if cfg.MaxActiveJobsPerRequester < 1 || cfg.MaxActiveJobsPerRequester > cfg.MaxActiveJobs {
 		return fmt.Errorf("max-active-jobs-per-requester must be between 1 and max-active-jobs")
@@ -315,8 +315,11 @@ func validateCapacityConfig(cfg config.Config) error {
 	if cfg.MaxQueuedJobsPerRequester > cfg.MaxQueuedJobs {
 		return fmt.Errorf("max-queued-jobs-per-requester must not exceed max-queued-jobs")
 	}
-	if cfg.WorkerSlots < 1 {
-		return fmt.Errorf("worker-slots must be at least 1")
+	if cfg.WorkerSlots < 1 || cfg.WorkerSlots > buildcontroller.MaxWorkerSlots {
+		return fmt.Errorf("worker-slots must be between 1 and %d", buildcontroller.MaxWorkerSlots)
+	}
+	if err := buildcontroller.ValidateReservationCapacity(cfg); err != nil {
+		return err
 	}
 	// Result verification can block one reconciler until its bounded I/O
 	// attempt ends. Keep another worker available for cancellation and cleanup.

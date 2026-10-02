@@ -9,8 +9,10 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	kovav1 "github.com/cofy-x/kova/internal/apis/kova/v1alpha1"
+	"github.com/cofy-x/kova/internal/service/admissionjson"
 	"github.com/cofy-x/kova/internal/service/config"
 	"github.com/cofy-x/kova/internal/service/queueadmission"
 
@@ -18,6 +20,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -28,6 +31,13 @@ const (
 	bootstrapAttemptKey       = "kova.cofy.dev/admission-bootstrap"
 	podCreateAttemptKey       = "kova.cofy.dev/create-attempt"
 	maxReservationCASAttempts = 16
+	maxReservationLedgerBytes = 768 * 1024
+	maxReservationHeaderBytes = 8192
+	maxReservationEntryBytes  = 3456
+	maxReservationUIDBytes    = 256
+	maxRequesterRunes         = 253
+	MaxActiveJobs             = 128
+	MaxWorkerSlots            = 65535
 )
 
 type activeReservation struct {
@@ -135,7 +145,7 @@ func (r *KovaBuildReconciler) initializeReservations(ctx context.Context, namesp
 			return nil, reservationState{}, false, err
 		}
 		state = r.freshReservations()
-		data, err := json.Marshal(state)
+		data, err := encodeReservations(state)
 		if err != nil {
 			return nil, reservationState{}, false, err
 		}
@@ -180,7 +190,7 @@ func PreflightAdmissionLedger(ctx context.Context, reader client.Reader, namespa
 	} else if !apierrors.IsNotFound(err) {
 		return err
 	}
-	if cfg.MaxActiveJobs < 1 || cfg.MaxActiveJobsPerRequester < 1 || cfg.MaxActiveJobsPerRequester > cfg.MaxActiveJobs || cfg.WorkerSlots < 1 {
+	if err := ValidateReservationCapacity(cfg); err != nil {
 		return fmt.Errorf("active admission ledger has invalid replica limits")
 	}
 	var builds kovav1.KovaBuildList
@@ -228,36 +238,109 @@ func CheckAdmissionLedger(ctx context.Context, reader client.Reader, namespace s
 
 func decodeReservations(cm *corev1.ConfigMap) (reservationState, error) {
 	var state reservationState
-	if err := json.Unmarshal([]byte(cm.Data[reservationDataKey]), &state); err != nil {
+	if len(cm.Data) != 1 || len(cm.Data[reservationDataKey]) == 0 || len(cm.Data[reservationDataKey]) > maxReservationLedgerBytes || len(cm.BinaryData) != 0 {
+		return reservationState{}, fmt.Errorf("admission ledger %s/%s has invalid data keys or size", cm.Namespace, cm.Name)
+	}
+	if err := admissionjson.Decode([]byte(cm.Data[reservationDataKey]), &state, allowedReservationField); err != nil {
 		return reservationState{}, fmt.Errorf("admission ledger %s/%s is invalid: %w", cm.Namespace, cm.Name, err)
 	}
-	if state.Version != 1 || state.Active == nil || state.MaxJobs < 0 || state.MaxPerRequester < 0 || state.WorkerSlots < 0 {
-		return reservationState{}, fmt.Errorf("admission ledger %s/%s has an unsupported state", cm.Namespace, cm.Name)
-	}
-	if cursor := state.LastGrantedRequesterHash; cursor != "" {
-		if len(cursor) != 64 || cursor != strings.ToLower(cursor) {
-			return reservationState{}, fmt.Errorf("admission ledger %s/%s has an invalid requester cursor", cm.Namespace, cm.Name)
-		}
-		if _, err := hex.DecodeString(cursor); err != nil {
-			return reservationState{}, fmt.Errorf("admission ledger %s/%s has an invalid requester cursor", cm.Namespace, cm.Name)
-		}
-	}
-	for key, entry := range state.Active {
-		if key == "" || entry.BuildName == "" || entry.Requester == "" || entry.Slots < 1 {
-			return reservationState{}, fmt.Errorf("admission ledger %s/%s has an invalid active reservation", cm.Namespace, cm.Name)
-		}
-		seen := map[string]bool{}
-		for _, attempt := range entry.InFlight {
-			if attempt == "" || seen[attempt] {
-				return reservationState{}, fmt.Errorf("admission ledger %s/%s has an invalid Pod create attempt", cm.Namespace, cm.Name)
-			}
-			seen[attempt] = true
-		}
+	if err := validateReservationState(state); err != nil {
+		return reservationState{}, fmt.Errorf("admission ledger %s/%s has unsupported state: %w", cm.Namespace, cm.Name, err)
 	}
 	return state, nil
 }
 
+func allowedReservationField(path []string, key string) bool {
+	switch len(path) {
+	case 0:
+		switch key {
+		case "version", "fence", "maxJobs", "maxPerRequester", "workerSlots", "lastGrantedRequesterHash", "active":
+			return true
+		}
+	case 1:
+		return path[0] == "active"
+	case 2:
+		if path[0] == "active" {
+			switch key {
+			case "buildName", "requester", "slots", "closing", "inFlight":
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// The entry reserve includes a 256-byte opaque UID key (up to six escaped
+// bytes per input byte), a 253-byte DNS name, 253 Unicode requester runes
+// (up to six escaped bytes each), one future 32-byte Pod nonce, closing=true,
+// the largest slot integer, field names and separators. The header includes
+// the full 20-digit fence and 64-byte fairness cursor. Admission can fill the
+// configured table without making a later nonce, close or fence write too big.
+func ValidateReservationCapacity(cfg config.Config) error {
+	if cfg.MaxActiveJobs < 1 || cfg.MaxActiveJobs > MaxActiveJobs ||
+		cfg.MaxActiveJobsPerRequester < 1 || cfg.MaxActiveJobsPerRequester > cfg.MaxActiveJobs ||
+		cfg.WorkerSlots < 1 || cfg.WorkerSlots > MaxWorkerSlots ||
+		maxReservationHeaderBytes+cfg.MaxActiveJobs*maxReservationEntryBytes > maxReservationLedgerBytes {
+		return fmt.Errorf("active admission limits exceed the supported encoded capacity")
+	}
+	return nil
+}
+
+func validReservationHex(value string, length int) bool {
+	if len(value) != length || value != strings.ToLower(value) {
+		return false
+	}
+	_, err := hex.DecodeString(value)
+	return err == nil
+}
+
+func validateReservationState(state reservationState) error {
+	if state.Version != 1 || state.Active == nil ||
+		ValidateReservationCapacity(config.Config{MaxActiveJobs: state.MaxJobs, MaxActiveJobsPerRequester: state.MaxPerRequester, WorkerSlots: state.WorkerSlots}) != nil ||
+		len(state.Active) > state.MaxJobs ||
+		(state.LastGrantedRequesterHash != "" && !validReservationHex(state.LastGrantedRequesterHash, 64)) {
+		return fmt.Errorf("admission ledger has unsupported capacity or state")
+	}
+	usedSlots := 0
+	byRequester := make(map[string]int)
+	for key, entry := range state.Active {
+		if key == "" || len(key) > maxReservationUIDBytes || !utf8.ValidString(key) ||
+			len(entry.BuildName) == 0 || len(entry.BuildName) > 253 || len(validation.IsDNS1123Subdomain(entry.BuildName)) != 0 ||
+			entry.Requester == "" || !utf8.ValidString(entry.Requester) || utf8.RuneCountInString(entry.Requester) > maxRequesterRunes ||
+			entry.Slots < 1 || entry.Slots > state.WorkerSlots || len(entry.InFlight) > 1 ||
+			(len(entry.InFlight) == 1 && !validReservationHex(entry.InFlight[0], 32)) {
+			return fmt.Errorf("admission ledger has invalid active reservation")
+		}
+		if usedSlots > state.WorkerSlots-entry.Slots {
+			return fmt.Errorf("admission ledger exceeds worker slots")
+		}
+		usedSlots += entry.Slots
+		byRequester[entry.Requester]++
+		if byRequester[entry.Requester] > state.MaxPerRequester {
+			return fmt.Errorf("admission ledger exceeds requester capacity")
+		}
+	}
+	return nil
+}
+
+func encodeReservations(state reservationState) ([]byte, error) {
+	if err := validateReservationState(state); err != nil {
+		return nil, err
+	}
+	data, err := json.Marshal(state)
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > maxReservationLedgerBytes {
+		return nil, fmt.Errorf("active admission ledger exceeds %d bytes", maxReservationLedgerBytes)
+	}
+	return data, nil
+}
+
 func (r *KovaBuildReconciler) validateReservationLimits(state reservationState) error {
+	if err := ValidateReservationCapacity(r.Cfg); err != nil {
+		return err
+	}
 	if state.MaxJobs != r.Cfg.MaxActiveJobs || state.MaxPerRequester != r.Cfg.MaxActiveJobsPerRequester || state.WorkerSlots != r.Cfg.WorkerSlots {
 		return fmt.Errorf("active admission ledger limits differ from this Service replica")
 	}
@@ -269,7 +352,10 @@ func (r *KovaBuildReconciler) freshReservations() reservationState {
 }
 
 func (r *KovaBuildReconciler) writeReservations(ctx context.Context, cm *corev1.ConfigMap, state reservationState) error {
-	data, err := json.Marshal(state)
+	if cm == nil || len(cm.Data) != 1 || len(cm.Data[reservationDataKey]) == 0 || len(cm.BinaryData) != 0 {
+		return fmt.Errorf("active admission ledger has unsupported data keys")
+	}
+	data, err := encodeReservations(state)
 	if err != nil {
 		return err
 	}
@@ -300,9 +386,8 @@ func (r *KovaBuildReconciler) fenceReservation(ctx context.Context, build *kovav
 		if err != nil {
 			return err
 		}
-		if state.Fence == ^uint64(0) {
-			return fmt.Errorf("active admission fence counter is exhausted in %s", build.Namespace)
-		}
+		// ResourceVersion CAS is the fence. The numeric field may wrap without
+		// reusing an old resourceVersion or blocking cleanup at MaxUint64.
 		state.Fence++
 		if entry, ok := state.Active[reservationKey(build)]; ok {
 			if entry.BuildName != build.Name {
@@ -326,20 +411,14 @@ func (r *KovaBuildReconciler) fenceReservation(ctx context.Context, build *kovav
 }
 
 func (r *KovaBuildReconciler) releaseReservation(ctx context.Context, build *kovav1.KovaBuild) error {
-	key := client.ObjectKey{Namespace: build.Namespace, Name: reservationConfigMap}
 	for retry := 0; retry < maxReservationCASAttempts; retry++ {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		var cm corev1.ConfigMap
-		if err := r.reader().Get(ctx, key, &cm); err != nil {
-			return client.IgnoreNotFound(err)
-		}
-		state, err := decodeReservations(&cm)
+		cm, state, err := r.readReservations(ctx, build.Namespace)
 		if err != nil {
-			return err
-		}
-		if err := r.validateReservationLimits(state); err != nil {
+			// A missing ledger may have held capacity or an unresolved Pod Create.
+			// Finalizer cleanup must retain that evidence rather than report success.
 			return err
 		}
 		entry, ok := state.Active[reservationKey(build)]
@@ -361,7 +440,7 @@ func (r *KovaBuildReconciler) releaseReservation(ctx context.Context, build *kov
 			return fmt.Errorf("runner Pod %s/%s still exists while releasing active capacity", pod.Namespace, pod.Name)
 		}
 		delete(state.Active, reservationKey(build))
-		if err := r.writeReservations(ctx, &cm, state); err != nil {
+		if err := r.writeReservations(ctx, cm, state); err != nil {
 			if apierrors.IsConflict(err) {
 				if err := waitReservationCAS(ctx, retry); err != nil {
 					return err

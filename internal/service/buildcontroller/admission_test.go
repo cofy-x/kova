@@ -470,6 +470,18 @@ func admissionConfig() config.Config {
 
 func initializeAdmissionForTest(t *testing.T, r *KovaBuildReconciler) {
 	t.Helper()
+	// Older fixtures omitted runtime limits because zero previously meant
+	// unbounded. Give those fixtures explicit chart-sized limits; tests that
+	// exercise capacity supply their own narrower values.
+	if r.Cfg.MaxActiveJobs == 0 {
+		r.Cfg.MaxActiveJobs = 20
+	}
+	if r.Cfg.MaxActiveJobsPerRequester == 0 {
+		r.Cfg.MaxActiveJobsPerRequester = min(4, r.Cfg.MaxActiveJobs)
+	}
+	if r.Cfg.WorkerSlots == 0 {
+		r.Cfg.WorkerSlots = 20
+	}
 	ctx := context.Background()
 	if _, _, err := r.readReservations(ctx, "jobs"); err == nil {
 		return

@@ -109,6 +109,8 @@ func TestRegistryFaultDuringVerificationRetriesAfterLeaderRestart(t *testing.T) 
 			key := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: build.Namespace, Name: build.Name}}
 			mode.Store(tc.mode)
 			firstLeader := KovaBuildReconciler{Client: crClient, Scheme: testScheme(t), Kube: kubeClient, Cfg: cfg}
+			initializeAdmissionForTest(t, &firstLeader)
+			cfg = firstLeader.Cfg
 			if _, err := firstLeader.Reconcile(context.Background(), key); err != nil {
 				t.Fatal(err)
 			}
@@ -151,6 +153,7 @@ func TestRegistryTimeoutUntilVerificationDeadlineFailsBeforeCleanup(t *testing.T
 	mode.Store(registryTimeout)
 	firstLeader := KovaBuildReconciler{Client: crClient, Scheme: testScheme(t), Kube: kubeClient, Cfg: cfg}
 	initializeAdmissionForTest(t, &firstLeader)
+	cfg = firstLeader.Cfg
 	if _, err := firstLeader.Reconcile(context.Background(), key); err != nil {
 		t.Fatal(err)
 	}
@@ -251,6 +254,7 @@ func TestOverwrittenTagWithGarbageCollectedDigestFailsClosedAtDeadline(t *testin
 	key := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: build.Namespace, Name: build.Name}}
 	r := KovaBuildReconciler{Client: crClient, Scheme: testScheme(t), Kube: kubeClient, Cfg: cfg}
 	initializeAdmissionForTest(t, &r)
+	cfg = r.Cfg
 	if _, err := r.Reconcile(context.Background(), key); err != nil {
 		t.Fatal(err)
 	}
@@ -337,6 +341,7 @@ func TestTerminalWriteFailureKeepsExactReceiptAndPodUntilRestart(t *testing.T) {
 	recorder := record.NewFakeRecorder(2)
 	firstLeader := KovaBuildReconciler{Client: statusClient, Scheme: testScheme(t), Kube: kubeClient, Cfg: cfg, Recorder: recorder}
 	initializeAdmissionForTest(t, &firstLeader)
+	cfg = firstLeader.Cfg
 	if _, err := firstLeader.Reconcile(context.Background(), key); err == nil || !strings.Contains(err.Error(), "injected terminal status write failure") {
 		t.Fatalf("first reconcile error=%v, want injected terminal write failure", err)
 	}
