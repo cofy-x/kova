@@ -29,11 +29,29 @@ import (
 
 type fakeDirect struct {
 	client.Client
-	creates   int
-	attempts  int
-	builds    int
-	pods      int
-	intercept func(client.Object) (bool, error)
+	creates        int
+	updates        int
+	attempts       int
+	builds         int
+	pods           int
+	intercept      func(client.Object) (bool, error)
+	namespaceReads int
+	stopReads      int
+	getIntercept   func(client.Object) error
+}
+
+func (f *fakeDirect) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+	err := f.Client.Get(ctx, key, obj, opts...)
+	if _, ok := obj.(*corev1.Namespace); ok {
+		f.namespaceReads++
+	}
+	if cm, ok := obj.(*corev1.ConfigMap); ok && cm.Name == "stop-incident-one" {
+		f.stopReads++
+	}
+	if err == nil && f.getIntercept != nil {
+		return f.getIntercept(obj)
+	}
+	return err
 }
 
 func (f *fakeDirect) Create(ctx context.Context, obj client.Object, opts ...client.CreateOption) error {
@@ -55,6 +73,11 @@ func (f *fakeDirect) Create(ctx context.Context, obj client.Object, opts ...clie
 		obj.SetUID(types.UID(fmt.Sprintf("created-%d", f.creates)))
 	}
 	return f.Client.Create(ctx, obj, opts...)
+}
+
+func (f *fakeDirect) Update(ctx context.Context, obj client.Object, opts ...client.UpdateOption) error {
+	f.updates++
+	return f.Client.Update(ctx, obj, opts...)
 }
 
 func fixture(t *testing.T, existingBuild bool, withPod bool) (Input, *fakeDirect, *kovav1.KovaBuild) {
@@ -410,5 +433,71 @@ func TestDrainLateOriginalWinsAtomicNameRace(t *testing.T) {
 	}
 	if report.Dispositions[0].State != "original-retained" || report.Dispositions[0].UID != string(build.UID) || api.builds != 1 {
 		t.Fatalf("late original was not retained: %#v", report)
+	}
+}
+
+func TestNamespaceUIDReplacementBeforeFirstEffectIsUnknownAndDoesNotWrite(t *testing.T) {
+	in, api, _ := fixture(t, false, false)
+	api.getIntercept = func(obj client.Object) error {
+		if namespace, ok := obj.(*corev1.Namespace); ok && api.namespaceReads >= 2 {
+			namespace.UID = "replacement-namespace-uid"
+		}
+		return nil
+	}
+	report, err := Drain(context.Background(), api, in)
+	if !errors.Is(err, ErrUnknown) || report.Stage != "occupancy-unknown" || api.creates != 0 {
+		t.Fatalf("replacement namespace allowed write: %#v, %v, writes=%d", report, err, api.creates)
+	}
+}
+
+func TestNamespaceUIDReplacementBeforeOriginalHoldDoesNotUpdate(t *testing.T) {
+	in, api, _ := fixture(t, true, false)
+	api.getIntercept = func(obj client.Object) error {
+		if namespace, ok := obj.(*corev1.Namespace); ok && api.namespaceReads >= 2 {
+			namespace.UID = "replacement-namespace-uid"
+		}
+		return nil
+	}
+	report, err := Drain(context.Background(), api, in)
+	if !errors.Is(err, ErrUnknown) || report.Stage != "occupancy-unknown" || api.updates != 0 || api.creates != 0 {
+		t.Fatalf("replacement namespace allowed hold: %#v, %v, updates=%d", report, err, api.updates)
+	}
+}
+
+func TestStopLossAfterAttemptPreventsTombstoneCreate(t *testing.T) {
+	in, api, _ := fixture(t, false, false)
+	api.intercept = func(obj client.Object) (bool, error) {
+		cm, ok := obj.(*corev1.ConfigMap)
+		if !ok || !strings.HasPrefix(cm.Name, attemptPrefix) {
+			return false, nil
+		}
+		cm.UID = "attempt-original-uid"
+		if err := api.Client.Create(context.Background(), cm); err != nil {
+			t.Fatal(err)
+		}
+		stop := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Namespace: in.Expected.StopIntent.Namespace, Name: in.Expected.StopIntent.Name}}
+		if err := api.Client.Delete(context.Background(), stop); err != nil {
+			t.Fatal(err)
+		}
+		return true, nil
+	}
+	report, err := Drain(context.Background(), api, in)
+	if !errors.Is(err, ErrUnknown) || report.Stage != "occupancy-unknown" || api.attempts != 1 || api.builds != 0 {
+		t.Fatalf("lost stop allowed tombstone Create: %#v, %v, writes=%d/%d", report, err, api.attempts, api.builds)
+	}
+}
+
+func TestNamespaceReplacementAtFinalReadbackCannotReportOccupied(t *testing.T) {
+	in, api, _ := fixture(t, false, false)
+	api.getIntercept = func(obj client.Object) error {
+		if namespace, ok := obj.(*corev1.Namespace); ok && api.namespaceReads >= 5 {
+			namespace.UID = "replacement-namespace-uid"
+		}
+		return nil
+	}
+	report, err := Drain(context.Background(), api, in)
+	if !errors.Is(err, ErrUnknown) || report.Stage != "occupancy-unknown" || len(report.Dispositions) != 1 ||
+		api.attempts != 1 || api.builds != 1 {
+		t.Fatalf("replacement namespace falsely reported occupied: %#v, %v", report, err)
 	}
 }

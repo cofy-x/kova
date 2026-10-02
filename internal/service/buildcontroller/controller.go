@@ -11,6 +11,7 @@ import (
 	"github.com/cofy-x/kova/internal/observability"
 	"github.com/cofy-x/kova/internal/service/config"
 	"github.com/cofy-x/kova/internal/service/queueadmission"
+	"github.com/cofy-x/kova/internal/service/recoverydrain"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -59,7 +60,7 @@ func (r *KovaBuildReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	}
 	// A recovery tombstone only occupies an old, pre-receipted name. It must
 	// never acquire a runner, finalizer workflow, admission grant, or status.
-	if build.Labels["kova.cofy.dev/recovery-tombstone"] != "" {
+	if recoverydrain.IsInertBuildTombstone(&build) {
 		return ctrl.Result{}, nil
 	}
 	if !build.ObjectMeta.DeletionTimestamp.IsZero() {

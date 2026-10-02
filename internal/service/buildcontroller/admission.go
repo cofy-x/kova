@@ -7,6 +7,7 @@ import (
 
 	kovav1 "github.com/cofy-x/kova/internal/apis/kova/v1alpha1"
 	"github.com/cofy-x/kova/internal/service/queueadmission"
+	"github.com/cofy-x/kova/internal/service/recoverydrain"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -160,7 +161,7 @@ func queuedAdmissionCandidates(builds []kovav1.KovaBuild, active map[string]acti
 		// Deleting and cancellation-requested builds can remain Queued while
 		// cleanup is blocked. They will never receive a real grant, so they
 		// must not consume one in the virtual fair-share allocation either.
-		if item.Labels["kova.cofy.dev/recovery-tombstone"] == "" &&
+		if !recoverydrain.IsInertBuildTombstone(item) &&
 			item.DeletionTimestamp.IsZero() && !cancellationRequested(item) &&
 			(item.Status.Phase == "" || item.Status.Phase == kovav1.PhaseQueued) && active[reservationKey(item)].Slots == 0 {
 			queued = append(queued, item)

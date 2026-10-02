@@ -117,6 +117,9 @@ func Drain(ctx context.Context, api DirectAPI, in Input) (Report, error) {
 		}
 		report.Dispositions = append(report.Dispositions, disposition)
 	}
+	if err := qualifyStopAndNamespace(ctx, api, in.Expected); err != nil {
+		return report, fmt.Errorf("%w: final namespace/stop readback: %v", ErrUnknown, err)
+	}
 	report.Stage = "occupied-not-drained"
 	return report, nil
 }
@@ -378,6 +381,9 @@ func occupy(ctx context.Context, api DirectAPI, exp recoverypermit.Expectation, 
 	} else {
 		proposed = newPodTombstone(exp, item.name)
 	}
+	if err := qualifyStopAndNamespace(ctx, api, exp); err != nil {
+		return Disposition{}, fmt.Errorf("namespace/stop changed before tombstone Create: %w", err)
+	}
 	createErr := api.Create(ctx, proposed) // exactly one wire attempt by caller's transport
 	observed, readErr := getTarget(ctx, api, exp.Epoch.Namespace, item)
 	if readErr != nil {
@@ -418,6 +424,9 @@ func retain(ctx context.Context, api DirectAPI, exp recoverypermit.Expectation, 
 		return Disposition{}, err
 	}
 	if !slices.Contains(observed.GetFinalizers(), holdFinalizer) {
+		if err := qualifyStopAndNamespace(ctx, api, exp); err != nil {
+			return Disposition{}, fmt.Errorf("namespace/stop changed before hold: %w", err)
+		}
 		observed.SetFinalizers(append(slices.Clone(observed.GetFinalizers()), holdFinalizer))
 		if err := api.Update(ctx, observed); err != nil {
 			return Disposition{}, fmt.Errorf("UID/RV-bounded hold: %w", err)
@@ -434,6 +443,9 @@ func retain(ctx context.Context, api DirectAPI, exp recoverypermit.Expectation, 
 		}
 	} else if err := qualifyOriginal(item, readback); err != nil {
 		return Disposition{}, err
+	}
+	if err := qualifyStopAndNamespace(ctx, api, exp); err != nil {
+		return Disposition{}, fmt.Errorf("namespace/stop changed after occupant readback: %w", err)
 	}
 	return Disposition{Kind: item.kind, Name: item.name, UID: string(readback.GetUID()), State: state}, nil
 }
@@ -516,8 +528,7 @@ func qualifyTombstone(exp recoverypermit.Expectation, item target, observed clie
 	}
 	if item.kind == "KovaBuild" {
 		value, ok := observed.(*kovav1.KovaBuild)
-		want := newBuildTombstone(exp, item.name)
-		if !ok || !reflect.DeepEqual(value.Spec, want.Spec) {
+		if !ok || !IsInertBuildTombstone(value) {
 			return errors.New("KovaBuild tombstone is not inert")
 		}
 		return nil
@@ -547,10 +558,25 @@ func newMeta(exp recoverypermit.Expectation, name string) metav1.ObjectMeta {
 func newBuildTombstone(exp recoverypermit.Expectation, name string) *kovav1.KovaBuild {
 	return &kovav1.KovaBuild{TypeMeta: metav1.TypeMeta{APIVersion: kovav1.Group + "/" + kovav1.Version, Kind: "KovaBuild"},
 		ObjectMeta: newMeta(exp, name),
-		Spec: kovav1.KovaBuildSpec{Requester: kovav1.KovaBuildRequester{Username: "recovery-tombstone"},
-			Targets: []kovav1.KovaBuildTargetSpec{{Target: "recovery.invalid/tombstone:never", Platform: "linux/amd64"}},
-			Source:  kovav1.KovaBuildSourceSpec{URI: "https://recovery.invalid/inert", Digest: "sha256:" + strings.Repeat("0", 64)},
-			Build:   kovav1.KovaBuildOptions{Format: "oci"}}}
+		Spec:       inertBuildSpec()}
+}
+
+func inertBuildSpec() kovav1.KovaBuildSpec {
+	return kovav1.KovaBuildSpec{Requester: kovav1.KovaBuildRequester{Username: "recovery-tombstone"},
+		Targets: []kovav1.KovaBuildTargetSpec{{Target: "recovery.invalid/tombstone:never", Platform: "linux/amd64"}},
+		Source:  kovav1.KovaBuildSourceSpec{URI: "https://recovery.invalid/inert", Digest: "sha256:" + strings.Repeat("0", 64)},
+		// The serving CRD's CEL rule reads self.spec.build.concurrency;
+		// omitting it is rejected even though the Go field is omitempty.
+		Build: kovav1.KovaBuildOptions{Format: "oci", Concurrency: 1}}
+}
+
+// IsInertBuildTombstone is the controller's strict skip predicate. A marker
+// label on a real KovaBuild cannot suppress its ordinary reconcile/cleanup.
+func IsInertBuildTombstone(build *kovav1.KovaBuild) bool {
+	return build != nil && build.Labels[markerKey] == markerValue &&
+		build.Annotations[markerKey] != "" && build.Annotations["kova.cofy.dev/recovery-epoch-uid"] != "" &&
+		slices.Contains(build.Finalizers, holdFinalizer) && len(build.OwnerReferences) == 0 &&
+		reflect.DeepEqual(build.Spec, inertBuildSpec())
 }
 
 func newPodTombstone(exp recoverypermit.Expectation, name string) *corev1.Pod {
@@ -599,6 +625,9 @@ func recordAttemptOnce(ctx context.Context, api DirectAPI, exp recoverypermit.Ex
 	}
 	if !apierrors.IsNotFound(err) {
 		return false, err
+	}
+	if err := qualifyStopAndNamespace(ctx, api, exp); err != nil {
+		return false, fmt.Errorf("namespace/stop changed before occupancy attempt: %w", err)
 	}
 	created := expected.DeepCopy()
 	createErr := api.Create(ctx, created)
