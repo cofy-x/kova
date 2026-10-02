@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -20,6 +21,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	crfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
@@ -62,6 +64,13 @@ func (f *fakeKube) DeletePod(_ context.Context, namespace string, name string) e
 	defer f.mu.Unlock()
 	f.deleted = append(f.deleted, namespace+"/"+name)
 	return nil
+}
+
+func (f *fakeKube) DeletePodWithUID(ctx context.Context, namespace, name string, uid types.UID) error {
+	if uid == "" {
+		return fmt.Errorf("refusing to delete pod %s/%s without a UID", namespace, name)
+	}
+	return f.DeletePod(ctx, namespace, name)
 }
 
 func (f *fakeKube) WritePodLogsTail(_ context.Context, _ string, _ string, _ int64, out io.Writer) error {

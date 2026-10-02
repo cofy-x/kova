@@ -310,11 +310,11 @@ type assertReceiptBeforeDeleteKube struct {
 	check func() error
 }
 
-func (k *assertReceiptBeforeDeleteKube) DeletePod(ctx context.Context, namespace, name string) error {
+func (k *assertReceiptBeforeDeleteKube) DeletePodWithUID(ctx context.Context, namespace, name string, uid types.UID) error {
 	if err := k.check(); err != nil {
 		return err
 	}
-	return k.fakeKube.DeletePod(ctx, namespace, name)
+	return k.fakeKube.DeletePodWithUID(ctx, namespace, name, uid)
 }
 
 func TestTerminalWriteFailureKeepsExactReceiptAndPodUntilRestart(t *testing.T) {
