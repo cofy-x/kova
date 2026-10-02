@@ -36,6 +36,9 @@ func (s *Server) handleCancelBuild(c echo.Context) error {
 	if build.Annotations[kovav1.CancellationRequestedAnnotation] == "" {
 		build.Annotations[kovav1.CancellationRequestedAnnotation] = time.Now().UTC().Format(time.RFC3339Nano)
 	}
+	if err := s.checkGenesis(c.Request().Context()); err != nil {
+		return serviceUnavailable(c, err)
+	}
 	if err := s.client.Patch(c.Request().Context(), build, client.MergeFrom(base)); err != nil {
 		return internalError(c, err)
 	}
@@ -61,6 +64,9 @@ func (s *Server) handleRunnerAction(c echo.Context, action, contentType string) 
 	}
 	if err := s.authorizeBuild(c.Request().Context(), principalFromContext(c), "update", build); err != nil {
 		return authorizationFailure(c, err)
+	}
+	if err := s.checkGenesis(c.Request().Context()); err != nil {
+		return serviceUnavailable(c, err)
 	}
 	out, err := s.runner().Post(c.Request().Context(), build, action, c.QueryString())
 	if err != nil {

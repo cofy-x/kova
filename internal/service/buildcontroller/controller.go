@@ -9,6 +9,7 @@ import (
 	"github.com/cofy-x/kova/internal/buildcontract"
 	"github.com/cofy-x/kova/internal/kube"
 	"github.com/cofy-x/kova/internal/observability"
+	"github.com/cofy-x/kova/internal/service/admissiongenesis"
 	"github.com/cofy-x/kova/internal/service/config"
 	"github.com/cofy-x/kova/internal/service/queueadmission"
 
@@ -39,6 +40,7 @@ type KovaBuildReconciler struct {
 	Kube     kube.API
 	Cfg      config.Config
 	Recorder record.EventRecorder
+	Genesis  *admissiongenesis.Guard
 	// APIReader bypasses the manager cache for capacity and recovery reads.
 	APIReader         client.Reader
 	verificationOnce  sync.Once
@@ -47,7 +49,7 @@ type KovaBuildReconciler struct {
 
 func (r *KovaBuildReconciler) queueStoreForNamespace(namespace string) queueadmission.Store {
 	return queueadmission.Store{
-		Client: r.Client, Reader: r.reader(), Namespace: namespace,
+		Client: r.Client, Reader: r.reader(), Genesis: r.Genesis, Namespace: namespace,
 		GlobalLimit: r.Cfg.MaxQueuedJobs, RequesterLimit: r.Cfg.MaxQueuedJobsPerRequester,
 	}
 }

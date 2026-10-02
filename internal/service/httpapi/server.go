@@ -10,6 +10,7 @@ import (
 	"github.com/cofy-x/kova/internal/kube"
 	"github.com/cofy-x/kova/internal/logging"
 	"github.com/cofy-x/kova/internal/observability"
+	"github.com/cofy-x/kova/internal/service/admissiongenesis"
 	serviceauth "github.com/cofy-x/kova/internal/service/auth"
 	"github.com/cofy-x/kova/internal/service/buildcontroller"
 	"github.com/cofy-x/kova/internal/service/config"
@@ -34,6 +35,8 @@ type Server struct {
 	readinessReader client.Reader
 	auth            serviceauth.Authenticator
 	authz           serviceauth.Authorizer
+	genesis         admissiongenesis.Checker
+	genesisLedger   *admissiongenesis.Guard
 }
 
 var (
@@ -71,19 +74,43 @@ func NewServer(cfg config.Config, kube kubeAPI, crClient client.Client, crReader
 	return &Server{cfg: cfg, kube: kube, client: crClient, reader: crReader, readinessReader: readinessReader, auth: authenticator, authz: authorizer}
 }
 
+// WithGenesisGuard is an internal opt-in until all controller and cleanup
+// side-effect gates are wired. The default constructor retains legacy mode.
+func (s *Server) WithGenesisGuard(guard *admissiongenesis.Guard) *Server {
+	s.genesis = guard
+	s.genesisLedger = guard
+	return s
+}
+
+// withGenesisChecker injects an edge failure in package tests. Runtime
+// callers must supply a concrete Guard so queue writes cannot silently fall
+// back to legacy Update semantics.
+func (s *Server) withGenesisChecker(checker admissiongenesis.Checker) *Server {
+	s.genesis = checker
+	s.genesisLedger = nil
+	return s
+}
+
+func (s *Server) checkGenesis(ctx context.Context) error {
+	if s.genesis == nil {
+		return nil
+	}
+	return s.genesis.Check(ctx)
+}
+
 func (s *Server) queueStore() queueadmission.Store {
 	return s.queueStoreWithReader(s.reader)
 }
 
 func (s *Server) queueStoreWithReader(reader client.Reader) queueadmission.Store {
 	return queueadmission.Store{
-		Client: s.client, Reader: reader, Namespace: s.cfg.Namespace,
+		Client: s.client, Reader: reader, Genesis: s.genesisLedger, Namespace: s.cfg.Namespace,
 		GlobalLimit: s.cfg.MaxQueuedJobs, RequesterLimit: s.cfg.MaxQueuedJobsPerRequester,
 	}
 }
 
 func (s *Server) Start(ctx context.Context) error {
-	if err := s.initializeAdmission(ctx); err != nil {
+	if err := s.startAdmission(ctx); err != nil {
 		return err
 	}
 	httpSrv := s.httpServer()
@@ -98,6 +125,15 @@ func (s *Server) Start(ctx context.Context) error {
 		return err
 	}
 	return nil
+}
+
+func (s *Server) startAdmission(ctx context.Context) error {
+	if s.genesis != nil {
+		// Never enter the legacy both-missing Create path after a Genesis
+		// commit, including a deletion between startup and listener handoff.
+		return s.genesis.Check(ctx)
+	}
+	return s.initializeAdmission(ctx)
 }
 
 func (s *Server) httpServer() *http.Server {
@@ -231,8 +267,14 @@ func (s *Server) routes() *echo.Echo {
 		if err := s.readinessReader.List(c.Request().Context(), &builds, client.InNamespace(s.cfg.Namespace), client.Limit(1)); err != nil {
 			return serviceUnavailable(c, err)
 		}
-		if err := s.checkAdmissionLedgersWithReader(c.Request().Context(), s.readinessReader); err != nil {
-			return serviceUnavailable(c, err)
+		if s.genesis != nil {
+			if err := s.genesis.Check(c.Request().Context()); err != nil {
+				return serviceUnavailable(c, err)
+			}
+		} else {
+			if err := s.checkAdmissionLedgersWithReader(c.Request().Context(), s.readinessReader); err != nil {
+				return serviceUnavailable(c, err)
+			}
 		}
 		return c.JSON(http.StatusOK, apiv1.ReadyStatus{Status: "ready"})
 	})
