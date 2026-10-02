@@ -36,6 +36,7 @@ helm show chart "${ARCHIVE}" | grep -Fx "appVersion: ${TAG}" >/dev/null
 
 helm template kova "${ARCHIVE}" \
   --namespace kova \
+  -f "${ROOT}/scripts/chart/genesis-test-values.yaml" \
   --set serviceDaemon.enabled=true >"${rendered}"
 
 grep -F "image: \"ghcr.io/cofy-x/kova:controller-${TAG}\"" "${rendered}" >/dev/null
@@ -44,6 +45,7 @@ grep -F -- "--runner-image=ghcr.io/cofy-x/kova:runner-${TAG}" "${rendered}" >/de
 
 helm template kova "${ARCHIVE}" \
   --namespace release \
+  -f "${ROOT}/scripts/chart/genesis-test-values.yaml" \
   --set serviceDaemon.enabled=true \
   --set serviceDaemon.runnerNamespace=jobs \
   --set imagePullSecrets.create=true \

@@ -1,6 +1,6 @@
 # Fresh Admission Bootstrap Recovery Proposal
 
-Status: proposed for [#57](https://github.com/cofy-x/kova/issues/57); isolated API mechanism checks passed, but product bootstrap and runtime recovery are not wired or accepted.
+Status: local candidate for [#57](https://github.com/cofy-x/kova/issues/57); bootstrap and runtime are wired and deterministic checks pass, but isolated product acceptance and committed-loss recovery remain incomplete.
 The existing two-ledger admission contract remains authoritative until this protocol, [#58](https://github.com/cofy-x/kova/issues/58), migration, and isolated runtime gates pass.
 Do not use this note to repair a released or live namespace.
 
@@ -29,7 +29,7 @@ Receipt/Genesis disagreement is an actionable refusal, not an invitation to disc
 
 ## Bootstrap and monotonic commit
 
-Run one shared startup gate before either the controller manager or HTTP listener begins work; today they start concurrently.
+Run one shared startup gate before either the controller manager or HTTP listener begins work.
 Any replica may continue the original `Initializing` generation after another replica crashes, but none may admit a CR, create a runner Pod, submit to a runner, complete cleanup, or return ready until the commit is qualified.
 Bootstrap uses direct named API reads, never cache, List emptiness, lease expiration, or elapsed time as authority.
 CR/runner Lists remain one-way vetoes for observed pre-existing work; external old-writer quiescence is an installation precondition, not inferred from those Lists.
@@ -94,8 +94,8 @@ Never reuse a runner Namespace name while an old writer or delayed request may s
 ## Installation, RBAC, and recovery boundary
 
 The installer records the original Namespace/Genesis UIDs and receipt outside runtime before starting Service replicas.
-The Service account needs direct `get` for the exact Namespace, named `get`/conditional `patch` for Genesis during bootstrap, and named ledger `get`/`update` for the current CAS writers plus the existing ledger Create permission; it must not receive ledger or Genesis `delete`.
-If an implementation changes ledger CAS to JSON Patch, add named ledger `patch` only with that reviewed implementation and remove no still-used `update` permission prematurely.
+The Service account needs direct `get` for the exact Namespace and receipt Secret, named `get`/conditional `patch` for Genesis and both ledgers, plus ledger Create permission; it must not receive ledger or Genesis `delete`.
+The candidate uses UID/resourceVersion/data-tested JSON Patch for ledger CAS, so its named RBAC grants `patch`, not the old `update` verb.
 Kubernetes RBAC cannot restrict `create configmaps` by `resourceNames`, so the application must fix the two allowed names and validate every object; installation and other privileged actors must be separately controlled.
 The installer must withhold new submission/direct-admin routes during bootstrap.
 A bypassing direct CR is not trusted merely because it exists, especially if it arrives in `Starting` phase.
@@ -115,6 +115,12 @@ Rollback also requires a reviewed drained namespace boundary, not pointing an ol
 - Static chart/RBAC/receipt and migration checks, focused race tests, and an operator runbook that records exact UIDs and refusal reason without deleting evidence.
 - Narrow isolated Kind acceptance against exact candidate images and owned resources: pause/crash between writes, restart and leader/startup handoff, uncertain responses, late old writer, direct `Starting` bypass, and committed-ledger loss. Require exact identity/UID receipts, zero excess work, bounded actionable refusal for only unsafe states, and evidence-preserving cleanup. Do not inject faults into HK, touch the preserved old ledger-loss fixture, or call synthetic/fake-client tests real crash recovery.
 
-Current implementation checkpoint: Genesis has an explicit opt-in runtime route and a read-only installer helper that renders create-only Genesis and immutable receipt Secret manifests. The Service requires the original Secret UID and exact mounted receipt bytes before startup, wires one Guard through HTTP admission and the controller, and refuses committed pair loss or replacement. Deterministic fake-API tests cover partial fresh `Initializing` restart, exact ledger templates, runtime side-effect fences, accepted-result preservation, and terminal-first stop, but they are not a real apiserver or proof that all old writers were stopped. The serving-API round-trip probe does not yet cover the Genesis witness and stop-intent CRD fields. If an original committed ledger is lost, terminal and Delete cleanup deliberately retain the charge/finalizer; no bounded authorized repair of that original ledger identity has been implemented. This is a hard no-go for the next RC, not a passing recovery result. A future reviewed repair must define how accepted work and exact original UIDs are reconciled without inventing a replacement ledger or erasing evidence.
+Current implementation checkpoint: the shipped Service entrypoint requires Genesis authority, and the read-only CLI helper renders create-only Genesis and immutable receipt Secret manifests.
+The Kind-only external installer creates fresh identities and keeps private installation receipts; it never adopts or repairs an existing namespace.
+The Service requires the original Secret UID and exact mounted bytes before startup and each bootstrap write, with separate controller, HTTP and readiness Guard clients that retain one original binding without sharing rate-limit budgets.
+Deterministic fake-API tests cover partial fresh `Initializing` restart, exact ledger templates, runtime side-effect fences, accepted-result preservation and terminal-first stop; they do not prove that all external writers were stopped.
+An opt-in registry-free real-API gate covers Genesis/ledger conditional writes and the witness/stop-intent serving-CRD round-trip, but adding or compiling that gate is not a live PASS.
+If an original committed ledger is lost, terminal and Delete cleanup deliberately retain the charge/finalizer; no bounded authorized drain of that incident has been integrated.
+That separate recovery gap remains a hard no-go for the next RC.
 
 Sources for the proposed Kubernetes mechanisms: [API resourceVersion and conditional JSON Patch](https://kubernetes.io/docs/reference/using-api/api-concepts/#updates-to-existing-resources) and [immutable ConfigMap behavior](https://kubernetes.io/docs/concepts/configuration/configmap/#configmap-immutable).

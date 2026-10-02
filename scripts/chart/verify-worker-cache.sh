@@ -6,7 +6,7 @@ cd "${root}"
 
 assert_budget() {
   local values="$1" expected="$2" rendered
-  rendered="$(helm template kova ./charts/kova --show-only templates/configmap.yaml -f "${values}")"
+  rendered="$(helm template kova ./charts/kova --show-only templates/configmap.yaml -f "${values}" -f scripts/chart/genesis-test-values.yaml)"
   if [[ "${rendered}" != *"maxUsedSpace = \"${expected}GB\""* ]] ||
      [[ "${rendered}" != *'gc = true'* ]]; then
     echo "Missing bounded BuildKit GC policy in ${values}" >&2

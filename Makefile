@@ -231,6 +231,7 @@ docs-check:
 
 lint-scripts:
 	find scripts -name '*.sh' -print0 | xargs -0 -n1 bash -n
+	python3 -m unittest discover -s scripts/kind -p 'test_create_service_genesis.py'
 	bash scripts/e2e/test-service-migration-preflight.sh
 	bash scripts/e2e/test-release-artifacts.sh
 	bash scripts/release/test-image-digests.sh
@@ -245,6 +246,7 @@ lint-scripts:
 helm-template:
 	bash scripts/chart/verify-worker-cache.sh
 	bash scripts/chart/verify-service-metrics.sh
+	bash scripts/chart/verify-service-genesis.sh
 	helm template $(RELEASE_NAME) ./charts/kova \
 		--set serviceDaemon.enabled=true \
 		--set serviceDaemon.runnerNamespace=kova-runner-genesis-test \
@@ -258,24 +260,29 @@ helm-template:
 		echo "Genesis chart accepted a missing immutable receipt identity" >&2; exit 1; \
 	fi
 	helm template $(RELEASE_NAME) ./charts/kova -f deploy/kind-values.yaml >/dev/null
-	helm template $(RELEASE_NAME) ./charts/kova -f deploy/production-values.yaml >/dev/null
+	helm template $(RELEASE_NAME) ./charts/kova -f deploy/production-values.yaml -f scripts/chart/genesis-test-values.yaml >/dev/null
 	helm template $(RELEASE_NAME) ./charts/kova \
+		-f scripts/chart/genesis-test-values.yaml \
 		--set serviceDaemon.enabled=true >/dev/null
 	helm template $(RELEASE_NAME) ./charts/kova \
+		-f scripts/chart/genesis-test-values.yaml \
 		--set serviceDaemon.enabled=true \
 		--set serviceDaemon.authentication.mode=static \
 		--set serviceDaemon.authentication.staticTokenSecret.name=test-secret \
 		--set networkPolicy.service.enabled=true >/dev/null
 	helm template $(RELEASE_NAME) ./charts/kova \
+		-f scripts/chart/genesis-test-values.yaml \
 		--set serviceDaemon.enabled=true \
 		--set serviceDaemon.authentication.mode=unsafe-none >/dev/null
 	helm template $(RELEASE_NAME) ./charts/kova \
+		-f scripts/chart/genesis-test-values.yaml \
 		--set serviceDaemon.enabled=true \
 		--set serviceDaemon.replicas=0 \
 		--set serviceDaemon.authentication.mode=unsafe-none >/dev/null
 	helm template $(RELEASE_NAME) ./charts/kova \
 		--set-string worker.platform=linux/arm64 >/dev/null
 	helm template $(RELEASE_NAME) ./charts/kova \
+		-f scripts/chart/genesis-test-values.yaml \
 		--set serviceDaemon.enabled=true \
 		--set-string serviceDaemon.buildkitPlatformAddrs.linux/amd64=tcp://kova-amd64.kova.svc:9094 \
 		--set-string serviceDaemon.buildkitPlatformAddrs.linux/arm64=tcp://kova-arm64.kova.svc:9094 >/dev/null

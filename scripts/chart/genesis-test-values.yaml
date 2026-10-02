@@ -1,0 +1,9 @@
+# Rendering tests only. These are deliberately fictitious object identities.
+# Never install this file: the runtime rejects these unprovisioned receipts.
+serviceDaemon:
+  runnerNamespace: kova-render-test-jobs
+  admissionGenesis:
+    enabled: true
+    receiptSecret:
+      name: render-test-receipt
+      uid: render-test-not-a-live-secret-uid

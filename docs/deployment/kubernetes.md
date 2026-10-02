@@ -49,6 +49,8 @@ Run the gate from the matching Kova checkout, using the same `KUBECONFIG` as
 the Helm upgrade. Proceed only if it exits zero; it blocks when the CRD is not
 Established, cannot be read, or lacks the `v1alpha1` status retry fields,
 `Verifying` and `FailedVerifying` phases, and bounded verification receipt/timing schema.
+Before enabling the Service, provision the external Genesis and receipt described below.
+The environment values must include its new runner namespace and original immutable receipt Secret name/UID; missing authority deliberately blocks Helm rendering.
 Then upgrade the controller:
 
 ```bash
@@ -117,6 +119,8 @@ export NEW_RUNNER_NAMESPACE=kova-runner-v2
 kubectl create namespace "${NEW_RUNNER_NAMESPACE}"
 # Now run the helm upgrade shown above with:
 # --set-string "serviceDaemon.runnerNamespace=${NEW_RUNNER_NAMESPACE}"
+# and the original immutable Genesis receipt Secret name/UID provisioned below.
+# Merely creating a Namespace is not sufficient to start the new Service.
 # Then verify the new Service and resume submissions:
 kubectl -n "${NAMESPACE}" rollout status deployment/kova-service
 ```
@@ -152,11 +156,13 @@ order with an older chart before upgrading to the current controller; run
 For a live, isolated old-CRD-to-new-controller smoke, see
 [CRD upgrade testing](../testing.md#crd-upgrade-smoke).
 
-The opt-in [admission Genesis protocol](../service-genesis-recovery-proposal.md)
-requires an external, stopped-writer installation. It is not the default
-upgrade path and is not yet qualified for the next RC: the live serving-API
-status round-trip and committed-ledger-loss repair gates below remain open.
-Before considering enablement, stop **every** old Service writer and
+The [admission Genesis protocol](../service-genesis-recovery-proposal.md)
+requires an external, stopped-writer installation.
+The new Service binary requires the exact receipt; there is no legacy startup mode.
+An enabled Helm Service without that receipt fails rendering, including a zero-replica deployment.
+Existing deployments must remain on their old version until an explicit stop-and-drain migration to a new runner namespace is possible.
+This candidate is not yet qualified for the next RC: the live serving-API and committed-ledger-loss repair gates below remain open.
+Before installing, stop **every** old Service writer and
 direct/admin submission route, use a never-before-used runner Namespace
 **name**, and retain the original Namespace UID, Genesis UID, random
 generation, all five limits, and ledger schemas outside the Service process.
@@ -191,6 +197,14 @@ external installer has created the fresh Namespace and recorded its UID:
    mounted bytes before admission or controller startup, then rechecks it at
    runtime. Namespace/Genesis/ledger loss or replacement refuses authority;
    do not switch back to the old Namespace to recover.
+
+The local Kind quickstart uses the external
+[`create-service-genesis.py` installer](../../scripts/kind/create-service-genesis.py)
+and a never-used, separate runner namespace for each invocation.
+This script is intentionally Kind-only; production orchestration remains environment-owned.
+It captures create intents and original UID responses in a private evidence directory, emits a Helm values file only after exact readback, and never resets or adopts an existing namespace.
+An unknown create or partial installation stops without deleting evidence or retrying under a new identity.
+Its visible-work checks are vetoes, not proof that all external writers are gone.
 
 The matching CRD must be applied before any such Service starts, then the
 serving `/status` API must round-trip both `admissionGenesisWitness` and

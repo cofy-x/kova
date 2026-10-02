@@ -55,6 +55,11 @@ the categorized paths below.
 - `kind/kind-registry.sh`: create or attach the local Docker registry.
 - `kind/kind-create.sh`: create the local kind cluster.
 - `kind/kind-load.sh`: load the Kova image into kind.
+- `kind/create-service-genesis.py`: create a never-used runner Namespace,
+  Genesis and immutable receipt Secret for a caller-selected Kind context.
+  It writes private create-only receipts and a Helm values file, never adopts
+  existing objects or cleans up unknown outcomes, and does not certify that
+  external submission routes or old worker pools were drained.
 - `kind/deploy-kind.sh`: apply and verify the current KovaBuild CRD before
   upgrading the local controller; historical-chart tests explicitly skip the
   current retry-schema gate.
