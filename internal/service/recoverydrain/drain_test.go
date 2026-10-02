@@ -464,6 +464,20 @@ func TestNamespaceUIDReplacementBeforeOriginalHoldDoesNotUpdate(t *testing.T) {
 	}
 }
 
+func TestOriginalBuildFromWrongNamespaceCannotBeHeld(t *testing.T) {
+	in, api, _ := fixture(t, true, false)
+	api.getIntercept = func(obj client.Object) error {
+		if build, ok := obj.(*kovav1.KovaBuild); ok {
+			build.Namespace = "replacement-namespace"
+		}
+		return nil
+	}
+	report, err := Drain(context.Background(), api, in)
+	if !errors.Is(err, ErrUnknown) || report.Stage != "occupancy-unknown" || api.updates != 0 || api.creates != 0 {
+		t.Fatalf("cross-namespace Build was held: %#v, %v, writes=%d/%d", report, err, api.updates, api.creates)
+	}
+}
+
 func TestStopLossAfterAttemptPreventsTombstoneCreate(t *testing.T) {
 	in, api, _ := fixture(t, false, false)
 	api.intercept = func(obj client.Object) (bool, error) {

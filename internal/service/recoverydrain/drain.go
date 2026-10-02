@@ -453,7 +453,15 @@ func retain(ctx context.Context, api DirectAPI, exp recoverypermit.Expectation, 
 func qualifyOriginal(item target, observed client.Object) error {
 	switch value := observed.(type) {
 	case *kovav1.KovaBuild:
-		if item.kind != "KovaBuild" || value.Name != item.name || value.DeletionTimestamp != nil ||
+		expectedNamespace := ""
+		if item.queue != nil {
+			expectedNamespace = item.queue.Namespace
+		}
+		if item.grant != nil {
+			expectedNamespace = item.grant.Build.Namespace
+		}
+		if item.kind != "KovaBuild" || expectedNamespace == "" || value.Namespace != expectedNamespace ||
+			value.Name != item.name || value.DeletionTimestamp != nil ||
 			value.Labels[markerKey] != "" {
 			return errors.New("foreign KovaBuild occupant")
 		}
