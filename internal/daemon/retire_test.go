@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -43,6 +44,41 @@ func waitForLocalJoin(t *testing.T, srv *daemonServer, requestID string) retireS
 	}
 	t.Fatal("timed out waiting for local build join")
 	return retireState{}
+}
+
+// retireHeldReadBody lets this direct-handler test distinguish closing the
+// admitted Body from the build POST actually returning. The Unix HTTP protocol
+// test separately verifies that closing a real stalled upload unblocks it.
+type retireHeldReadBody struct {
+	reading     chan struct{}
+	closed      chan struct{}
+	release     chan struct{}
+	readOnce    sync.Once
+	closeOnce   sync.Once
+	releaseOnce sync.Once
+}
+
+func newRetireHeldReadBody() *retireHeldReadBody {
+	return &retireHeldReadBody{
+		reading: make(chan struct{}),
+		closed:  make(chan struct{}),
+		release: make(chan struct{}),
+	}
+}
+
+func (b *retireHeldReadBody) Read([]byte) (int, error) {
+	b.readOnce.Do(func() { close(b.reading) })
+	<-b.release
+	return 0, io.ErrClosedPipe
+}
+
+func (b *retireHeldReadBody) Close() error {
+	b.closeOnce.Do(func() { close(b.closed) })
+	return nil
+}
+
+func (b *retireHeldReadBody) allowReadReturn() {
+	b.releaseOnce.Do(func() { close(b.release) })
 }
 
 func TestRetireBeforeBuildAdmissionBlocksEveryLaterPost(t *testing.T) {
@@ -160,37 +196,34 @@ func TestRetireAcceptedBuildCancelsButJoinsOnlyAfterReturn(t *testing.T) {
 }
 
 func TestRetireWaitsForBuildStillUploading(t *testing.T) {
+	var builds atomic.Int32
 	srv := testDaemonServer(serverBackend{
 		validateBuildArchive: func(string) (int, error) { return 1, nil },
 		extractZip:           func(string, string) error { return nil },
 		runBuild: func(opts batch.Options) error {
+			builds.Add(1)
 			return opts.Ctx.Err()
 		},
 	})
 	e := echo.New()
-	reader, writer := io.Pipe()
-	defer writer.Close()
+	body := newRetireHeldReadBody()
+	defer body.allowReadReturn()
 	type postResult struct {
 		status int
 		err    error
 	}
 	posted := make(chan postResult, 1)
 	go func() {
-		req := httptest.NewRequest(http.MethodPost, "/api/v1/build?request-id=uploading-request", reader)
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/build?request-id=uploading-request", body)
 		rec := httptest.NewRecorder()
 		err := srv.handleBuildPost(e.NewContext(req, rec))
 		posted <- postResult{status: rec.Code, err: err}
 	}()
 
-	deadline := time.Now().Add(time.Second)
-	for time.Now().Before(deadline) {
-		srv.mu.RLock()
-		admitted := srv.buildRequestID == "uploading-request" && srv.buildDone != nil
-		srv.mu.RUnlock()
-		if admitted {
-			break
-		}
-		time.Sleep(time.Millisecond)
+	select {
+	case <-body.reading:
+	case <-time.After(time.Second):
+		t.Fatal("build did not begin reading its upload")
 	}
 	srv.mu.RLock()
 	admitted := srv.buildRequestID == "uploading-request" && srv.buildDone != nil
@@ -204,12 +237,20 @@ func TestRetireWaitsForBuildStillUploading(t *testing.T) {
 	if retire.Code != http.StatusAccepted || decodeRetireState(t, retire).Phase != "retiring" {
 		t.Fatalf("retire during upload=%d body=%s", retire.Code, retire.Body.String())
 	}
-	if readback := performEchoRequest(t, e, http.MethodGet, path, "", srv.handleBuildRetireGet); readback.Code != http.StatusAccepted {
+	select {
+	case <-body.closed:
+	default:
+		t.Fatal("retire did not close the admitted upload Body")
+	}
+	select {
+	case result := <-posted:
+		t.Fatalf("build POST returned before upload read was released: %+v", result)
+	default:
+	}
+	if readback := performEchoRequest(t, e, http.MethodGet, path, "", srv.handleBuildRetireGet); readback.Code != http.StatusAccepted || decodeRetireState(t, readback).LocalSettled {
 		t.Fatalf("readback during upload=%d body=%s", readback.Code, readback.Body.String())
 	}
-	if err := writer.Close(); err != nil {
-		t.Fatal(err)
-	}
+	body.allowReadReturn()
 	select {
 	case result := <-posted:
 		if result.err != nil || result.status != http.StatusAccepted {
@@ -221,6 +262,9 @@ func TestRetireWaitsForBuildStillUploading(t *testing.T) {
 	state := waitForLocalJoin(t, srv, "uploading-request")
 	if state.Build.Status != "cancelled" {
 		t.Fatalf("joined uploaded build state=%#v", state.Build)
+	}
+	if !state.LocalSettled || state.RemoteWorkerSettled || builds.Load() != 0 {
+		t.Fatalf("joined state=%#v; runBuild calls=%d", state, builds.Load())
 	}
 }
 
