@@ -8,6 +8,42 @@ repo_root() {
   CDPATH='' cd -- "${script_dir}/.." && pwd
 }
 
+# Append to the caller's helm_image_args array. Digest references must never be
+# split at their sha256 colon and treated as a mutable image tag.
+append_helm_role_image_args() {
+  local role=$1 image=$2 legacy=${3:-false} repository tag digest
+  case ${role} in controller|runner|worker) ;; *) return 2 ;; esac
+  case ${legacy} in true|false) ;; *) return 2 ;; esac
+  if [[ ${image} == *@* ]]; then
+    repository=${image%@*}
+    digest=${image##*@}
+    if [[ ! ${digest} =~ ^sha256:[0-9a-f]{64}$ || ${repository} == *@* || -z ${repository} ]]; then
+      echo 'error: image requires a canonical sha256 manifest digest' >&2
+      return 2
+    fi
+    if [[ ${legacy} == true ]]; then
+      # Historical released charts expose only repository:tag. This exact
+      # split renders the original digest reference without altering its bytes.
+      helm_image_args+=(--set-string "images.${role}.repository=${repository}@sha256"
+        --set-string "images.${role}.tag=${digest#sha256:}")
+    else
+      helm_image_args+=(--set-string "images.${role}.repository=${repository}"
+        --set-string "images.${role}.tag=" --set-string "images.${role}.digest=${digest}")
+    fi
+  else
+    tag=${image##*/}
+    if [[ ${tag} != *:* || -z ${tag##*:} ]]; then
+      echo 'error: image must have an explicit tag or manifest digest' >&2
+      return 2
+    fi
+    helm_image_args+=(--set-string "images.${role}.repository=${image%:*}"
+      --set-string "images.${role}.tag=${image##*:}")
+    if [[ ${legacy} == false ]]; then
+      helm_image_args+=(--set-string "images.${role}.digest=")
+    fi
+  fi
+}
+
 detect_host_http_proxy() {
   local port=${LOCAL_PROXY_PORT:-7890}
   if command -v nc >/dev/null 2>&1 && nc -z 127.0.0.1 "${port}" >/dev/null 2>&1; then

@@ -49,6 +49,8 @@ Run the gate from the matching Kova checkout, using the same `KUBECONFIG` as
 the Helm upgrade. Proceed only if it exits zero; it blocks when the CRD is not
 Established, cannot be read, or lacks the `v1alpha1` status retry fields,
 `Verifying` and `FailedVerifying` phases, and bounded verification receipt/timing schema.
+Before enabling the Service, provision the external Genesis and receipt described below.
+The environment values must include its new runner namespace and original immutable receipt Secret name/UID; missing authority deliberately blocks Helm rendering.
 Then upgrade the controller:
 
 ```bash
@@ -117,6 +119,8 @@ export NEW_RUNNER_NAMESPACE=kova-runner-v2
 kubectl create namespace "${NEW_RUNNER_NAMESPACE}"
 # Now run the helm upgrade shown above with:
 # --set-string "serviceDaemon.runnerNamespace=${NEW_RUNNER_NAMESPACE}"
+# and the original immutable Genesis receipt Secret name/UID provisioned below.
+# Merely creating a Namespace is not sufficient to start the new Service.
 # Then verify the new Service and resume submissions:
 kubectl -n "${NAMESPACE}" rollout status deployment/kova-service
 ```
@@ -151,6 +155,75 @@ order with an older chart before upgrading to the current controller; run
 `./scripts/deployment/test-verify-kovabuild-crd.sh` for a cluster-free gate test.
 For a live, isolated old-CRD-to-new-controller smoke, see
 [CRD upgrade testing](../testing.md#crd-upgrade-smoke).
+
+The [admission Genesis protocol](../service-genesis-recovery-proposal.md)
+requires an external, stopped-writer installation.
+The new Service binary requires the exact receipt; there is no legacy startup mode.
+An enabled Helm Service without that receipt fails rendering, including a zero-replica deployment.
+Existing deployments must remain on their old version until an explicit stop-and-drain migration to a new runner namespace is possible.
+This candidate is not yet qualified for the next RC: the live serving-API and committed-ledger-loss repair gates below remain open.
+Before installing, stop **every** old Service writer and
+direct/admin submission route, use a never-before-used runner Namespace
+**name**, and retain the original Namespace UID, Genesis UID, random
+generation, all five limits, and ledger schemas outside the Service process.
+An empty List is only a veto check, never proof of a fresh installation.
+
+The `kova admission-genesis` helper makes read-only, declarative proposals.
+Supply explicit global `--kubeconfig` and `--namespace` before the command,
+then `--namespace-uid`, `--receipt-namespace`, its original
+`--receipt-namespace-uid`, `--generation` (32 lowercase hex characters), and
+`--worker-pool-id` plus a canonical `--runner-image=repository@sha256:...`, and
+all five `--max-active-jobs`, `--max-active-jobs-per-requester`,
+`--worker-slots`, `--max-queued-jobs`, and
+`--max-queued-jobs-per-requester` flags after its subcommand. After an
+external installer has created distinct, never-used runner and recovery-receipt
+Namespaces and recorded both original UIDs:
+
+1. Run `render-genesis` with those exact inputs and save its ConfigMap JSON
+   privately. It directly checks both Namespaces and refuses an existing
+   Genesis. Create the manifest with **`kubectl create -f`**, never `apply` or
+   replace. A failed/unknown create needs operator investigation, not a new
+   generation or retry that could erase provisional UID pins.
+2. Directly read and record the created Genesis UID. Run
+   `export-receipt-secret` with the same flags plus explicit `--genesis-uid`,
+   `--service-namespace`, and `--secret-name`. It accepts only that original,
+   untouched `Initializing` Genesis and renders one immutable Secret. Create
+   it with **`kubectl create -f`** in the Service Namespace; record its UID.
+   Keep the private manifest and receipt outside Git.
+3. Only after the CRD serving and drain gates pass, set
+   `serviceDaemon.runnerNamespace` to the new runner Namespace and
+   `serviceDaemon.admissionGenesis.recoveryReceiptNamespace` to the new
+   recovery-receipt Namespace; set
+   `serviceDaemon.admissionGenesis.enabled=true`,
+   `receiptSecret.name`, and the original `receiptSecret.uid` in the chart.
+   Set `serviceDaemon.workerPoolID`, `images.runner.repository`, and `images.runner.digest` to the exact v3 contract values; mutable tags, old v1/v2 receipts, or runtime identity drift refuse startup.
+   The chart mounts the existing Secret; it never creates one. Missing receipt
+   values fail Helm rendering, and a missing Secret/key prevents Pod startup.
+   Each Service process directly checks the immutable Secret UID and exact
+   mounted bytes before admission or controller startup, then rechecks it at
+   runtime. Namespace/Genesis/ledger loss or replacement refuses authority;
+   do not switch back to the old Namespace to recover.
+
+The local Kind quickstart uses the external
+[`create-service-genesis.py` installer](../../scripts/kind/create-service-genesis.py)
+and never-used, distinct runner and recovery-receipt namespaces for each invocation.
+This script is intentionally Kind-only; production orchestration remains environment-owned.
+It captures create intents and original UID responses in a private evidence directory, emits a Helm values file only after exact readback, and never resets or adopts an existing namespace.
+An unknown create or partial installation stops without deleting evidence or retrying under a new identity.
+Its visible-work checks are vetoes, not proof that all external writers are gone.
+The local E2E resolves an already published `localhost:5002` runner tag by reading the manifest bytes and then reading the same bytes back by digest; remote image inputs must already be digest-pinned.
+This read-only resolution does not publish images or establish worker retirement.
+
+The matching CRD must be applied before any such Service starts, then the
+serving `/status` API must round-trip both `admissionGenesisWitness` and
+`admissionGenesisStopIntent` without pruning. The current
+`probe-kovabuild-status.sh --expect-persisted` checks older verification
+fields, **not** those Genesis fields; it is not sufficient for this gate.
+Committed-ledger loss still retains capacity and finalizers without a bounded
+repair path, so Genesis remains out of the next RC. The separately tracked
+drain-only recovery work does not retroactively make a deleted original
+ledger safe to recreate. The local fake-API tests and Helm rendering are not
+substitutes for these live gates.
 
 Replace `vX.Y.Z` with an exact tag from the
 [GitHub release page](https://github.com/cofy-x/kova/releases). Keep the same
@@ -260,7 +333,15 @@ slots without leaving usable capacity idle, and records each fixed allocation
 in job status. Runners resolve the headless Service into worker Pod IPs, avoid
 busy or cooling endpoints, and refresh DNS as replicas change.
 
-Active grants and HTTP queue intents use separate Kubernetes ConfigMap CAS ledgers. The active grant precedes Pod Create; a unique in-flight nonce fences a late old-leader Create. HTTP submission reserves one bounded queue intent before CR Create, and active grant commits before that intent is released. Do not delete either `kova-service-admission` or `kova-service-queue-admission` while the Service is running. Direct/admin CR writes are outside the HTTP queue quota, though active limits still apply. Unknown Create results may retain capacity until exact operator evidence resolves them.
+Active grants and HTTP queue intents use separate Kubernetes ConfigMap CAS ledgers.
+The fresh Genesis v3 candidate records immutable queue, grant, and Pod-Create receipts in the separately pinned recovery-receipt Namespace before their respective effects.
+A permanent Pod attempt nonce and separate in-flight issue CAS fence a late old-leader Create; a replacement process never replays a spent attempt.
+The HTTP queue slot remains charged through active execution until terminal cleanup verifies the exact CR, settles the Pod and grant receipts, and then UID-deletes and confirms absence of the queue receipt.
+`maxQueuedJobs` therefore counts admitted active HTTP builds too; it is not merely a waiting-queue depth.
+Do not delete either `kova-service-admission` or `kova-service-queue-admission` while the Service is running.
+Direct/admin CR writes are outside the HTTP queue quota, though active limits still apply.
+Unknown Create results may retain capacity until exact operator evidence resolves them.
+Receipt instrumentation and external signature verification alone do not authorize committed-loss disposal or capacity release; the bounded executor and full live drain acceptance remain release blockers.
 The supported settings are `maxActiveJobs` 1–128, `workerSlots` 1–65535 and `maxQueuedJobs` 1–1000, with each per-requester limit no greater than its global limit. Both ledgers enforce separate 768 KiB encoded data budgets with room for an in-flight nonce, cleanup marker, fence and cursor at full supported occupancy. An existing ledger above the new bounds requires draining and migration to a fresh runner namespace; do not edit or delete it to force startup.
 
 This protocol **requires a stop-and-drain upgrade**: stop submissions, finish/delete old queued and active builds, verify all old runner Pods are gone, stop every old controller and HTTP replica, apply the updated CRD, and start the new version with a new runner namespace and fresh ledgers. A mixed-version or in-place rolling upgrade can bypass the fence. See the [admission design and recovery rules](../service-admission-design.md); real-apiserver migration validation is still required before claiming a deployed strict quota.

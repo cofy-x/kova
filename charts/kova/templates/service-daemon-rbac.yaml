@@ -2,6 +2,7 @@
 {{- $name := printf "%s-service" (include "kova.fullname" .) | trunc 63 | trimSuffix "-" }}
 {{- $serviceNamespace := include "kova.namespace" . }}
 {{- $runnerNamespace := default $serviceNamespace .Values.serviceDaemon.runnerNamespace }}
+{{- $receiptNamespace := .Values.serviceDaemon.admissionGenesis.recoveryReceiptNamespace }}
 {{- $saName := default "default" .Values.serviceDaemon.serviceAccount.name }}
 {{- if .Values.serviceDaemon.serviceAccount.create }}
 {{- $saName = default $name .Values.serviceDaemon.serviceAccount.name }}
@@ -44,7 +45,13 @@ rules:
   - apiGroups: [""]
     resources: ["configmaps"]
     resourceNames: ["kova-service-admission", "kova-service-queue-admission"]
-    verbs: ["get", "update"]
+    verbs: ["get", "patch"]
+  {{- if .Values.serviceDaemon.admissionGenesis.enabled }}
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["kova-service-admission-genesis"]
+    verbs: ["get", "patch"]
+  {{- end }}
   - apiGroups: [""]
     resources: ["configmaps"]
     resourceNames: ["kova-service-admission"]
@@ -101,6 +108,39 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
   name: {{ $name }}
+{{- if .Values.serviceDaemon.admissionGenesis.enabled }}
+---
+# This Role lives in a fresh, receipt-only namespace. Dynamic nonce-named
+# receipts need unenumerable resourceNames; no Delete grant reaches Genesis or
+# the quota ledgers in the distinct runner namespace.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $name }}-recovery-receipts
+  namespace: {{ $receiptNamespace }}
+  labels:
+    {{- include "kova.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["create", "get", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $name }}-recovery-receipts
+  namespace: {{ $receiptNamespace }}
+  labels:
+    {{- include "kova.labels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ $saName }}
+    namespace: {{ $serviceNamespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $name }}-recovery-receipts
+{{- end }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
@@ -132,6 +172,64 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
   name: {{ $name }}-leader-election
+{{- if .Values.serviceDaemon.admissionGenesis.enabled }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $name }}-admission-receipt
+  namespace: {{ $serviceNamespace }}
+  labels:
+    {{- include "kova.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: [{{ .Values.serviceDaemon.admissionGenesis.receiptSecret.name | quote }}]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $name }}-admission-receipt
+  namespace: {{ $serviceNamespace }}
+  labels:
+    {{- include "kova.labels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ $saName }}
+    namespace: {{ $serviceNamespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $name }}-admission-receipt
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ $name }}-admission-namespace
+  labels:
+    {{- include "kova.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    resourceNames: [{{ $runnerNamespace | quote }}, {{ $receiptNamespace | quote }}]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ $name }}-admission-namespace
+  labels:
+    {{- include "kova.labels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ $saName }}
+    namespace: {{ $serviceNamespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ $name }}-admission-namespace
+{{- end }}
 {{- if ne .Values.serviceDaemon.authentication.mode "unsafe-none" }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1

@@ -9,10 +9,12 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
+	"github.com/cofy-x/kova/internal/admissioncontract"
+	"github.com/cofy-x/kova/internal/admissionjson"
 	kovav1 "github.com/cofy-x/kova/internal/apis/kova/v1alpha1"
-	"github.com/cofy-x/kova/internal/service/admissionjson"
 	"github.com/cofy-x/kova/internal/service/config"
 	"github.com/cofy-x/kova/internal/service/queueadmission"
 
@@ -27,25 +29,38 @@ import (
 const (
 	AdmissionLedgerName       = "kova-service-admission"
 	reservationConfigMap      = AdmissionLedgerName
-	reservationDataKey        = "reservations.json"
+	AdmissionLedgerDataKey    = "reservations.json"
+	reservationDataKey        = AdmissionLedgerDataKey
 	bootstrapAttemptKey       = "kova.cofy.dev/admission-bootstrap"
 	podCreateAttemptKey       = "kova.cofy.dev/create-attempt"
 	maxReservationCASAttempts = 16
 	maxReservationLedgerBytes = 768 * 1024
 	maxReservationHeaderBytes = 8192
-	maxReservationEntryBytes  = 3456
+	maxReservationEntryBytes  = 6000
 	maxReservationUIDBytes    = 256
+	maxGrantObservedRVBytes   = 256
 	maxRequesterRunes         = 253
 	MaxActiveJobs             = 128
 	MaxWorkerSlots            = 65535
 )
 
 type activeReservation struct {
-	BuildName string   `json:"buildName"`
-	Requester string   `json:"requester"`
-	Slots     int      `json:"slots"`
-	Closing   bool     `json:"closing,omitempty"`
-	InFlight  []string `json:"inFlight,omitempty"`
+	BuildName          string   `json:"buildName"`
+	Requester          string   `json:"requester"`
+	Slots              int      `json:"slots"`
+	GrantNonce         string   `json:"grantNonce,omitempty"`
+	GrantFence         uint64   `json:"grantFence,omitempty"`
+	GrantObservedRV    string   `json:"grantObservedRV,omitempty"`
+	GrantReceiptUID    string   `json:"grantReceiptUID,omitempty"`
+	GrantReceiptDigest string   `json:"grantReceiptDigest,omitempty"`
+	GrantCleanupReady  bool     `json:"grantCleanupReady,omitempty"`
+	PodAttemptNonce    string   `json:"podAttemptNonce,omitempty"`
+	PodTemplateDigest  string   `json:"podTemplateDigest,omitempty"`
+	PodReceiptUID      string   `json:"podReceiptUID,omitempty"`
+	PodReceiptDigest   string   `json:"podReceiptDigest,omitempty"`
+	PodCleanupReady    bool     `json:"podCleanupReady,omitempty"`
+	Closing            bool     `json:"closing,omitempty"`
+	InFlight           []string `json:"inFlight,omitempty"`
 }
 
 type reservationState struct {
@@ -101,19 +116,39 @@ func (r *KovaBuildReconciler) ensureLiveAdmissionBuild(ctx context.Context, buil
 }
 
 func (r *KovaBuildReconciler) readReservations(ctx context.Context, namespace string) (*corev1.ConfigMap, reservationState, error) {
+	if r.Genesis != nil {
+		if r.APIReader == nil {
+			return nil, reservationState{}, fmt.Errorf("Genesis admission requires a direct API reader")
+		}
+		if err := r.Genesis.Check(ctx); err != nil {
+			return nil, reservationState{}, err
+		}
+	}
 	key := client.ObjectKey{Namespace: namespace, Name: reservationConfigMap}
 	var cm corev1.ConfigMap
 	if err := r.reader().Get(ctx, key, &cm); err != nil {
 		return nil, reservationState{}, err
 	}
+	if r.Genesis != nil {
+		if err := r.Genesis.CheckLedger(&cm, admissioncontract.Active); err != nil {
+			return nil, reservationState{}, err
+		}
+	}
 	state, err := decodeReservations(&cm)
 	if err == nil {
 		err = r.validateReservationLimits(state)
+		if err == nil && (r.Genesis != nil && state.Version != 2 || r.Genesis == nil && state.Version != 1) {
+			err = fmt.Errorf("active admission ledger has the wrong receipt protocol version")
+		}
 	}
 	return &cm, state, err
 }
 
 func (r *KovaBuildReconciler) initializeReservations(ctx context.Context, namespace string) (*corev1.ConfigMap, reservationState, bool, error) {
+	if r.Genesis != nil {
+		cm, state, err := r.readReservations(ctx, namespace)
+		return cm, state, false, err
+	}
 	var bootstrapNonce string
 	for retry := 0; retry < maxReservationCASAttempts; retry++ {
 		cm, state, err := r.readReservations(ctx, namespace)
@@ -222,8 +257,9 @@ func EnsureAdmissionLedger(ctx context.Context, writer client.Client, reader cli
 	return created, err
 }
 
-// CheckAdmissionLedger validates the authoritative active ledger and this
-// replica's limits without creating a replacement for missing state.
+// CheckAdmissionLedger validates the legacy, nil-Genesis active ledger and
+// this replica's limits without creating a replacement for missing state.
+// A Genesis caller must use its original Guard/strict v2 validator instead.
 func CheckAdmissionLedger(ctx context.Context, reader client.Reader, namespace string, cfg config.Config) error {
 	var cm corev1.ConfigMap
 	if err := reader.Get(ctx, client.ObjectKey{Namespace: namespace, Name: reservationConfigMap}, &cm); err != nil {
@@ -232,6 +268,34 @@ func CheckAdmissionLedger(ctx context.Context, reader client.Reader, namespace s
 	state, err := decodeReservations(&cm)
 	if err != nil {
 		return err
+	}
+	if state.Version != 1 {
+		return fmt.Errorf("legacy admission requires active ledger version 1")
+	}
+	return (&KovaBuildReconciler{Cfg: cfg}).validateReservationLimits(state)
+}
+
+// GenesisEmptyAdmissionData and ValidateAdmissionLedgerForGenesis expose the
+// existing schema/limit checks to the separate, not-yet-wired bootstrapper.
+// They do not authorize admission or create a ledger.
+func GenesisEmptyAdmissionData(cfg config.Config) (string, error) {
+	r := &KovaBuildReconciler{Cfg: cfg}
+	state := r.freshReservations()
+	state.Version, state.Fence = 2, 1
+	encoded, err := encodeReservations(state)
+	return string(encoded), err
+}
+
+func ValidateAdmissionLedgerForGenesis(cm *corev1.ConfigMap, cfg config.Config) error {
+	if cm == nil {
+		return fmt.Errorf("active admission ledger is missing")
+	}
+	state, err := decodeReservations(cm)
+	if err != nil {
+		return err
+	}
+	if state.Version != 2 {
+		return fmt.Errorf("admission Genesis requires active ledger version 2")
 	}
 	return (&KovaBuildReconciler{Cfg: cfg}).validateReservationLimits(state)
 }
@@ -262,7 +326,7 @@ func allowedReservationField(path []string, key string) bool {
 	case 2:
 		if path[0] == "active" {
 			switch key {
-			case "buildName", "requester", "slots", "closing", "inFlight":
+			case "buildName", "requester", "slots", "grantNonce", "grantFence", "grantObservedRV", "grantReceiptUID", "grantReceiptDigest", "grantCleanupReady", "podAttemptNonce", "podTemplateDigest", "podReceiptUID", "podReceiptDigest", "podCleanupReady", "closing", "inFlight":
 				return true
 			}
 		}
@@ -270,12 +334,15 @@ func allowedReservationField(path []string, key string) bool {
 	return false
 }
 
-// The entry reserve includes a 256-byte opaque UID key (up to six escaped
-// bytes per input byte), a 253-byte DNS name, 253 Unicode requester runes
-// (up to six escaped bytes each), one future 32-byte Pod nonce, closing=true,
-// the largest slot integer, field names and separators. The header includes
-// the full 20-digit fence and 64-byte fairness cursor. Admission can fill the
-// configured table without making a later nonce, close or fence write too big.
+// The entry reserve includes a 256-byte opaque UID key and 253 Unicode
+// requester runes (each conservatively six JSON bytes per byte/rune), a
+// 253-byte DNS name, both 32-byte nonces, a 256-byte opaque observed RV,
+// compact 64-byte grant and Pod receipt UIDs, both 71-byte digests, the
+// permanent 32-byte Pod attempt nonce and 71-byte template digest, the
+// cleanup/closing flags, and one in-flight Pod attempt. The header reserve
+// covers the 20-digit fence
+// and fairness cursor. Even all 128 maximally expanded entries fit below
+// the 768 KiB ConfigMap data guard; the capacity test measures this state.
 func ValidateReservationCapacity(cfg config.Config) error {
 	if cfg.MaxActiveJobs < 1 || cfg.MaxActiveJobs > MaxActiveJobs ||
 		cfg.MaxActiveJobsPerRequester < 1 || cfg.MaxActiveJobsPerRequester > cfg.MaxActiveJobs ||
@@ -294,8 +361,36 @@ func validReservationHex(value string, length int) bool {
 	return err == nil
 }
 
+func validGrantReceiptUID(value string) bool {
+	if value == "" || len(value) > 64 {
+		return false
+	}
+	for _, c := range []byte(value) {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') && c != '-' {
+			return false
+		}
+	}
+	return true
+}
+
+func validGrantObservedRV(value string) bool {
+	if value == "" || len(value) > maxGrantObservedRVBytes || !utf8.ValidString(value) {
+		return false
+	}
+	for _, r := range value {
+		if unicode.IsSpace(r) || unicode.IsControl(r) {
+			return false
+		}
+	}
+	return true
+}
+
+func validGrantReceiptDigest(value string) bool {
+	return strings.HasPrefix(value, "sha256:") && validReservationHex(strings.TrimPrefix(value, "sha256:"), 64)
+}
+
 func validateReservationState(state reservationState) error {
-	if state.Version != 1 || state.Active == nil ||
+	if (state.Version != 1 && state.Version != 2) || state.Active == nil ||
 		ValidateReservationCapacity(config.Config{MaxActiveJobs: state.MaxJobs, MaxActiveJobsPerRequester: state.MaxPerRequester, WorkerSlots: state.WorkerSlots}) != nil ||
 		len(state.Active) > state.MaxJobs ||
 		(state.LastGrantedRequesterHash != "" && !validReservationHex(state.LastGrantedRequesterHash, 64)) {
@@ -310,6 +405,34 @@ func validateReservationState(state reservationState) error {
 			entry.Slots < 1 || entry.Slots > state.WorkerSlots || len(entry.InFlight) > 1 ||
 			(len(entry.InFlight) == 1 && !validReservationHex(entry.InFlight[0], 32)) {
 			return fmt.Errorf("admission ledger has invalid active reservation")
+		}
+		if state.Version == 1 {
+			if entry.GrantNonce != "" || entry.GrantFence != 0 || entry.GrantObservedRV != "" ||
+				entry.GrantReceiptUID != "" || entry.GrantReceiptDigest != "" || entry.GrantCleanupReady ||
+				entry.PodAttemptNonce != "" || entry.PodTemplateDigest != "" || entry.PodReceiptUID != "" ||
+				entry.PodReceiptDigest != "" || entry.PodCleanupReady {
+				return fmt.Errorf("legacy active reservation contains Genesis grant fields")
+			}
+		} else if !validReservationHex(entry.GrantNonce, 32) || entry.GrantFence == 0 ||
+			(entry.GrantObservedRV != "" && !validGrantObservedRV(entry.GrantObservedRV)) ||
+			(entry.GrantReceiptUID == "") != (entry.GrantReceiptDigest == "") ||
+			(entry.GrantReceiptUID != "" && (entry.GrantObservedRV == "" ||
+				!validGrantReceiptUID(entry.GrantReceiptUID) || !validGrantReceiptDigest(entry.GrantReceiptDigest))) ||
+			(entry.GrantCleanupReady && (!entry.Closing || len(entry.InFlight) != 0 || entry.GrantReceiptUID == "" ||
+				(entry.PodTemplateDigest != "" && !entry.PodCleanupReady))) ||
+			(entry.PodAttemptNonce == "" && (entry.PodTemplateDigest != "" || entry.PodReceiptUID != "" ||
+				entry.PodReceiptDigest != "" || entry.PodCleanupReady || len(entry.InFlight) != 0)) ||
+			(entry.PodAttemptNonce != "" && !validReservationHex(entry.PodAttemptNonce, 32)) ||
+			(entry.PodTemplateDigest == "" && (entry.PodReceiptUID != "" || entry.PodReceiptDigest != "" ||
+				entry.PodCleanupReady || len(entry.InFlight) != 0)) ||
+			(entry.PodTemplateDigest != "" && (!validGrantReceiptDigest(entry.PodTemplateDigest) ||
+				entry.GrantReceiptUID == "")) ||
+			(entry.PodReceiptUID == "") != (entry.PodReceiptDigest == "") ||
+			(entry.PodReceiptUID != "" && (!validGrantReceiptUID(entry.PodReceiptUID) ||
+				!validGrantReceiptDigest(entry.PodReceiptDigest))) ||
+			(len(entry.InFlight) == 1 && (entry.InFlight[0] != entry.PodAttemptNonce || entry.PodReceiptUID == "")) ||
+			(entry.PodCleanupReady && (!entry.Closing || len(entry.InFlight) != 0 || entry.PodReceiptUID == "")) {
+			return fmt.Errorf("Genesis active reservation has invalid grant receipt state")
 		}
 		if usedSlots > state.WorkerSlots-entry.Slots {
 			return fmt.Errorf("admission ledger exceeds worker slots")
@@ -358,6 +481,9 @@ func (r *KovaBuildReconciler) writeReservations(ctx context.Context, cm *corev1.
 	data, err := encodeReservations(state)
 	if err != nil {
 		return err
+	}
+	if r.Genesis != nil {
+		return r.Genesis.PatchLedgerData(ctx, cm, admissioncontract.Active, string(data))
 	}
 	copy := cm.DeepCopy()
 	copy.Data = map[string]string{reservationDataKey: string(data)}
@@ -431,6 +557,16 @@ func (r *KovaBuildReconciler) releaseReservation(ctx context.Context, build *kov
 		if !entry.Closing {
 			return fmt.Errorf("admission reservation for %s/%s cannot be released before its cleanup fence", build.Namespace, build.Name)
 		}
+		if r.Genesis != nil {
+			var current kovav1.KovaBuild
+			if err := r.reader().Get(ctx, client.ObjectKeyFromObject(build), &current); err != nil {
+				return err
+			}
+			if current.UID != build.UID || (!isTerminalPhase(current.Status.Phase) && current.DeletionTimestamp == nil) {
+				return fmt.Errorf("Genesis active grant cannot be released before its original CR is terminal or deleting")
+			}
+			build = &current
+		}
 		if len(entry.InFlight) != 0 {
 			return &admissionRecoveryError{Namespace: build.Namespace, BuildName: build.Name, Pending: len(entry.InFlight)}
 		}
@@ -438,6 +574,34 @@ func (r *KovaBuildReconciler) releaseReservation(ctx context.Context, build *kov
 			return err
 		} else if pod != nil {
 			return fmt.Errorf("runner Pod %s/%s still exists while releasing active capacity", pod.Namespace, pod.Name)
+		}
+		if r.Genesis != nil {
+			ready, err := r.releaseGenesisPodReceipt(ctx, build, cm, state, entry)
+			if err != nil {
+				if apierrors.IsConflict(err) {
+					if err := waitReservationCAS(ctx, retry); err != nil {
+						return err
+					}
+					continue
+				}
+				return err
+			}
+			if !ready {
+				continue
+			}
+			ready, err = r.releaseGenesisGrantReceipt(ctx, build, cm, state, entry)
+			if err != nil {
+				if apierrors.IsConflict(err) {
+					if err := waitReservationCAS(ctx, retry); err != nil {
+						return err
+					}
+					continue
+				}
+				return err
+			}
+			if !ready {
+				continue
+			}
 		}
 		delete(state.Active, reservationKey(build))
 		if err := r.writeReservations(ctx, cm, state); err != nil {
@@ -487,10 +651,24 @@ func (r *KovaBuildReconciler) beginPodCreate(ctx context.Context, build *kovav1.
 		if entry.Closing {
 			return "", fmt.Errorf("%w: %s/%s grant is closing", errAdmissionClosed, build.Namespace, build.Name)
 		}
+		if r.Genesis != nil {
+			if err := r.verifyPinnedGrant(ctx, build, entry); err != nil {
+				return "", err
+			}
+			if entry.PodAttemptNonce != "" {
+				// The nonce remains spent even after a successful Pod Create or
+				// definitive rejection. A replacement leader never retries Create.
+				return "", &admissionRecoveryError{Namespace: build.Namespace, BuildName: build.Name, Pending: 1}
+			}
+		}
 		if len(entry.InFlight) != 0 {
 			return "", &admissionRecoveryError{Namespace: build.Namespace, BuildName: build.Name, Pending: len(entry.InFlight)}
 		}
-		entry.InFlight = append(entry.InFlight, attempt)
+		if r.Genesis != nil {
+			entry.PodAttemptNonce = attempt
+		} else {
+			entry.InFlight = append(entry.InFlight, attempt)
+		}
 		state.Active[reservationKey(build)] = entry
 		if err := r.writeReservations(ctx, cm, state); err != nil {
 			if apierrors.IsConflict(err) {
@@ -515,6 +693,9 @@ func (r *KovaBuildReconciler) beginPodCreate(ctx context.Context, build *kovav1.
 // completePodCreate is called only after definitive Create success/rejection,
 // AlreadyExists, or observation of the Pod with this exact nonce.
 func (r *KovaBuildReconciler) completePodCreate(ctx context.Context, build *kovav1.KovaBuild, attempt string) error {
+	if r.Genesis != nil {
+		return r.completeGenesisPodCreate(ctx, build, attempt)
+	}
 	for retry := 0; retry < maxReservationCASAttempts; retry++ {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -564,6 +745,9 @@ func (r *KovaBuildReconciler) podCreateAttemptRecorded(ctx context.Context, buil
 	entry, ok := state.Active[reservationKey(build)]
 	if !ok || entry.BuildName != build.Name {
 		return false, fmt.Errorf("KovaBuild %s/%s has no matching active reservation", build.Namespace, build.Name)
+	}
+	if r.Genesis != nil {
+		return entry.PodAttemptNonce == attempt, nil
 	}
 	for _, value := range entry.InFlight {
 		if value == attempt {
@@ -633,8 +817,16 @@ func (r *KovaBuildReconciler) reservationCovered(ctx context.Context, namespace 
 	if err := r.reader().Get(ctx, client.ObjectKey{Namespace: namespace, Name: reservationConfigMap}, &latest); err != nil {
 		return false, err
 	}
+	if r.Genesis != nil {
+		if err := r.Genesis.CheckLedger(&latest, admissioncontract.Active); err != nil {
+			return false, err
+		}
+	}
 	current, err := decodeReservations(&latest)
 	if err != nil {
+		return false, err
+	}
+	if err := r.validateReservationLimits(current); err != nil {
 		return false, err
 	}
 	entry, ok := current.Active[reservationKey(build)]

@@ -142,7 +142,9 @@ func newTestServerWithConfig(t *testing.T, kube *fakeKube, cfg config.Config) *S
 func testConfig(root string) config.Config {
 	return config.Config{
 		Namespace:                 "jobs",
-		RunnerImage:               "registry.local/kova:dev",
+		RunnerImage:               "example.com/kova/runner@sha256:" + strings.Repeat("a", 64),
+		RunnerImageDigest:         "sha256:" + strings.Repeat("a", 64),
+		WorkerPoolID:              "worker-pool-original",
 		RunnerImagePullPolicy:     "IfNotPresent",
 		BuildkitPlatformAddrs:     map[string]string{"linux/amd64": "tcp://kova.kova.svc:9094"},
 		JobTTL:                    time.Hour,

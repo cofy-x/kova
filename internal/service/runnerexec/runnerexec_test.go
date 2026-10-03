@@ -76,6 +76,54 @@ func TestSubmitBuildForwardsPlainHTTPRegistriesToDaemon(t *testing.T) {
 	}
 }
 
+func TestGenesisRunnerExecCommandsCarryDurablePodUID(t *testing.T) {
+	build := &kovav1.KovaBuild{ObjectMeta: metav1.ObjectMeta{Namespace: "jobs", Name: "example", UID: "build-uid"},
+		Status: kovav1.KovaBuildStatus{RunnerPodName: "runner", AdmissionGenesisWitness: &kovav1.AdmissionGenesisWitness{PodUID: "pod-original"}}}
+	for _, tc := range []struct {
+		name, stdout string
+		run          func(Client) error
+	}{
+		{name: "source inspect", stdout: `{"targets":[]}`, run: func(c Client) error {
+			_, err := c.SourceTargets(context.Background(), build, "/source")
+			return err
+		}},
+		{name: "build POST", stdout: `{"status":"running"}`, run: func(c Client) error {
+			return c.SubmitBuild(context.Background(), build, "/source")
+		}},
+		{name: "status GET", stdout: `{"status":"running"}`, run: func(c Client) error {
+			_, err := c.BuildStatus(context.Background(), build)
+			return err
+		}},
+		{name: "cancel POST", run: func(c Client) error {
+			return c.CancelBuild(context.Background(), build)
+		}},
+		{name: "export POST", stdout: `receipt`, run: func(c Client) error {
+			_, err := c.Post(context.Background(), build, "export", "with-fail=true&summary=true")
+			return err
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			client := Client{Kube: fakeExecKube{exec: func(options kube.ExecOptions) error {
+				calls++
+				if got := strings.Join(options.Command, " "); !strings.Contains(got, "--expected-pod-uid pod-original") {
+					t.Fatalf("Genesis runner command omitted original Pod UID: %q", got)
+				}
+				if options.Stdout != nil {
+					_, _ = io.WriteString(options.Stdout, tc.stdout)
+				}
+				return nil
+			}}}
+			if err := tc.run(client); err != nil {
+				t.Fatal(err)
+			}
+			if calls != 1 {
+				t.Fatalf("Exec calls = %d, want one", calls)
+			}
+		})
+	}
+}
+
 func TestBoundedResponseBufferRejectsOversizedRunnerResponse(t *testing.T) {
 	out := boundedResponseBuffer{overflowErr: ErrRunnerResponseTooLarge}
 	chunk := make([]byte, maxRunnerResponseBytes)

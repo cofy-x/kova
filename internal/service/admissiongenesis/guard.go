@@ -1,0 +1,191 @@
+package admissiongenesis
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+
+	"github.com/cofy-x/kova/internal/admissioncontract"
+
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+)
+
+// Guard retains the original pair qualified at startup. A later read can
+// refuse authority, but cannot silently adopt a different committed pair.
+// Check is not a lease: callers must check again before each new side effect
+// and retain their own UID/resourceVersion CAS and uncertain-outcome fences.
+type Guard struct {
+	Bootstrap Bootstrapper
+	Original  Binding
+	// ReceiptCheck retains the external, immutable receipt Secret identity.
+	// Runtime installs it before exposing any Service component.
+	ReceiptCheck func(context.Context) error
+}
+
+// Checker is the read-only authority check used at runtime side-effect edges.
+// A concrete Guard also exposes its original ledger bindings to CAS writers.
+type Checker interface {
+	Check(context.Context) error
+}
+
+func NewGuard(ctx context.Context, bootstrap Bootstrapper, original Binding) (*Guard, error) {
+	if err := bootstrap.validate(); err != nil {
+		return nil, err
+	}
+	if original.NamespaceUID != bootstrap.Receipt.Contract.NamespaceUID ||
+		original.GenesisUID != bootstrap.Receipt.GenesisUID ||
+		!admissioncontract.ValidUID(original.ActiveLedgerUID) || !admissioncontract.ValidUID(original.QueueLedgerUID) {
+		return nil, fmt.Errorf("%w: startup binding differs from admission receipt", ErrChanged)
+	}
+	guard := &Guard{Bootstrap: bootstrap, Original: original}
+	if err := guard.Check(ctx); err != nil {
+		return nil, err
+	}
+	return guard, nil
+}
+
+func (g *Guard) Check(ctx context.Context) error {
+	if g == nil {
+		return fmt.Errorf("admission Genesis guard is missing")
+	}
+	if g.ReceiptCheck != nil {
+		if err := g.ReceiptCheck(ctx); err != nil {
+			return err
+		}
+	}
+	current, err := g.Bootstrap.ObserveCommitted(ctx)
+	if err != nil {
+		return err
+	}
+	if current != g.Original {
+		return fmt.Errorf("%w: committed admission pair differs from startup binding", ErrChanged)
+	}
+	if g.ReceiptCheck != nil {
+		return g.ReceiptCheck(ctx)
+	}
+	return nil
+}
+
+func (g *Guard) CheckLedger(cm *corev1.ConfigMap, role admissioncontract.Role) error {
+	if g == nil {
+		return fmt.Errorf("admission Genesis guard is missing")
+	}
+	if err := g.Bootstrap.Receipt.QualifyLedgerIdentity(cm, role); err != nil {
+		return err
+	}
+	var expected string
+	switch role {
+	case admissioncontract.Active:
+		expected = g.Original.ActiveLedgerUID
+	case admissioncontract.Queue:
+		expected = g.Original.QueueLedgerUID
+	default:
+		return fmt.Errorf("invalid admission ledger role")
+	}
+	if string(cm.UID) != expected {
+		return fmt.Errorf("%w: %s ledger differs from startup UID", ErrChanged, role)
+	}
+	return nil
+}
+
+// PatchLedgerData is the only Genesis-mode ledger writer. JSON Patch tests
+// the original UID, opaque resourceVersion, and exact old data in the same
+// API operation that replaces the data. A stale writer therefore cannot
+// mutate a same-name replacement, even if an ordinary Update were to accept
+// its old UID. The direct CoreAPI transport must make one wire attempt.
+func (g *Guard) PatchLedgerData(ctx context.Context, cm *corev1.ConfigMap, role admissioncontract.Role, nextData string) error {
+	if err := g.CheckLedger(cm, role); err != nil {
+		return err
+	}
+	if cm.ResourceVersion == "" {
+		return fmt.Errorf("%w: %s ledger lacks a resourceVersion", ErrChanged, role)
+	}
+	var template LedgerTemplate
+	switch role {
+	case admissioncontract.Active:
+		template = g.Bootstrap.Active
+	case admissioncontract.Queue:
+		template = g.Bootstrap.Queue
+	default:
+		return fmt.Errorf("invalid admission ledger role")
+	}
+	if len(cm.Data) != 1 || len(cm.BinaryData) != 0 || cm.Data[template.DataKey] == "" {
+		return fmt.Errorf("%w: %s ledger has unsupported data keys", ErrChanged, role)
+	}
+	proposed := cm.DeepCopy()
+	proposed.Data = map[string]string{template.DataKey: nextData}
+	if err := template.Validate(proposed); err != nil {
+		return fmt.Errorf("%s ledger proposal: %w", role, err)
+	}
+	if err := g.Check(ctx); err != nil {
+		return err
+	}
+	// JSON Pointer needs no escaping for the two fixed, validated data keys.
+	body, err := json.Marshal([]patchOp{
+		{Op: "test", Path: "/metadata/uid", Value: string(cm.UID)},
+		{Op: "test", Path: "/metadata/resourceVersion", Value: cm.ResourceVersion},
+		{Op: "test", Path: "/data/" + template.DataKey, Value: cm.Data[template.DataKey]},
+		{Op: "replace", Path: "/data/" + template.DataKey, Value: nextData},
+	})
+	if err != nil {
+		return err
+	}
+	updated, err := g.Bootstrap.API.PatchConfigMap(ctx, cm.Namespace, cm.Name, body)
+	if err != nil {
+		return g.classifyLedgerPatchError(ctx, cm, role, template, err)
+	}
+	if err := g.CheckLedger(updated, role); err != nil {
+		return err
+	}
+	if updated.Data[template.DataKey] != nextData {
+		return fmt.Errorf("%w: %s ledger Patch response differs from proposal", ErrChanged, role)
+	}
+	// The Patch response proves this commit; the direct readback checks that
+	// it still belongs to the original installation. Another valid CAS may
+	// already have advanced the data, so equality is not required here.
+	readback, err := g.Bootstrap.API.GetConfigMap(ctx, cm.Namespace, cm.Name)
+	if err != nil {
+		return err
+	}
+	if err := g.CheckLedger(readback, role); err != nil {
+		return err
+	}
+	if err := template.Validate(readback); err != nil {
+		return err
+	}
+	return g.Check(ctx)
+}
+
+// Kubernetes reports an RFC6902 failed `test` as HTTP 422, not 409. Its
+// generic StatusError also discards the operation-specific failure text, so
+// 422 alone is never classified as contention. A direct read must prove that
+// this same original ledger advanced; unchanged state retains the rejection,
+// while replacement/loss remains a hard refusal. Callers then recompute a
+// fresh proposal in their bounded CAS loop rather than replaying this Patch.
+func (g *Guard) classifyLedgerPatchError(ctx context.Context, cm *corev1.ConfigMap, role admissioncontract.Role, template LedgerTemplate, patchErr error) error {
+	var status apierrors.APIStatus
+	if !errors.As(patchErr, &status) || status.Status().Code != http.StatusUnprocessableEntity {
+		return patchErr
+	}
+	current, err := g.Bootstrap.API.GetConfigMap(ctx, cm.Namespace, cm.Name)
+	if err != nil {
+		return errors.Join(patchErr, fmt.Errorf("%s ledger 422 readback failed: %w", role, err))
+	}
+	if err := g.CheckLedger(current, role); err != nil {
+		return err
+	}
+	if err := template.Validate(current); err != nil {
+		return fmt.Errorf("%w: %s ledger changed to invalid state: %v", ErrChanged, role, err)
+	}
+	if err := g.Check(ctx); err != nil {
+		return err
+	}
+	if current.ResourceVersion == cm.ResourceVersion && current.Data[template.DataKey] == cm.Data[template.DataKey] {
+		return patchErr
+	}
+	return apierrors.NewConflict(schema.GroupResource{Resource: "configmaps"}, cm.Name, patchErr)
+}

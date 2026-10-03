@@ -17,6 +17,8 @@ fi
 
 VERSION=${TAG#v}
 ARCHIVE=${DIST_DIR}/kova-${VERSION}.tgz
+# Fictitious render input only; never a published image or installed Genesis identity.
+RENDER_RUNNER_DIGEST=sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 rendered=$(mktemp "${TMPDIR:-/tmp}/kova-chart.XXXXXX")
 cross_namespace=$(mktemp "${TMPDIR:-/tmp}/kova-chart-cross-namespace.XXXXXX")
 trap 'rm -f "${rendered}" "${cross_namespace}"' EXIT
@@ -36,16 +38,25 @@ helm show chart "${ARCHIVE}" | grep -Fx "appVersion: ${TAG}" >/dev/null
 
 helm template kova "${ARCHIVE}" \
   --namespace kova \
+  -f "${ROOT}/scripts/chart/genesis-test-values.yaml" \
+  --set-string "images.runner.digest=${RENDER_RUNNER_DIGEST}" \
   --set serviceDaemon.enabled=true >"${rendered}"
 
 grep -F "image: \"ghcr.io/cofy-x/kova:controller-${TAG}\"" "${rendered}" >/dev/null
 grep -F "image: \"ghcr.io/cofy-x/kova:worker-${TAG}\"" "${rendered}" >/dev/null
-grep -F -- "--runner-image=ghcr.io/cofy-x/kova:runner-${TAG}" "${rendered}" >/dev/null
+runner_image_arg=$(awk '$1 == "-" && $2 ~ /^--runner-image=/ { sub(/^[[:space:]]*-[[:space:]]*/, ""); print }' "${rendered}")
+if [[ "${runner_image_arg}" != "--runner-image=ghcr.io/cofy-x/kova@${RENDER_RUNNER_DIGEST}" ]]; then
+  echo "error: packaged Service runner image must match render fixture ghcr.io/cofy-x/kova@${RENDER_RUNNER_DIGEST}" >&2
+  exit 1
+fi
 
 helm template kova "${ARCHIVE}" \
   --namespace release \
+  -f "${ROOT}/scripts/chart/genesis-test-values.yaml" \
+  --set-string "images.runner.digest=${RENDER_RUNNER_DIGEST}" \
   --set serviceDaemon.enabled=true \
   --set serviceDaemon.runnerNamespace=jobs \
+  --set serviceDaemon.admissionGenesis.recoveryReceiptNamespace=receipts \
   --set imagePullSecrets.create=true \
   --set imagePullSecrets.name=kova-registry \
   --set imageRegistries[0].name=registry.example.com \

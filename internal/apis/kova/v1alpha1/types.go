@@ -124,6 +124,13 @@ type KovaBuildStatus struct {
 	AllocatedConcurrency int32  `json:"allocatedConcurrency,omitempty"`
 	// +kubebuilder:validation:MaxLength=253
 	RunnerPodName string `json:"runnerPodName,omitempty"`
+	// AdmissionGenesisWitness is recorded only for a runner created under an
+	// externally committed admission Genesis. It binds a directly observed Pod
+	// UID and the runner request to the original CR and ledger installation.
+	AdmissionGenesisWitness *AdmissionGenesisWitness `json:"admissionGenesisWitness,omitempty"`
+	// AdmissionGenesisStopIntent is durably recorded before a UID-scoped
+	// forced stop. An absent Pod alone can never manufacture this intent.
+	AdmissionGenesisStopIntent *AdmissionGenesisStopIntent `json:"admissionGenesisStopIntent,omitempty"`
 	// +kubebuilder:validation:MaxLength=128
 	Reason string `json:"reason,omitempty"`
 	// +kubebuilder:validation:MaxLength=2048
@@ -146,6 +153,57 @@ type KovaBuildStatus struct {
 	// +listMapKey=type
 	// +kubebuilder:validation:MaxItems=2
 	Conditions []metav1.Condition `json:"conditions,omitempty" patchStrategy:"merge" patchMergeKey:"type"`
+}
+
+// AdmissionGenesisWitness is durable, independent evidence for a runner that
+// may continue to report an accepted build after an admission ledger is lost.
+// Its fields are copied from the pre-Create Pod stamps and a direct Pod read;
+// status alone never authorizes a new build submission or cleanup.
+type AdmissionGenesisWitness struct {
+	// +kubebuilder:validation:MaxLength=256
+	NamespaceUID string `json:"namespaceUID"`
+	// +kubebuilder:validation:MaxLength=256
+	GenesisUID string `json:"genesisUID"`
+	// +kubebuilder:validation:MaxLength=32
+	// +kubebuilder:validation:Pattern=`^[a-f0-9]{32}$`
+	Generation string `json:"generation"`
+	// +kubebuilder:validation:MaxLength=256
+	ActiveLedgerUID string `json:"activeLedgerUID"`
+	// +kubebuilder:validation:MaxLength=256
+	QueueLedgerUID string `json:"queueLedgerUID"`
+	// +kubebuilder:validation:MaxLength=256
+	BuildUID string `json:"buildUID"`
+	// +kubebuilder:validation:MaxLength=253
+	PodName string `json:"podName"`
+	// +kubebuilder:validation:MaxLength=256
+	PodUID string `json:"podUID"`
+	// +kubebuilder:validation:MaxLength=32
+	// +kubebuilder:validation:Pattern=`^[a-f0-9]{32}$`
+	PodCreateAttempt string `json:"podCreateAttempt"`
+	// PodTemplateDigest was recorded only after the original Pod's immutable
+	// pre-Create receipt was qualified. It lets evidence-only observation after
+	// ledger loss reject a changed execution template without those ledgers.
+	// +kubebuilder:validation:Pattern=`^sha256:[a-f0-9]{64}$`
+	PodTemplateDigest string `json:"podTemplateDigest"`
+	// +kubebuilder:validation:MaxLength=256
+	RunnerRequestID string `json:"runnerRequestID"`
+}
+
+// AdmissionGenesisStopIntent binds an explicit forced-stop decision to the
+// independently witnessed original runner. It is written only after the
+// original admission pair and active charge are directly requalified.
+type AdmissionGenesisStopIntent struct {
+	// +kubebuilder:validation:MaxLength=256
+	BuildUID string `json:"buildUID"`
+	// +kubebuilder:validation:MaxLength=256
+	PodUID string `json:"podUID"`
+	// +kubebuilder:validation:MaxLength=32
+	// +kubebuilder:validation:Pattern=`^[a-f0-9]{32}$`
+	PodCreateAttempt string `json:"podCreateAttempt"`
+	// +kubebuilder:validation:MaxLength=256
+	RunnerRequestID string `json:"runnerRequestID"`
+	// +kubebuilder:validation:Enum=Cancelled;Deleted;BuildTimedOut
+	Reason string `json:"reason"`
 }
 
 type BuildOutput struct {

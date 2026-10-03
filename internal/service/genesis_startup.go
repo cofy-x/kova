@@ -1,0 +1,141 @@
+package service
+
+import (
+	"context"
+	"fmt"
+	"strings"
+
+	"github.com/cofy-x/kova/internal/admissioncontract"
+	kovav1 "github.com/cofy-x/kova/internal/apis/kova/v1alpha1"
+	"github.com/cofy-x/kova/internal/daemonclient"
+	"github.com/cofy-x/kova/internal/service/admissiongenesis"
+	"github.com/cofy-x/kova/internal/service/buildcontroller"
+	"github.com/cofy-x/kova/internal/service/config"
+	"github.com/cofy-x/kova/internal/service/queueadmission"
+
+	corev1 "k8s.io/api/core/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+)
+
+// prepareGenesisRuntime qualifies the externally supplied receipt before any
+// listener or manager starts. A committed installation can only be observed;
+// only the original fresh Initializing installation may be completed.
+func prepareGenesisRuntime(ctx context.Context, cfg config.Config, receiptRaw []byte,
+	api admissiongenesis.CoreAPI, directReader client.Reader,
+	receiptCheck func(context.Context) error) (*admissiongenesis.Guard, error) {
+	receipt, err := admissioncontract.ParseReceipt(receiptRaw)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateGenesisRuntimeConfig(cfg, receipt); err != nil {
+		return nil, err
+	}
+	if directReader == nil {
+		return nil, fmt.Errorf("admission Genesis requires a direct CR/Pod reader")
+	}
+	activeEmpty, err := buildcontroller.GenesisEmptyAdmissionData(cfg)
+	if err != nil {
+		return nil, err
+	}
+	queueEmpty, err := queueadmission.GenesisEmptyQueueData(cfg.MaxQueuedJobs, cfg.MaxQueuedJobsPerRequester)
+	if err != nil {
+		return nil, err
+	}
+	bootstrap := admissiongenesis.Bootstrapper{
+		API: api, Receipt: receipt, BeforeEffect: receiptCheck,
+		Active: admissiongenesis.LedgerTemplate{Role: admissioncontract.Active,
+			DataKey: admissioncontract.ActiveLedgerDataKey, EmptyData: activeEmpty,
+			Validate: func(cm *corev1.ConfigMap) error { return buildcontroller.ValidateAdmissionLedgerForGenesis(cm, cfg) }},
+		Queue: admissiongenesis.LedgerTemplate{Role: admissioncontract.Queue,
+			DataKey: admissioncontract.QueueLedgerDataKey, EmptyData: queueEmpty,
+			Validate: func(cm *corev1.ConfigMap) error {
+				return queueadmission.ValidateQueueLedgerForGenesis(cm, cfg.MaxQueuedJobs, cfg.MaxQueuedJobsPerRequester)
+			}},
+		Preflight: func(ctx context.Context) error { return genesisOldWorkVeto(ctx, directReader, receipt.Namespace) },
+	}
+	binding, err := bootstrap.EnsureFresh(ctx)
+	if err != nil {
+		return nil, err
+	}
+	guard, err := admissiongenesis.NewGuard(ctx, bootstrap, binding)
+	if err != nil {
+		return nil, err
+	}
+	guard.ReceiptCheck = receiptCheck
+	if err := guard.Check(ctx); err != nil {
+		return nil, err
+	}
+	return guard, nil
+}
+
+// A view reuses only the already qualified original receipt and binding. It
+// never enters bootstrap again; each traffic class gets its own direct client
+// and rate limiter, so controller backlog cannot starve HTTP or readiness.
+func forkGenesisGuard(ctx context.Context, original *admissiongenesis.Guard,
+	api admissiongenesis.CoreAPI, receiptCheck func(context.Context) error) (*admissiongenesis.Guard, error) {
+	if original == nil || api == nil || receiptCheck == nil {
+		return nil, fmt.Errorf("admission Genesis guard view lacks an original binding or direct reader")
+	}
+	bootstrap := original.Bootstrap
+	bootstrap.API = api
+	bootstrap.BeforeEffect = receiptCheck
+	view, err := admissiongenesis.NewGuard(ctx, bootstrap, original.Original)
+	if err != nil {
+		return nil, err
+	}
+	view.ReceiptCheck = receiptCheck
+	if err := view.Check(ctx); err != nil {
+		return nil, err
+	}
+	return view, nil
+}
+
+func validateGenesisRuntimeConfig(cfg config.Config, receipt admissioncontract.Receipt) error {
+	digest, err := admissioncontract.RunnerManifestDigest(cfg.RunnerImage)
+	if err != nil || cfg.RunnerImage != receipt.Contract.RunnerImage ||
+		cfg.RunnerImageDigest != digest || cfg.WorkerPoolID != receipt.Contract.WorkerPoolID ||
+		!admissioncontract.ValidWorkerPoolID(cfg.WorkerPoolID) {
+		return fmt.Errorf("admission Genesis receipt differs from runtime worker pool or runner manifest identity")
+	}
+	limits := receipt.Contract.Limits
+	if cfg.Namespace != receipt.Namespace ||
+		cfg.MaxActiveJobs != limits.MaxActiveJobs ||
+		cfg.MaxActiveJobsPerRequester != limits.MaxActiveJobsPerRequester ||
+		cfg.WorkerSlots != limits.WorkerSlots ||
+		cfg.MaxQueuedJobs != limits.MaxQueuedJobs ||
+		cfg.MaxQueuedJobsPerRequester != limits.MaxQueuedJobsPerRequester {
+		return fmt.Errorf("admission Genesis receipt differs from runtime namespace or capacity configuration")
+	}
+	if _, collision := cfg.RunnerEnv[daemonclient.RunnerPodUIDEnv]; collision {
+		return fmt.Errorf("admission Genesis runner environment collides with reserved Pod UID fence")
+	}
+	return nil
+}
+
+// A List can veto visible old work, never prove quiescence. The installation
+// contract separately requires every old writer stopped before provisioning.
+func genesisOldWorkVeto(ctx context.Context, reader client.Reader, namespace string) error {
+	var builds kovav1.KovaBuildList
+	if err := reader.List(ctx, &builds, client.InNamespace(namespace), client.Limit(1)); err != nil {
+		return err
+	}
+	if len(builds.Items) != 0 {
+		return fmt.Errorf("admission Genesis initialization sees a pre-existing KovaBuild in %s", namespace)
+	}
+	var pods corev1.PodList
+	if err := reader.List(ctx, &pods, client.InNamespace(namespace)); err != nil {
+		return err
+	}
+	for i := range pods.Items {
+		pod := &pods.Items[i]
+		if pod.Labels["kova.cofy.dev/build-id"] != "" || strings.HasPrefix(pod.Name, "kova-job-") {
+			return fmt.Errorf("admission Genesis initialization sees a pre-existing runner Pod %s/%s", namespace, pod.Name)
+		}
+		for _, owner := range pod.OwnerReferences {
+			if owner.APIVersion == kovav1.Group+"/"+kovav1.Version && owner.Kind == "KovaBuild" {
+				return fmt.Errorf("admission Genesis initialization sees a pre-existing KovaBuild-owned Pod %s/%s", namespace, pod.Name)
+			}
+		}
+	}
+	return nil
+}

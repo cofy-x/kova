@@ -10,6 +10,7 @@ import (
 	"syscall"
 
 	"github.com/cofy-x/kova/internal/buildcontract"
+	"github.com/cofy-x/kova/internal/daemonclient"
 	"github.com/cofy-x/kova/internal/source"
 	"github.com/cofy-x/kova/internal/sourcebundle"
 
@@ -42,8 +43,14 @@ func CLICommand() *cli.Command {
 			},
 		}, {
 			Name: "inspect", Usage: "validate a source archive and print its normalized target contract",
-			Flags: []cli.Flag{&cli.StringFlag{Name: "input", Required: true}},
+			Flags: []cli.Flag{
+				&cli.StringFlag{Name: "input", Required: true},
+				&cli.StringFlag{Name: "expected-pod-uid"},
+			},
 			Action: func(c *cli.Context) error {
+				if err := daemonclient.ValidateExpectedPodUID(c.String("expected-pod-uid")); err != nil {
+					return err
+				}
 				targets, err := source.BuildArchiveTargets(filepath.Clean(c.String("input")))
 				if err != nil {
 					return classifySourceCommandError(err)

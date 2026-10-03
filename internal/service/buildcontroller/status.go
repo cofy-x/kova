@@ -7,6 +7,7 @@ import (
 	"unicode/utf8"
 
 	kovav1 "github.com/cofy-x/kova/internal/apis/kova/v1alpha1"
+	"github.com/cofy-x/kova/internal/service/buildresult"
 
 	"go.opentelemetry.io/otel/attribute"
 	corev1 "k8s.io/api/core/v1"
@@ -44,6 +45,36 @@ func (r *KovaBuildReconciler) clearAdmissionRecovery(ctx context.Context, build 
 }
 
 func (r *KovaBuildReconciler) finish(ctx context.Context, build *kovav1.KovaBuild, phase string, reason string, message string) error {
+	if r.Genesis != nil {
+		if build.Status.AdmissionGenesisWitness == nil {
+			if phase == kovav1.PhaseSucceeded {
+				return fmt.Errorf("Genesis success cannot be recorded without independent runner witness")
+			}
+			if err := r.Genesis.Check(ctx); err != nil {
+				return err
+			}
+		} else {
+			if _, _, err := r.directGenesisWitness(ctx, build); err != nil {
+				// A healthy pair does not turn a missing or changed Pod into
+				// proof that accepted work stopped. Forced stops use the separate
+				// durable-intent and UID-absence path below.
+				return err
+			}
+			if phase == kovav1.PhaseSucceeded {
+				if !validVerificationResults(build) {
+					return fmt.Errorf("Genesis success lacks exact verification results")
+				}
+				done, failed := buildresult.VerificationDone(build.Status.VerificationResults)
+				if !done || failed {
+					return fmt.Errorf("Genesis success has pending or failed verification")
+				}
+			}
+		}
+	}
+	return r.writeTerminalStatus(ctx, build, phase, reason, message)
+}
+
+func (r *KovaBuildReconciler) writeTerminalStatus(ctx context.Context, build *kovav1.KovaBuild, phase, reason, message string) error {
 	now := metav1.Now()
 	build.Status.Phase = phase
 	build.Status.ObservedGeneration = build.Generation

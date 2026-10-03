@@ -21,7 +21,7 @@ func (s *daemonServer) handleHealth(c echo.Context) error {
 
 func (s *daemonServer) handleBuildStatus(c echo.Context) error {
 	state := s.getBuildState()
-	state.Capabilities = []string{daemonclient.IdempotentBuildRequestCapability}
+	state.Capabilities = []string{daemonclient.IdempotentBuildRequestCapability, daemonclient.ExactBuildRetireCapability}
 	return c.JSON(http.StatusOK, state)
 }
 
@@ -48,6 +48,10 @@ func (s *daemonServer) handleBuildPost(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, daemonState{Status: "error", Error: "request-id is too long"})
 	}
 	s.mu.Lock()
+	if s.retiredRequestID != "" {
+		s.mu.Unlock()
+		return c.JSON(http.StatusConflict, daemonState{Status: "error", Error: "runner has an installed retire barrier"})
+	}
 	if requestID != "" && requestID == s.buildRequestID {
 		state := s.build
 		s.mu.Unlock()
@@ -68,7 +72,13 @@ func (s *daemonServer) handleBuildPost(c echo.Context) error {
 	buildCtx, buildCancel := context.WithCancel(context.Background())
 	s.buildCancel = buildCancel
 	s.buildDone = done
+	s.buildBody = c.Request().Body
+	s.buildUploadDone = done
+	s.buildReadDeadline = func() {
+		_ = http.NewResponseController(c.Response().Writer).SetReadDeadline(time.Now())
+	}
 	s.mu.Unlock()
+	defer s.clearBuildUpload(done)
 
 	logging.Infof("Accepted build request from %s with query %q", c.RealIP(), c.QueryString())
 
@@ -91,6 +101,12 @@ func (s *daemonServer) handleBuildPost(c echo.Context) error {
 	if err != nil {
 		tmpZip.Close()
 		os.Remove(tmpZip.Name())
+		if errors.Is(buildCtx.Err(), context.Canceled) {
+			s.setBuildState(daemonState{Status: "cancelled", Error: "build cancelled while receiving upload"})
+			close(done)
+			s.clearBuildExecution(done)
+			return c.JSON(http.StatusAccepted, s.getBuildState())
+		}
 		logging.Errorf("Build request: receive zip failed: %v", err)
 		s.setBuildState(daemonState{Status: "failed", Error: "receive zip: " + err.Error()})
 		buildCancel()
@@ -109,6 +125,13 @@ func (s *daemonServer) handleBuildPost(c echo.Context) error {
 		close(done)
 		s.clearBuildExecution(done)
 		return c.JSON(http.StatusInternalServerError, s.getBuildState())
+	}
+	if errors.Is(buildCtx.Err(), context.Canceled) {
+		os.Remove(tmpZip.Name())
+		s.setBuildState(daemonState{Status: "cancelled", Error: "build cancelled after upload"})
+		close(done)
+		s.clearBuildExecution(done)
+		return c.JSON(http.StatusAccepted, s.getBuildState())
 	}
 	logging.Infof("Build request body stored at %s (%d bytes)", tmpZip.Name(), bytesWritten)
 
@@ -133,6 +156,13 @@ func (s *daemonServer) handleBuildPost(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, s.getBuildState())
 	}
 	logging.Infof("Build request zip layout validated: %d image directorie(s)", imageDirCount)
+	if errors.Is(buildCtx.Err(), context.Canceled) {
+		os.Remove(tmpZip.Name())
+		s.setBuildState(daemonState{Status: "cancelled", Error: "build cancelled before execution"})
+		close(done)
+		s.clearBuildExecution(done)
+		return c.JSON(http.StatusAccepted, s.getBuildState())
+	}
 
 	logging.Infof("Build request accepted for async processing: zip=%s", tmpZip.Name())
 	go s.runBuildAsync(buildCtx, tmpZip.Name(), q, done)
@@ -140,8 +170,8 @@ func (s *daemonServer) handleBuildPost(c echo.Context) error {
 }
 
 func (s *daemonServer) runBuildAsync(buildCtx context.Context, zipPath string, q url.Values, done chan struct{}) {
-	defer close(done)
 	defer s.clearBuildExecution(done)
+	defer close(done)
 	defer os.Remove(zipPath)
 	defer func() {
 		_ = os.RemoveAll(daemonImageDir)
@@ -174,6 +204,10 @@ func (s *daemonServer) runBuildAsync(buildCtx context.Context, zipPath string, q
 	logging.Infof("Async build extracted zip to %s", daemonImageDir)
 	opts.ImageDirs = daemonImageDir
 	opts.ImageDirsAlreadyIsolated = true
+	if errors.Is(buildCtx.Err(), context.Canceled) {
+		s.setBuildState(daemonState{Status: "cancelled", Error: "build cancelled before execution"})
+		return
+	}
 
 	logging.Infof("Async build entering batch.RunBuild")
 	if err := s.backend.runBuild(opts); err != nil {
@@ -185,12 +219,6 @@ func (s *daemonServer) runBuildAsync(buildCtx context.Context, zipPath string, q
 		s.setBuildState(daemonState{Status: "failed", Error: err.Error()})
 		return
 	}
-	if errors.Is(buildCtx.Err(), context.Canceled) {
-		logging.Infof("Async build cancelled")
-		s.setBuildState(daemonState{Status: "cancelled", Error: "build cancelled"})
-		return
-	}
-
 	logging.Infof("Async build completed successfully")
 	s.setBuildState(daemonState{Status: "completed"})
 }
@@ -266,6 +294,16 @@ func (s *daemonServer) clearBuildExecution(done chan struct{}) {
 	if s.buildDone == done {
 		s.buildDone = nil
 		s.buildCancel = nil
+	}
+	s.mu.Unlock()
+}
+
+func (s *daemonServer) clearBuildUpload(done chan struct{}) {
+	s.mu.Lock()
+	if s.buildUploadDone == done {
+		s.buildBody = nil
+		s.buildReadDeadline = nil
+		s.buildUploadDone = nil
 	}
 	s.mu.Unlock()
 }

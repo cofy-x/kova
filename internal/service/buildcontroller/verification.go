@@ -19,6 +19,15 @@ const (
 	verificationBatchSize             = 16
 )
 
+func (r *KovaBuildReconciler) persistVerificationStatus(ctx context.Context, build *kovav1.KovaBuild) error {
+	if r.Genesis != nil {
+		if _, _, err := r.directGenesisWitness(ctx, build); err != nil {
+			return err
+		}
+	}
+	return r.Status().Update(ctx, build)
+}
+
 func (r *KovaBuildReconciler) verificationAttemptTimeout() time.Duration {
 	if r.Cfg.VerificationAttemptTimeout > 0 {
 		return r.Cfg.VerificationAttemptTimeout
@@ -46,6 +55,13 @@ func (r *KovaBuildReconciler) beginFailedVerification(ctx context.Context, build
 }
 
 func (r *KovaBuildReconciler) beginVerificationPhase(ctx context.Context, build *kovav1.KovaBuild, phase, reason, message string, window time.Duration) (ctrl.Result, error) {
+	if r.Genesis != nil {
+		current, _, err := r.directGenesisWitness(ctx, build)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		build = current
+	}
 	pending := buildresult.Pending(build)
 	if len(pending) == 0 || len(pending) > kovav1.MaxConcreteOutputs {
 		if phase == kovav1.PhaseFailedVerifying {
@@ -78,7 +94,7 @@ func (r *KovaBuildReconciler) beginVerificationPhase(ctx context.Context, build 
 		})
 	}
 	setPhaseCondition(build, phase, build.Status.Reason, build.Status.Message)
-	if err := r.Status().Update(ctx, build); err != nil {
+	if err := r.persistVerificationStatus(ctx, build); err != nil {
 		return ctrl.Result{}, err
 	}
 	return ctrl.Result{RequeueAfter: time.Millisecond}, nil
@@ -97,6 +113,13 @@ func (r *KovaBuildReconciler) verificationSlot() chan struct{} {
 }
 
 func (r *KovaBuildReconciler) reconcileVerifying(ctx context.Context, build *kovav1.KovaBuild) (ctrl.Result, error) {
+	if r.Genesis != nil {
+		current, _, err := r.directGenesisWitness(ctx, build)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		build = current
+	}
 	if build.Status.VerificationStartedAt == nil || build.Status.VerificationDeadlineAt == nil ||
 		!validVerificationResults(build) {
 		return r.failVerification(ctx, build, "verification state is missing or inconsistent")
@@ -138,13 +161,17 @@ func (r *KovaBuildReconciler) reconcileVerifying(ctx context.Context, build *kov
 	attemptCtx, cancel := context.WithTimeout(ctx, min(r.verificationAttemptTimeout(), remaining))
 	defer cancel()
 	build.Status.VerificationAttempts++
-	exporter := runnerexec.Client{Kube: r.Kube, BuildkitPlatformAddrs: r.Cfg.BuildkitPlatformAddrs}
+	client := runnerexec.Client{Kube: r.Kube, BuildkitPlatformAddrs: r.Cfg.BuildkitPlatformAddrs}
+	var exporter buildresult.Exporter = client
+	if r.Genesis != nil {
+		exporter = genesisReceiptExporter{reconciler: r, client: client}
+	}
 	transient, hardFailure := buildresult.CollectReceipts(attemptCtx, exporter, build, build.Status.VerificationResults)
 	// Persist exact push receipts before any registry lookup. On leader handoff,
 	// pending digest-bearing outputs resume here without another runner POST.
 	boundVerificationErrors(build.Status.VerificationResults)
 	build.Status.VerificationLastError = truncate(transient, 2048)
-	if err := r.Status().Update(ctx, build); err != nil {
+	if err := r.persistVerificationStatus(ctx, build); err != nil {
 		return ctrl.Result{}, err
 	}
 	if !hardFailure && attemptCtx.Err() == nil {
@@ -169,7 +196,7 @@ func (r *KovaBuildReconciler) reconcileVerifying(ctx context.Context, build *kov
 		build.Status.VerificationNextAttemptAt = nil
 		// Durable receipts precede the terminal transition. A status-write
 		// ambiguity can then be recovered even if the deadline has elapsed.
-		if err := r.Status().Update(ctx, build); err != nil {
+		if err := r.persistVerificationStatus(ctx, build); err != nil {
 			return ctrl.Result{}, err
 		}
 		if err := r.finish(ctx, build, kovav1.PhaseSucceeded, "Completed", ""); err != nil {
@@ -189,7 +216,7 @@ func (r *KovaBuildReconciler) reconcileVerifying(ctx context.Context, build *kov
 	delay = min(delay, max(remaining, time.Millisecond))
 	next := metav1.NewTime(time.Now().Add(delay))
 	build.Status.VerificationNextAttemptAt = &next
-	if err := r.Status().Update(ctx, build); err != nil {
+	if err := r.persistVerificationStatus(ctx, build); err != nil {
 		return ctrl.Result{}, err
 	}
 	return ctrl.Result{RequeueAfter: delay}, nil
@@ -200,6 +227,13 @@ func (r *KovaBuildReconciler) reconcileVerifying(ctx context.Context, build *kov
 // successful build, one definitive failed output does not prevent another
 // output's exact pushed digest from being collected and checked.
 func (r *KovaBuildReconciler) reconcileFailedVerifying(ctx context.Context, build *kovav1.KovaBuild) (ctrl.Result, error) {
+	if r.Genesis != nil {
+		current, _, err := r.directGenesisWitness(ctx, build)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		build = current
+	}
 	if build.Status.VerificationStartedAt == nil || build.Status.VerificationDeadlineAt == nil || !validVerificationResults(build) {
 		// Discard malformed receipt state rather than repeatedly trying to
 		// update an object the CRD schema cannot accept.
@@ -233,13 +267,17 @@ func (r *KovaBuildReconciler) reconcileFailedVerifying(ctx context.Context, buil
 	attemptCtx, cancel := context.WithTimeout(ctx, min(r.verificationAttemptTimeout(), remaining))
 	defer cancel()
 	build.Status.VerificationAttempts++
-	exporter := runnerexec.Client{Kube: r.Kube, BuildkitPlatformAddrs: r.Cfg.BuildkitPlatformAddrs}
+	client := runnerexec.Client{Kube: r.Kube, BuildkitPlatformAddrs: r.Cfg.BuildkitPlatformAddrs}
+	var exporter buildresult.Exporter = client
+	if r.Genesis != nil {
+		exporter = genesisReceiptExporter{reconciler: r, client: client}
+	}
 	transient, _ := buildresult.CollectReceipts(attemptCtx, exporter, build, build.Status.VerificationResults)
 	// Persist each exact runner push receipt before registry I/O. No later
 	// mutable tag lookup may substitute for a missing digest.
 	boundVerificationErrors(build.Status.VerificationResults)
 	build.Status.VerificationLastError = truncate(transient, 2048)
-	if err := r.Status().Update(ctx, build); err != nil {
+	if err := r.persistVerificationStatus(ctx, build); err != nil {
 		return ctrl.Result{}, err
 	}
 	if attemptCtx.Err() == nil {
@@ -273,7 +311,7 @@ func (r *KovaBuildReconciler) reconcileFailedVerifying(ctx context.Context, buil
 	delay = min(delay, remaining)
 	next := metav1.NewTime(time.Now().Add(delay))
 	build.Status.VerificationNextAttemptAt = &next
-	if err := r.Status().Update(ctx, build); err != nil {
+	if err := r.persistVerificationStatus(ctx, build); err != nil {
 		return ctrl.Result{}, err
 	}
 	return ctrl.Result{RequeueAfter: delay}, nil
@@ -306,7 +344,7 @@ func (r *KovaBuildReconciler) expireFailedVerification(ctx context.Context, buil
 
 func (r *KovaBuildReconciler) finishFailedVerification(ctx context.Context, build *kovav1.KovaBuild) (ctrl.Result, error) {
 	build.Status.VerificationNextAttemptAt = nil
-	if err := r.Status().Update(ctx, build); err != nil {
+	if err := r.persistVerificationStatus(ctx, build); err != nil {
 		return ctrl.Result{}, err
 	}
 	message := build.Status.Message
@@ -371,7 +409,7 @@ func (r *KovaBuildReconciler) failVerification(ctx context.Context, build *kovav
 		}
 	}
 	build.Status.Outputs = buildresult.VerificationOutputs(build.Status.VerificationResults)
-	if err := r.Status().Update(ctx, build); err != nil {
+	if err := r.persistVerificationStatus(ctx, build); err != nil {
 		return ctrl.Result{}, err
 	}
 	if err := r.finish(ctx, build, kovav1.PhaseFailed, "ResultVerificationFailed", message); err != nil {

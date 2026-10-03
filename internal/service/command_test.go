@@ -1,16 +1,83 @@
 package service
 
 import (
+	"context"
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/cofy-x/kova/internal/buildcontract"
 	"github.com/cofy-x/kova/internal/service/config"
+	"github.com/urfave/cli/v2"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/client-go/rest"
 )
+
+func serviceFactoryReceiptArgs() []string {
+	return []string{"kova-controller", "service", "--admission-genesis-receipt-file=/unused",
+		"--runner-image=example.com/kova/runner@sha256:" + strings.Repeat("a", 64), "--worker-pool-id=unit-pool",
+		"--admission-genesis-receipt-secret-namespace=control", "--admission-genesis-receipt-secret-name=receipt",
+		"--admission-genesis-receipt-secret-uid=original", "--buildkit-platform-addr=linux/amd64=tcp://127.0.0.1:1"}
+}
+
+func TestServiceFactoryUsesOnlyInjectedConfigLoaderAfterValidation(t *testing.T) {
+	sentinel := errors.New("pinned config unavailable")
+	calls := 0
+	app := &cli.App{Commands: []*cli.Command{serviceCLICommand(func() (*rest.Config, error) {
+		calls++
+		return nil, sentinel
+	})}}
+	if err := app.Run([]string{"kova-controller", "service"}); err == nil || calls != 0 {
+		t.Fatal("factory bypassed mandatory receipt validation")
+	}
+	if err := app.Run(serviceFactoryReceiptArgs()); !errors.Is(err, sentinel) || calls != 1 {
+		t.Fatalf("factory loader calls=%d error=%v", calls, err)
+	}
+}
+
+func TestServiceFactoryPropagatesRunContextCancellation(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	app := &cli.App{Commands: []*cli.Command{serviceCLICommand(func() (*rest.Config, error) {
+		return &rest.Config{Host: server.URL}, nil
+	})}}
+	path := filepath.Join(t.TempDir(), "receipt.json")
+	if err := os.WriteFile(path, []byte("{}"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	args := serviceFactoryReceiptArgs()
+	args[2] = "--admission-genesis-receipt-file=" + path
+	// The file is readable, so startup reaches the direct Secret check. The
+	// canceled parent must prevent even that first request from reaching a wire.
+	if err := app.RunContext(ctx, args); !errors.Is(err, context.Canceled) || requests.Load() != 0 {
+		t.Fatalf("canceled Service startup error=%v requests=%d", err, requests.Load())
+	}
+}
+
+func TestShippedServiceRefusesLegacyAdmissionBeforeKubernetes(t *testing.T) {
+	app := &cli.App{Commands: []*cli.Command{CLICommand()}}
+	err := app.Run([]string{"kovad", "service"})
+	if err == nil || !strings.Contains(err.Error(), "requires an externally installed admission Genesis receipt") {
+		t.Fatalf("unreceipted runtime entered Kubernetes startup: %v", err)
+	}
+	err = app.Run([]string{"kovad", "service", "--admission-genesis-receipt-file=/unused"})
+	if err == nil || !strings.Contains(err.Error(), "exact Secret namespace, name, and UID") {
+		t.Fatalf("partial receipt was accepted: %v", err)
+	}
+}
 
 func TestParseNodeSelector(t *testing.T) {
 	got, err := parseNodeSelector([]string{"kova.cofy.io/source-node=true", "topology.kubernetes.io/zone=zone-b"})

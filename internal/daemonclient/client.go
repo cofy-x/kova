@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 )
 
@@ -19,6 +20,10 @@ const (
 	ExportPath                       = "/api/v1/export"
 	PreheatPath                      = "/api/v1/preheat"
 	IdempotentBuildRequestCapability = "idempotent-build-request-v1"
+	// RunnerPodUIDEnv is injected from the Pod's immutable spec through the
+	// Downward API only for Genesis runner Pods. Its presence makes an exact
+	// expected Pod UID mandatory before any in-container runner operation.
+	RunnerPodUIDEnv = "KOVA_RUNNER_POD_UID"
 )
 
 type Client struct {
@@ -70,4 +75,27 @@ func TransportCommand(method, path, query string, inputPath string) []string {
 		command = append(command, "--input", inputPath)
 	}
 	return command
+}
+
+func TransportCommandForPodUID(method, path, query, inputPath, expectedPodUID string) []string {
+	command := TransportCommand(method, path, query, inputPath)
+	if expectedPodUID != "" {
+		command = append(command, "--expected-pod-uid", expectedPodUID)
+	}
+	return command
+}
+
+// ValidateExpectedPodUID runs inside the target container before touching an
+// input file or daemon socket. An absent env preserves the standalone legacy
+// runner, but never accepts a caller claiming a Pod UID. A Genesis container
+// with the Downward API env rejects absent or mismatched expectations.
+func ValidateExpectedPodUID(expectedPodUID string) error {
+	actualPodUID, present := os.LookupEnv(RunnerPodUIDEnv)
+	if !present && expectedPodUID == "" {
+		return nil
+	}
+	if !present || actualPodUID == "" || expectedPodUID == "" || expectedPodUID != actualPodUID {
+		return fmt.Errorf("runner Pod UID fence rejected the command")
+	}
+	return nil
 }
