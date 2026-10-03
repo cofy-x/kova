@@ -11,6 +11,8 @@ type Config struct {
 	Listen                     string
 	Namespace                  string
 	RunnerImage                string
+	RunnerImageDigest          string
+	WorkerPoolID               string
 	RunnerImagePullPolicy      string
 	RunnerImagePullSecret      string
 	RunnerNodeSelector         map[string]string

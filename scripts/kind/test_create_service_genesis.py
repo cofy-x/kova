@@ -161,6 +161,10 @@ class InstallerTests(unittest.TestCase):
                 "jobs-new",
                 "--receipt-namespace",
                 "receipts-new",
+                "--worker-pool-id",
+                "kind-fixture/test-pool",
+                "--runner-image",
+                "localhost:5002/kova@sha256:" + "a" * 64,
                 "--service-namespace",
                 "service",
                 "--release",
@@ -190,11 +194,30 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual(values["admissionGenesis"]["recoveryReceiptNamespace"], "receipts-new")
         self.assertEqual(values["admissionGenesis"]["receiptSecret"]["uid"], "secret-original")
         self.assertEqual(values["runnerNamespace"], "jobs-new")
+        self.assertEqual(values["workerPoolID"], "kind-fixture/test-pool")
+        self.assertEqual(json.loads(values_path.read_text())["images"]["runner"], {
+            "repository": "localhost:5002/kova", "tag": "", "digest": "sha256:" + "a" * 64,
+        })
         self.assertEqual(values["maxQueuedJobs"], 1000)
         self.assertEqual(os.stat(values_path).st_mode & 0o777, 0o600)
         self.assertEqual(os.stat(values_path.parent).st_mode & 0o777, 0o700)
         for artifact in values_path.parent.iterdir():
             self.assertEqual(os.stat(artifact).st_mode & 0o777, 0o600)
+
+    def test_execution_identity_rejected_before_any_write(self):
+        for field, value in (
+            ("worker_pool_id", ""), ("worker_pool_id", "pool with spaces"),
+            ("runner_image", "localhost:5002/kova:runner-dev"),
+            ("runner_image", "sha256:" + "a" * 64),
+            ("runner_image", "localhost:5002/kova@sha256:" + "A" * 64),
+        ):
+            with self.subTest(field=field, value=value):
+                prior = getattr(self.args, field)
+                setattr(self.args, field, value)
+                with self.assertRaises(installer.Stop):
+                    FakeInstaller(self.args)
+                self.assertFalse(Path(self.args.output_directory).exists())
+                setattr(self.args, field, prior)
 
     def test_existing_namespace_never_adopted(self):
         fake = FakeInstaller(self.args)

@@ -22,6 +22,8 @@ type InstallationSpec struct {
 	NamespaceUID        string
 	ReceiptNamespace    string
 	ReceiptNamespaceUID string
+	WorkerPoolID        string
+	RunnerImage         string
 	Generation          string
 	Limits              Limits
 }
@@ -38,13 +40,15 @@ func (s InstallationSpec) contract() (Contract, error) {
 		return Contract{}, fmt.Errorf("admission installation has invalid Namespace name")
 	}
 	contract := Contract{
-		Version:             2,
+		Version:             3,
 		NamespaceUID:        s.NamespaceUID,
 		ReceiptNamespace:    s.ReceiptNamespace,
 		ReceiptNamespaceUID: s.ReceiptNamespaceUID,
+		WorkerPoolID:        s.WorkerPoolID,
+		RunnerImage:         s.RunnerImage,
 		Generation:          s.Generation,
 		ActiveLedgerName:    ActiveLedgerName,
-		ActiveLedgerSchema:  1,
+		ActiveLedgerSchema:  2,
 		QueueLedgerName:     QueueLedgerName,
 		QueueLedgerSchema:   2,
 		Limits:              s.Limits,

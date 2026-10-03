@@ -19,6 +19,7 @@ KIND_LOAD_IMAGES=${KIND_LOAD_IMAGES:-true}
 START_OBSERVABILITY=${START_OBSERVABILITY:-true}
 WORKER_PLATFORM=${WORKER_PLATFORM-$(kova_platform)}
 VERIFY_RETRY_CRD_SCHEMA=${VERIFY_RETRY_CRD_SCHEMA:-true}
+HELM_LEGACY_IMAGE_VALUES=${HELM_LEGACY_IMAGE_VALUES:-false}
 
 if [[ "${KOVA_CHART}" != /* ]]; then
   KOVA_CHART=${ROOT}/${KOVA_CHART}
@@ -31,6 +32,10 @@ if [[ "${KIND_KUBECONFIG}" != /* ]]; then
 fi
 
 require_cmd helm
+helm_image_args=()
+append_helm_role_image_args controller "${CONTROLLER_IMAGE}" "${HELM_LEGACY_IMAGE_VALUES}"
+append_helm_role_image_args runner "${RUNNER_IMAGE}" "${HELM_LEGACY_IMAGE_VALUES}"
+append_helm_role_image_args worker "${WORKER_IMAGE}" "${HELM_LEGACY_IMAGE_VALUES}"
 
 case ${VERIFY_RETRY_CRD_SCHEMA} in
   true|false) ;;
@@ -66,12 +71,7 @@ helm_args=(
   --create-namespace
   --wait
   --timeout 180s
-  --set-string "images.controller.repository=${CONTROLLER_IMAGE%:*}"
-  --set-string "images.controller.tag=${CONTROLLER_IMAGE##*:}"
-  --set-string "images.runner.repository=${RUNNER_IMAGE%:*}"
-  --set-string "images.runner.tag=${RUNNER_IMAGE##*:}"
-  --set-string "images.worker.repository=${WORKER_IMAGE%:*}"
-  --set-string "images.worker.tag=${WORKER_IMAGE##*:}"
+  "${helm_image_args[@]}"
 )
 if [[ -n "${KIND_VALUES}" ]]; then
   helm_args+=(-f "${KIND_VALUES}")

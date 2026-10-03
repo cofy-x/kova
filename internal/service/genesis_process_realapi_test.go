@@ -44,7 +44,7 @@ import (
 // Opt in with KOVA_GENESIS_PROCESS_API_MANIFEST=/absolute/private/matrix.json.
 // The external installer must first create ten distinct, fresh runner and
 // recovery-receipt Namespace pairs, Initializing Genesises, and immutable
-// receipt Secrets. Both Namespace UIDs must be pinned in each v2 receipt. This gate
+// receipt Secrets. Both Namespace UIDs must be pinned in each v3 receipt. This gate
 // creates only the two runtime ledgers; it never starts a Service, Pod, runner,
 // manager, listener, registry, or leader. No API object is removed on failure.
 // A passing gate is process-loss evidence around prepareGenesisRuntime only.
@@ -239,8 +239,11 @@ func loadProcessManifest(path, pinnedHash string) (processManifest, string, erro
 
 func processConfig(c processCase, receipt admissioncontract.Receipt) config.Config {
 	limits := receipt.Contract.Limits
+	runnerDigest, _ := admissioncontract.RunnerManifestDigest(receipt.Contract.RunnerImage)
 	return config.Config{Namespace: c.Namespace,
-		MaxActiveJobs: limits.MaxActiveJobs, MaxActiveJobsPerRequester: limits.MaxActiveJobsPerRequester,
+		WorkerPoolID: receipt.Contract.WorkerPoolID, RunnerImage: receipt.Contract.RunnerImage,
+		RunnerImageDigest: runnerDigest,
+		MaxActiveJobs:     limits.MaxActiveJobs, MaxActiveJobsPerRequester: limits.MaxActiveJobsPerRequester,
 		WorkerSlots: limits.WorkerSlots, MaxQueuedJobs: limits.MaxQueuedJobs,
 		MaxQueuedJobsPerRequester: limits.MaxQueuedJobsPerRequester}
 }
@@ -1090,7 +1093,7 @@ func TestGenesisProcessPinnedReceiptRejectsChange(t *testing.T) {
 	}
 }
 
-func processV2ReceiptForUnit(c processCase) admissioncontract.Receipt {
+func processReceiptForUnit(c processCase) admissioncontract.Receipt {
 	receipt, _ := genesisTestReceiptAndConfig()
 	receipt.Namespace, receipt.GenesisUID = c.Namespace, c.GenesisUID
 	receipt.Contract.NamespaceUID = c.NamespaceUID
@@ -1101,7 +1104,7 @@ func processV2ReceiptForUnit(c processCase) admissioncontract.Receipt {
 
 func TestGenesisProcessReceiptPinsSeparateNamespace(t *testing.T) {
 	c := validProcessFixtureForUnit().Cases[0]
-	receipt := processV2ReceiptForUnit(c)
+	receipt := processReceiptForUnit(c)
 	raw, err := json.Marshal(receipt)
 	if err != nil {
 		t.Fatal(err)
@@ -1122,7 +1125,7 @@ func TestGenesisProcessReceiptPinsSeparateNamespace(t *testing.T) {
 		changed := c
 		mutate(&changed)
 		if _, _, err := processReceipt(changed); err == nil {
-			t.Fatal("manifest and immutable v2 receipt accepted different receipt Namespace identities")
+			t.Fatal("manifest and immutable v3 receipt accepted different receipt Namespace identities")
 		}
 	}
 }
@@ -1148,7 +1151,7 @@ func (r processInventoryReader) List(ctx context.Context, list client.ObjectList
 
 func TestGenesisProcessV2ReceiptNamespacePreflight(t *testing.T) {
 	c := validProcessFixtureForUnit().Cases[0]
-	receipt := processV2ReceiptForUnit(c)
+	receipt := processReceiptForUnit(c)
 	for _, tc := range []struct {
 		name            string
 		changeNamespace func(*corev1.Namespace)

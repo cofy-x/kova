@@ -125,12 +125,15 @@ func (f *staticGenesisCore) PatchConfigMap(context.Context, string, string, []by
 
 func genesisTestReceiptAndConfig() (admissioncontract.Receipt, config.Config) {
 	cfg := config.Config{Namespace: "jobs-57", MaxActiveJobs: 20, MaxActiveJobsPerRequester: 4,
-		WorkerSlots: 20, MaxQueuedJobs: 1000, MaxQueuedJobsPerRequester: 100}
+		WorkerSlots: 20, MaxQueuedJobs: 1000, MaxQueuedJobsPerRequester: 100,
+		WorkerPoolID: "worker-pool-original", RunnerImage: "example.com/kova/runner@sha256:" + strings.Repeat("a", 64),
+		RunnerImageDigest: "sha256:" + strings.Repeat("a", 64)}
 	r := admissioncontract.Receipt{Namespace: cfg.Namespace, GenesisName: admissioncontract.GenesisName,
 		GenesisUID: "genesis-original", Contract: admissioncontract.Contract{
-			Version: 2, NamespaceUID: "namespace-original", Generation: strings.Repeat("a", 32),
+			Version: 3, NamespaceUID: "namespace-original", Generation: strings.Repeat("a", 32),
 			ReceiptNamespace: "receipts-57", ReceiptNamespaceUID: "receipts-original",
-			ActiveLedgerName: admissioncontract.ActiveLedgerName, ActiveLedgerSchema: 1,
+			WorkerPoolID: cfg.WorkerPoolID, RunnerImage: cfg.RunnerImage,
+			ActiveLedgerName: admissioncontract.ActiveLedgerName, ActiveLedgerSchema: 2,
 			QueueLedgerName: admissioncontract.QueueLedgerName, QueueLedgerSchema: 2,
 			Limits: admissioncontract.Limits{MaxActiveJobs: cfg.MaxActiveJobs,
 				MaxActiveJobsPerRequester: cfg.MaxActiveJobsPerRequester, WorkerSlots: cfg.WorkerSlots,

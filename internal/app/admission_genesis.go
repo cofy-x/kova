@@ -80,6 +80,8 @@ func admissionGenesisIdentityFlags() []cli.Flag {
 		&cli.StringFlag{Name: "namespace-uid", Usage: "expected original runner Namespace UID (required)"},
 		&cli.StringFlag{Name: "receipt-namespace", Usage: "separate original recovery receipt Namespace name (required)"},
 		&cli.StringFlag{Name: "receipt-namespace-uid", Usage: "expected original recovery receipt Namespace UID (required)"},
+		&cli.StringFlag{Name: "worker-pool-id", Usage: "externally assigned immutable worker capacity identity (required)"},
+		&cli.StringFlag{Name: "runner-image", Usage: "canonical runner repository@sha256 manifest reference (required)"},
 		&cli.StringFlag{Name: "generation", Usage: "caller-created 32-character lowercase hex installation generation (required)"},
 		&cli.IntFlag{Name: "max-active-jobs", Usage: "exact admission maxActiveJobs (required)"},
 		&cli.IntFlag{Name: "max-active-jobs-per-requester", Usage: "exact admission maxActiveJobsPerRequester (required)"},
@@ -96,7 +98,7 @@ func admissionGenesisInputs(c *cli.Context) (admissioncontract.InstallationSpec,
 		strings.TrimSpace(c.String("namespace")) == "" || strings.TrimSpace(c.String("kubeconfig")) == "" {
 		return empty, noReader, fmt.Errorf("explicit global --namespace and --kubeconfig are required")
 	}
-	for _, name := range []string{"namespace-uid", "receipt-namespace", "receipt-namespace-uid", "generation", "max-active-jobs", "max-active-jobs-per-requester",
+	for _, name := range []string{"namespace-uid", "receipt-namespace", "receipt-namespace-uid", "worker-pool-id", "runner-image", "generation", "max-active-jobs", "max-active-jobs-per-requester",
 		"worker-slots", "max-queued-jobs", "max-queued-jobs-per-requester"} {
 		if !c.IsSet(name) {
 			return empty, noReader, fmt.Errorf("explicit --%s is required", name)
@@ -105,6 +107,7 @@ func admissionGenesisInputs(c *cli.Context) (admissioncontract.InstallationSpec,
 	spec := admissioncontract.InstallationSpec{
 		Namespace: c.String("namespace"), NamespaceUID: c.String("namespace-uid"),
 		ReceiptNamespace: c.String("receipt-namespace"), ReceiptNamespaceUID: c.String("receipt-namespace-uid"),
+		WorkerPoolID: c.String("worker-pool-id"), RunnerImage: c.String("runner-image"),
 		Generation: c.String("generation"), Limits: admissioncontract.Limits{
 			MaxActiveJobs:             c.Int("max-active-jobs"),
 			MaxActiveJobsPerRequester: c.Int("max-active-jobs-per-requester"),

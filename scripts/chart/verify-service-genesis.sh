@@ -14,6 +14,20 @@ for extra in absent partial; do
     exit 1
   fi
 done
+for invalid in 'serviceDaemon.workerPoolID=' 'images.runner.digest=' 'images.runner.digest=sha256:bad'; do
+  if helm template kova ./charts/kova --set serviceDaemon.enabled=true \
+    -f scripts/chart/genesis-test-values.yaml --set-string "${invalid}" >/dev/null 2>&1; then
+    echo "Service chart accepted missing or invalid execution identity: ${invalid}" >&2
+    exit 1
+  fi
+done
+deployment=$(helm template kova ./charts/kova --set serviceDaemon.enabled=true \
+  -f scripts/chart/genesis-test-values.yaml --show-only templates/service-daemon-deployment.yaml)
+if [[ ${deployment} != *'--worker-pool-id=render-test-pool'* ||
+      ${deployment} != *'--runner-image=ghcr.io/cofy-x/kova@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'* ]]; then
+  echo 'Service chart lost its worker pool or manifest digest pin' >&2
+  exit 1
+fi
 
 rendered=$(helm template kova ./charts/kova --set serviceDaemon.enabled=true \
   -f scripts/chart/genesis-test-values.yaml --show-only templates/service-daemon-rbac.yaml)

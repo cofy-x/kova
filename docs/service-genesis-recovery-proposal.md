@@ -16,10 +16,13 @@ The numbers are candidate measurements; the separate #58 maximal payloads round-
 The environment installer, not Kova, first creates previously unused, uniquely named and distinct runner and recovery-receipt Namespaces, then an `Initializing` Genesis named `kova-service-admission-genesis` in the runner Namespace.
 After direct named reads, the installer publishes a trusted installation receipt to the Service Deployment, for example through an immutable Secret mounted as a file.
 The receipt contains the **original** runner and recovery-receipt Namespace names and UIDs, Genesis name and UID, a random installation generation, the active and queue ledger names and schema versions, and all five capacity limits (`maxActiveJobs`, `maxActiveJobsPerRequester`, `workerSlots`, `maxQueuedJobs`, `maxQueuedJobsPerRequester`).
+Contract v3 also pins the externally assigned `workerPoolID` and canonical runner `repository@sha256` OCI manifest/index reference, and requires active ledger schema 2 plus queue ledger schema 2.
+All replicas must use those exact execution identities; v1/v2 receipts cannot be adopted or rewritten in place.
+The capacity identity is not derived from a BuildKit endpoint and does not itself prove physical worker retirement.
 These identifiers are not credentials, but the receipt's source and write access are part of the installation trust boundary.
 A Kova process must have the receipt before it starts; it never manufactures a receipt from a discovered object or an empty List, creates/replaces Genesis, or follows a changed UID.
 
-Genesis has one strictly decoded `genesis.json` data value with exactly the receipt's two Namespace UIDs, generation, ledger schemas, and limits, plus `phase`, `activeLedgerUID`, and `queueLedgerUID`.
+Genesis has one strictly decoded `genesis.json` data value with exactly the receipt's two Namespace UIDs, worker pool and runner image identities, generation, ledger schemas, and limits, plus `phase`, `activeLedgerUID`, and `queueLedgerUID`.
 The externally created `Initializing` Genesis starts with both ledger UIDs empty and treats an absent/nil `immutable` field and explicit `false` as semantically equivalent.
 While still `Initializing`, each ledger UID may only move once from empty to the first directly observed canonical empty object UID; these are durable provisional pins, not admission authority.
 `Committed` requires both nonempty provisional UIDs to match the actual ledgers and explicit `immutable=true`.

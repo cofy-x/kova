@@ -141,9 +141,10 @@ func newGenesisReceiptHTTPServer(t *testing.T) (*Server, client.Client, *receipt
 	}
 	receipt := admissioncontract.Receipt{Namespace: cfg.Namespace, GenesisName: admissioncontract.GenesisName,
 		GenesisUID: "genesis-http-original", Contract: admissioncontract.Contract{
-			Version: 2, NamespaceUID: "runner-http-original", ReceiptNamespace: "receipts-http",
+			Version: 3, NamespaceUID: "runner-http-original", ReceiptNamespace: "receipts-http",
 			ReceiptNamespaceUID: "receipt-namespace-original", Generation: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-			ActiveLedgerName: admissioncontract.ActiveLedgerName, ActiveLedgerSchema: 1,
+			WorkerPoolID: cfg.WorkerPoolID, RunnerImage: cfg.RunnerImage,
+			ActiveLedgerName: admissioncontract.ActiveLedgerName, ActiveLedgerSchema: 2,
 			QueueLedgerName: admissioncontract.QueueLedgerName, QueueLedgerSchema: 2,
 			Limits: admissioncontract.Limits{MaxActiveJobs: cfg.MaxActiveJobs, MaxActiveJobsPerRequester: cfg.MaxActiveJobsPerRequester,
 				WorkerSlots: cfg.WorkerSlots, MaxQueuedJobs: cfg.MaxQueuedJobs, MaxQueuedJobsPerRequester: cfg.MaxQueuedJobsPerRequester},

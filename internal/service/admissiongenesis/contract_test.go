@@ -16,9 +16,10 @@ func testReceipt() admissioncontract.Receipt {
 	return admissioncontract.Receipt{
 		Namespace: "jobs-57", GenesisName: admissioncontract.GenesisName, GenesisUID: "genesis-uid",
 		Contract: admissioncontract.Contract{
-			Version: 2, NamespaceUID: "namespace-uid", ReceiptNamespace: "receipts-57",
+			Version: 3, NamespaceUID: "namespace-uid", ReceiptNamespace: "receipts-57",
 			ReceiptNamespaceUID: "receipt-namespace-uid", Generation: strings.Repeat("a", 32),
-			ActiveLedgerName: admissioncontract.ActiveLedgerName, ActiveLedgerSchema: 1,
+			WorkerPoolID: "worker-pool-original", RunnerImage: "example.com/kova/runner@sha256:" + strings.Repeat("a", 64),
+			ActiveLedgerName: admissioncontract.ActiveLedgerName, ActiveLedgerSchema: 2,
 			QueueLedgerName: admissioncontract.QueueLedgerName, QueueLedgerSchema: 2,
 			Limits: admissioncontract.Limits{MaxActiveJobs: 128, MaxActiveJobsPerRequester: 8, WorkerSlots: 65535,
 				MaxQueuedJobs: 1000, MaxQueuedJobsPerRequester: 100},
@@ -58,7 +59,7 @@ func TestReceiptRejectsLossyOrDriftedContract(t *testing.T) {
 		"missing":           bytes.Replace(raw, []byte(`"genesisUID":"genesis-uid",`), nil, 1),
 		"null":              bytes.Replace(raw, []byte(`"genesisUID":"genesis-uid"`), []byte(`"genesisUID":null`), 1),
 		"cap drift":         bytes.Replace(raw, []byte(`"maxActiveJobs":128`), []byte(`"maxActiveJobs":129`), 1),
-		"schema drift":      bytes.Replace(raw, []byte(`"activeLedgerSchema":1`), []byte(`"activeLedgerSchema":2`), 1),
+		"schema drift":      bytes.Replace(raw, []byte(`"activeLedgerSchema":2`), []byte(`"activeLedgerSchema":1`), 1),
 		"trailing":          append(bytes.Clone(raw), []byte(` true`)...),
 		"surrogate":         bytes.Replace(raw, []byte(`"namespace":"jobs-57"`), []byte(`"namespace":"\ud800"`), 1),
 	} {

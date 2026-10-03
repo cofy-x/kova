@@ -50,6 +50,7 @@ func CLICommand() *cli.Command {
 			&cli.StringFlag{Name: "listen", Value: ":8080", Usage: "HTTP listen address"},
 			&cli.StringFlag{Name: "namespace", Value: defaults.Namespace, Usage: "Kubernetes namespace for runner Pods"},
 			&cli.StringFlag{Name: "runner-image", EnvVars: []string{"KOVA_RUNNER_IMAGE"}, Usage: "runner image used for created Pods"},
+			&cli.StringFlag{Name: "worker-pool-id", Usage: "externally pinned worker capacity identity; must match admission Genesis"},
 			&cli.StringFlag{Name: "runner-image-pull-policy", Value: defaults.RunnerImagePullPolicy, Usage: "runner image pull policy"},
 			&cli.StringFlag{Name: "runner-image-pull-secret", Value: defaults.ImagePullSecret, Usage: "runner image pull secret name"},
 			&cli.StringSliceFlag{Name: "runner-node-selector", Usage: "node selector for runner Pods; repeatable key=value"},
@@ -179,6 +180,7 @@ func CLICommand() *cli.Command {
 				Listen:                     c.String("listen"),
 				Namespace:                  c.String("namespace"),
 				RunnerImage:                strings.TrimSpace(c.String("runner-image")),
+				WorkerPoolID:               c.String("worker-pool-id"),
 				RunnerImagePullPolicy:      c.String("runner-image-pull-policy"),
 				RunnerImagePullSecret:      c.String("runner-image-pull-secret"),
 				RunnerNodeSelector:         runnerNodeSelector,
@@ -206,6 +208,10 @@ func CLICommand() *cli.Command {
 				ControllerConcurrency:      c.Int("controller-concurrency"),
 			}
 			if err := validateCapacityConfig(cfg); err != nil {
+				return err
+			}
+			cfg.RunnerImageDigest, err = admissioncontract.RunnerManifestDigest(cfg.RunnerImage)
+			if err != nil {
 				return err
 			}
 			controllerReader, err := ctrlclient.New(restConfig, ctrlclient.Options{Scheme: scheme})
@@ -277,13 +283,14 @@ func CLICommand() *cli.Command {
 				return err
 			}
 			if err := (&buildcontroller.KovaBuildReconciler{
-				Client:    mgr.GetClient(),
-				APIReader: mgr.GetAPIReader(),
-				Scheme:    mgr.GetScheme(),
-				Kube:      controllerKubeClient,
-				Cfg:       cfg,
-				Genesis:   controllerGuard,
-				Recorder:  mgr.GetEventRecorderFor("kova-service"),
+				Client:           mgr.GetClient(),
+				APIReader:        mgr.GetAPIReader(),
+				Scheme:           mgr.GetScheme(),
+				Kube:             controllerKubeClient,
+				Cfg:              cfg,
+				Genesis:          controllerGuard,
+				RecoveryReceipts: controllerClientset.CoreV1().ConfigMaps(receiptNamespace),
+				Recorder:         mgr.GetEventRecorderFor("kova-service"),
 			}).SetupWithManager(mgr, admissionPump.WakeEvents()); err != nil {
 				return err
 			}

@@ -172,6 +172,7 @@ The `kova admission-genesis` helper makes read-only, declarative proposals.
 Supply explicit global `--kubeconfig` and `--namespace` before the command,
 then `--namespace-uid`, `--receipt-namespace`, its original
 `--receipt-namespace-uid`, `--generation` (32 lowercase hex characters), and
+`--worker-pool-id` plus a canonical `--runner-image=repository@sha256:...`, and
 all five `--max-active-jobs`, `--max-active-jobs-per-requester`,
 `--worker-slots`, `--max-queued-jobs`, and
 `--max-queued-jobs-per-requester` flags after its subcommand. After an
@@ -195,6 +196,7 @@ Namespaces and recorded both original UIDs:
    recovery-receipt Namespace; set
    `serviceDaemon.admissionGenesis.enabled=true`,
    `receiptSecret.name`, and the original `receiptSecret.uid` in the chart.
+   Set `serviceDaemon.workerPoolID`, `images.runner.repository`, and `images.runner.digest` to the exact v3 contract values; mutable tags, old v1/v2 receipts, or runtime identity drift refuse startup.
    The chart mounts the existing Secret; it never creates one. Missing receipt
    values fail Helm rendering, and a missing Secret/key prevents Pod startup.
    Each Service process directly checks the immutable Secret UID and exact
@@ -209,6 +211,8 @@ This script is intentionally Kind-only; production orchestration remains environ
 It captures create intents and original UID responses in a private evidence directory, emits a Helm values file only after exact readback, and never resets or adopts an existing namespace.
 An unknown create or partial installation stops without deleting evidence or retrying under a new identity.
 Its visible-work checks are vetoes, not proof that all external writers are gone.
+The local E2E resolves an already published `localhost:5002` runner tag by reading the manifest bytes and then reading the same bytes back by digest; remote image inputs must already be digest-pinned.
+This read-only resolution does not publish images or establish worker retirement.
 
 The matching CRD must be applied before any such Service starts, then the
 serving `/status` API must round-trip both `admissionGenesisWitness` and

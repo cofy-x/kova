@@ -49,9 +49,10 @@ func TestAdmissionGenesisCLIUsesExplicitGlobalFlagsAndGETOnlyAPI(t *testing.T) {
 	receipt := admissioncontract.Receipt{
 		Namespace: "jobs-57", GenesisName: admissioncontract.GenesisName, GenesisUID: "genesis-original",
 		Contract: admissioncontract.Contract{
-			Version: 2, NamespaceUID: "namespace-original", ReceiptNamespace: "receipts-57",
+			Version: 3, NamespaceUID: "namespace-original", ReceiptNamespace: "receipts-57",
 			ReceiptNamespaceUID: "receipts-original", Generation: strings.Repeat("a", 32),
-			ActiveLedgerName: admissioncontract.ActiveLedgerName, ActiveLedgerSchema: 1,
+			WorkerPoolID: "worker-pool-original", RunnerImage: "example.com/kova/runner@sha256:" + strings.Repeat("a", 64),
+			ActiveLedgerName: admissioncontract.ActiveLedgerName, ActiveLedgerSchema: 2,
 			QueueLedgerName: admissioncontract.QueueLedgerName, QueueLedgerSchema: 2,
 			Limits: admissioncontract.Limits{MaxActiveJobs: 20, MaxActiveJobsPerRequester: 4,
 				WorkerSlots: 20, MaxQueuedJobs: 1000, MaxQueuedJobsPerRequester: 100},
@@ -105,6 +106,7 @@ func TestAdmissionGenesisCLIUsesExplicitGlobalFlagsAndGETOnlyAPI(t *testing.T) {
 	identity := []string{"--namespace-uid", receipt.Contract.NamespaceUID, "--generation", receipt.Contract.Generation,
 		"--receipt-namespace", receipt.Contract.ReceiptNamespace,
 		"--receipt-namespace-uid", receipt.Contract.ReceiptNamespaceUID,
+		"--worker-pool-id", receipt.Contract.WorkerPoolID, "--runner-image", receipt.Contract.RunnerImage,
 		"--max-active-jobs", "20", "--max-active-jobs-per-requester", "4", "--worker-slots", "20",
 		"--max-queued-jobs", "1000", "--max-queued-jobs-per-requester", "100"}
 	app := NewCLIApp()

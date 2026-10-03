@@ -37,7 +37,8 @@ The gate only accepts dedicated `kind-kova-genesis-api-*` or `kind-kova-genesis-
 
 The private absolute manifest requires `kubeconfig`, its `kubeconfigSHA256`, `context`, `kubeSystemUID`, `controlPlaneID`, an explicit `cleanupOnSuccess` boolean, and exactly ten `cases`.
 Each case pins `stage` (`active-create`, `active-pin`, `queue-create`, `queue-pin`, or `commit`), `point` (`before` or `after`), `namespace`, `namespaceUID`, `receiptNamespace`, `receiptNamespaceUID`, `genesisUID`, absolute `receiptFile`, `receiptSHA256`, `secretNamespace`, `secretNamespaceUID`, `secretName`, and `secretUID`.
-Each recovery-receipt Namespace must be unique and disjoint from every runner and control Namespace, and its original name/UID must match the immutable v2 receipt.
+Each recovery-receipt Namespace must be unique and disjoint from every runner and control Namespace, and its original name/UID must match the immutable v3 receipt.
+The receipt also pins an externally assigned worker pool identity and the exact runner OCI manifest/index reference; the gate derives no authority from a mutable tag or image configuration ID.
 All ten fixtures are preflighted before the first runtime write; bounded receipt-Namespace inventory rejects existing receipts, workloads, Secrets, pagination, or read failures, allowing only the system `kube-root-ca.crt` ConfigMap if present.
 The strict schema and opt-in-free refusal tests live in the [process gate implementation](../internal/service/genesis_process_realapi_test.go).
 
@@ -49,8 +50,8 @@ KOVA_GENESIS_PROCESS_API_MANIFEST=/absolute/private/matrix.json \
 Use `cleanupOnSuccess=false` to retain every test object for exact-UID inspection.
 No API cleanup occurs on a failed test path before cleanup; an explicitly opted-in successful cleanup is sequential, and a later deletion failure can leave a partially cleaned fixture that requires inspection.
 Each child has a 45-second absolute deadline and the parent has a 12-minute budget; a timeout retains all unresolved API state.
-The v2 fixture/schema adaptation is not itself live v2 qualification, and earlier v1 process-gate evidence cannot certify the changed contract.
-The historical waiting-only queue fixtures below also need explicit adaptation before they can qualify v2's active-inclusive HTTP queue cap.
+The v3 fixture/schema adaptation is not itself live v3 qualification, and earlier v1 process-gate evidence cannot certify the changed contract.
+The historical waiting-only queue fixtures below also need explicit adaptation before they can qualify the active-inclusive HTTP queue cap introduced in v2 and retained in v3.
 
 ## Network Overrides
 

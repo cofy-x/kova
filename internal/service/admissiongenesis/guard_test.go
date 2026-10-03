@@ -17,7 +17,7 @@ func committedGuardFixture(t *testing.T) (*fakeCore, Bootstrapper, *Guard, map[a
 	t.Helper()
 	f, b := testBootstrap(t)
 	next := map[admissioncontract.Role]string{
-		admissioncontract.Active: strings.Replace(b.Active.EmptyData, `"fence":0`, `"fence":1`, 1),
+		admissioncontract.Active: strings.Replace(b.Active.EmptyData, `"fence":1`, `"fence":2`, 1),
 		admissioncontract.Queue:  strings.Replace(b.Queue.EmptyData, `"intents":{}`, `"intents":{ }`, 1),
 	}
 	for _, template := range []LedgerTemplate{b.Active, b.Queue} {

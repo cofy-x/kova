@@ -31,6 +31,9 @@ SERVICE_MAX_ACTIVE_JOBS_PER_REQUESTER=${SERVICE_MAX_ACTIVE_JOBS_PER_REQUESTER:-4
 SERVICE_MAX_QUEUED_JOBS=${SERVICE_MAX_QUEUED_JOBS:-1000}
 SERVICE_MAX_QUEUED_JOBS_PER_REQUESTER=${SERVICE_MAX_QUEUED_JOBS_PER_REQUESTER:-100}
 SERVICE_WORKER_SLOTS=${SERVICE_WORKER_SLOTS:-20}
+# Dedicated local-fixture capacity identity; an environment managing shared
+# workers must supply its externally assigned identity instead.
+SERVICE_WORKER_POOL_ID=${SERVICE_WORKER_POOL_ID:-kind-fixture/${SERVICE_RUNNER_NAMESPACE}}
 KOVA_CHART=${KOVA_CHART:-${ROOT}/charts/kova}
 KOVA_VALUES=${KOVA_VALUES:-${ROOT}/deploy/kind-values.yaml}
 BASELINE_CHART=${BASELINE_CHART:-}
@@ -147,6 +150,7 @@ if [[ -n "${BASELINE_CHART}" ]]; then
     RUNNER_IMAGE=${BASELINE_RUNNER_IMAGE} \
     WORKER_IMAGE=${BASELINE_WORKER_IMAGE} \
     KIND_LOAD_IMAGES=false \
+    HELM_LEGACY_IMAGE_VALUES=true \
     VERIFY_RETRY_CRD_SCHEMA=false \
     "${ROOT}/scripts/kind/deploy-kind.sh"
   kubectl --kubeconfig "${kind_kubeconfig}" -n "${NAMESPACE}" \
@@ -234,6 +238,9 @@ if [[ "${REQUIRE_LEGACY_CRD}" == true ]]; then
   fi
 fi
 
+# Resolve only the already-published local fixture tag. Remote callers must
+# supply their exact immutable manifest reference; this never pushes an image.
+RUNNER_IMAGE=$(python3 "${ROOT}/scripts/kind/resolve-runner-image.py" "${RUNNER_IMAGE}")
 genesis_context=$(kubectl --kubeconfig "${kind_kubeconfig}" config current-context)
 genesis_system_uid=$(kubectl --kubeconfig "${kind_kubeconfig}" get namespace kube-system -o jsonpath='{.metadata.uid}')
 mkdir -p "${ROOT}/.work/service-genesis"
@@ -243,6 +250,7 @@ genesis_values=$(python3 "${ROOT}/scripts/kind/create-service-genesis.py" \
   --kova-cli "${KOVA_CLI}" --release "${RELEASE_NAME}" \
   --service-namespace "${NAMESPACE}" --runner-namespace "${SERVICE_RUNNER_NAMESPACE}" \
   --receipt-namespace "${SERVICE_RECEIPT_NAMESPACE}" \
+  --worker-pool-id "${SERVICE_WORKER_POOL_ID}" --runner-image "${RUNNER_IMAGE}" \
   --acknowledge "${genesis_context}/${NAMESPACE}/${SERVICE_RUNNER_NAMESPACE}/${SERVICE_RECEIPT_NAMESPACE}" \
   --output-directory "${ROOT}/.work/service-genesis/${SERVICE_RUNNER_NAMESPACE}" \
   --max-active-jobs "${SERVICE_MAX_ACTIVE_JOBS}" \
@@ -271,17 +279,16 @@ if [[ -n "${BASELINE_CHART}" ]]; then
   # Service processes may overlap across this protocol migration.
   service_replicas=0
 fi
+helm_image_args=()
+append_helm_role_image_args controller "${CONTROLLER_IMAGE}"
+append_helm_role_image_args runner "${RUNNER_IMAGE}"
+append_helm_role_image_args worker "${WORKER_IMAGE}"
 helm upgrade --install "${RELEASE_NAME}" "${KOVA_CHART}" \
   --kubeconfig "${kind_kubeconfig}" \
   --namespace "${NAMESPACE}" --create-namespace --wait --timeout 180s \
   -f "${KOVA_VALUES}" \
   -f "${genesis_values}" \
-  --set-string "images.controller.repository=${CONTROLLER_IMAGE%:*}" \
-  --set-string "images.controller.tag=${CONTROLLER_IMAGE##*:}" \
-  --set-string "images.runner.repository=${RUNNER_IMAGE%:*}" \
-  --set-string "images.runner.tag=${RUNNER_IMAGE##*:}" \
-  --set-string "images.worker.repository=${WORKER_IMAGE%:*}" \
-  --set-string "images.worker.tag=${WORKER_IMAGE##*:}" \
+  "${helm_image_args[@]}" \
   --set-string "worker.platform=${KOVA_PLATFORM}" \
   --set serviceDaemon.enabled=true \
   --set "serviceDaemon.replicas=${service_replicas}" \

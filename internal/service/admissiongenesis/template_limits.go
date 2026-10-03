@@ -60,7 +60,7 @@ func validateCanonicalEmptyLimits(template LedgerTemplate, limits admissioncontr
 		if err := admissioncontract.RequireKeys(raw, "version", "fence", "maxJobs", "maxPerRequester", "workerSlots", "active"); err != nil {
 			return fmt.Errorf("active canonical empty header: %w", err)
 		}
-		if state.Version != 1 || state.Fence != 0 || state.Active == nil || len(state.Active) != 0 ||
+		if state.Version != 2 || state.Fence != 1 || state.Active == nil || len(state.Active) != 0 ||
 			state.MaxJobs != limits.MaxActiveJobs || state.MaxPerRequester != limits.MaxActiveJobsPerRequester ||
 			state.WorkerSlots != limits.WorkerSlots {
 			return fmt.Errorf("active canonical empty capacity differs from admission receipt")

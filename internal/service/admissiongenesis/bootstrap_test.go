@@ -194,7 +194,7 @@ func testBootstrap(t *testing.T) (*fakeCore, Bootstrapper) {
 	r := testReceipt()
 	f := newFakeCore(t, r)
 	limits := r.Contract.Limits
-	activeEmpty := fmt.Sprintf(`{"version":1,"fence":0,"maxJobs":%d,"maxPerRequester":%d,"workerSlots":%d,"active":{}}`,
+	activeEmpty := fmt.Sprintf(`{"version":2,"fence":1,"maxJobs":%d,"maxPerRequester":%d,"workerSlots":%d,"active":{}}`,
 		limits.MaxActiveJobs, limits.MaxActiveJobsPerRequester, limits.WorkerSlots)
 	queueEmpty := fmt.Sprintf(`{"version":2,"globalLimit":%d,"requesterLimit":%d,"intents":{}}`,
 		limits.MaxQueuedJobs, limits.MaxQueuedJobsPerRequester)
@@ -287,7 +287,7 @@ func TestBootstrapRejectsWrongRoleDataKeysBeforeAnyWrite(t *testing.T) {
 }
 
 func TestNonemptyReadRaceRequiresValidCommittedPeerPair(t *testing.T) {
-	const nonemptyActive = `{"version":1,"active":{"job":"running"}}`
+	const nonemptyActive = `{"version":2,"active":{"job":"running"}}`
 	for _, mode := range []string{"valid", "malformed", "replaced"} {
 		t.Run(mode, func(t *testing.T) {
 			f, b := testBootstrap(t)
@@ -584,7 +584,7 @@ func TestBootstrapRefusesPinnedOrCommittedLossWithoutCreate(t *testing.T) {
 				active.UID = "active-replacement"
 			}
 			if tc.nonempty {
-				active.Data[b.Active.DataKey] = `{"version":1,"active":{"unexpected":true}}`
+				active.Data[b.Active.DataKey] = `{"version":2,"active":{"unexpected":true}}`
 			}
 			if !tc.missing {
 				f.objects[admissioncontract.ActiveLedgerName] = active

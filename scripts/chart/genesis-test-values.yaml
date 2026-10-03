@@ -1,6 +1,10 @@
 # Rendering tests only. These are deliberately fictitious object identities.
 # Never install this file: the runtime rejects these unprovisioned receipts.
+images:
+  runner:
+    digest: sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 serviceDaemon:
+  workerPoolID: render-test-pool
   runnerNamespace: kova-render-test-jobs
   admissionGenesis:
     enabled: true

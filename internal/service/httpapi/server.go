@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/cofy-x/kova/internal/admissioncontract"
 	kovav1 "github.com/cofy-x/kova/internal/apis/kova/v1alpha1"
 	"github.com/cofy-x/kova/internal/kube"
 	"github.com/cofy-x/kova/internal/logging"
@@ -20,6 +21,7 @@ import (
 	apiv1 "github.com/cofy-x/kova/pkg/api/v1"
 
 	"github.com/labstack/echo/v4"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -269,11 +271,26 @@ func (s *Server) checkAdmissionLedgersWithReader(ctx context.Context, reader cli
 	if err := s.queueStoreWithReader(reader).CheckReady(ctx); err != nil {
 		return err
 	}
-	return buildcontroller.CheckAdmissionLedger(ctx, reader, s.cfg.Namespace, s.cfg)
+	return s.checkActiveAdmissionLedgerWithReader(ctx, reader)
 }
 
 func (s *Server) checkActiveAdmissionLedger(ctx context.Context) error {
-	return buildcontroller.CheckAdmissionLedger(ctx, s.reader, s.cfg.Namespace, s.cfg)
+	return s.checkActiveAdmissionLedgerWithReader(ctx, s.reader)
+}
+
+func (s *Server) checkActiveAdmissionLedgerWithReader(ctx context.Context, reader client.Reader) error {
+	if s.genesisLedger == nil {
+		return buildcontroller.CheckAdmissionLedger(ctx, reader, s.cfg.Namespace, s.cfg)
+	}
+	cm := &corev1.ConfigMap{}
+	if err := reader.Get(ctx, client.ObjectKey{Namespace: s.cfg.Namespace,
+		Name: s.genesisLedger.Bootstrap.Receipt.Contract.ActiveLedgerName}, cm); err != nil {
+		return err
+	}
+	if err := s.genesisLedger.CheckLedger(cm, admissioncontract.Active); err != nil {
+		return err
+	}
+	return buildcontroller.ValidateAdmissionLedgerForGenesis(cm, s.cfg)
 }
 
 func (s *Server) routes() *echo.Echo {

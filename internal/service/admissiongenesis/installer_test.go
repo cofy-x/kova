@@ -16,6 +16,7 @@ func TestExternalInstallerPinsCallerSuppliedIdentities(t *testing.T) {
 	receipt := testReceipt()
 	spec := admissioncontract.InstallationSpec{Namespace: receipt.Namespace, NamespaceUID: receipt.Contract.NamespaceUID,
 		ReceiptNamespace: receipt.Contract.ReceiptNamespace, ReceiptNamespaceUID: receipt.Contract.ReceiptNamespaceUID,
+		WorkerPoolID: receipt.Contract.WorkerPoolID, RunnerImage: receipt.Contract.RunnerImage,
 		Generation: receipt.Contract.Generation, Limits: receipt.Contract.Limits}
 	api := newFakeCore(t, receipt)
 	originalGenesis := api.objects[admissioncontract.GenesisName]

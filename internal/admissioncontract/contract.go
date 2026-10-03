@@ -7,9 +7,11 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"unicode/utf8"
 
 	"github.com/cofy-x/kova/internal/admissionjson"
+	"github.com/google/go-containerregistry/pkg/name"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -51,6 +53,8 @@ type Contract struct {
 	NamespaceUID        string `json:"namespaceUID"`
 	ReceiptNamespace    string `json:"receiptNamespace"`
 	ReceiptNamespaceUID string `json:"receiptNamespaceUID"`
+	WorkerPoolID        string `json:"workerPoolID"`
+	RunnerImage         string `json:"runnerImage"`
 	Generation          string `json:"generation"`
 	ActiveLedgerName    string `json:"activeLedgerName"`
 	ActiveLedgerSchema  int    `json:"activeLedgerSchema"`
@@ -106,7 +110,7 @@ func (l Limits) validate() error {
 		l.WorkerSlots < 1 || l.WorkerSlots > 65535 ||
 		l.MaxQueuedJobs < 1 || l.MaxQueuedJobs > 1000 ||
 		l.MaxQueuedJobsPerRequester < 1 || l.MaxQueuedJobsPerRequester > l.MaxQueuedJobs ||
-		8192+3456*l.MaxActiveJobs > MaxLedgerDataBytes ||
+		8192+6000*l.MaxActiveJobs > MaxLedgerDataBytes ||
 		4096+736*l.MaxQueuedJobs > MaxLedgerDataBytes {
 		return fmt.Errorf("admission receipt has unsupported limits")
 	}
@@ -114,14 +118,54 @@ func (l Limits) validate() error {
 }
 
 func (c Contract) validate() error {
-	if c.Version != 2 || !ValidUID(c.NamespaceUID) ||
+	if c.Version != 3 || !ValidUID(c.NamespaceUID) ||
 		len(validation.IsDNS1123Label(c.ReceiptNamespace)) != 0 || !ValidUID(c.ReceiptNamespaceUID) ||
+		!ValidWorkerPoolID(c.WorkerPoolID) ||
 		!validNonce(c.Generation) ||
-		c.ActiveLedgerName != ActiveLedgerName || c.ActiveLedgerSchema != 1 ||
+		c.ActiveLedgerName != ActiveLedgerName || c.ActiveLedgerSchema != 2 ||
 		c.QueueLedgerName != QueueLedgerName || c.QueueLedgerSchema != 2 {
 		return fmt.Errorf("admission receipt has unsupported contract")
 	}
+	if _, err := RunnerManifestDigest(c.RunnerImage); err != nil {
+		return err
+	}
 	return c.Limits.validate()
+}
+
+// ValidWorkerPoolID accepts an externally assigned identity for the entire
+// worker capacity of this epoch. It is not derived from a mutable Service
+// address and does not prove that any physical worker has been retired.
+func ValidWorkerPoolID(value string) bool {
+	if value == "" || len(value) > 128 {
+		return false
+	}
+	for _, r := range value {
+		if !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') ||
+			(r >= '0' && r <= '9') || strings.ContainsRune("._:/@+-", r)) {
+			return false
+		}
+	}
+	return true
+}
+
+// RunnerManifestDigest accepts only a fully qualified digest reference. The
+// digest identifies the OCI manifest or index selected for the Pod, never a
+// Docker image configuration ID. Resolution/publishing belongs to the caller.
+func RunnerManifestDigest(value string) (string, error) {
+	ref, err := name.NewDigest(value, name.StrictValidation)
+	if err != nil || len(value) > 512 || ref.Name() != value {
+		return "", fmt.Errorf("runner image must be a canonical repository@sha256 manifest reference")
+	}
+	digest := ref.DigestStr()
+	if len(digest) != 71 || !strings.HasPrefix(digest, "sha256:") {
+		return "", fmt.Errorf("runner image must use a sha256 manifest digest")
+	}
+	for _, r := range strings.TrimPrefix(digest, "sha256:") {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
+			return "", fmt.Errorf("runner manifest digest must use lowercase hexadecimal")
+		}
+	}
+	return digest, nil
 }
 
 func (r Receipt) Validate() error {
@@ -152,7 +196,7 @@ func allowContract(path []string, key string) bool {
 	case 1:
 		if path[0] == "contract" {
 			switch key {
-			case "version", "namespaceUID", "receiptNamespace", "receiptNamespaceUID", "generation", "activeLedgerName", "activeLedgerSchema", "queueLedgerName", "queueLedgerSchema", "limits":
+			case "version", "namespaceUID", "receiptNamespace", "receiptNamespaceUID", "workerPoolID", "runnerImage", "generation", "activeLedgerName", "activeLedgerSchema", "queueLedgerName", "queueLedgerSchema", "limits":
 				return true
 			}
 		}
@@ -184,7 +228,7 @@ func RequireKeys(raw []byte, keys ...string) error {
 }
 
 func requireContractKeys(raw []byte) error {
-	if err := RequireKeys(raw, "version", "namespaceUID", "receiptNamespace", "receiptNamespaceUID", "generation", "activeLedgerName", "activeLedgerSchema", "queueLedgerName", "queueLedgerSchema", "limits"); err != nil {
+	if err := RequireKeys(raw, "version", "namespaceUID", "receiptNamespace", "receiptNamespaceUID", "workerPoolID", "runnerImage", "generation", "activeLedgerName", "activeLedgerSchema", "queueLedgerName", "queueLedgerSchema", "limits"); err != nil {
 		return err
 	}
 	var values map[string]json.RawMessage

@@ -33,6 +33,7 @@ kova version
 ```
 
 This source guide describes the required Genesis contract in the next candidate.
+The v3 installation pins an externally assigned worker capacity identity and the runner's exact OCI manifest/index digest; older v1/v2 receipts cannot be adopted.
 Do not combine it with an older release that lacks `kova admission-genesis`; use that release's versioned guide instead.
 
 ## Install Kova
@@ -60,6 +61,8 @@ If any create has an unknown result, stop and inspect the retained original iden
 
 ```bash
 set -euo pipefail
+: "${KOVA_WORKER_POOL_ID:?supply the externally assigned dedicated worker pool identity}"
+: "${KOVA_RUNNER_IMAGE:?supply the reviewed repository@sha256 manifest reference}"
 helm show crds oci://ghcr.io/cofy-x/charts/kova \
   --version "${KOVA_CHART_VERSION}" | kubectl apply -f -
 umask 077
@@ -73,6 +76,7 @@ genesis_inputs=(
   --namespace-uid "$(jq -r .metadata.uid "${genesis_directory}/namespace.json")"
   --receipt-namespace "${KOVA_RECEIPT_NAMESPACE}"
   --receipt-namespace-uid "$(jq -r .metadata.uid "${genesis_directory}/receipt-namespace.json")"
+  --worker-pool-id "${KOVA_WORKER_POOL_ID}" --runner-image "${KOVA_RUNNER_IMAGE}"
   --generation "${genesis_generation}"
   --max-active-jobs 20 --max-active-jobs-per-requester 4
   --worker-slots 20 --max-queued-jobs 1000 --max-queued-jobs-per-requester 100
@@ -97,6 +101,9 @@ helm upgrade --install kova oci://ghcr.io/cofy-x/charts/kova \
   --create-namespace \
   --set serviceDaemon.enabled=true \
   --set-string "serviceDaemon.runnerNamespace=${KOVA_RUNNER_NAMESPACE}" \
+  --set-string "serviceDaemon.workerPoolID=${KOVA_WORKER_POOL_ID}" \
+  --set-string "images.runner.repository=${KOVA_RUNNER_IMAGE%@*}" \
+  --set-string "images.runner.digest=${KOVA_RUNNER_IMAGE##*@}" \
   --set serviceDaemon.admissionGenesis.enabled=true \
   --set-string "serviceDaemon.admissionGenesis.recoveryReceiptNamespace=${KOVA_RECEIPT_NAMESPACE}" \
   --set serviceDaemon.admissionGenesis.receiptSecret.name=kova-admission-receipt \
@@ -121,6 +128,8 @@ kubectl -n "${KOVA_RUNNER_NAMESPACE}" create rolebinding kova-quickstart \
 ```
 
 The installation creates the Service controller and one rootless BuildKit worker.
+The worker pool identity names the environment's capacity domain; it is not a BuildKit address or proof that old workers have stopped.
+Resolve the runner digest from the reviewed registry artifact, never from `docker image inspect .Id` (an image configuration digest).
 Published charts bind controller, runner, and worker image tags to the same Kova release automatically.
 Kova needs no object store or shared PVC.
 

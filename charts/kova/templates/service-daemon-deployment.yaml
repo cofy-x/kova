@@ -11,6 +11,12 @@
 {{- if not .Values.serviceDaemon.runnerNamespace }}
 {{- fail "serviceDaemon.admissionGenesis requires an explicit fresh runnerNamespace" }}
 {{- end }}
+{{- if not .Values.serviceDaemon.workerPoolID }}
+{{- fail "serviceDaemon requires the externally assigned workerPoolID from the Genesis contract" }}
+{{- end }}
+{{- if not .Values.images.runner.digest }}
+{{- fail "serviceDaemon requires images.runner.digest pinned to the OCI manifest in the Genesis contract" }}
+{{- end }}
 {{- if not .Values.serviceDaemon.admissionGenesis.recoveryReceiptNamespace }}
 {{- fail "serviceDaemon.admissionGenesis requires an explicit fresh recoveryReceiptNamespace" }}
 {{- end }}
@@ -78,6 +84,7 @@ spec:
             - --listen={{ .Values.serviceDaemon.listen }}
             - --namespace={{ default (include "kova.namespace" .) .Values.serviceDaemon.runnerNamespace }}
             - --recovery-receipt-namespace={{ .Values.serviceDaemon.admissionGenesis.recoveryReceiptNamespace }}
+            - --worker-pool-id={{ .Values.serviceDaemon.workerPoolID }}
             - --runner-image={{ include "kova.roleImage" (dict "root" . "role" "runner") }}
             - --runner-image-pull-policy={{ include "kova.roleImagePullPolicy" (dict "root" . "role" "runner") }}
             - --runner-image-pull-secret={{ $runnerRegistrySecret }}

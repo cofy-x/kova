@@ -91,6 +91,12 @@ func forkGenesisGuard(ctx context.Context, original *admissiongenesis.Guard,
 }
 
 func validateGenesisRuntimeConfig(cfg config.Config, receipt admissioncontract.Receipt) error {
+	digest, err := admissioncontract.RunnerManifestDigest(cfg.RunnerImage)
+	if err != nil || cfg.RunnerImage != receipt.Contract.RunnerImage ||
+		cfg.RunnerImageDigest != digest || cfg.WorkerPoolID != receipt.Contract.WorkerPoolID ||
+		!admissioncontract.ValidWorkerPoolID(cfg.WorkerPoolID) {
+		return fmt.Errorf("admission Genesis receipt differs from runtime worker pool or runner manifest identity")
+	}
 	limits := receipt.Contract.Limits
 	if cfg.Namespace != receipt.Namespace ||
 		cfg.MaxActiveJobs != limits.MaxActiveJobs ||

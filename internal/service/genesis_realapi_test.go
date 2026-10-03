@@ -99,10 +99,14 @@ func TestRealAPIGenesisBootstrapAndStatusRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg := config.Config{Namespace: target.Namespace, MaxActiveJobs: 2, MaxActiveJobsPerRequester: 1,
-		WorkerSlots: 2, MaxQueuedJobs: 10, MaxQueuedJobsPerRequester: 2}
+		WorkerSlots: 2, MaxQueuedJobs: 10, MaxQueuedJobsPerRequester: 2,
+		WorkerPoolID:      "worker-pool-" + hex.EncodeToString(nonce[:]),
+		RunnerImage:       "example.com/kova/runner@sha256:" + strings.Repeat("a", 64),
+		RunnerImageDigest: "sha256:" + strings.Repeat("a", 64)}
 	spec := admissioncontract.InstallationSpec{Namespace: target.Namespace,
 		NamespaceUID: os.Getenv("KOVA_GENESIS_REAL_API_NAMESPACE_UID"), Generation: hex.EncodeToString(nonce[:]),
 		ReceiptNamespace: receiptNamespace, ReceiptNamespaceUID: receiptNamespaceUID,
+		WorkerPoolID: cfg.WorkerPoolID, RunnerImage: cfg.RunnerImage,
 		Limits: admissioncontract.Limits{MaxActiveJobs: cfg.MaxActiveJobs,
 			MaxActiveJobsPerRequester: cfg.MaxActiveJobsPerRequester, WorkerSlots: cfg.WorkerSlots,
 			MaxQueuedJobs: cfg.MaxQueuedJobs, MaxQueuedJobsPerRequester: cfg.MaxQueuedJobsPerRequester}}
@@ -203,7 +207,7 @@ func TestRealAPIGenesisBootstrapAndStatusRoundTrip(t *testing.T) {
 	}
 	// Exercise the actual API server's JSON Patch UID/RV/data CAS, without a
 	// build, Pod, registry, or queue intent.
-	proposed := strings.Replace(active.Data[admissioncontract.ActiveLedgerDataKey], `"fence":0`, `"fence":1`, 1)
+	proposed := strings.Replace(active.Data[admissioncontract.ActiveLedgerDataKey], `"fence":1`, `"fence":2`, 1)
 	if proposed == active.Data[admissioncontract.ActiveLedgerDataKey] {
 		t.Fatal("active ledger fixture lacks a fence to advance")
 	}

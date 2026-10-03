@@ -55,13 +55,15 @@ def local_endpoint(value: str) -> bool:
 
 def expected_contract(args: argparse.Namespace, namespace_uid: str, receipt_namespace_uid: str, generation: str) -> dict:
     return {
-        "version": 2,
+        "version": 3,
         "namespaceUID": namespace_uid,
         "receiptNamespace": args.receipt_namespace,
         "receiptNamespaceUID": receipt_namespace_uid,
+        "workerPoolID": args.worker_pool_id,
+        "runnerImage": args.runner_image,
         "generation": generation,
         "activeLedgerName": "kova-service-admission",
-        "activeLedgerSchema": 1,
+        "activeLedgerSchema": 2,
         "queueLedgerName": "kova-service-queue-admission",
         "queueLedgerSchema": 2,
         "limits": {
@@ -144,6 +146,19 @@ def validate_options(args: argparse.Namespace) -> None:
         "runner, Service, and receipt namespaces must be pairwise distinct",
     )
     require(dns_label(args.release), "invalid release name")
+    require(
+        re.fullmatch(r"[A-Za-z0-9._:/@+\-]{1,128}", args.worker_pool_id) is not None,
+        "an explicit stable worker pool identity is required",
+    )
+    require(
+        len(args.runner_image) <= 512
+        and re.fullmatch(
+            r"(?:[a-z0-9][a-z0-9.-]*\.[a-z0-9.-]+|localhost)(?::[0-9]+)?/"
+            r"[a-z0-9]+(?:[._/-][a-z0-9]+)*@sha256:[0-9a-f]{64}",
+            args.runner_image,
+        ) is not None,
+        "runner image must be an explicit repository@sha256 OCI manifest digest",
+    )
     require(
         args.acknowledge == f"{args.context}/{args.service_namespace}/{args.runner_namespace}/{args.receipt_namespace}",
         "fresh-install acknowledgement must match context/service-namespace/runner-namespace/receipt-namespace",
@@ -374,6 +389,8 @@ class Installer:
                 "serviceNamespaceUID": service_uid,
                 "runnerNamespace": args.runner_namespace,
                 "receiptNamespace": args.receipt_namespace,
+                "workerPoolID": args.worker_pool_id,
+                "runnerImage": args.runner_image,
                 "generation": generation,
                 "kubeconfigSHA256": self.kubeconfig_sha,
                 "cliSHA256": self.cli_sha,
@@ -411,6 +428,8 @@ class Installer:
             "--namespace-uid", namespace_uid,
             "--receipt-namespace", args.receipt_namespace,
             "--receipt-namespace-uid", receipt_namespace_uid,
+            "--worker-pool-id", args.worker_pool_id,
+            "--runner-image", args.runner_image,
             "--generation", generation,
         ]
         for name in (
@@ -527,8 +546,16 @@ class Installer:
             },
         )
         values = {
+            "images": {
+                "runner": {
+                    "repository": args.runner_image.split("@", 1)[0],
+                    "tag": "",
+                    "digest": args.runner_image.split("@", 1)[1],
+                },
+            },
             "serviceDaemon": {
                 "runnerNamespace": args.runner_namespace,
+                "workerPoolID": args.worker_pool_id,
                 "admissionGenesis": {
                     "enabled": True,
                     "recoveryReceiptNamespace": args.receipt_namespace,
@@ -555,6 +582,8 @@ def parser() -> argparse.ArgumentParser:
         "kova-cli",
         "runner-namespace",
         "receipt-namespace",
+        "worker-pool-id",
+        "runner-image",
         "service-namespace",
         "release",
         "output-directory",
