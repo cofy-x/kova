@@ -172,13 +172,13 @@ func VerifyAuthorization(raw []byte, expected AuthorizationExpectation, roots Tr
 		!validPhysicalRetirement(expected.PhysicalRetirement, expected.Source) {
 		return VerifiedAuthorization{}, ErrUnqualified
 	}
-	var envelope AuthorizationEnvelope
-	if err := decodeCanonical(raw, &envelope); err != nil {
-		return VerifiedAuthorization{}, err
-	}
 	digest := digestBytes(raw)
 	if digest != expected.EnvelopeDigest {
 		return VerifiedAuthorization{}, ErrUnqualified
+	}
+	var envelope AuthorizationEnvelope
+	if err := decodeCanonical(raw, &envelope); err != nil {
+		return VerifiedAuthorization{}, err
 	}
 	p := envelope.Payload
 	if p.Version != version || p.Audience != authorizationAudience || p.Action != authorizationAction ||
@@ -318,11 +318,14 @@ func VerifyClosure(raw []byte, prior VerifiedAuthorization, expected ClosureExpe
 		!validSuccessor(expected.Successor, prior.source) {
 		return VerifiedClosure{}, ErrUnqualified
 	}
+	digest := digestBytes(raw)
+	if digest != expected.EnvelopeDigest {
+		return VerifiedClosure{}, ErrUnqualified
+	}
 	var envelope ClosureEnvelope
 	if err := decodeCanonical(raw, &envelope); err != nil {
 		return VerifiedClosure{}, err
 	}
-	digest := digestBytes(raw)
 	p := envelope.Payload
 	if digest != expected.EnvelopeDigest || p.Version != version || p.Audience != closureAudience ||
 		p.Action != closureAction || p.Issuer != expected.Issuer || p.KeyID != expected.KeyID ||

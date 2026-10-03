@@ -350,6 +350,11 @@ func VerifyDrainPermit(raw []byte, expected Expectation, roots TrustRoots) (Drai
 		!orderedProcesses(expected.ServiceProcesses) {
 		return DrainEvidence{}, ErrUnqualified
 	}
+	sum := sha256.Sum256(raw)
+	digest := "sha256:" + hex.EncodeToString(sum[:])
+	if digest != expected.PermitDigest {
+		return DrainEvidence{}, fmt.Errorf("%w: permit digest mismatch", ErrUnqualified)
+	}
 	var envelope Envelope
 	if err := json.Unmarshal(raw, &envelope); err != nil {
 		// An overflowing JSON number may be echoed in the decoder's error.
@@ -359,11 +364,6 @@ func VerifyDrainPermit(raw []byte, expected Expectation, roots TrustRoots) (Drai
 	canonical, err := json.Marshal(envelope)
 	if err != nil || !bytes.Equal(raw, canonical) {
 		return DrainEvidence{}, fmt.Errorf("%w: noncanonical envelope", ErrUnqualified)
-	}
-	sum := sha256.Sum256(canonical)
-	digest := "sha256:" + hex.EncodeToString(sum[:])
-	if digest != expected.PermitDigest {
-		return DrainEvidence{}, fmt.Errorf("%w: permit digest mismatch", ErrUnqualified)
 	}
 	p := envelope.Payload
 	if p.Version != permitVersion || p.Audience != permitAudience || p.Action != permitAction ||

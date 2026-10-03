@@ -101,9 +101,10 @@ func TestVerifyDrainPermitExactSignedBindings(t *testing.T) {
 
 func TestDrainPermitDecodeErrorDoesNotEchoEnvelope(t *testing.T) {
 	_, expected, roots, _ := fixturePermit(t)
-	expected.PermitDigest = "sha256:" + strings.Repeat("a", 64)
 	marker := strings.Repeat("123456789", 512)
 	raw := []byte(`{"payload":{"receiptCount":` + marker + `}}`)
+	sum := sha256.Sum256(raw)
+	expected.PermitDigest = "sha256:" + hex.EncodeToString(sum[:])
 	_, err := VerifyDrainPermit(raw, expected, roots)
 	if !errors.Is(err, ErrUnqualified) || len(err.Error()) > 160 || strings.Contains(err.Error(), "123456789") {
 		t.Fatal("invalid permit body escaped through decoder error")
