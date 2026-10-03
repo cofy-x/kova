@@ -237,6 +237,7 @@ lint-scripts:
 	bash scripts/e2e/test-service-migration-preflight.sh
 	bash scripts/e2e/test-release-artifacts.sh
 	bash scripts/release/test-image-digests.sh
+	bash scripts/release/test-package-chart.sh
 	bash scripts/release/test-publication-guards.sh
 	python3 scripts/release/test-pypi-artifacts.py
 	@if command -v shellcheck >/dev/null 2>&1; then \
