@@ -15,8 +15,8 @@ import (
 	kovav1 "github.com/cofy-x/kova/internal/apis/kova/v1alpha1"
 	"github.com/cofy-x/kova/internal/buildcontract"
 	"github.com/cofy-x/kova/internal/kube"
-	"github.com/cofy-x/kova/internal/logging"
 	"github.com/cofy-x/kova/internal/runner"
+	"github.com/cofy-x/kova/internal/service/admissiongenesis"
 	serviceauth "github.com/cofy-x/kova/internal/service/auth"
 	"github.com/cofy-x/kova/internal/service/buildcontroller"
 	"github.com/cofy-x/kova/internal/service/config"
@@ -78,9 +78,26 @@ func CLICommand() *cli.Command {
 			&cli.StringFlag{Name: "metrics-bind-address", Value: "0", Usage: "disabled by default; optional loopback controller-runtime Prometheus metrics address"},
 			&cli.BoolFlag{Name: "leader-elect", Value: true, Usage: "enable controller-runtime leader election"},
 			&cli.StringFlag{Name: "leader-election-namespace", Usage: "namespace used for controller leader election leases; defaults to --namespace"},
+			&cli.StringFlag{Name: "admission-genesis-receipt-file", Usage: "read-only mounted immutable admission receipt Secret data file"},
+			&cli.StringFlag{Name: "admission-genesis-receipt-secret-namespace", Usage: "original receipt Secret namespace"},
+			&cli.StringFlag{Name: "admission-genesis-receipt-secret-name", Usage: "original receipt Secret name"},
+			&cli.StringFlag{Name: "admission-genesis-receipt-secret-uid", Usage: "original immutable receipt Secret UID"},
 		},
 		Action: func(c *cli.Context) error {
 			ctrl.SetLogger(ctrlzap.New(ctrlzap.UseDevMode(false), ctrlzap.WriteTo(os.Stderr)))
+			receiptOptions := genesisReceiptOptions{
+				File:            c.String("admission-genesis-receipt-file"),
+				SecretNamespace: c.String("admission-genesis-receipt-secret-namespace"),
+				SecretName:      c.String("admission-genesis-receipt-secret-name"),
+				SecretUID:       c.String("admission-genesis-receipt-secret-uid"),
+			}
+			genesisEnabled, err := receiptOptions.enabled()
+			if err != nil {
+				return err
+			}
+			if !genesisEnabled {
+				return fmt.Errorf("kova service requires an externally installed admission Genesis receipt; legacy admission is not a shipped runtime mode")
+			}
 			if err := validateKubeClientRateLimit(c.Int("kube-client-qps"), c.Int("kube-client-burst")); err != nil {
 				return err
 			}
@@ -135,6 +152,14 @@ func CLICommand() *cli.Command {
 			if err != nil {
 				return err
 			}
+			controllerClientset, err := kubernetes.NewForConfig(restConfig)
+			if err != nil {
+				return err
+			}
+			readinessClientset, err := kubernetes.NewForConfig(readinessConfig)
+			if err != nil {
+				return err
+			}
 			scheme := runtime.NewScheme()
 			utilruntime.Must(corev1.AddToScheme(scheme))
 			utilruntime.Must(kovav1.AddToScheme(scheme))
@@ -181,6 +206,29 @@ func CLICommand() *cli.Command {
 			if err := validateCapacityConfig(cfg); err != nil {
 				return err
 			}
+			controllerReader, err := ctrlclient.New(restConfig, ctrlclient.Options{Scheme: scheme})
+			if err != nil {
+				return err
+			}
+			controllerDirect := admissiongenesis.DirectClient{Client: controllerClientset}
+			httpDirect := admissiongenesis.DirectClient{Client: clientset}
+			readinessDirect := admissiongenesis.DirectClient{Client: readinessClientset}
+			receiptRaw, checkControllerSecret, err := receiptOptions.loadAndCheck(ctx, controllerDirect)
+			if err != nil {
+				return err
+			}
+			controllerGuard, err := prepareGenesisRuntime(ctx, cfg, receiptRaw, controllerDirect, controllerReader, checkControllerSecret)
+			if err != nil {
+				return err
+			}
+			httpGuard, err := forkGenesisGuard(ctx, controllerGuard, httpDirect, receiptOptions.checkRaw(receiptRaw, httpDirect))
+			if err != nil {
+				return err
+			}
+			readinessGuard, err := forkGenesisGuard(ctx, controllerGuard, readinessDirect, receiptOptions.checkRaw(receiptRaw, readinessDirect))
+			if err != nil {
+				return err
+			}
 			authenticator, err := serviceauth.New(cfg.AuthMode, cfg.AuthToken, cfg.AuthStaticPrincipal, clientset.AuthenticationV1().TokenReviews())
 			if err != nil {
 				return err
@@ -213,6 +261,7 @@ func CLICommand() *cli.Command {
 				return err
 			}
 			admissionPump := buildcontroller.NewAdmissionPump(mgr.GetAPIReader(), cfg)
+			admissionPump.Genesis = controllerGuard
 			if err := admissionPump.SetupWithManager(mgr); err != nil {
 				return err
 			}
@@ -222,17 +271,16 @@ func CLICommand() *cli.Command {
 				Scheme:    mgr.GetScheme(),
 				Kube:      controllerKubeClient,
 				Cfg:       cfg,
+				Genesis:   controllerGuard,
 				Recorder:  mgr.GetEventRecorderFor("kova-service"),
 			}).SetupWithManager(mgr, admissionPump.WakeEvents()); err != nil {
 				return err
 			}
-			go func() {
-				if err := httpapi.NewServer(cfg, httpKubeClient, httpClient, httpClient, readinessReader, authenticator, authorizer).Start(ctx); err != nil {
-					logging.Errorf("Kova Service HTTP server stopped: %v", err)
-					stop()
-				}
-			}()
-			return mgr.Start(ctx)
+			server := httpapi.NewServer(cfg, httpKubeClient, httpClient, httpClient, readinessReader, authenticator, authorizer)
+			if err := server.WithGenesisGuards(httpGuard, readinessGuard); err != nil {
+				return err
+			}
+			return startServiceComponents(ctx, stop, controllerGuard, mgr.Start, server.Start)
 		},
 	}
 }
@@ -274,6 +322,10 @@ func configureKubeClientRateLimit(config *rest.Config, qps, burst int) {
 }
 
 func configureKubeClientRateLimits(config *rest.Config, qps, burst int) (*rest.Config, *rest.Config, *rest.Config) {
+	return configureKubeClientRateLimitsWithMetrics(config, qps, burst, serviceKubeClientMetrics)
+}
+
+func configureKubeClientRateLimitsWithMetrics(config *rest.Config, qps, burst int, metrics *kubeClientMetricSet) (*rest.Config, *rest.Config, *rest.Config) {
 	leaderConfig := rest.CopyConfig(config)
 	readinessConfig := rest.CopyConfig(config)
 	httpConfig := rest.CopyConfig(config)
@@ -281,6 +333,10 @@ func configureKubeClientRateLimits(config *rest.Config, qps, burst int) (*rest.C
 	configureKubeClientRateLimit(readinessConfig, 5, 10)
 	configureKubeClientRateLimit(httpConfig, qps, burst)
 	configureKubeClientRateLimit(config, qps, burst)
+	instrumentKubeClientConfig(leaderConfig, kubeClassLeader, metrics)
+	instrumentKubeClientConfig(readinessConfig, kubeClassReadiness, metrics)
+	instrumentKubeClientConfig(httpConfig, kubeClassHTTP, metrics)
+	instrumentKubeClientConfig(config, kubeClassController, metrics)
 	return leaderConfig, readinessConfig, httpConfig
 }
 

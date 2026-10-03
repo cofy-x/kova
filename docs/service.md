@@ -382,6 +382,7 @@ Runner exec streams do not use the REST token bucket; active-job and runner conc
 Tune them only after measuring queue convergence and API-server 429/5xx rates on the target cluster, and budget across all Service replicas rather than treating the values as cluster-wide limits.
 
 The controller-runtime Prometheus endpoint is disabled by default (`metricsBindAddress: "0"`). A controlled diagnostic run may bind it only to `127.0.0.1:<port>` inside each Service Pod. It is not published through the Service, and Kova rejects wildcard or non-loopback bind addresses because this endpoint has no built-in authentication. Collect the low-cardinality `controller_runtime_reconcile_time_seconds` histogram separately from HTTP POST latency and queue-status convergence; histogram p95/p99 do not include workqueue wait or client-side submission time.
+The same private scrape includes per-traffic-class client-go limiter `Wait` duration, Kubernetes wire-attempt counts by bounded verb/resource/status, and headers-only wire RTT. These are distinct phases; `WrapTransport` cannot observe limiter wait, and wire RTT excludes response-body decoding and watch stream lifetime. See [Service Kubernetes API attribution](observability.md#service-kubernetes-api-attribution) for metric names, label scope and scrape limitations.
 
 Registry credentials are the only storage credentials needed by Kova.
 The same Docker config can authorize source pulls, output pushes, and controller-side manifest verification:

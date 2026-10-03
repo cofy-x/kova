@@ -10,6 +10,7 @@ import (
 	"github.com/cofy-x/kova/internal/kube"
 	"github.com/cofy-x/kova/internal/logging"
 	"github.com/cofy-x/kova/internal/observability"
+	"github.com/cofy-x/kova/internal/service/admissiongenesis"
 	serviceauth "github.com/cofy-x/kova/internal/service/auth"
 	"github.com/cofy-x/kova/internal/service/buildcontroller"
 	"github.com/cofy-x/kova/internal/service/config"
@@ -27,13 +28,16 @@ type kubeAPI interface {
 }
 
 type Server struct {
-	cfg             config.Config
-	kube            kubeAPI
-	client          client.Client
-	reader          client.Reader
-	readinessReader client.Reader
-	auth            serviceauth.Authenticator
-	authz           serviceauth.Authorizer
+	cfg              config.Config
+	kube             kubeAPI
+	client           client.Client
+	reader           client.Reader
+	readinessReader  client.Reader
+	auth             serviceauth.Authenticator
+	authz            serviceauth.Authorizer
+	genesis          admissiongenesis.Checker
+	genesisLedger    *admissiongenesis.Guard
+	readinessGenesis admissiongenesis.Checker
 }
 
 var (
@@ -71,19 +75,49 @@ func NewServer(cfg config.Config, kube kubeAPI, crClient client.Client, crReader
 	return &Server{cfg: cfg, kube: kube, client: crClient, reader: crReader, readinessReader: readinessReader, auth: authenticator, authz: authorizer}
 }
 
+// WithGenesisGuards gives HTTP admission and readiness independent API budgets
+// while retaining the same externally receipted original binding.
+func (s *Server) WithGenesisGuards(httpGuard, readinessGuard *admissiongenesis.Guard) error {
+	if httpGuard == nil || readinessGuard == nil || httpGuard.Original != readinessGuard.Original ||
+		httpGuard.Bootstrap.Receipt != readinessGuard.Bootstrap.Receipt {
+		return fmt.Errorf("HTTP and readiness Genesis guards must share the exact original receipt and binding")
+	}
+	s.genesis = httpGuard
+	s.genesisLedger = httpGuard
+	s.readinessGenesis = readinessGuard
+	return nil
+}
+
+// withGenesisChecker injects an edge failure in package tests. Runtime
+// callers must supply a concrete Guard so queue writes cannot silently fall
+// back to legacy Update semantics.
+func (s *Server) withGenesisChecker(checker admissiongenesis.Checker) *Server {
+	s.genesis = checker
+	s.genesisLedger = nil
+	s.readinessGenesis = checker
+	return s
+}
+
+func (s *Server) checkGenesis(ctx context.Context) error {
+	if s.genesis == nil {
+		return nil
+	}
+	return s.genesis.Check(ctx)
+}
+
 func (s *Server) queueStore() queueadmission.Store {
 	return s.queueStoreWithReader(s.reader)
 }
 
 func (s *Server) queueStoreWithReader(reader client.Reader) queueadmission.Store {
 	return queueadmission.Store{
-		Client: s.client, Reader: reader, Namespace: s.cfg.Namespace,
+		Client: s.client, Reader: reader, Genesis: s.genesisLedger, Namespace: s.cfg.Namespace,
 		GlobalLimit: s.cfg.MaxQueuedJobs, RequesterLimit: s.cfg.MaxQueuedJobsPerRequester,
 	}
 }
 
 func (s *Server) Start(ctx context.Context) error {
-	if err := s.initializeAdmission(ctx); err != nil {
+	if err := s.startAdmission(ctx); err != nil {
 		return err
 	}
 	httpSrv := s.httpServer()
@@ -98,6 +132,15 @@ func (s *Server) Start(ctx context.Context) error {
 		return err
 	}
 	return nil
+}
+
+func (s *Server) startAdmission(ctx context.Context) error {
+	if s.genesis != nil {
+		// Never enter the legacy both-missing Create path after a Genesis
+		// commit, including a deletion between startup and listener handoff.
+		return s.genesis.Check(ctx)
+	}
+	return s.initializeAdmission(ctx)
 }
 
 func (s *Server) httpServer() *http.Server {
@@ -231,8 +274,14 @@ func (s *Server) routes() *echo.Echo {
 		if err := s.readinessReader.List(c.Request().Context(), &builds, client.InNamespace(s.cfg.Namespace), client.Limit(1)); err != nil {
 			return serviceUnavailable(c, err)
 		}
-		if err := s.checkAdmissionLedgersWithReader(c.Request().Context(), s.readinessReader); err != nil {
-			return serviceUnavailable(c, err)
+		if s.readinessGenesis != nil {
+			if err := s.readinessGenesis.Check(c.Request().Context()); err != nil {
+				return serviceUnavailable(c, err)
+			}
+		} else {
+			if err := s.checkAdmissionLedgersWithReader(c.Request().Context(), s.readinessReader); err != nil {
+				return serviceUnavailable(c, err)
+			}
 		}
 		return c.JSON(http.StatusOK, apiv1.ReadyStatus{Status: "ready"})
 	})

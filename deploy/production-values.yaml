@@ -32,6 +32,9 @@ serviceAccount:
 
 serviceDaemon:
   enabled: true
+  # Supply an environment-created fresh runnerNamespace and exact immutable
+  # admissionGenesis receipt Secret identity. Rendering intentionally fails
+  # without that separate installation overlay; never copy test identities.
   replicas: 2
   authentication:
     mode: tokenreview

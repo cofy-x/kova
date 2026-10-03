@@ -27,5 +27,8 @@ assert_rejected legacy-without-baseline \
 assert_rejected invalid-legacy-mode \
   'REQUIRE_LEGACY_CRD must be true or false' \
   REQUIRE_LEGACY_CRD=maybe
+assert_rejected same-namespace-fresh-install \
+  'Service E2E requires a separate, never-used runner namespace' \
+  NAMESPACE=kova SERVICE_RUNNER_NAMESPACE=kova
 
 echo 'Service migration preflight rejects in-place baseline and invalid legacy modes'

@@ -7,10 +7,23 @@ import (
 
 	"github.com/cofy-x/kova/internal/buildcontract"
 	"github.com/cofy-x/kova/internal/service/config"
+	"github.com/urfave/cli/v2"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/client-go/rest"
 )
+
+func TestShippedServiceRefusesLegacyAdmissionBeforeKubernetes(t *testing.T) {
+	app := &cli.App{Commands: []*cli.Command{CLICommand()}}
+	err := app.Run([]string{"kovad", "service"})
+	if err == nil || !strings.Contains(err.Error(), "requires an externally installed admission Genesis receipt") {
+		t.Fatalf("unreceipted runtime entered Kubernetes startup: %v", err)
+	}
+	err = app.Run([]string{"kovad", "service", "--admission-genesis-receipt-file=/unused"})
+	if err == nil || !strings.Contains(err.Error(), "exact Secret namespace, name, and UID") {
+		t.Fatalf("partial receipt was accepted: %v", err)
+	}
+}
 
 func TestParseNodeSelector(t *testing.T) {
 	got, err := parseNodeSelector([]string{"kova.cofy.io/source-node=true", "topology.kubernetes.io/zone=zone-b"})

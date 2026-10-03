@@ -36,6 +36,16 @@ NetworkPolicy allows Kova runner Pods from the configured runner namespace by
 default. Service ingress policy is opt-in; an empty peer list denies ingress
 when it is enabled.
 
+An enabled Service requires `serviceDaemon.admissionGenesis.enabled=true`
+and an externally installed runner Namespace and Genesis.
+There is no legacy Service startup mode.
+Supply the exact existing
+immutable receipt Secret name and original UID under
+`serviceDaemon.admissionGenesis.receiptSecret`; the chart only mounts and
+reads it. Never use Helm or `kubectl apply` to create or reset Genesis or the
+receipt. Follow the [Genesis installation gates](../../docs/deployment/kubernetes.md)
+before enabling the Service; a receipt is required even with zero replicas.
+
 Service deployments reuse the runner image pull Secret to authenticate output
 descriptor verification by default. Set `serviceDaemon.registrySecret` when
 those credentials differ. The same Secret authorizes OCI source pulls.

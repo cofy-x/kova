@@ -42,6 +42,20 @@ func TestGeneratedCRDMatchesBoundedBuildContract(t *testing.T) {
 			t.Fatalf("status.%s schema = %#v, want %#v", field, got, want)
 		}
 	}
+	stop, ok := status["admissionGenesisStopIntent"].(map[string]any)
+	if !ok || stop["type"] != "object" {
+		t.Fatalf("Genesis forced-stop intent schema = %#v", status["admissionGenesisStopIntent"])
+	}
+	stopFields := stop["properties"].(map[string]any)
+	for _, field := range []string{"buildUID", "podUID", "podCreateAttempt", "runnerRequestID", "reason"} {
+		if _, ok := stopFields[field].(map[string]any); !ok {
+			t.Fatalf("Genesis forced-stop intent lacks %s", field)
+		}
+	}
+	reasons := stopFields["reason"].(map[string]any)["enum"].([]any)
+	if len(reasons) != 3 || reasons[0] != "Cancelled" || reasons[1] != "Deleted" || reasons[2] != "BuildTimedOut" {
+		t.Fatalf("Genesis forced-stop reasons = %#v", reasons)
+	}
 	targets := spec["targets"].(map[string]any)
 	outputs := status["outputs"].(map[string]any)
 	build := spec["build"].(map[string]any)["properties"].(map[string]any)

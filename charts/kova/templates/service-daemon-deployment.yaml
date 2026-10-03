@@ -1,9 +1,21 @@
 {{- if .Values.serviceDaemon.enabled }}
+{{- if not .Values.serviceDaemon.admissionGenesis.enabled }}
+{{- fail "serviceDaemon.enabled requires externally installed admission Genesis; legacy Service admission is not supported" }}
+{{- end }}
 {{- if not (has .Values.serviceDaemon.authentication.mode (list "tokenreview" "static" "unsafe-none")) }}
 {{- fail "serviceDaemon.authentication.mode must be tokenreview, static, or unsafe-none" }}
 {{- end }}
 {{- if lt (int .Values.serviceDaemon.kubeClientBurst) (int .Values.serviceDaemon.kubeClientQPS) }}
 {{- fail "serviceDaemon.kubeClientBurst must be at least serviceDaemon.kubeClientQPS" }}
+{{- end }}
+{{- if not .Values.serviceDaemon.runnerNamespace }}
+{{- fail "serviceDaemon.admissionGenesis requires an explicit fresh runnerNamespace" }}
+{{- end }}
+{{- if not .Values.serviceDaemon.admissionGenesis.receiptSecret.name }}
+{{- fail "serviceDaemon.admissionGenesis requires the external immutable receipt Secret name" }}
+{{- end }}
+{{- if not .Values.serviceDaemon.admissionGenesis.receiptSecret.uid }}
+{{- fail "serviceDaemon.admissionGenesis requires the original immutable receipt Secret UID" }}
 {{- end }}
 {{- if ne .Values.serviceDaemon.metricsBindAddress "0" }}
 {{- $metricsPort := int (last (splitList ":" .Values.serviceDaemon.metricsBindAddress)) }}
@@ -98,6 +110,12 @@ spec:
             - --metrics-bind-address={{ .Values.serviceDaemon.metricsBindAddress }}
             - --leader-elect={{ .Values.serviceDaemon.leaderElect }}
             - --leader-election-namespace={{ include "kova.namespace" . }}
+            {{- if .Values.serviceDaemon.admissionGenesis.enabled }}
+            - --admission-genesis-receipt-file=/etc/kova/admission-genesis/receipt.json
+            - --admission-genesis-receipt-secret-namespace={{ include "kova.namespace" . }}
+            - --admission-genesis-receipt-secret-name={{ .Values.serviceDaemon.admissionGenesis.receiptSecret.name }}
+            - --admission-genesis-receipt-secret-uid={{ .Values.serviceDaemon.admissionGenesis.receiptSecret.uid }}
+            {{- end }}
           ports:
             - name: http
               containerPort: {{ .Values.serviceDaemon.port }}
@@ -134,11 +152,18 @@ spec:
             {{- toYaml .Values.serviceDaemon.resources | nindent 12 }}
           securityContext:
             {{- toYaml .Values.serviceDaemon.securityContext | nindent 12 }}
-          {{- if $outputRegistrySecret }}
+          {{- if or $outputRegistrySecret .Values.serviceDaemon.admissionGenesis.enabled }}
           volumeMounts:
+            {{- if .Values.serviceDaemon.admissionGenesis.enabled }}
+            - name: admission-genesis-receipt
+              mountPath: /etc/kova/admission-genesis
+              readOnly: true
+            {{- end }}
+            {{- if $outputRegistrySecret }}
             - name: registry-credentials
               mountPath: /home/kova/.docker
               readOnly: true
+            {{- end }}
           {{- end }}
       {{- $imagePullSecrets := include "kova.renderImagePullSecrets" . }}
       {{- if $imagePullSecrets }}
@@ -157,13 +182,24 @@ spec:
       tolerations:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- if $outputRegistrySecret }}
+      {{- if or $outputRegistrySecret .Values.serviceDaemon.admissionGenesis.enabled }}
       volumes:
+        {{- if .Values.serviceDaemon.admissionGenesis.enabled }}
+        - name: admission-genesis-receipt
+          secret:
+            secretName: {{ .Values.serviceDaemon.admissionGenesis.receiptSecret.name }}
+            optional: false
+            items:
+              - key: receipt.json
+                path: receipt.json
+        {{- end }}
+        {{- if $outputRegistrySecret }}
         - name: registry-credentials
           secret:
             secretName: {{ $outputRegistrySecret }}
             items:
               - key: .dockerconfigjson
                 path: config.json
+        {{- end }}
       {{- end }}
 {{- end }}

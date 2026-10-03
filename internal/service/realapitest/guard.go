@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -18,17 +19,20 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/validation"
+	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 type Guard struct {
-	Client       client.Client
-	Namespace    string
-	namespaceUID types.UID
-	systemUID    types.UID
-	kubeconfig   string
-	configHash   [sha256.Size]byte
+	Client        client.Client
+	Namespace     string
+	namespaceUID  types.UID
+	systemUID     types.UID
+	kubeconfig    string
+	configHash    [sha256.Size]byte
+	restConfig    *rest.Config
+	requireActive bool
 }
 
 // Open requires a dedicated local Kind cluster and creates a namespace that
@@ -83,7 +87,7 @@ func Open(t *testing.T, scheme *runtime.Scheme) *Guard {
 	if err != nil {
 		t.Fatal(err)
 	}
-	g := &Guard{Client: c, Namespace: namespace, systemUID: expectedSystemUID, kubeconfig: path, configHash: sha256.Sum256(data)}
+	g := &Guard{Client: c, Namespace: namespace, systemUID: expectedSystemUID, kubeconfig: path, configHash: sha256.Sum256(data), restConfig: config}
 	ctx := t.Context()
 	g.checkConfig(t)
 	var system corev1.Namespace
@@ -114,6 +118,79 @@ func Open(t *testing.T, scheme *runtime.Scheme) *Guard {
 	return g
 }
 
+// OpenExistingGenesis accepts only an externally prepared, dedicated local
+// Kind Namespace. It never creates a cluster, Namespace, registry, or any
+// object. The test itself may later create exact owned in-namespace fixtures.
+func OpenExistingGenesis(t *testing.T, scheme *runtime.Scheme) *Guard {
+	t.Helper()
+	path := os.Getenv("KOVA_GENESIS_REAL_API_KUBECONFIG")
+	if path == "" {
+		if os.Getenv("KOVA_GENESIS_REAL_API_CONTEXT") != "" || os.Getenv("KOVA_GENESIS_REAL_API_NAMESPACE") != "" ||
+			os.Getenv("KOVA_GENESIS_REAL_API_KUBE_SYSTEM_UID") != "" || os.Getenv("KOVA_GENESIS_REAL_API_NAMESPACE_UID") != "" {
+			t.Fatal("Genesis real-API target is partially configured")
+		}
+		t.Skip("set KOVA_GENESIS_REAL_API_KUBECONFIG for the opt-in Genesis real-API gate")
+	}
+	if !filepath.IsAbs(path) {
+		t.Fatal("KOVA_GENESIS_REAL_API_KUBECONFIG must be absolute")
+	}
+	namespace := os.Getenv("KOVA_GENESIS_REAL_API_NAMESPACE")
+	if !strings.HasPrefix(namespace, "kova-genesis-api-") || len(validation.IsDNS1123Label(namespace)) != 0 {
+		t.Fatal("KOVA_GENESIS_REAL_API_NAMESPACE must be an explicit kova-genesis-api-* DNS label")
+	}
+	expectedContext := os.Getenv("KOVA_GENESIS_REAL_API_CONTEXT")
+	if !strings.HasPrefix(expectedContext, "kind-kova-genesis-api-") {
+		t.Fatal("KOVA_GENESIS_REAL_API_CONTEXT must name a dedicated kind-kova-genesis-api-* context")
+	}
+	expectedSystemUID := types.UID(os.Getenv("KOVA_GENESIS_REAL_API_KUBE_SYSTEM_UID"))
+	expectedNamespaceUID := types.UID(os.Getenv("KOVA_GENESIS_REAL_API_NAMESPACE_UID"))
+	if expectedSystemUID == "" || expectedNamespaceUID == "" || expectedSystemUID == expectedNamespaceUID {
+		t.Fatal("Genesis real-API gate requires distinct explicit kube-system and test Namespace UIDs")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := clientcmd.Load(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.CurrentContext != expectedContext {
+		t.Fatalf("kubeconfig context %q does not equal explicit target %q", loaded.CurrentContext, expectedContext)
+	}
+	config, err := clientcmd.NewNonInteractiveClientConfig(*loaded, expectedContext, &clientcmd.ConfigOverrides{}, nil).ClientConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	endpoint, err := url.Parse(config.Host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	host, ip := endpoint.Hostname(), net.ParseIP(endpoint.Hostname())
+	if endpoint.Scheme != "https" || (host != "localhost" && (ip == nil || !ip.IsLoopback())) {
+		t.Fatalf("Genesis real-API target must be a loopback HTTPS Kind API server, got %q", config.Host)
+	}
+	config.Timeout = 10 * time.Second
+	c, err := client.New(config, client.Options{Scheme: scheme})
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := &Guard{Client: c, Namespace: namespace, namespaceUID: expectedNamespaceUID,
+		systemUID: expectedSystemUID, kubeconfig: path, configHash: sha256.Sum256(data), restConfig: config,
+		requireActive: true}
+	g.Check(t)
+	return g
+}
+
+func (g *Guard) RESTConfig(t *testing.T) *rest.Config {
+	t.Helper()
+	g.Check(t)
+	if g.restConfig == nil {
+		t.Fatal("real-API guard has no REST config")
+	}
+	return rest.CopyConfig(g.restConfig)
+}
+
 func (g *Guard) checkConfig(t *testing.T) {
 	t.Helper()
 	current, err := os.ReadFile(g.kubeconfig)
@@ -135,6 +212,9 @@ func (g *Guard) Check(t *testing.T) {
 		}
 		if ns.UID != expected {
 			t.Fatalf("namespace identity drift %s: UID=%s, expected=%s", name, ns.UID, expected)
+		}
+		if g.requireActive && name == g.Namespace && (ns.DeletionTimestamp != nil || ns.Status.Phase != corev1.NamespaceActive) {
+			t.Fatalf("test Namespace %s is not active and stable", name)
 		}
 	}
 }
