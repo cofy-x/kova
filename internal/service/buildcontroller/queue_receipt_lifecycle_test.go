@@ -5,7 +5,9 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/cofy-x/kova/internal/admissioncontract"
 	kovav1 "github.com/cofy-x/kova/internal/apis/kova/v1alpha1"
+	"github.com/cofy-x/kova/internal/service/admissiongenesis"
 	"github.com/cofy-x/kova/internal/service/queueadmission"
 	"github.com/cofy-x/kova/internal/service/recoveryreceipt"
 
@@ -18,6 +20,21 @@ type receiptDeleteFailure struct {
 	client.Client
 	deleteFirst bool
 	calls       int
+}
+
+type rejectFinalQueuePatch struct {
+	admissiongenesis.CoreAPI
+	queuePatches int
+}
+
+func (a *rejectFinalQueuePatch) PatchConfigMap(ctx context.Context, namespace, name string, body []byte) (*corev1.ConfigMap, error) {
+	if name == admissioncontract.QueueLedgerName {
+		a.queuePatches++
+		if a.queuePatches == 2 {
+			return nil, context.DeadlineExceeded
+		}
+	}
+	return a.CoreAPI.PatchConfigMap(ctx, namespace, name, body)
 }
 
 func (c *receiptDeleteFailure) Delete(ctx context.Context, obj client.Object, opts ...client.DeleteOption) error {
@@ -199,6 +216,72 @@ func TestGenesisRejectedLostDeleteResponseRequiresDirectAbsence(t *testing.T) {
 	}
 	if _, found, err := store.Lookup(ctx, build.Name); err != nil || found {
 		t.Fatalf("settled rejected charge remains: found=%t err=%v", found, err)
+	}
+}
+
+func TestGenesisTerminalCleanupResumesAfterDurableMarkerBeforeReceiptDelete(t *testing.T) {
+	ctx := context.Background()
+	store, base, build, _, witness := pinnedQueueFixture(t)
+	build.Status.Phase = kovav1.PhaseSucceeded
+	if err := base.Create(ctx, build); err != nil {
+		t.Fatal(err)
+	}
+	denied := &receiptDeleteFailure{Client: base}
+	store.Client = denied
+	if err := store.ReleaseForBuild(ctx, build); !errors.Is(err, context.DeadlineExceeded) || denied.calls != 1 {
+		t.Fatalf("post-marker Delete fault did not stop cleanup: %v calls=%d", err, denied.calls)
+	}
+	entry, found, err := store.Lookup(ctx, build.Name)
+	if err != nil || !found || entry.CleanupKind != "terminal" || entry.ReceiptUID != witness.ReceiptUID {
+		t.Fatalf("terminal marker did not retain exact charge: entry=%#v found=%t err=%v", entry, found, err)
+	}
+	var receipt corev1.ConfigMap
+	if err := base.Get(ctx, client.ObjectKey{Namespace: witness.Intent.ReceiptNamespace, Name: witness.ReceiptName}, &receipt); err != nil {
+		t.Fatalf("failed Delete removed the retained receipt: %v", err)
+	}
+	store.Client = base
+	if err := store.ReleaseForBuild(ctx, build); err != nil {
+		t.Fatalf("restart could not finish terminal receipt cleanup: %v", err)
+	}
+	if _, found, err := store.Lookup(ctx, build.Name); err != nil || found {
+		t.Fatalf("terminal cleanup left queue charge: found=%t err=%v", found, err)
+	}
+}
+
+func TestGenesisTerminalCleanupResumesAfterCRSettledBeforeFinalQueueCAS(t *testing.T) {
+	ctx := context.Background()
+	store, base, build, _, witness := pinnedQueueFixture(t)
+	build.Status.Phase = kovav1.PhaseSucceeded
+	if err := base.Create(ctx, build); err != nil {
+		t.Fatal(err)
+	}
+	originalAPI := store.Genesis.Bootstrap.API
+	fault := &rejectFinalQueuePatch{CoreAPI: originalAPI}
+	store.Genesis.Bootstrap.API = fault
+	if err := store.ReleaseForBuild(ctx, build); !errors.Is(err, context.DeadlineExceeded) || fault.queuePatches != 2 {
+		t.Fatalf("final queue CAS fault did not stop cleanup: %v patches=%d", err, fault.queuePatches)
+	}
+	entry, found, err := store.Lookup(ctx, build.Name)
+	if err != nil || !found || entry.CleanupKind != "terminal" || entry.ReceiptUID != witness.ReceiptUID {
+		t.Fatalf("settled CR released queue before final CAS: entry=%#v found=%t err=%v", entry, found, err)
+	}
+	var receipt corev1.ConfigMap
+	if err := base.Get(ctx, client.ObjectKey{Namespace: witness.Intent.ReceiptNamespace, Name: witness.ReceiptName}, &receipt); !apierrors.IsNotFound(err) {
+		t.Fatalf("post-settlement receipt was not UID-deleted: %v", err)
+	}
+	var persisted kovav1.KovaBuild
+	if err := base.Get(ctx, client.ObjectKeyFromObject(build), &persisted); err != nil {
+		t.Fatal(err)
+	}
+	if persisted.Annotations[queueadmission.ReceiptSettledAnnotation] != witness.ReceiptUID {
+		t.Fatalf("CR lacks durable settled witness: %#v", persisted.Annotations)
+	}
+	store.Genesis.Bootstrap.API = originalAPI
+	if err := store.ReleaseForBuild(ctx, &persisted); err != nil {
+		t.Fatalf("restart could not finish final queue CAS: %v", err)
+	}
+	if _, found, err := store.Lookup(ctx, build.Name); err != nil || found {
+		t.Fatalf("final queue CAS left charge: found=%t err=%v", found, err)
 	}
 }
 

@@ -30,6 +30,7 @@ type receiptHTTPAuthAPI struct {
 	client.Client
 	queuePatches int
 	failPin      bool
+	losePinReply bool
 }
 
 func (a *receiptHTTPAuthAPI) GetNamespace(ctx context.Context, name string) (*corev1.Namespace, error) {
@@ -58,6 +59,9 @@ func (a *receiptHTTPAuthAPI) PatchConfigMap(ctx context.Context, namespace, name
 	}
 	cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: name}}
 	err := a.Client.Patch(ctx, cm, client.RawPatch(types.JSONPatchType, body))
+	if err == nil && name == admissioncontract.QueueLedgerName && a.losePinReply && a.queuePatches == 2 {
+		return nil, context.DeadlineExceeded
+	}
 	return cm, err
 }
 
@@ -367,6 +371,20 @@ func TestGenesisHTTPReceiptOrPinUnknownNeverCreatesCR(t *testing.T) {
 				t.Fatalf("duplicate retried effect: code=%d CR=%d receipts=%d", second.Code, writer.crCreates, receipts.creates)
 			}
 		})
+	}
+}
+
+func TestGenesisHTTPPinLostResponseAfterWriteDirectReadbackAllowsSoleCR(t *testing.T) {
+	srv, _, authAPI, receipts, writer := newGenesisReceiptHTTPServer(t)
+	authAPI.losePinReply = true
+	response := postGenesisReceiptBuild(t, srv, "pin-lost-response")
+	if response.Code != http.StatusAccepted || authAPI.queuePatches != 2 || writer.crCreates != 1 || receipts.creates != 1 {
+		t.Fatalf("persisted pin was not qualified after lost response: code=%d patches=%d CR=%d receipts=%d body=%s",
+			response.Code, authAPI.queuePatches, writer.crCreates, receipts.creates, response.Body.String())
+	}
+	entry, found, err := srv.queueStore().Lookup(context.Background(), response.Header().Get("X-Kova-Build-ID"))
+	if err != nil || !found || entry.ReceiptUID == "" || entry.ReceiptDigest == "" {
+		t.Fatalf("lost-response pin lacks durable readback: entry=%#v found=%t err=%v", entry, found, err)
 	}
 }
 
