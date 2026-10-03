@@ -486,7 +486,9 @@ func envelopeSizeOK(raw []byte) bool { return len(raw) > 0 && len(raw) <= maxEnv
 
 func decodeCanonical(raw []byte, value any) error {
 	if err := json.Unmarshal(raw, value); err != nil {
-		return fmt.Errorf("%w: decode: %v", ErrUnqualified, err)
+		// Decoder errors can include an untrusted numeric token verbatim.
+		// Preserve the error class without placing envelope bytes in logs.
+		return fmt.Errorf("%w: invalid envelope encoding", ErrUnqualified)
 	}
 	canonical, err := json.Marshal(value)
 	if err != nil || !bytes.Equal(raw, canonical) {

@@ -14,6 +14,17 @@ import (
 
 func hash(c byte) string { return "sha256:" + strings.Repeat(string(c), 64) }
 
+func TestCanonicalDecodeErrorDoesNotEchoEnvelope(t *testing.T) {
+	marker := strings.Repeat("123456789", 512)
+	var value struct {
+		Count int `json:"count"`
+	}
+	err := decodeCanonical([]byte(`{"count":`+marker+`}`), &value)
+	if !errors.Is(err, ErrUnqualified) || len(err.Error()) > 160 || strings.Contains(err.Error(), "123456789") {
+		t.Fatal("invalid envelope body escaped through decoder error")
+	}
+}
+
 type fixture struct {
 	auth          AuthorizationPayload
 	closure       ClosurePayload

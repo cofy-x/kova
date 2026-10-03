@@ -352,7 +352,9 @@ func VerifyDrainPermit(raw []byte, expected Expectation, roots TrustRoots) (Drai
 	}
 	var envelope Envelope
 	if err := json.Unmarshal(raw, &envelope); err != nil {
-		return DrainEvidence{}, fmt.Errorf("%w: decode: %v", ErrUnqualified, err)
+		// An overflowing JSON number may be echoed in the decoder's error.
+		// Never expose unqualified envelope contents in an error or log.
+		return DrainEvidence{}, fmt.Errorf("%w: invalid envelope encoding", ErrUnqualified)
 	}
 	canonical, err := json.Marshal(envelope)
 	if err != nil || !bytes.Equal(raw, canonical) {
