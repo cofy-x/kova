@@ -180,6 +180,11 @@ type AdmissionGenesisWitness struct {
 	// +kubebuilder:validation:MaxLength=32
 	// +kubebuilder:validation:Pattern=`^[a-f0-9]{32}$`
 	PodCreateAttempt string `json:"podCreateAttempt"`
+	// PodTemplateDigest was recorded only after the original Pod's immutable
+	// pre-Create receipt was qualified. It lets evidence-only observation after
+	// ledger loss reject a changed execution template without those ledgers.
+	// +kubebuilder:validation:Pattern=`^sha256:[a-f0-9]{64}$`
+	PodTemplateDigest string `json:"podTemplateDigest"`
 	// +kubebuilder:validation:MaxLength=256
 	RunnerRequestID string `json:"runnerRequestID"`
 }

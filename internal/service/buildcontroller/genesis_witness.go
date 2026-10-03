@@ -6,6 +6,7 @@ import (
 
 	kovav1 "github.com/cofy-x/kova/internal/apis/kova/v1alpha1"
 	"github.com/cofy-x/kova/internal/daemonclient"
+	"github.com/cofy-x/kova/internal/service/recoveryreceipt"
 	"github.com/cofy-x/kova/internal/service/runnerexec"
 
 	corev1 "k8s.io/api/core/v1"
@@ -114,12 +115,16 @@ func (r *KovaBuildReconciler) witnessFromPodMode(build *kovav1.KovaBuild, pod *c
 		annotations[genesisRequestIDKey] != requestID {
 		return nil, fmt.Errorf("Genesis runner Pod stamps differ from original admission receipt")
 	}
+	templateDigest, err := recoveryreceipt.CanonicalPodTemplateDigest(pod)
+	if err != nil || annotations[recoveryreceipt.PodTemplateDigestAnnotation] != templateDigest {
+		return nil, fmt.Errorf("Genesis runner Pod template differs from the durable pre-Create witness")
+	}
 	return &kovav1.AdmissionGenesisWitness{
 		NamespaceUID: w.NamespaceUID, GenesisUID: w.GenesisUID,
 		Generation:      r.Genesis.Bootstrap.Receipt.Contract.Generation,
 		ActiveLedgerUID: w.ActiveLedgerUID, QueueLedgerUID: w.QueueLedgerUID,
 		BuildUID: string(build.UID), PodName: pod.Name, PodUID: string(pod.UID),
-		PodCreateAttempt: attempt, RunnerRequestID: requestID,
+		PodCreateAttempt: attempt, PodTemplateDigest: templateDigest, RunnerRequestID: requestID,
 	}, nil
 }
 
@@ -205,6 +210,9 @@ func (r *KovaBuildReconciler) directGenesisGrant(ctx context.Context, build *kov
 		return nil, nil, fmt.Errorf("Genesis runner submission lacks an open active grant")
 	}
 	if err := r.verifyPinnedGrant(ctx, current, entry); err != nil {
+		return nil, nil, err
+	}
+	if err := r.qualifyGenesisPod(ctx, current, pod, false); err != nil {
 		return nil, nil, err
 	}
 	return current, pod, nil

@@ -103,6 +103,8 @@ func TestGenesisFullReservationTableHasReceiptAndFuturePodHeadroom(t *testing.T)
 			GrantNonce: strings.Repeat("b", 32), GrantFence: math.MaxUint64,
 			GrantObservedRV: strings.Repeat("<", maxGrantObservedRVBytes),
 			GrantReceiptUID: strings.Repeat("R", 64), GrantReceiptDigest: "sha256:" + strings.Repeat("d", 64),
+			PodAttemptNonce: strings.Repeat("e", 32), PodTemplateDigest: "sha256:" + strings.Repeat("f", 64),
+			PodReceiptUID: strings.Repeat("P", 64), PodReceiptDigest: "sha256:" + strings.Repeat("c", 64),
 			Closing: true, InFlight: []string{strings.Repeat("e", 32)},
 		}
 	}
@@ -112,6 +114,7 @@ func TestGenesisFullReservationTableHasReceiptAndFuturePodHeadroom(t *testing.T)
 	}
 	for key, entry := range state.Active {
 		entry.InFlight = nil
+		entry.PodCleanupReady = true
 		entry.GrantCleanupReady = true
 		state.Active[key] = entry
 	}

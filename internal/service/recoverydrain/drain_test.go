@@ -146,6 +146,10 @@ func fixture(t *testing.T, existingBuild bool, withPod bool) (Input, *fakeDirect
 			PodName:      "kova-job-" + build.Name, PodAttemptNonce: strings.Repeat("3", 32),
 			PodTemplateDigest: "sha256:" + strings.Repeat("c", 64), RunnerImageDigest: "sha256:" + strings.Repeat("d", 64),
 			BuildRequestID: string(build.UID)}
+		podIntent.PodTemplateDigest, err = recoveryreceipt.CanonicalPodTemplateDigest(matchingOriginalPod(podIntent, build.Name))
+		if err != nil {
+			t.Fatal(err)
+		}
 		podCM, err := recoveryreceipt.NewPodCreateConfigMap(podIntent)
 		if err != nil {
 			t.Fatal(err)
@@ -334,6 +338,40 @@ func TestDrainRetainsOnlyReceiptMatchedOriginalPod(t *testing.T) {
 			}
 			if err != nil || report.Stage != "occupied-not-drained" || report.Dispositions[1].State != "original-retained" || api.pods != 0 {
 				t.Fatalf("original Pod not held: %#v, %v", report, err)
+			}
+		})
+	}
+}
+
+func TestDrainRejectsPodMutationDespiteMatchingDigestAnnotation(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mutate func(*corev1.Pod)
+	}{
+		{"runner env", func(p *corev1.Pod) { p.Spec.Containers[0].Env = []corev1.EnvVar{{Name: "INJECTED", Value: "1"}} }},
+		{"runner command", func(p *corev1.Pod) { p.Spec.Containers[0].Command = []string{"/bin/sh", "-c", "sleep 1"} }},
+		{"source digest", func(p *corev1.Pod) {
+			p.Spec.InitContainers[0].Command[len(p.Spec.InitContainers[0].Command)-1] = "sha256:" + strings.Repeat("e", 64)
+		}},
+		{"source image", func(p *corev1.Pod) { p.Spec.InitContainers[0].Image = "foreign.example/sidecar:latest" }},
+		{"host network", func(p *corev1.Pod) { p.Spec.HostNetwork = true }},
+		{"sidecar", func(p *corev1.Pod) {
+			p.Spec.Containers = append(p.Spec.Containers, corev1.Container{Name: "sidecar", Image: "foreign.example/sidecar:latest"})
+		}},
+		{"volume", func(p *corev1.Pod) {
+			p.Spec.Volumes = append(p.Spec.Volumes, corev1.Volume{Name: "foreign", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}})
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			in, api, build := fixture(t, true, true)
+			pod := matchingOriginalPod(in.PodCreates[0], build.Name)
+			tc.mutate(pod)
+			if err := api.Client.Create(context.Background(), pod); err != nil {
+				t.Fatal(err)
+			}
+			report, err := Drain(context.Background(), api, in)
+			if !errors.Is(err, ErrUnknown) || report.Stage != "occupancy-unknown" || api.pods != 0 {
+				t.Fatalf("changed Pod qualified from copied digest annotation: report=%#v err=%v", report, err)
 			}
 		})
 	}

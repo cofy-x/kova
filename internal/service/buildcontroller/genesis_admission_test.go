@@ -12,9 +12,11 @@ import (
 	kovav1 "github.com/cofy-x/kova/internal/apis/kova/v1alpha1"
 	"github.com/cofy-x/kova/internal/daemonclient"
 	"github.com/cofy-x/kova/internal/kube"
+	"github.com/cofy-x/kova/internal/runner"
 	"github.com/cofy-x/kova/internal/service/admissiongenesis"
 	"github.com/cofy-x/kova/internal/service/buildresult"
 	"github.com/cofy-x/kova/internal/service/queueadmission"
+	"github.com/cofy-x/kova/internal/service/recoveryreceipt"
 	"github.com/cofy-x/kova/internal/service/runnerexec"
 
 	corev1 "k8s.io/api/core/v1"
@@ -184,17 +186,51 @@ func genesisAdmissionFixture(t *testing.T) (*KovaBuildReconciler, *controllerGen
 func persistGenesisStartingWitness(t *testing.T, r *KovaBuildReconciler, api *controllerGenesisAPI, build *kovav1.KovaBuild) (*kovav1.KovaBuild, *corev1.Pod) {
 	t.Helper()
 	ctx := context.Background()
-	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: build.Namespace, Name: buildPodName(build.Name),
-		UID: "pod-original", Labels: map[string]string{"kova.cofy.dev/build-id": build.Name}},
-		Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "runner"}}}}
+	prepared := runner.PreparePod(runner.ManifestOptions{PodName: buildPodName(build.Name), Namespace: build.Namespace,
+		Image: r.Cfg.RunnerImage, ImagePullPolicy: "IfNotPresent", SourceURI: build.Spec.Source.URI,
+		SourceDigest: build.Spec.Source.Digest, RegistryPlainHTTP: r.Cfg.RegistryPlainHTTP,
+		Labels: map[string]string{"kova.cofy.dev/build-id": build.Name}})
+	pod := &prepared
+	pod.UID = "pod-original"
+	prepareGenesisPodDefaults(pod)
 	if err := controllerutil.SetControllerReference(build, pod, r.Scheme); err != nil {
 		t.Fatal(err)
 	}
-	if err := r.stampGenesisPod(ctx, build, pod, "dddddddddddddddddddddddddddddddd"); err != nil {
+	attempt := "dddddddddddddddddddddddddddddddd"
+	_, state, err := r.readReservations(ctx, build.Namespace)
+	if err != nil {
 		t.Fatal(err)
+	}
+	_, hasGrant := state.Active[reservationKey(build)]
+	if hasGrant {
+		attempt, err = r.beginPodCreate(ctx, build)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := r.stampGenesisPod(ctx, build, pod, attempt); err != nil {
+		t.Fatal(err)
+	}
+	if hasGrant {
+		if err := r.finishFreshPodAttempt(ctx, build, pod, attempt); err != nil {
+			t.Fatal(err)
+		}
+	} else {
+		// The forged no-grant fixture can copy a self-consistent Pod digest,
+		// but it still cannot create the separately receipted active charge.
+		digest, err := recoveryreceipt.CanonicalPodTemplateDigest(pod)
+		if err != nil {
+			t.Fatal(err)
+		}
+		pod.Annotations[recoveryreceipt.PodTemplateDigestAnnotation] = digest
 	}
 	if err := api.Create(ctx, pod); err != nil {
 		t.Fatal(err)
+	}
+	if hasGrant {
+		if err := r.completePodCreate(ctx, build, attempt); err != nil {
+			t.Fatal(err)
+		}
 	}
 	var observed corev1.Pod
 	if err := api.Get(ctx, client.ObjectKeyFromObject(pod), &observed); err != nil {
@@ -276,6 +312,10 @@ func TestGenesisAcceptedBuildPreservesExactResultAfterLedgerLoss(t *testing.T) {
 		t.Fatalf("pre-loss grant was not durable: decision=%+v err=%v", decision, err)
 	}
 	starting, _ := persistGenesisStartingWitness(t, r, api, build)
+	if starting.Status.AdmissionGenesisWitness == nil ||
+		starting.Status.AdmissionGenesisWitness.PodTemplateDigest == "" {
+		t.Fatal("accepted Starting status lost the qualified Pod template digest")
+	}
 	var queue corev1.ConfigMap
 	if err := api.Get(ctx, client.ObjectKey{Namespace: build.Namespace, Name: queueadmission.ConfigMapName}, &queue); err != nil {
 		t.Fatal(err)
@@ -335,6 +375,61 @@ func TestGenesisAcceptedBuildPreservesExactResultAfterLedgerLoss(t *testing.T) {
 	state, err := decodeReservations(&active)
 	if err != nil || len(state.Active) != 1 {
 		t.Fatalf("accepted charge was lost: active=%+v err=%v", state.Active, err)
+	}
+}
+
+func TestGenesisWitnessAfterPairLossRejectsRestampedExecutionTemplate(t *testing.T) {
+	for _, mode := range []string{"runner image", "runner command"} {
+		t.Run(mode, func(t *testing.T) {
+			ctx := context.Background()
+			r, api, build := genesisAdmissionFixture(t)
+			if decision, err := r.admission(ctx, build); err != nil || !decision.Admitted {
+				t.Fatalf("original grant was not durable: decision=%+v err=%v", decision, err)
+			}
+			starting, pod := persistGenesisStartingWitness(t, r, api, build)
+			var queue corev1.ConfigMap
+			if err := api.Get(ctx, client.ObjectKey{Namespace: build.Namespace, Name: queueadmission.ConfigMapName}, &queue); err != nil {
+				t.Fatal(err)
+			}
+			if err := api.Delete(ctx, &queue); err != nil {
+				t.Fatal(err)
+			}
+			switch mode {
+			case "runner image":
+				pod.Spec.Containers[0].Image = "registry.invalid/other:latest"
+			case "runner command":
+				pod.Spec.Containers[0].Command = []string{"sh", "-c", "unexpected"}
+			}
+			changedDigest, err := recoveryreceipt.CanonicalPodTemplateDigest(pod)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if changedDigest == starting.Status.AdmissionGenesisWitness.PodTemplateDigest {
+				t.Fatal("changed execution template retained the original digest")
+			}
+			pod.Annotations[recoveryreceipt.PodTemplateDigestAnnotation] = changedDigest
+			if err := api.Update(ctx, pod); err != nil {
+				t.Fatal(err)
+			}
+			r.Kube = &fakeKube{podClient: api.Client, execFn: func(kube.ExecOptions) error {
+				t.Fatal("changed Pod contacted runner after committed pair loss")
+				return nil
+			}}
+			if _, _, err := r.directGenesisWitness(ctx, starting); err == nil {
+				t.Fatal("restamped changed Pod passed the independent status witness")
+			}
+			if _, err := r.submitWhenReady(ctx, starting); err == nil {
+				t.Fatal("restamped changed Pod was accepted after committed pair loss")
+			}
+			var current kovav1.KovaBuild
+			if err := api.Get(ctx, client.ObjectKeyFromObject(build), &current); err != nil {
+				t.Fatal(err)
+			}
+			if current.Status.Phase != kovav1.PhaseStarting ||
+				current.Status.AdmissionGenesisWitness.PodTemplateDigest != starting.Status.AdmissionGenesisWitness.PodTemplateDigest {
+				t.Fatalf("uncertain original witness changed: phase=%s witness=%+v", current.Status.Phase, current.Status.AdmissionGenesisWitness)
+			}
+		})
 	}
 }
 

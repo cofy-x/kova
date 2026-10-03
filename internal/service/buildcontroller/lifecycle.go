@@ -111,6 +111,9 @@ func (r *KovaBuildReconciler) startBuild(ctx context.Context, build *kovav1.Kova
 		}
 		pod.Spec.ActiveDeadlineSeconds = &seconds
 	}
+	if r.Genesis != nil {
+		prepareGenesisPodDefaults(&pod)
+	}
 	if err := ctrl.SetControllerReference(build, &pod, r.Scheme); err != nil {
 		return ctrl.Result{}, r.finish(ctx, build, kovav1.PhaseFailed, "RunnerCreateFailed", err.Error())
 	}
@@ -123,6 +126,9 @@ func (r *KovaBuildReconciler) startBuild(ctx context.Context, build *kovav1.Kova
 		// Starting status update was lost. The stamped nonce proves which
 		// attempt reached storage; no second Create is needed.
 		if r.Genesis != nil {
+			if err := r.qualifyGenesisPod(ctx, build, owned, false); err != nil {
+				return ctrl.Result{}, err
+			}
 			if _, err := r.witnessFromPod(build, owned); err != nil {
 				return ctrl.Result{}, err
 			}
@@ -153,6 +159,11 @@ func (r *KovaBuildReconciler) startBuild(ctx context.Context, build *kovav1.Kova
 		if err := r.stampGenesisPod(ctx, build, &pod, attempt); err != nil {
 			return ctrl.Result{}, err
 		}
+		if r.Genesis != nil {
+			if err := r.finishFreshPodAttempt(ctx, build, &pod, attempt); err != nil {
+				return ctrl.Result{}, err
+			}
+		}
 		if err := r.Create(ctx, &pod); err != nil {
 			if !apierrors.IsAlreadyExists(err) {
 				if definitivePodCreateRejection(err) {
@@ -171,6 +182,9 @@ func (r *KovaBuildReconciler) startBuild(ctx context.Context, build *kovav1.Kova
 				return ctrl.Result{}, fmt.Errorf("runner Pod %s/%s disappeared after AlreadyExists", build.Namespace, podName)
 			}
 			if r.Genesis != nil {
+				if err := r.qualifyGenesisPod(ctx, build, owned, false); err != nil {
+					return ctrl.Result{}, err
+				}
 				if _, err := r.witnessFromPod(build, owned); err != nil {
 					return ctrl.Result{}, err
 				}
@@ -186,8 +200,19 @@ func (r *KovaBuildReconciler) startBuild(ctx context.Context, build *kovav1.Kova
 					return ctrl.Result{}, err
 				}
 			}
-		} else if err := r.completePodCreate(ctx, build, attempt); err != nil {
-			return ctrl.Result{}, err
+		} else {
+			if r.Genesis != nil {
+				observed, err := r.getOwnedPod(ctx, build)
+				if err != nil {
+					return ctrl.Result{}, err
+				}
+				if err := r.qualifyGenesisPod(ctx, build, observed, false); err != nil {
+					return ctrl.Result{}, err
+				}
+			}
+			if err := r.completePodCreate(ctx, build, attempt); err != nil {
+				return ctrl.Result{}, err
+			}
 		}
 	}
 	now := metav1.Now()
@@ -202,6 +227,9 @@ func (r *KovaBuildReconciler) startBuild(ctx context.Context, build *kovav1.Kova
 		// before any path may submit work to the runner.
 		observed, err := r.getOwnedPod(ctx, build)
 		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if err := r.qualifyGenesisPod(ctx, build, observed, false); err != nil {
 			return ctrl.Result{}, err
 		}
 		witness, err := r.witnessFromPod(build, observed)
@@ -908,6 +936,9 @@ func (r *KovaBuildReconciler) deleteOwnedRunnerPodAndConfirm(ctx context.Context
 			return fmt.Errorf("Genesis Pod deletion lacks fenced active charge")
 		}
 		build, pod = current, observed
+		if err := r.qualifyGenesisPod(ctx, build, pod, true); err != nil {
+			return err
+		}
 	}
 	if observed := pod.Annotations[podCreateAttemptKey]; observed != "" {
 		if err := r.completePodCreate(ctx, build, observed); err != nil {

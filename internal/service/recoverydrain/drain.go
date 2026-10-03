@@ -511,8 +511,10 @@ func qualifyOriginal(item target, observed client.Object) error {
 			return errors.New("foreign Pod occupant")
 		}
 		for _, p := range item.pods {
+			computed, digestErr := recoveryreceipt.CanonicalPodTemplateDigest(value)
 			if value.Annotations[podAttemptKey] == p.PodAttemptNonce &&
 				value.Annotations[metricDigest] == p.PodTemplateDigest &&
+				digestErr == nil && computed == p.PodTemplateDigest &&
 				strings.HasSuffix(value.Spec.Containers[0].Image, "@"+p.RunnerImageDigest) &&
 				podFetchesDigest(value, p.Build.SourceDigest) {
 				return nil
