@@ -240,7 +240,8 @@ func TestRealAPIGenesisBootstrapAndStatusRoundTrip(t *testing.T) {
 		GenesisUID: receipt.GenesisUID, Generation: receipt.Contract.Generation,
 		ActiveLedgerUID: string(active.UID), QueueLedgerUID: string(queue.UID), BuildUID: string(build.UID),
 		PodName: "kova-job-genesis-api-status", PodUID: "synthetic-pod-uid",
-		PodCreateAttempt: strings.Repeat("b", 32), RunnerRequestID: "synthetic-request"}
+		PodTemplateDigest: "sha256:" + strings.Repeat("c", 64),
+		PodCreateAttempt:  strings.Repeat("b", 32), RunnerRequestID: "synthetic-request"}
 	stop := &kovav1.AdmissionGenesisStopIntent{BuildUID: string(build.UID), PodUID: witness.PodUID,
 		PodCreateAttempt: witness.PodCreateAttempt, RunnerRequestID: witness.RunnerRequestID, Reason: "Deleted"}
 	build.Status.Phase = kovav1.PhaseStarting

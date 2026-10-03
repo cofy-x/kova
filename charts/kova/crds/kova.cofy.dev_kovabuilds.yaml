@@ -191,15 +191,15 @@ spec:
                     maxLength: 32
                     pattern: ^[a-f0-9]{32}$
                     type: string
+                  podName:
+                    maxLength: 253
+                    type: string
                   podTemplateDigest:
                     description: |-
                       PodTemplateDigest was recorded only after the original Pod's immutable
                       pre-Create receipt was qualified. It lets evidence-only observation after
                       ledger loss reject a changed execution template without those ledgers.
                     pattern: ^sha256:[a-f0-9]{64}$
-                    type: string
-                  podName:
-                    maxLength: 253
                     type: string
                   podUID:
                     maxLength: 256
@@ -217,8 +217,8 @@ spec:
                 - genesisUID
                 - namespaceUID
                 - podCreateAttempt
-                - podTemplateDigest
                 - podName
+                - podTemplateDigest
                 - podUID
                 - queueLedgerUID
                 - runnerRequestID

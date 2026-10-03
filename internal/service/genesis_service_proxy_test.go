@@ -119,6 +119,7 @@ func (p *serviceFaultProxy) requestStage(req *http.Request, body []byte) (string
 	}
 	runner := "/api/v1/namespaces/" + p.receipt.Namespace
 	control := "/api/v1/namespaces/" + p.control
+	receipts := "/api/v1/namespaces/" + p.receipt.Contract.ReceiptNamespace
 	crs := "/apis/kova.cofy.dev/v1alpha1/namespaces/" + p.receipt.Namespace + "/kovabuilds"
 	lease := "/apis/coordination.k8s.io/v1/namespaces/" + p.control + "/leases"
 	if req.Method == http.MethodGet {
@@ -126,7 +127,7 @@ func (p *serviceFaultProxy) requestStage(req *http.Request, body []byte) (string
 		// pinned fixture, including the manager's Pod List/Watch.
 		if path == "/api" || path == "/api/v1" || path == "/apis" || path == "/apis/kova.cofy.dev" ||
 			path == "/apis/kova.cofy.dev/v1alpha1" || path == "/apis/coordination.k8s.io" || path == "/apis/coordination.k8s.io/v1" ||
-			path == "/version" || path == runner || path == control || path == control+"/secrets/"+p.secret ||
+			path == "/version" || path == runner || path == control || path == receipts || path == control+"/secrets/"+p.secret ||
 			(path == runner+"/configmaps" && req.URL.Query().Get("fieldSelector") == "metadata.name="+admissioncontract.ActiveLedgerName) || path == runner+"/configmaps/"+admissioncontract.GenesisName ||
 			path == runner+"/configmaps/"+admissioncontract.ActiveLedgerName || path == runner+"/configmaps/"+admissioncontract.QueueLedgerName ||
 			path == runner+"/pods" || path == crs || path == lease+"/kova-service.kova.cofy.dev" {

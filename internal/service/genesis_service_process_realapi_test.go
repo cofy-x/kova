@@ -38,7 +38,8 @@ func serviceChildArgs(c serviceProcessCase, receipt admissioncontract.Receipt, a
 	limits := receipt.Contract.Limits
 	return []string{"kova-controller", "service", "--listen=" + address, "--namespace=" + c.Fixture.Namespace,
 		"--leader-election-namespace=" + c.Fixture.SecretNamespace, "--leader-elect=true", "--metrics-bind-address=0",
-		"--auth-mode=unsafe-none", "--runner-image=invalid.invalid/kova-forbidden:never", "--runner-image-pull-policy=Never",
+		"--auth-mode=unsafe-none", "--runner-image=" + receipt.Contract.RunnerImage, "--runner-image-pull-policy=Never",
+		"--worker-pool-id=" + receipt.Contract.WorkerPoolID, "--recovery-receipt-namespace=" + receipt.Contract.ReceiptNamespace,
 		"--runner-node-selector=kova-test-never=true", "--buildkit-platform-addr=linux/amd64=tcp://127.0.0.1:1",
 		"--max-active-jobs=" + strconv.Itoa(limits.MaxActiveJobs), "--max-active-jobs-per-requester=" + strconv.Itoa(limits.MaxActiveJobsPerRequester),
 		"--max-queued-jobs=" + strconv.Itoa(limits.MaxQueuedJobs), "--max-queued-jobs-per-requester=" + strconv.Itoa(limits.MaxQueuedJobsPerRequester),

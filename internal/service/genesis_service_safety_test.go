@@ -34,6 +34,7 @@ func validServiceProcessManifestForUnit() serviceProcessManifest {
 		allowDelete := name == "late-active-create-after-loss"
 		m.Cases = append(m.Cases, serviceProcessCase{Name: name, AllowCommittedLedgerDeletion: &allowDelete, Fixture: processCase{
 			Namespace: fmt.Sprintf("kova-genesis-svc-unit-%d", index), NamespaceUID: fmt.Sprintf("runner-%d", index),
+			ReceiptNamespace: fmt.Sprintf("kova-genesis-svc-receipts-%d", index), ReceiptNamespaceUID: fmt.Sprintf("receipts-%d", index),
 			GenesisUID: fmt.Sprintf("genesis-%d", index), ReceiptFile: fmt.Sprintf("/private/receipt-%d.json", index), ReceiptSHA256: strings.Repeat("e", 64),
 			SecretNamespace: fmt.Sprintf("kova-genesis-svc-control-%d", index), SecretNamespaceUID: fmt.Sprintf("control-%d", index), SecretName: "receipt", SecretUID: fmt.Sprintf("secret-%d", index)}})
 	}
@@ -58,6 +59,14 @@ func TestActualServiceManifestRejectsUnsafeOrIncompleteFixtures(t *testing.T) {
 		"default context":          func(m *serviceProcessManifest) { m.Context = "kind-default" },
 		"old process namespace":    func(m *serviceProcessManifest) { m.Cases[1].Fixture.Namespace = "kova-genesis-api-proc-old" },
 		"control aliases runner":   func(m *serviceProcessManifest) { m.Cases[1].Fixture.SecretNamespace = m.Cases[0].Fixture.Namespace },
+		"receipt aliases runner":   func(m *serviceProcessManifest) { m.Cases[1].Fixture.ReceiptNamespace = m.Cases[0].Fixture.Namespace },
+		"receipt UID aliases control": func(m *serviceProcessManifest) {
+			m.Cases[1].Fixture.ReceiptNamespaceUID = m.Cases[0].Fixture.SecretNamespaceUID
+		},
+		"receipt reused": func(m *serviceProcessManifest) {
+			m.Cases[1].Fixture.ReceiptNamespace = m.Cases[0].Fixture.ReceiptNamespace
+		},
+		"missing receipt UID": func(m *serviceProcessManifest) { m.Cases[1].Fixture.ReceiptNamespaceUID = "" },
 		"namespace UID alias": func(m *serviceProcessManifest) {
 			m.Cases[1].Fixture.NamespaceUID = m.Cases[0].Fixture.SecretNamespaceUID
 		},
@@ -73,6 +82,40 @@ func TestActualServiceManifestRejectsUnsafeOrIncompleteFixtures(t *testing.T) {
 				t.Fatal("unsafe Service fixture accepted")
 			}
 		})
+	}
+}
+
+func TestActualServiceChildUsesExactV3ExecutionIdentity(t *testing.T) {
+	receipt, _ := genesisTestReceiptAndConfig()
+	c := validServiceProcessManifestForUnit().Cases[0]
+	args := strings.Join(serviceChildArgs(c, receipt, "127.0.0.1:18080"), "\n")
+	for _, expected := range []string{"--runner-image=" + receipt.Contract.RunnerImage,
+		"--worker-pool-id=" + receipt.Contract.WorkerPoolID,
+		"--recovery-receipt-namespace=" + receipt.Contract.ReceiptNamespace} {
+		if !strings.Contains(args, expected+"\n") {
+			t.Fatalf("actual Service arguments lack pinned execution identity %s", expected)
+		}
+	}
+}
+
+func TestActualServiceProxyAllowsOnlyExactReceiptNamespaceGet(t *testing.T) {
+	proxy, _, _ := unitServiceProxy(t, "")
+	path := "/api/v1/namespaces/" + proxy.receipt.Contract.ReceiptNamespace
+	get, _ := http.NewRequest(http.MethodGet, proxy.server.URL+path, nil)
+	if _, allowed := proxy.requestStage(get, nil); !allowed {
+		t.Fatal("exact receipt Namespace qualification GET denied")
+	}
+	for _, suffix := range []string{"-other", "/configmaps", "/pods", "/secrets"} {
+		request, _ := http.NewRequest(http.MethodGet, proxy.server.URL+path+suffix, nil)
+		if _, allowed := proxy.requestStage(request, nil); allowed {
+			t.Fatalf("receipt Namespace scope widened to %s", suffix)
+		}
+	}
+	for _, method := range []string{http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete} {
+		request, _ := http.NewRequest(method, proxy.server.URL+path, bytes.NewBufferString(`{}`))
+		if _, allowed := proxy.requestStage(request, []byte(`{}`)); allowed {
+			t.Fatal("receipt Namespace mutation allowed")
+		}
 	}
 }
 

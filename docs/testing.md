@@ -70,15 +70,16 @@ The matrix requires these seven distinct case names:
 The deletion case requires explicit, separately reviewed live-fault authorization for the exact disposable fixture, as well as its manifest acknowledgement.
 Adding the test or setting its acknowledgement is not evidence of a live PASS or permission to mutate a shared cluster.
 Never run it against HK, old preserved ledger-loss fixtures, reused runner namespace names, or the earlier ten-process bootstrap fixtures.
-All seven runner/control namespaces, original UIDs, receipts, empty-workload vetoes, and absent Lease identities are checked before the first child starts.
+All seven runner/receipt/control namespace triples, original UIDs, receipts, empty-workload vetoes, and absent Lease identities are checked before the first child starts.
 Namespace freshness and stopped external writers remain the external installer's responsibility, not facts inferred from empty Lists.
 
 Create a private JSON manifest outside Git, selected only with `KOVA_GENESIS_SERVICE_MANIFEST=/absolute/private/service-matrix.json`.
 The strict root fields are `schemaVersion: 1`, the full lowercase 40-character `sourceCommit`, `testBinarySHA256`, absolute `kubeconfig`, `kubeconfigSHA256`, `context`, `kubeSystemUID`, `controlPlaneID`, `oldWritersStopped: true`, `cleanupOnSuccess: false`, and `cases`.
 The exact dedicated context must satisfy the existing Kind process-target identity check, including original running control-plane container ID and its loopback API port.
 Each case has `name`, explicit `allowCommittedLedgerDeletion` (true only for the final deletion case), and `fixture`.
-The fixture fields are `namespace`, `namespaceUID`, `genesisUID`, absolute `receiptFile`, `receiptSHA256`, `secretNamespace`, `secretNamespaceUID`, `secretName`, and `secretUID`; do not include the earlier process gate's `stage` or `point` fields.
-All fourteen runner/control namespace names must be distinct, begin `kova-genesis-svc-`, and retain distinct original UIDs.
+The fixture fields are `namespace`, `namespaceUID`, `receiptNamespace`, `receiptNamespaceUID`, `genesisUID`, absolute `receiptFile`, `receiptSHA256`, `secretNamespace`, `secretNamespaceUID`, `secretName`, and `secretUID`; do not include the earlier process gate's `stage` or `point` fields.
+All twenty-one runner/receipt/control namespace names must be distinct, begin `kova-genesis-svc-`, and retain distinct original UIDs.
+The v3 receipt pins the worker pool and runner manifest reference used in the actual Service arguments; the proxy still forbids all runner Pod or build creation.
 Each receipt Secret is immutable and its UID and exact mounted bytes are pinned.
 
 Compile only a clean reviewed source candidate into a private test executable, explicitly stamping `github.com/cofy-x/kova/internal/version.Commit` with that same full source SHA through Go's `-ldflags=-X` option.

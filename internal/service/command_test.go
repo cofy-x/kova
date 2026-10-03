@@ -22,6 +22,7 @@ import (
 
 func serviceFactoryReceiptArgs() []string {
 	return []string{"kova-controller", "service", "--admission-genesis-receipt-file=/unused",
+		"--runner-image=example.com/kova/runner@sha256:" + strings.Repeat("a", 64), "--worker-pool-id=unit-pool",
 		"--admission-genesis-receipt-secret-namespace=control", "--admission-genesis-receipt-secret-name=receipt",
 		"--admission-genesis-receipt-secret-uid=original", "--buildkit-platform-addr=linux/amd64=tcp://127.0.0.1:1"}
 }

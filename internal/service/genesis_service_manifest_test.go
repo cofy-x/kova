@@ -99,9 +99,9 @@ func validateServiceProcessManifest(m serviceProcessManifest) error {
 			!admissioncontract.ValidUID(f.GenesisUID) || !admissioncontract.ValidUID(f.SecretUID) || len(validation.IsDNS1123Label(f.SecretName)) != 0 || secrets[f.SecretUID] {
 			return errors.New("Service gate case identity or explicit destructive-case acknowledgement is invalid")
 		}
-		for _, pair := range [][2]string{{f.Namespace, f.NamespaceUID}, {f.SecretNamespace, f.SecretNamespaceUID}} {
+		for _, pair := range [][2]string{{f.Namespace, f.NamespaceUID}, {f.ReceiptNamespace, f.ReceiptNamespaceUID}, {f.SecretNamespace, f.SecretNamespaceUID}} {
 			if !serviceProcessNamespace(pair[0]) || !admissioncontract.ValidUID(pair[1]) || names[pair[0]] || uids[pair[1]] {
-				return errors.New("Service gate requires distinct never-used runner and control Namespace names and UIDs")
+				return errors.New("Service gate requires distinct never-used runner, receipt and control Namespace names and UIDs")
 			}
 			names[pair[0]], uids[pair[1]] = true, true
 		}
