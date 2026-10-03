@@ -11,6 +11,7 @@ import (
 	"unicode/utf8"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/validation"
 )
@@ -299,6 +300,14 @@ func recordEffectOnce(ctx context.Context, api ConfigMaps, expected *corev1.Conf
 			return EffectWitness{}, ErrChanged
 		}
 	} else if createErr == nil {
+		return EffectWitness{}, ErrUnconfirmed
+	}
+	// A definitive rejection or AlreadyExists does not establish that this
+	// fresh CAS owner created the receipt. The matching object is observation
+	// only and cannot arm a later Pod Create.
+	if apierrors.IsAlreadyExists(createErr) || apierrors.IsForbidden(createErr) ||
+		apierrors.IsInvalid(createErr) || apierrors.IsBadRequest(createErr) ||
+		apierrors.IsUnauthorized(createErr) {
 		return EffectWitness{}, ErrUnconfirmed
 	}
 	return observed, nil

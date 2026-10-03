@@ -38,6 +38,37 @@ func TestReservationCapacityRejectsUnsupportedConfiguration(t *testing.T) {
 	}
 }
 
+func TestGenesisActiveSchemaRejectsLegacyAndMissingGrantNonce(t *testing.T) {
+	cfg := config.Config{MaxActiveJobs: 2, MaxActiveJobsPerRequester: 2, WorkerSlots: 2}
+	data, err := GenesisEmptyAdmissionData(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Namespace: "jobs", Name: reservationConfigMap},
+		Data: map[string]string{reservationDataKey: data}}
+	if err := ValidateAdmissionLedgerForGenesis(cm, cfg); err != nil {
+		t.Fatalf("fresh v2 active ledger was refused: %v", err)
+	}
+	state, err := decodeReservations(cm)
+	if err != nil || state.Version != 2 || state.Fence != 1 {
+		t.Fatalf("fresh active header=%+v err=%v", state, err)
+	}
+	state.Version = 1
+	state.Fence = 0
+	legacy, err := encodeReservations(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cm.Data[reservationDataKey] = string(legacy)
+	if err := ValidateAdmissionLedgerForGenesis(cm, cfg); err == nil {
+		t.Fatal("Genesis adopted a legacy active ledger")
+	}
+	cm.Data[reservationDataKey] = `{"version":2,"fence":1,"maxJobs":2,"maxPerRequester":2,"workerSlots":2,"active":{"build-uid":{"buildName":"build","requester":"alice","slots":1}}}`
+	if err := ValidateAdmissionLedgerForGenesis(cm, cfg); err == nil {
+		t.Fatal("Genesis accepted active entry without a stable grant nonce")
+	}
+}
+
 func fullReservationState() (reservationState, string) {
 	state := reservationState{Version: 1, Fence: math.MaxUint64, MaxJobs: 128, MaxPerRequester: 128, WorkerSlots: 65535,
 		LastGrantedRequesterHash: strings.Repeat("a", 64), Active: make(map[string]activeReservation, 128)}
@@ -55,6 +86,46 @@ func fullReservationState() (reservationState, string) {
 		}
 	}
 	return state, first
+}
+
+func TestGenesisFullReservationTableHasReceiptAndFuturePodHeadroom(t *testing.T) {
+	state := reservationState{Version: 2, Fence: math.MaxUint64, MaxJobs: 128, MaxPerRequester: 128, WorkerSlots: 65535,
+		LastGrantedRequesterHash: strings.Repeat("a", 64), Active: make(map[string]activeReservation, 128)}
+	for i := 0; i < 128; i++ {
+		uid := fmt.Sprintf("%04d", i) + strings.Repeat("<", 252)
+		name := fmt.Sprintf("%04d", i) + strings.Repeat("a", 249)
+		slots := 100
+		if i < 58 {
+			slots = 1000 // 58,000 + 7,000 = 65,000 slots.
+		}
+		state.Active[uid] = activeReservation{
+			BuildName: name, Requester: strings.Repeat("<", 253), Slots: slots,
+			GrantNonce: strings.Repeat("b", 32), GrantFence: math.MaxUint64,
+			GrantObservedRV: strings.Repeat("<", maxGrantObservedRVBytes),
+			GrantReceiptUID: strings.Repeat("R", 64), GrantReceiptDigest: "sha256:" + strings.Repeat("d", 64),
+			Closing: true, InFlight: []string{strings.Repeat("e", 32)},
+		}
+	}
+	withPodAttempt, err := encodeReservations(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for key, entry := range state.Active {
+		entry.InFlight = nil
+		entry.GrantCleanupReady = true
+		state.Active[key] = entry
+	}
+	withCleanupMarker, err := encodeReservations(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bound := maxReservationHeaderBytes + MaxActiveJobs*maxReservationEntryBytes
+	if len(withPodAttempt) > bound || len(withCleanupMarker) > bound || bound > maxReservationLedgerBytes {
+		t.Fatalf("full Genesis active table exceeds conservative bound: pod=%d cleanup=%d bound=%d max=%d",
+			len(withPodAttempt), len(withCleanupMarker), bound, maxReservationLedgerBytes)
+	}
+	t.Logf("128-entry Genesis active JSON: Pod attempt=%d cleanup=%d; reserved bound=%d; guard=%d",
+		len(withPodAttempt), len(withCleanupMarker), bound, maxReservationLedgerBytes)
 }
 
 func TestFullReservationTableKeepsNonceClosingFenceAndReleaseHeadroom(t *testing.T) {

@@ -7,7 +7,9 @@ import (
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 )
 
@@ -165,6 +167,24 @@ func TestEffectReceiptLostResponseNeverReplaysAndRejectsChangedIdentity(t *testi
 	api.get = func(string) (*corev1.ConfigMap, error) { return replaced.DeepCopy(), nil }
 	if _, err := RecordGrantOnce(context.Background(), api, g); !errors.Is(err, ErrChanged) {
 		t.Fatalf("same-name replacement qualified: %v", err)
+	}
+}
+
+func TestEffectReceiptAlreadyExistsIsObservationOnly(t *testing.T) {
+	g := exampleGrantIntent(t)
+	proposal, err := NewGrantConfigMap(g)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored := serverEffect(t, proposal, "preexisting-receipt-uid")
+	api := &scriptedConfigMaps{
+		create: func(*corev1.ConfigMap) (*corev1.ConfigMap, error) {
+			return nil, apierrors.NewAlreadyExists(schema.GroupResource{Resource: "configmaps"}, proposal.Name)
+		},
+		get: func(string) (*corev1.ConfigMap, error) { return stored.DeepCopy(), nil },
+	}
+	if _, err := RecordGrantOnce(context.Background(), api, g); !errors.Is(err, ErrUnconfirmed) || api.puts != 1 || api.reads != 1 {
+		t.Fatalf("preexisting receipt armed grant: %v, calls=%d/%d", err, api.puts, api.reads)
 	}
 }
 

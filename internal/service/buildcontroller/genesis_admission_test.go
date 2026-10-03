@@ -31,6 +31,40 @@ type controllerGenesisAPI struct {
 	patches int
 }
 
+// The fake controller client does not assign server UIDs to created
+// ConfigMaps. This scoped adapter supplies synthetic, compact receipt UIDs
+// while preserving the direct typed Create/Get/Delete call boundaries.
+type controllerReceiptConfigMaps struct {
+	client.Client
+	namespace string
+}
+
+func (a controllerReceiptConfigMaps) Create(ctx context.Context, cm *corev1.ConfigMap, _ metav1.CreateOptions) (*corev1.ConfigMap, error) {
+	if cm.Namespace != a.namespace {
+		return nil, fmt.Errorf("receipt Create used wrong Namespace %q", cm.Namespace)
+	}
+	if cm.UID == "" {
+		cm.UID = types.UID("receipt-" + cm.Name[len(cm.Name)-32:])
+	}
+	if err := a.Client.Create(ctx, cm); err != nil {
+		return nil, err
+	}
+	return cm.DeepCopy(), nil
+}
+
+func (a controllerReceiptConfigMaps) Get(ctx context.Context, name string, _ metav1.GetOptions) (*corev1.ConfigMap, error) {
+	var cm corev1.ConfigMap
+	if err := a.Client.Get(ctx, client.ObjectKey{Namespace: a.namespace, Name: name}, &cm); err != nil {
+		return nil, err
+	}
+	return &cm, nil
+}
+
+func (a controllerReceiptConfigMaps) Delete(ctx context.Context, name string, options metav1.DeleteOptions) error {
+	cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Namespace: a.namespace, Name: name}}
+	return a.Client.Delete(ctx, cm, &client.DeleteOptions{Preconditions: options.Preconditions})
+}
+
 type failingGenesisPodReader struct{ client.Reader }
 
 func (r failingGenesisPodReader) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
@@ -76,12 +110,16 @@ func genesisAdmissionFixture(t *testing.T) (*KovaBuildReconciler, *controllerGen
 	t.Helper()
 	cfg := admissionConfig()
 	cfg.Namespace = "jobs"
+	cfg.WorkerPoolID = "test-pool"
+	cfg.RunnerImage = "example.com/kova/runner@sha256:" + strings.Repeat("a", 64)
+	cfg.RunnerImageDigest = "sha256:" + strings.Repeat("a", 64)
 	build := queuedBuild("direct", "alice", 1, 1)
 	receipt := admissioncontract.Receipt{Namespace: cfg.Namespace, GenesisName: admissioncontract.GenesisName,
 		GenesisUID: "genesis-original", Contract: admissioncontract.Contract{
-			Version: 2, NamespaceUID: "namespace-original", Generation: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			Version: 3, NamespaceUID: "namespace-original", Generation: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 			ReceiptNamespace: "receipts-57", ReceiptNamespaceUID: "receipts-original",
-			ActiveLedgerName: admissioncontract.ActiveLedgerName, ActiveLedgerSchema: 1,
+			WorkerPoolID: cfg.WorkerPoolID, RunnerImage: cfg.RunnerImage,
+			ActiveLedgerName: admissioncontract.ActiveLedgerName, ActiveLedgerSchema: 2,
 			QueueLedgerName: admissioncontract.QueueLedgerName, QueueLedgerSchema: 2,
 			Limits: admissioncontract.Limits{MaxActiveJobs: cfg.MaxActiveJobs, MaxActiveJobsPerRequester: cfg.MaxActiveJobsPerRequester,
 				WorkerSlots: cfg.WorkerSlots, MaxQueuedJobs: cfg.MaxQueuedJobs, MaxQueuedJobsPerRequester: cfg.MaxQueuedJobsPerRequester},
@@ -138,7 +176,8 @@ func genesisAdmissionFixture(t *testing.T) (*KovaBuildReconciler, *controllerGen
 	if err != nil {
 		t.Fatal(err)
 	}
-	r := &KovaBuildReconciler{Client: base, APIReader: base, Scheme: scheme, Cfg: cfg, Genesis: guard}
+	r := &KovaBuildReconciler{Client: base, APIReader: base, Scheme: scheme, Cfg: cfg, Genesis: guard,
+		RecoveryReceipts: controllerReceiptConfigMaps{Client: base, namespace: receipt.Contract.ReceiptNamespace}}
 	return r, api, build
 }
 
@@ -792,15 +831,19 @@ func TestGenesisDirectBuildGrantUsesConditionalLedgerPatch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !decision.Admitted || api.patches != 1 {
-		t.Fatalf("direct/admin CR did not receive exactly one guarded grant: decision=%+v patches=%d", decision, api.patches)
+	if !decision.Admitted || api.patches != 3 {
+		t.Fatalf("direct/admin CR did not receive grant, arm, and receipt-pin CASes: decision=%+v patches=%d", decision, api.patches)
 	}
 	_, state, err := r.readReservations(ctx, build.Namespace)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, exists := state.Active[reservationKey(build)]; !exists {
-		t.Fatal("conditional grant did not persist active reservation")
+	grant, exists := state.Active[reservationKey(build)]
+	if !exists || grant.GrantNonce == "" || grant.GrantObservedRV == "" || grant.GrantReceiptUID == "" || grant.GrantReceiptDigest == "" {
+		t.Fatalf("conditional grant did not persist exact receipt link: %+v, exists=%t", grant, exists)
+	}
+	if err := r.verifyPinnedGrant(ctx, build, grant); err != nil {
+		t.Fatalf("pinned grant receipt was not directly qualified: %v", err)
 	}
 	if err := r.Genesis.Check(ctx); err != nil {
 		t.Fatal(fmt.Errorf("grant changed qualified pair: %w", err))

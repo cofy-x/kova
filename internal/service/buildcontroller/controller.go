@@ -42,6 +42,9 @@ type KovaBuildReconciler struct {
 	Cfg      config.Config
 	Recorder record.EventRecorder
 	Genesis  *admissiongenesis.Guard
+	// RecoveryReceipts is a direct typed client scoped to the immutable
+	// dedicated receipt Namespace; it is not the manager's cached client.
+	RecoveryReceipts ReceiptConfigMaps
 	// APIReader bypasses the manager cache for capacity and recovery reads.
 	APIReader         client.Reader
 	verificationOnce  sync.Once

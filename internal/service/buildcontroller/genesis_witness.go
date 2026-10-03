@@ -204,6 +204,9 @@ func (r *KovaBuildReconciler) directGenesisGrant(ctx context.Context, build *kov
 	if entry.Closing || len(entry.InFlight) != 0 {
 		return nil, nil, fmt.Errorf("Genesis runner submission lacks an open active grant")
 	}
+	if err := r.verifyPinnedGrant(ctx, current, entry); err != nil {
+		return nil, nil, err
+	}
 	return current, pod, nil
 }
 

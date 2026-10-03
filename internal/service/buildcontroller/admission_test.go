@@ -805,7 +805,7 @@ func TestStartupCreatesActiveLedgerInEmptyNamespace(t *testing.T) {
 	if err := queue.EnsureInitialized(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if err := CheckAdmissionLedger(ctx, base, "jobs", cfg); err != nil {
+	if _, _, err := (&KovaBuildReconciler{Client: base, APIReader: base, Cfg: cfg}).readReservations(ctx, "jobs"); err != nil {
 		t.Fatal(err)
 	}
 }
