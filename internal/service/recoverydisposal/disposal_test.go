@@ -199,6 +199,15 @@ func TestAuthorizationFailsClosed(t *testing.T) {
 			f.auth.PhysicalRetirement.InflightEffectsDigest = ""
 			f.authExpected.PhysicalRetirement = f.auth.PhysicalRetirement
 		},
+		"reused build UID": func(f *fixture) {
+			f.auth.Dispositions[1].BuildUID = f.auth.Dispositions[0].BuildUID
+			f.authExpected.Dispositions = f.auth.Dispositions
+		},
+		"reused pod UID": func(f *fixture) {
+			f.auth.Dispositions[1].BuildUID = "other-build-uid"
+			f.auth.Dispositions[1].PodUID = f.auth.Dispositions[0].PodUID
+			f.authExpected.Dispositions = f.auth.Dispositions
+		},
 		"wrong audience":           func(f *fixture) { f.auth.Audience = "kova-recovery-drain-v1" },
 		"wrong action":             func(f *fixture) { f.auth.Action = "release-capacity" },
 		"unsupported version":      func(f *fixture) { f.auth.Version = "2" },
@@ -258,6 +267,17 @@ func TestAuthorizationRejectsSignatureAndExternalMismatch(t *testing.T) {
 	f.authExpected.EnvelopeDigest = digestBytes(raw)
 	if _, err := VerifyAuthorization(raw, f.authExpected, f.roots); !errors.Is(err, ErrUnqualified) {
 		t.Fatalf("unmatched receipt UID: %v", err)
+	}
+	f = newFixture(t)
+	raw, err := json.Marshal(AuthorizationEnvelope{
+		Payload: f.auth, Signature: sign(t, f.auth, closureDomain, f.private),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.authExpected.EnvelopeDigest = digestBytes(raw)
+	if _, err := VerifyAuthorization(raw, f.authExpected, f.roots); !errors.Is(err, ErrUnqualified) {
+		t.Fatalf("cross-domain signature: %v", err)
 	}
 }
 

@@ -378,14 +378,24 @@ func validateDispositions(refs []recoverypermit.ReceiptRef, dispositions []Build
 		return ErrUnqualified
 	}
 	used := make([]bool, len(refs))
+	buildUIDs := make(map[string]bool, len(dispositions))
+	podUIDs := make(map[string]bool, len(dispositions))
 	for i, d := range dispositions {
 		if len(validation.IsDNS1123Subdomain(d.BuildName)) != 0 ||
 			i > 0 && dispositions[i-1].BuildName >= d.BuildName || !d.NeverReplay ||
 			len(d.ReceiptLinks) == 0 || len(d.ReceiptLinks) > 3 ||
 			(d.BuildUID != "" && !safeID(d.BuildUID, maxIDBytes)) ||
 			(d.PodUID != "" && !safeID(d.PodUID, maxIDBytes)) ||
-			(d.PodUID != "" && d.BuildUID == "") {
+			(d.PodUID != "" && d.BuildUID == "") ||
+			(d.BuildUID != "" && buildUIDs[d.BuildUID]) ||
+			(d.PodUID != "" && podUIDs[d.PodUID]) {
 			return ErrUnqualified
+		}
+		if d.BuildUID != "" {
+			buildUIDs[d.BuildUID] = true
+		}
+		if d.PodUID != "" {
+			podUIDs[d.PodUID] = true
 		}
 		switch d.Outcome {
 		case "terminal-result":
