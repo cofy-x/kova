@@ -35,13 +35,16 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/kubernetes"
+	kubefake "k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/tools/clientcmd"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	clientfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
 // Opt in with KOVA_GENESIS_PROCESS_API_MANIFEST=/absolute/private/matrix.json.
-// The external installer must first create ten distinct, fresh runner
-// Namespaces, Initializing Genesises, and immutable receipt Secrets. This gate
+// The external installer must first create ten distinct, fresh runner and
+// recovery-receipt Namespace pairs, Initializing Genesises, and immutable
+// receipt Secrets. Both Namespace UIDs must be pinned in each v2 receipt. This gate
 // creates only the two runtime ledgers; it never starts a Service, Pod, runner,
 // manager, listener, registry, or leader. No API object is removed on failure.
 // A passing gate is process-loss evidence around prepareGenesisRuntime only.
@@ -69,17 +72,19 @@ type processManifest struct {
 }
 
 type processCase struct {
-	Stage              string `json:"stage"`
-	Point              string `json:"point"`
-	Namespace          string `json:"namespace"`
-	NamespaceUID       string `json:"namespaceUID"`
-	GenesisUID         string `json:"genesisUID"`
-	ReceiptFile        string `json:"receiptFile"`
-	ReceiptSHA256      string `json:"receiptSHA256"`
-	SecretNamespace    string `json:"secretNamespace"`
-	SecretNamespaceUID string `json:"secretNamespaceUID"`
-	SecretName         string `json:"secretName"`
-	SecretUID          string `json:"secretUID"`
+	Stage               string `json:"stage"`
+	Point               string `json:"point"`
+	Namespace           string `json:"namespace"`
+	NamespaceUID        string `json:"namespaceUID"`
+	ReceiptNamespace    string `json:"receiptNamespace"`
+	ReceiptNamespaceUID string `json:"receiptNamespaceUID"`
+	GenesisUID          string `json:"genesisUID"`
+	ReceiptFile         string `json:"receiptFile"`
+	ReceiptSHA256       string `json:"receiptSHA256"`
+	SecretNamespace     string `json:"secretNamespace"`
+	SecretNamespaceUID  string `json:"secretNamespaceUID"`
+	SecretName          string `json:"secretName"`
+	SecretUID           string `json:"secretUID"`
 }
 
 func processManifestField(path []string, key string) bool {
@@ -91,7 +96,7 @@ func processManifestField(path []string, key string) bool {
 	}
 	if len(path) == 1 && path[0] == "cases" {
 		switch key {
-		case "stage", "point", "namespace", "namespaceUID", "genesisUID", "receiptFile", "receiptSHA256", "secretNamespace", "secretNamespaceUID", "secretName", "secretUID":
+		case "stage", "point", "namespace", "namespaceUID", "receiptNamespace", "receiptNamespaceUID", "genesisUID", "receiptFile", "receiptSHA256", "secretNamespace", "secretNamespaceUID", "secretName", "secretUID":
 			return true
 		}
 	}
@@ -127,6 +132,24 @@ func validateProcessManifest(m processManifest) error {
 	seenGenesisUID := map[string]bool{}
 	seenSecret := map[string]bool{}
 	seenSecretUID := map[string]bool{}
+	reservedNamespace := map[string]bool{"kube-system": true}
+	reservedNamespaceUID := map[string]bool{m.KubeSystemUID: true}
+	controlNamespaceUIDs := map[string]string{}
+	controlUIDNamespaces := map[string]string{}
+	for _, c := range m.Cases {
+		reservedNamespace[c.Namespace], reservedNamespace[c.SecretNamespace] = true, true
+		reservedNamespaceUID[c.NamespaceUID], reservedNamespaceUID[c.SecretNamespaceUID] = true, true
+		if previous, ok := controlNamespaceUIDs[c.SecretNamespace]; ok && previous != c.SecretNamespaceUID {
+			return errors.New("process gate control Namespace UID differs across cases")
+		}
+		if previous, ok := controlUIDNamespaces[c.SecretNamespaceUID]; ok && previous != c.SecretNamespace {
+			return errors.New("process gate control Namespace UID aliases another name")
+		}
+		controlNamespaceUIDs[c.SecretNamespace] = c.SecretNamespaceUID
+		controlUIDNamespaces[c.SecretNamespaceUID] = c.SecretNamespace
+	}
+	seenReceiptNamespace := map[string]bool{}
+	seenReceiptNamespaceUID := map[string]bool{}
 	for _, c := range m.Cases {
 		validStage, validPoint := false, false
 		for _, stage := range processStages {
@@ -140,10 +163,15 @@ func validateProcessManifest(m processManifest) error {
 		if !validStage || !validPoint || seenCase[key] ||
 			!dedicatedProcessNamespace(c.Namespace) || len(validation.IsDNS1123Label(c.Namespace)) != 0 ||
 			!admissioncontract.ValidUID(c.NamespaceUID) || c.NamespaceUID == m.KubeSystemUID ||
+			controlNamespaceUIDs[c.Namespace] != "" || controlUIDNamespaces[c.NamespaceUID] != "" ||
+			!dedicatedProcessNamespace(c.ReceiptNamespace) || len(validation.IsDNS1123Label(c.ReceiptNamespace)) != 0 ||
+			!admissioncontract.ValidUID(c.ReceiptNamespaceUID) ||
+			reservedNamespace[c.ReceiptNamespace] || reservedNamespaceUID[c.ReceiptNamespaceUID] ||
+			seenReceiptNamespace[c.ReceiptNamespace] || seenReceiptNamespaceUID[c.ReceiptNamespaceUID] ||
 			!admissioncontract.ValidUID(c.GenesisUID) ||
 			!filepath.IsAbs(c.ReceiptFile) || !validProcessHash(c.ReceiptSHA256) ||
 			!dedicatedProcessNamespace(c.SecretNamespace) || len(validation.IsDNS1123Label(c.SecretNamespace)) != 0 || c.SecretNamespace == c.Namespace ||
-			!admissioncontract.ValidUID(c.SecretNamespaceUID) || c.SecretNamespaceUID == c.NamespaceUID ||
+			!admissioncontract.ValidUID(c.SecretNamespaceUID) || c.SecretNamespaceUID == c.NamespaceUID || c.SecretNamespaceUID == m.KubeSystemUID ||
 			len(validation.IsDNS1123Label(c.SecretName)) != 0 || !admissioncontract.ValidUID(c.SecretUID) ||
 			seenNamespace[c.Namespace] || seenNamespaceUID[c.NamespaceUID] || seenGenesisUID[c.GenesisUID] ||
 			seenSecret[secretKey] || seenSecretUID[c.SecretUID] {
@@ -151,6 +179,7 @@ func validateProcessManifest(m processManifest) error {
 		}
 		seenCase[key], seenNamespace[c.Namespace], seenNamespaceUID[c.NamespaceUID] = true, true, true
 		seenGenesisUID[c.GenesisUID], seenSecret[secretKey], seenSecretUID[c.SecretUID] = true, true, true
+		seenReceiptNamespace[c.ReceiptNamespace], seenReceiptNamespaceUID[c.ReceiptNamespaceUID] = true, true
 	}
 	for _, stage := range processStages {
 		for _, point := range processPoints {
@@ -226,6 +255,7 @@ func processReceipt(c processCase) ([]byte, admissioncontract.Receipt, error) {
 		return nil, admissioncontract.Receipt{}, err
 	}
 	if receipt.Namespace != c.Namespace || receipt.Contract.NamespaceUID != c.NamespaceUID ||
+		receipt.Contract.ReceiptNamespace != c.ReceiptNamespace || receipt.Contract.ReceiptNamespaceUID != c.ReceiptNamespaceUID ||
 		receipt.GenesisUID != c.GenesisUID || receipt.GenesisName != admissioncontract.GenesisName {
 		return nil, admissioncontract.Receipt{}, errors.New("process gate receipt differs from explicit original identities")
 	}
@@ -369,6 +399,9 @@ func (a *processAPI) snapshot(ctx context.Context, m processManifest, c processC
 	if err != nil || receipt.QualifyNamespace(ns) != nil {
 		return processSnapshot{}, errors.New("original process-test Namespace changed")
 	}
+	if err := a.checkReceiptNamespace(ctx, c, receipt); err != nil {
+		return processSnapshot{}, err
+	}
 	controlNS, err := a.direct.GetNamespace(ctx, c.SecretNamespace)
 	if err != nil || controlNS == nil || string(controlNS.UID) != c.SecretNamespaceUID ||
 		controlNS.Status.Phase != corev1.NamespaceActive || controlNS.DeletionTimestamp != nil {
@@ -461,6 +494,9 @@ func processPreflight(ctx context.Context, a *processAPI, m processManifest, c p
 	if err := assertProcessSnapshot(s, c, 0); err != nil {
 		return err
 	}
+	if err := a.checkReceiptInventory(ctx, c, receipt); err != nil {
+		return err
+	}
 	var builds kovav1.KovaBuildList
 	var pods corev1.PodList
 	if err := a.reader.List(ctx, &builds, client.InNamespace(c.Namespace)); err != nil {
@@ -477,6 +513,47 @@ func processPreflight(ctx context.Context, a *processAPI, m processManifest, c p
 		return errors.New("process-test control Namespace contains Pods or cannot be listed")
 	}
 	return nil
+}
+
+func (a *processAPI) checkReceiptNamespace(ctx context.Context, c processCase, receipt admissioncontract.Receipt) error {
+	if receipt.Contract.ReceiptNamespace != c.ReceiptNamespace || receipt.Contract.ReceiptNamespaceUID != c.ReceiptNamespaceUID {
+		return errors.New("process-test recovery receipt Namespace differs from pinned manifest")
+	}
+	ns, err := a.direct.GetNamespace(ctx, c.ReceiptNamespace)
+	if err != nil || receipt.QualifyReceiptNamespace(ns) != nil {
+		return errors.New("original process-test recovery receipt Namespace changed")
+	}
+	return nil
+}
+
+// Bootstrap never creates a queue/grant/Pod receipt. Its dedicated receipt
+// Namespace must therefore stay empty, except for Kubernetes' root-CA
+// publication. These bounded direct Lists are only a veto: external fresh
+// create-only installation and stopped-writer evidence remain mandatory.
+func (a *processAPI) checkReceiptInventory(ctx context.Context, c processCase, receipt admissioncontract.Receipt) error {
+	if err := a.checkReceiptNamespace(ctx, c, receipt); err != nil {
+		return err
+	}
+	var maps corev1.ConfigMapList
+	if err := a.reader.List(ctx, &maps, client.InNamespace(c.ReceiptNamespace), client.Limit(2)); err != nil || maps.Continue != "" {
+		return errors.New("process-test recovery receipt ConfigMap inventory is incomplete")
+	}
+	if len(maps.Items) > 1 || (len(maps.Items) == 1 &&
+		(maps.Items[0].Namespace != c.ReceiptNamespace || maps.Items[0].Name != "kube-root-ca.crt" || maps.Items[0].DeletionTimestamp != nil)) {
+		return errors.New("process-test recovery receipt Namespace contains non-bootstrap ConfigMaps")
+	}
+	var pods corev1.PodList
+	var builds kovav1.KovaBuildList
+	var secrets corev1.SecretList
+	for _, list := range []client.ObjectList{&pods, &builds, &secrets} {
+		if err := a.reader.List(ctx, list, client.InNamespace(c.ReceiptNamespace), client.Limit(1)); err != nil || list.GetContinue() != "" {
+			return errors.New("process-test recovery receipt workload inventory is incomplete")
+		}
+	}
+	if len(pods.Items) != 0 || len(builds.Items) != 0 || len(secrets.Items) != 0 {
+		return errors.New("process-test recovery receipt Namespace contains workload or Secret objects")
+	}
+	return a.checkReceiptNamespace(ctx, c, receipt)
 }
 
 // The child starts from one fresh Initializing fixture. The wrapper accepts
@@ -897,6 +974,10 @@ func TestRealAPIGenesisProcessBootstrap(t *testing.T) {
 			current.ActiveUID != finals[index].ActiveUID || current.QueueUID != finals[index].QueueUID {
 			t.Fatalf("process cleanup refused changed fixture %s/%s; retained objects", c.Stage, c.Point)
 		}
+		_, receipt, err := processReceipt(c)
+		if err != nil || api.checkReceiptInventory(ctx, c, receipt) != nil {
+			t.Fatalf("process cleanup refused changed receipt Namespace %s/%s; retained objects", c.Stage, c.Point)
+		}
 	}
 	for index, c := range m.Cases {
 		for _, object := range []struct{ kind, namespace, name, uid string }{
@@ -923,6 +1004,7 @@ func validProcessFixtureForUnit() processManifest {
 			id := strconv.Itoa(i*len(processPoints) + j)
 			m.Cases = append(m.Cases, processCase{Stage: stage, Point: point,
 				Namespace: "kova-genesis-process-" + id, NamespaceUID: "namespace-uid-" + id,
+				ReceiptNamespace: "kova-genesis-process-receipts-" + id, ReceiptNamespaceUID: "receipt-namespace-uid-" + id,
 				GenesisUID: "genesis-uid-" + id, ReceiptFile: "/tmp/receipt-" + id + ".json",
 				ReceiptSHA256: strings.Repeat("c", 64), SecretNamespace: "kova-genesis-process-control", SecretNamespaceUID: "control-uid",
 				SecretName: "receipt-" + id, SecretUID: "secret-uid-" + id})
@@ -937,17 +1019,28 @@ func TestGenesisProcessManifestRejectsPartialAndReusedFixtures(t *testing.T) {
 		t.Fatal(err)
 	}
 	for name, change := range map[string]func(*processManifest){
-		"partial matrix":          func(m *processManifest) { m.Cases = m.Cases[:9] },
-		"missing cleanup choice":  func(m *processManifest) { m.CleanupOnSuccess = nil },
-		"missing Secret UID":      func(m *processManifest) { m.Cases[2].SecretUID = "" },
-		"missing control UID":     func(m *processManifest) { m.Cases[2].SecretNamespaceUID = "" },
-		"duplicate Namespace":     func(m *processManifest) { m.Cases[2].Namespace = m.Cases[1].Namespace },
-		"duplicate Namespace UID": func(m *processManifest) { m.Cases[2].NamespaceUID = m.Cases[1].NamespaceUID },
-		"duplicate Genesis UID":   func(m *processManifest) { m.Cases[2].GenesisUID = m.Cases[1].GenesisUID },
-		"duplicate Secret UID":    func(m *processManifest) { m.Cases[2].SecretUID = m.Cases[1].SecretUID },
-		"non-dedicated context":   func(m *processManifest) { m.Context = "kind-default" },
-		"relative receipt":        func(m *processManifest) { m.Cases[2].ReceiptFile = "receipt.json" },
-		"shared control NS":       func(m *processManifest) { m.Cases[2].SecretNamespace = "default" },
+		"partial matrix":                    func(m *processManifest) { m.Cases = m.Cases[:9] },
+		"missing cleanup choice":            func(m *processManifest) { m.CleanupOnSuccess = nil },
+		"missing Secret UID":                func(m *processManifest) { m.Cases[2].SecretUID = "" },
+		"missing control UID":               func(m *processManifest) { m.Cases[2].SecretNamespaceUID = "" },
+		"missing receipt namespace":         func(m *processManifest) { m.Cases[2].ReceiptNamespace = "" },
+		"missing receipt namespace UID":     func(m *processManifest) { m.Cases[2].ReceiptNamespaceUID = "" },
+		"duplicate receipt namespace":       func(m *processManifest) { m.Cases[2].ReceiptNamespace = m.Cases[1].ReceiptNamespace },
+		"duplicate receipt namespace UID":   func(m *processManifest) { m.Cases[2].ReceiptNamespaceUID = m.Cases[1].ReceiptNamespaceUID },
+		"receipt namespace aliases runner":  func(m *processManifest) { m.Cases[2].ReceiptNamespace = m.Cases[1].Namespace },
+		"receipt UID aliases runner":        func(m *processManifest) { m.Cases[2].ReceiptNamespaceUID = m.Cases[1].NamespaceUID },
+		"receipt namespace aliases control": func(m *processManifest) { m.Cases[2].ReceiptNamespace = m.Cases[1].SecretNamespace },
+		"receipt UID aliases control":       func(m *processManifest) { m.Cases[2].ReceiptNamespaceUID = m.Cases[1].SecretNamespaceUID },
+		"receipt UID aliases system":        func(m *processManifest) { m.Cases[2].ReceiptNamespaceUID = m.KubeSystemUID },
+		"control aliases other runner":      func(m *processManifest) { m.Cases[2].SecretNamespace = m.Cases[1].Namespace },
+		"control UID changes":               func(m *processManifest) { m.Cases[2].SecretNamespaceUID = "different-control-uid" },
+		"duplicate Namespace":               func(m *processManifest) { m.Cases[2].Namespace = m.Cases[1].Namespace },
+		"duplicate Namespace UID":           func(m *processManifest) { m.Cases[2].NamespaceUID = m.Cases[1].NamespaceUID },
+		"duplicate Genesis UID":             func(m *processManifest) { m.Cases[2].GenesisUID = m.Cases[1].GenesisUID },
+		"duplicate Secret UID":              func(m *processManifest) { m.Cases[2].SecretUID = m.Cases[1].SecretUID },
+		"non-dedicated context":             func(m *processManifest) { m.Context = "kind-default" },
+		"relative receipt":                  func(m *processManifest) { m.Cases[2].ReceiptFile = "receipt.json" },
+		"shared control NS":                 func(m *processManifest) { m.Cases[2].SecretNamespace = "default" },
 		"duplicate stage": func(m *processManifest) {
 			m.Cases[2].Stage, m.Cases[2].Point = m.Cases[1].Stage, m.Cases[1].Point
 		},
@@ -994,5 +1087,115 @@ func TestGenesisProcessPinnedReceiptRejectsChange(t *testing.T) {
 	}
 	if _, err := readPinnedProcessFile(path, hash, 1024); err == nil {
 		t.Fatal("changed receipt passed its pinned hash")
+	}
+}
+
+func processV2ReceiptForUnit(c processCase) admissioncontract.Receipt {
+	receipt, _ := genesisTestReceiptAndConfig()
+	receipt.Namespace, receipt.GenesisUID = c.Namespace, c.GenesisUID
+	receipt.Contract.NamespaceUID = c.NamespaceUID
+	receipt.Contract.ReceiptNamespace = c.ReceiptNamespace
+	receipt.Contract.ReceiptNamespaceUID = c.ReceiptNamespaceUID
+	return receipt
+}
+
+func TestGenesisProcessReceiptPinsSeparateNamespace(t *testing.T) {
+	c := validProcessFixtureForUnit().Cases[0]
+	receipt := processV2ReceiptForUnit(c)
+	raw, err := json.Marshal(receipt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.ReceiptFile = filepath.Join(t.TempDir(), "receipt.json")
+	if err := os.WriteFile(c.ReceiptFile, raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(raw)
+	c.ReceiptSHA256 = hex.EncodeToString(sum[:])
+	if _, _, err := processReceipt(c); err != nil {
+		t.Fatal(err)
+	}
+	for _, mutate := range []func(*processCase){
+		func(value *processCase) { value.ReceiptNamespace = "kova-genesis-process-replaced" },
+		func(value *processCase) { value.ReceiptNamespaceUID = "replaced-original-uid" },
+	} {
+		changed := c
+		mutate(&changed)
+		if _, _, err := processReceipt(changed); err == nil {
+			t.Fatal("manifest and immutable v2 receipt accepted different receipt Namespace identities")
+		}
+	}
+}
+
+type processInventoryReader struct {
+	client.Client
+	failure   bool
+	truncated bool
+}
+
+func (r processInventoryReader) List(ctx context.Context, list client.ObjectList, options ...client.ListOption) error {
+	if r.failure {
+		return errors.New("test-only inventory read failure")
+	}
+	if err := r.Client.List(ctx, list, options...); err != nil {
+		return err
+	}
+	if r.truncated {
+		list.SetContinue("more-unobserved-objects")
+	}
+	return nil
+}
+
+func TestGenesisProcessV2ReceiptNamespacePreflight(t *testing.T) {
+	c := validProcessFixtureForUnit().Cases[0]
+	receipt := processV2ReceiptForUnit(c)
+	for _, tc := range []struct {
+		name            string
+		changeNamespace func(*corev1.Namespace)
+		objects         []client.Object
+		readFailure     bool
+		truncated       bool
+		wantFailure     bool
+	}{
+		{name: "empty"},
+		{name: "system root CA only", objects: []client.Object{&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{
+			Namespace: c.ReceiptNamespace, Name: "kube-root-ca.crt"}}}},
+		{name: "replaced UID", changeNamespace: func(ns *corev1.Namespace) { ns.UID = "replacement" }, wantFailure: true},
+		{name: "not Active", changeNamespace: func(ns *corev1.Namespace) { ns.Status.Phase = corev1.NamespaceTerminating }, wantFailure: true},
+		{name: "deleting", changeNamespace: func(ns *corev1.Namespace) { now := metav1.Now(); ns.DeletionTimestamp = &now }, wantFailure: true},
+		{name: "queue receipt", objects: []client.Object{&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{
+			Namespace: c.ReceiptNamespace, Name: "kova-admission-intent-old"}}}, wantFailure: true},
+		{name: "unlabelled extra ConfigMap", objects: []client.Object{&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{
+			Namespace: c.ReceiptNamespace, Name: "unrecognised-evidence"}}}, wantFailure: true},
+		{name: "Pod", objects: []client.Object{&corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+			Namespace: c.ReceiptNamespace, Name: "old-pod"}}}, wantFailure: true},
+		{name: "KovaBuild", objects: []client.Object{&kovav1.KovaBuild{ObjectMeta: metav1.ObjectMeta{
+			Namespace: c.ReceiptNamespace, Name: "old-build"}}}, wantFailure: true},
+		{name: "Secret", objects: []client.Object{&corev1.Secret{ObjectMeta: metav1.ObjectMeta{
+			Namespace: c.ReceiptNamespace, Name: "unexpected-secret"}}}, wantFailure: true},
+		{name: "incomplete List", truncated: true, wantFailure: true},
+		{name: "failed List", readFailure: true, wantFailure: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: c.ReceiptNamespace, UID: types.UID(c.ReceiptNamespaceUID)},
+				Status: corev1.NamespaceStatus{Phase: corev1.NamespaceActive}}
+			if tc.changeNamespace != nil {
+				tc.changeNamespace(ns)
+			}
+			scheme := runtime.NewScheme()
+			if err := corev1.AddToScheme(scheme); err != nil {
+				t.Fatal(err)
+			}
+			if err := kovav1.AddToScheme(scheme); err != nil {
+				t.Fatal(err)
+			}
+			api := processAPI{direct: admissiongenesis.DirectClient{Client: kubefake.NewClientset(ns)},
+				reader: processInventoryReader{Client: clientfake.NewClientBuilder().WithScheme(scheme).WithObjects(tc.objects...).Build(),
+					failure: tc.readFailure, truncated: tc.truncated}}
+			err := api.checkReceiptInventory(t.Context(), c, receipt)
+			if (err != nil) != tc.wantFailure {
+				t.Fatalf("receipt Namespace preflight: err=%v wantFailure=%t", err, tc.wantFailure)
+			}
+		})
 	}
 }
