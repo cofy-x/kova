@@ -1,6 +1,10 @@
 # Service Admission Design
 
-The original scope of [#44](https://github.com/cofy-x/kova/issues/44) is closed; additional real fault-chain acceptance is tracked by [#59](https://github.com/cofy-x/kova/issues/59). This document describes the two-ledger baseline and explicitly identifies the fresh Genesis v2 candidate where its behavior differs. Neither the baseline tests nor this candidate claim a live committed-loss recovery PASS. Do not deploy this branch through an in-place rolling upgrade.
+The original scope of [#44](https://github.com/cofy-x/kova/issues/44) is closed; additional real fault-chain acceptance is tracked by [#59](https://github.com/cofy-x/kova/issues/59).
+This document describes the two-ledger baseline and identifies the queue-receipt behavior introduced in Genesis v2 and retained by the current v3 candidate.
+The v3 candidate additionally pins worker-pool and runner OCI identities and instruments active-grant and Pod-Create receipts.
+Neither the baseline tests nor this candidate claim a live committed-loss recovery PASS.
+Do not deploy this branch through an in-place rolling upgrade.
 
 ## Invariants and scope
 

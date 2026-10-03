@@ -1,10 +1,20 @@
 # Committed-loss recovery: drain-only slice
 
-This page documents a finite implementation slice for [#62](https://github.com/cofy-x/kova/issues/62), not a completed recovery procedure or a production acceptance result. The fresh Genesis v2 HTTP path now records a queue pre-effect receipt; active grant and Pod Create receipts are not yet wired into runtime. Do not invoke the drain coordinator against a live installation from this branch.
+This page documents a finite implementation slice for [#62](https://github.com/cofy-x/kova/issues/62), not a completed recovery procedure or a production acceptance result.
+The fresh Genesis v3 candidate records queue, active-grant, and Pod-Create pre-effect receipts, and pins the external worker-pool identity and runner OCI manifest/index digest.
+The committed-loss disposal executor and its isolated runtime acceptance remain incomplete.
+Do not invoke the drain coordinator against a live installation from this branch.
 
 ## Boundary
 
-`recoveryreceipt` can create immutable, unowned pre-effect ConfigMaps for a queue reservation, active grant, and Pod Create attempt in a dedicated, externally pinned recovery-receipt Namespace, separate from the runner and Service control Namespaces. Each records both original Namespace UIDs, Genesis/ledger identity, exact build/request/source facts, and a one-use nonce. A successful direct readback qualifies the receipt as evidence; it never grants a second Kubernetes Create, replay, or capacity release. The wired Genesis v2 queue path retains its queue charge through admitted active work and UID-preconditioned receipt cleanup after an exact terminal CR disposition. This conservatively makes `maxQueuedJobs` count all outstanding HTTP-submitted builds, not only waiting builds. Incident evidence must remain until an authorized disposition; no TTL or scavenger is provided.
+`recoveryreceipt` creates immutable, unowned pre-effect ConfigMaps for a queue reservation, active grant, and Pod Create attempt in a dedicated, externally pinned recovery-receipt Namespace, separate from the runner and Service control Namespaces.
+Each records both original Namespace UIDs, Genesis/ledger identity, exact build/request/source facts, and a one-use nonce.
+A successful direct readback qualifies the receipt as evidence; it never grants a second Kubernetes Create, replay, or capacity release.
+The v3 queue path retains its queue charge through admitted active work and UID-preconditioned receipt cleanup after an exact terminal CR disposition.
+This conservatively makes `maxQueuedJobs` count all outstanding HTTP-submitted builds, not only waiting builds.
+Grant and Pod attempts use durable CAS fences, direct receipt readback, and a permanent spent Pod-attempt nonce; an armed but unresolved attempt remains charged across restart.
+Normal terminal cleanup settles the Pod receipt, grant receipt, active charge, and then HTTP queue receipt in that order.
+Incident evidence must remain until an authorized disposition; no TTL or scavenger is provided.
 
 `recoverypermit` verifies an externally issued Ed25519, drain-only permit against an independently pinned whole-envelope digest, issuer public key, incident/epoch identity, complete ordered receipt-set digest, original worker-pool identity, and typed old-writer-stop assertion. The external assertion pins old ingress route and control Deployment UIDs, every old Service Pod/process generation, and a detailed evidence digest; it asserts old writers are joined and no uninstrumented or post-confirmation side effects remain. A signature does not itself prove that physical claim. Kova has no permit signer or authority to retire workers, and a locally cancelled buildctl process is not proof of remote BuildKit cancellation.
 
@@ -18,8 +28,23 @@ The only successful stage is **`occupied-not-drained`**. It proves name occupanc
 
 ## Still required for #62
 
-- Finish wiring active grant CAS → Pod Create and Pod-attempt CAS → Pod Create receipts, including one-attempt transport, durable nonces, bounded cleanup, and consistent diagnostics; complete queue-path real-API acceptance. Existing deployments are not retroactively instrumented.
+- Complete real-API acceptance of the three pre-effect receipt paths and canonical Pod defaulting, including uncertain writes and normal bounded cleanup. Existing deployments are not retroactively instrumented.
 - Join each exact daemon build request through its retire barrier and independently prove old runner/Service/BuildKit resources and network paths cannot resume. Local cancellation or a stopped HTTP process alone is insufficient.
 - Define and test the external issuer's evidence collection and signing procedure; prove stop ordering, complete receipt inventory, and worker/runner isolation against a real API server.
 - Specify the separate namespace-disposal and new-epoch admission gate. This slice intentionally never frees old capacity or silently recreates a ledger.
 - Run dedicated real-API failure-chain acceptance, including lost Create responses, late side effects, replacement UIDs, and process/leader crashes. Fake-client/race tests are not a #62 PASS.
+
+## External disposal boundary
+
+`recoverydisposal` currently verifies externally signed, independently pinned authorization and closure records only.
+It has no signer, Kubernetes mutation executor, physical-retirement detector, route writer, or capacity-release method.
+Its receipt-oriented authorization cannot authorize broad deletion of direct/admin objects, tombstones, or runner-namespace occupancy-attempt ConfigMaps.
+A separate exact-object execution plan must cover those physical identities and their independently approved dispositions.
+
+Before any namespace deletion, an external observer must archive the complete bounded CR, Pod, and relevant ConfigMap inventory, immutable receipts, stop/genesis/ledger evidence, terminal results, and explicit Unknown/discard approvals outside both old namespaces.
+The observer must prove retirement of old Service, runner, worker, network, and already-admitted in-flight effects; a namespace's `Terminating` state does not supply that proof.
+Object-count, per-object byte, total archive byte, and API-call bounds must fail closed rather than truncate the inventory.
+
+A future one-shot executor may only act on the separately signed exact namespace/name/UID and qualified archived projection, after the external authority starts normal deletion of both original namespace UIDs.
+It must preserve foreign finalizers, never force-finalize a namespace, never adopt a replacement UID, and never create a successor or release capacity.
+Even observing both old namespace UIDs absent is only an API observation: physical retirement, persistent name non-reuse, one-successor allocation, and route compare-and-swap remain independently verified external closure requirements.
