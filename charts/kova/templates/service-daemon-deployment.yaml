@@ -11,6 +11,12 @@
 {{- if not .Values.serviceDaemon.runnerNamespace }}
 {{- fail "serviceDaemon.admissionGenesis requires an explicit fresh runnerNamespace" }}
 {{- end }}
+{{- if not .Values.serviceDaemon.admissionGenesis.recoveryReceiptNamespace }}
+{{- fail "serviceDaemon.admissionGenesis requires an explicit fresh recoveryReceiptNamespace" }}
+{{- end }}
+{{- if or (eq .Values.serviceDaemon.admissionGenesis.recoveryReceiptNamespace .Values.serviceDaemon.runnerNamespace) (eq .Values.serviceDaemon.admissionGenesis.recoveryReceiptNamespace (include "kova.namespace" .)) }}
+{{- fail "recoveryReceiptNamespace must differ from runner and Service namespaces" }}
+{{- end }}
 {{- if not .Values.serviceDaemon.admissionGenesis.receiptSecret.name }}
 {{- fail "serviceDaemon.admissionGenesis requires the external immutable receipt Secret name" }}
 {{- end }}
@@ -71,6 +77,7 @@ spec:
           args:
             - --listen={{ .Values.serviceDaemon.listen }}
             - --namespace={{ default (include "kova.namespace" .) .Values.serviceDaemon.runnerNamespace }}
+            - --recovery-receipt-namespace={{ .Values.serviceDaemon.admissionGenesis.recoveryReceiptNamespace }}
             - --runner-image={{ include "kova.roleImage" (dict "root" . "role" "runner") }}
             - --runner-image-pull-policy={{ include "kova.roleImagePullPolicy" (dict "root" . "role" "runner") }}
             - --runner-image-pull-secret={{ $runnerRegistrySecret }}

@@ -53,7 +53,7 @@ This is a fresh installation, not an in-place upgrade.
 For an existing Service, first follow the [stop-and-drain migration and Genesis installation gates](deployment/kubernetes.md).
 Never reuse an old runner namespace name or run old and new writers together.
 
-Apply the selected release CRD, then externally create a fresh runner namespace, Genesis and immutable receipt.
+Apply the selected release CRD, then externally create distinct, fresh runner and recovery-receipt namespaces, Genesis, and an immutable installation receipt.
 The helper only reads Kubernetes; the explicit `kubectl create` operations own installation.
 Run this block in Bash; keep its private receipt directory outside Git.
 If any create has an unknown result, stop and inspect the retained original identities; do not rerun or replace it.
@@ -64,11 +64,15 @@ helm show crds oci://ghcr.io/cofy-x/charts/kova \
   --version "${KOVA_CHART_VERSION}" | kubectl apply -f -
 umask 077
 export KOVA_RUNNER_NAMESPACE=kova-jobs-$(openssl rand -hex 6)
+export KOVA_RECEIPT_NAMESPACE=kova-receipts-$(openssl rand -hex 6)
 genesis_directory=$(mktemp -d)
 genesis_generation=$(openssl rand -hex 16)
 kubectl create namespace "${KOVA_RUNNER_NAMESPACE}" -o json >"${genesis_directory}/namespace.json"
+kubectl create namespace "${KOVA_RECEIPT_NAMESPACE}" -o json >"${genesis_directory}/receipt-namespace.json"
 genesis_inputs=(
   --namespace-uid "$(jq -r .metadata.uid "${genesis_directory}/namespace.json")"
+  --receipt-namespace "${KOVA_RECEIPT_NAMESPACE}"
+  --receipt-namespace-uid "$(jq -r .metadata.uid "${genesis_directory}/receipt-namespace.json")"
   --generation "${genesis_generation}"
   --max-active-jobs 20 --max-active-jobs-per-requester 4
   --worker-slots 20 --max-queued-jobs 1000 --max-queued-jobs-per-requester 100
@@ -94,6 +98,7 @@ helm upgrade --install kova oci://ghcr.io/cofy-x/charts/kova \
   --set serviceDaemon.enabled=true \
   --set-string "serviceDaemon.runnerNamespace=${KOVA_RUNNER_NAMESPACE}" \
   --set serviceDaemon.admissionGenesis.enabled=true \
+  --set-string "serviceDaemon.admissionGenesis.recoveryReceiptNamespace=${KOVA_RECEIPT_NAMESPACE}" \
   --set serviceDaemon.admissionGenesis.receiptSecret.name=kova-admission-receipt \
   --set-string "serviceDaemon.admissionGenesis.receiptSecret.uid=${genesis_secret_uid}" \
   --set serviceDaemon.authentication.mode=static \
@@ -246,9 +251,9 @@ After the [drain gate](deployment/kubernetes.md#cross-version-service-upgrade) p
 helm uninstall kova --namespace kova
 ```
 
-The separate runner namespace and original Genesis/receipt remain as evidence.
+The separate runner and recovery-receipt namespaces, original Genesis, and receipts remain as evidence.
 An environment owner may dispose of them only after verifying their original UIDs and resolving every unknown operation.
-Do not reuse that runner namespace name for a later installation.
+Do not reuse either namespace name for a later installation.
 
 The chart does not create clusters, cloud accounts, output registries, or
 provider credentials. Those resources remain owned by the consuming

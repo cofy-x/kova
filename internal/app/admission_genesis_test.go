@@ -49,9 +49,10 @@ func TestAdmissionGenesisCLIUsesExplicitGlobalFlagsAndGETOnlyAPI(t *testing.T) {
 	receipt := admissioncontract.Receipt{
 		Namespace: "jobs-57", GenesisName: admissioncontract.GenesisName, GenesisUID: "genesis-original",
 		Contract: admissioncontract.Contract{
-			Version: 1, NamespaceUID: "namespace-original", Generation: strings.Repeat("a", 32),
+			Version: 2, NamespaceUID: "namespace-original", ReceiptNamespace: "receipts-57",
+			ReceiptNamespaceUID: "receipts-original", Generation: strings.Repeat("a", 32),
 			ActiveLedgerName: admissioncontract.ActiveLedgerName, ActiveLedgerSchema: 1,
-			QueueLedgerName: admissioncontract.QueueLedgerName, QueueLedgerSchema: 1,
+			QueueLedgerName: admissioncontract.QueueLedgerName, QueueLedgerSchema: 2,
 			Limits: admissioncontract.Limits{MaxActiveJobs: 20, MaxActiveJobsPerRequester: 4,
 				WorkerSlots: 20, MaxQueuedJobs: 1000, MaxQueuedJobsPerRequester: 100},
 		},
@@ -72,6 +73,10 @@ func TestAdmissionGenesisCLIUsesExplicitGlobalFlagsAndGETOnlyAPI(t *testing.T) {
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/namespaces/jobs-57":
 			_ = json.NewEncoder(w).Encode(corev1.Namespace{ObjectMeta: metav1.ObjectMeta{
 				Name: receipt.Namespace, UID: types.UID(receipt.Contract.NamespaceUID),
+			}, Status: corev1.NamespaceStatus{Phase: corev1.NamespaceActive}})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/namespaces/receipts-57":
+			_ = json.NewEncoder(w).Encode(corev1.Namespace{ObjectMeta: metav1.ObjectMeta{
+				Name: receipt.Contract.ReceiptNamespace, UID: types.UID(receipt.Contract.ReceiptNamespaceUID),
 			}, Status: corev1.NamespaceStatus{Phase: corev1.NamespaceActive}})
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/namespaces/jobs-57/configmaps/"+receipt.GenesisName:
 			if !exists {
@@ -98,6 +103,8 @@ func TestAdmissionGenesisCLIUsesExplicitGlobalFlagsAndGETOnlyAPI(t *testing.T) {
 	common := []string{"kova", "--kubeconfig", kubeconfig, "--namespace", receipt.Namespace,
 		"admission-genesis"}
 	identity := []string{"--namespace-uid", receipt.Contract.NamespaceUID, "--generation", receipt.Contract.Generation,
+		"--receipt-namespace", receipt.Contract.ReceiptNamespace,
+		"--receipt-namespace-uid", receipt.Contract.ReceiptNamespaceUID,
 		"--max-active-jobs", "20", "--max-active-jobs-per-requester", "4", "--worker-slots", "20",
 		"--max-queued-jobs", "1000", "--max-queued-jobs-per-requester", "100"}
 	app := NewCLIApp()
@@ -123,9 +130,10 @@ func TestAdmissionGenesisCLIUsesExplicitGlobalFlagsAndGETOnlyAPI(t *testing.T) {
 	if err := json.Unmarshal(output.Bytes(), &secret); err != nil || secret.Name != "receipt-57" || secret.Immutable == nil || !*secret.Immutable {
 		t.Fatalf("invalid rendered receipt Secret: %v, %s", err, output.String())
 	}
-	if len(calls) != 4 || calls[0] != "GET /api/v1/namespaces/jobs-57" ||
-		calls[1] != "GET /api/v1/namespaces/jobs-57/configmaps/"+receipt.GenesisName ||
-		calls[2] != calls[0] || calls[3] != calls[1] {
+	if len(calls) != 6 || calls[0] != "GET /api/v1/namespaces/jobs-57" ||
+		calls[1] != "GET /api/v1/namespaces/receipts-57" ||
+		calls[2] != "GET /api/v1/namespaces/jobs-57/configmaps/"+receipt.GenesisName ||
+		calls[3] != calls[0] || calls[4] != calls[1] || calls[5] != calls[2] {
 		t.Fatalf("helper issued unexpected API calls: %v", calls)
 	}
 }

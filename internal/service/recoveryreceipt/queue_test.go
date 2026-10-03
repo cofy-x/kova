@@ -35,6 +35,7 @@ func exampleQueueIntent() QueueIntent {
 	requesterHash := sha256.Sum256([]byte("alice"))
 	return QueueIntent{
 		Namespace: "runner-new", NamespaceUID: "namespace-original-uid",
+		ReceiptNamespace: "receipts-new", ReceiptNamespaceUID: "receipts-original-uid",
 		GenesisName: "kova-service-admission-genesis", GenesisUID: "genesis-original-uid",
 		Generation:      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 		ActiveLedgerUID: "active-original-uid", QueueLedgerUID: "queue-original-uid",
@@ -62,7 +63,7 @@ func TestQueueReceiptCreateAndDirectReadback(t *testing.T) {
 	cm := serverReceipt(t, q, "receipt-original-uid")
 	api := &scriptedConfigMaps{
 		create: func(proposal *corev1.ConfigMap) (*corev1.ConfigMap, error) {
-			if proposal.Name != cm.Name || proposal.Namespace != q.Namespace ||
+			if proposal.Name != cm.Name || proposal.Namespace != q.ReceiptNamespace ||
 				proposal.Immutable == nil || !*proposal.Immutable || len(proposal.OwnerReferences) != 0 {
 				t.Fatal("Create did not send the immutable, unowned original receipt")
 			}
@@ -115,12 +116,13 @@ func TestQueueReceiptAlreadyExistsIsEvidenceOnly(t *testing.T) {
 		},
 		get: func(string) (*corev1.ConfigMap, error) { return cm.DeepCopy(), nil },
 	}
-	observed, err := RecordQueueOnce(context.Background(), api, q)
-	if err != nil || observed.ReceiptUID != string(cm.UID) || api.puts != 1 || api.reads != 1 {
-		t.Fatalf("exact peer receipt was not observed once: %+v, %v, puts=%d reads=%d", observed, err, api.puts, api.reads)
+	if _, err := RecordQueueOnce(context.Background(), api, q); !errors.Is(err, ErrUnconfirmed) || api.puts != 1 || api.reads != 1 {
+		t.Fatalf("pre-existing receipt armed a fresh effect: %v, puts=%d reads=%d", err, api.puts, api.reads)
 	}
-	// The witness deliberately has no fresh/owner bit: the queue ledger still
-	// decides which caller may issue its one CR Create.
+	observed, err := ObserveQueue(context.Background(), api, q)
+	if err != nil || observed.ReceiptUID != string(cm.UID) {
+		t.Fatalf("pre-existing receipt was not still observable as evidence: %+v, %v", observed, err)
+	}
 }
 
 func TestQueueReceiptCreateSuccessWithoutReadIsUnconfirmed(t *testing.T) {

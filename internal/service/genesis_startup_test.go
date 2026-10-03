@@ -25,9 +25,10 @@ import (
 )
 
 type staticGenesisCore struct {
-	namespace *corev1.Namespace
-	objects   map[string]*corev1.ConfigMap
-	writes    int
+	namespace        *corev1.Namespace
+	receiptNamespace *corev1.Namespace
+	objects          map[string]*corev1.ConfigMap
+	writes           int
 }
 
 type exhaustedControllerCore struct{ admissiongenesis.CoreAPI }
@@ -95,8 +96,14 @@ func (f *restartingGenesisCore) PatchConfigMap(ctx context.Context, namespace, n
 	return f.GetConfigMap(ctx, namespace, name)
 }
 
-func (f *staticGenesisCore) GetNamespace(context.Context, string) (*corev1.Namespace, error) {
-	return f.namespace.DeepCopy(), nil
+func (f *staticGenesisCore) GetNamespace(_ context.Context, name string) (*corev1.Namespace, error) {
+	if f.namespace != nil && f.namespace.Name == name {
+		return f.namespace.DeepCopy(), nil
+	}
+	if f.receiptNamespace != nil && f.receiptNamespace.Name == name {
+		return f.receiptNamespace.DeepCopy(), nil
+	}
+	return nil, errors.New("missing Namespace")
 }
 
 func (f *staticGenesisCore) GetConfigMap(_ context.Context, _, name string) (*corev1.ConfigMap, error) {
@@ -121,9 +128,10 @@ func genesisTestReceiptAndConfig() (admissioncontract.Receipt, config.Config) {
 		WorkerSlots: 20, MaxQueuedJobs: 1000, MaxQueuedJobsPerRequester: 100}
 	r := admissioncontract.Receipt{Namespace: cfg.Namespace, GenesisName: admissioncontract.GenesisName,
 		GenesisUID: "genesis-original", Contract: admissioncontract.Contract{
-			Version: 1, NamespaceUID: "namespace-original", Generation: strings.Repeat("a", 32),
+			Version: 2, NamespaceUID: "namespace-original", Generation: strings.Repeat("a", 32),
+			ReceiptNamespace: "receipts-57", ReceiptNamespaceUID: "receipts-original",
 			ActiveLedgerName: admissioncontract.ActiveLedgerName, ActiveLedgerSchema: 1,
-			QueueLedgerName: admissioncontract.QueueLedgerName, QueueLedgerSchema: 1,
+			QueueLedgerName: admissioncontract.QueueLedgerName, QueueLedgerSchema: 2,
 			Limits: admissioncontract.Limits{MaxActiveJobs: cfg.MaxActiveJobs,
 				MaxActiveJobsPerRequester: cfg.MaxActiveJobsPerRequester, WorkerSlots: cfg.WorkerSlots,
 				MaxQueuedJobs: cfg.MaxQueuedJobs, MaxQueuedJobsPerRequester: cfg.MaxQueuedJobsPerRequester},
@@ -202,6 +210,8 @@ func TestPrepareGenesisRuntimeObservesExactCommittedPairWithoutLegacyWrites(t *t
 	api := &staticGenesisCore{namespace: &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{
 		Name: cfg.Namespace, UID: types.UID(receipt.Contract.NamespaceUID)},
 		Status: corev1.NamespaceStatus{Phase: corev1.NamespaceActive}},
+		receiptNamespace: &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: receipt.Contract.ReceiptNamespace,
+			UID: types.UID(receipt.Contract.ReceiptNamespaceUID)}, Status: corev1.NamespaceStatus{Phase: corev1.NamespaceActive}},
 		objects: map[string]*corev1.ConfigMap{
 			receipt.GenesisName: genesis, active.Name: active, queue.Name: queue,
 		}}
@@ -216,8 +226,8 @@ func TestPrepareGenesisRuntimeObservesExactCommittedPairWithoutLegacyWrites(t *t
 	if guard.Original.ActiveLedgerUID != string(active.UID) || guard.Original.QueueLedgerUID != string(queue.UID) || api.writes != 0 {
 		t.Fatalf("startup pair or writes differ: %+v, writes=%d", guard.Original, api.writes)
 	}
-	httpAPI := &staticGenesisCore{namespace: api.namespace, objects: api.objects}
-	readinessAPI := &staticGenesisCore{namespace: api.namespace, objects: api.objects}
+	httpAPI := &staticGenesisCore{namespace: api.namespace, receiptNamespace: api.receiptNamespace, objects: api.objects}
+	readinessAPI := &staticGenesisCore{namespace: api.namespace, receiptNamespace: api.receiptNamespace, objects: api.objects}
 	httpView, err := forkGenesisGuard(context.Background(), guard, httpAPI, func(context.Context) error { return nil })
 	if err != nil {
 		t.Fatal(err)
@@ -261,7 +271,9 @@ func TestPrepareGenesisRuntimeCompletesOriginalInitializingPairAfterPartialResta
 	namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{
 		Name: cfg.Namespace, UID: types.UID(receipt.Contract.NamespaceUID),
 	}, Status: corev1.NamespaceStatus{Phase: corev1.NamespaceActive}}
-	base := genesisTestClient(t, namespace, genesis)
+	receiptNamespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: receipt.Contract.ReceiptNamespace,
+		UID: types.UID(receipt.Contract.ReceiptNamespaceUID)}, Status: corev1.NamespaceStatus{Phase: corev1.NamespaceActive}}
+	base := genesisTestClient(t, namespace, receiptNamespace, genesis)
 	api := &restartingGenesisCore{Client: base, failQueueCreateOnce: true}
 	if guard, err := prepareGenesisRuntime(ctx, cfg, receiptRaw, api, base, nil); err == nil || guard != nil {
 		t.Fatalf("partial first startup unexpectedly routed: guard=%v err=%v", guard, err)

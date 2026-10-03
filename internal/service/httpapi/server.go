@@ -15,6 +15,7 @@ import (
 	"github.com/cofy-x/kova/internal/service/buildcontroller"
 	"github.com/cofy-x/kova/internal/service/config"
 	"github.com/cofy-x/kova/internal/service/queueadmission"
+	"github.com/cofy-x/kova/internal/service/recoveryreceipt"
 	"github.com/cofy-x/kova/internal/version"
 	apiv1 "github.com/cofy-x/kova/pkg/api/v1"
 
@@ -38,6 +39,18 @@ type Server struct {
 	genesis          admissiongenesis.Checker
 	genesisLedger    *admissiongenesis.Guard
 	readinessGenesis admissiongenesis.Checker
+	receipts         recoveryreceipt.ConfigMaps
+}
+
+// WithRecoveryReceipts supplies the direct, one-attempt ConfigMap transport
+// for the pre-CR receipt. A Genesis-backed runtime refuses new admission if
+// this transport is absent; tests without Genesis retain the legacy fixture.
+func (s *Server) WithRecoveryReceipts(api recoveryreceipt.ConfigMaps) error {
+	if api == nil {
+		return fmt.Errorf("recovery receipt direct ConfigMap API is required")
+	}
+	s.receipts = api
+	return nil
 }
 
 var (
@@ -136,6 +149,14 @@ func (s *Server) Start(ctx context.Context) error {
 
 func (s *Server) startAdmission(ctx context.Context) error {
 	if s.genesis != nil {
+		if s.genesisLedger != nil && s.receipts == nil {
+			return fmt.Errorf("Genesis queue admission lacks a direct recovery receipt client")
+		}
+		if s.genesisLedger != nil {
+			if err := s.queueStore().CheckReceiptNamespace(ctx); err != nil {
+				return err
+			}
+		}
 		// Never enter the legacy both-missing Create path after a Genesis
 		// commit, including a deletion between startup and listener handoff.
 		return s.genesis.Check(ctx)

@@ -73,7 +73,7 @@ func validateCanonicalEmptyLimits(template LedgerTemplate, limits admissioncontr
 		if err := admissioncontract.RequireKeys(raw, "version", "globalLimit", "requesterLimit", "intents"); err != nil {
 			return fmt.Errorf("queue canonical empty header: %w", err)
 		}
-		if state.Version != 1 || state.Intents == nil || len(state.Intents) != 0 ||
+		if state.Version != 2 || state.Intents == nil || len(state.Intents) != 0 ||
 			state.GlobalLimit != limits.MaxQueuedJobs || state.RequesterLimit != limits.MaxQueuedJobsPerRequester {
 			return fmt.Errorf("queue canonical empty capacity differs from admission receipt")
 		}

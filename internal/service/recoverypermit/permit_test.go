@@ -18,17 +18,18 @@ func fixturePermit(t *testing.T) (DrainPayload, Expectation, TrustRoots, ed25519
 	public := private.Public().(ed25519.PublicKey)
 	epoch := EpochIdentity{
 		Namespace: "runner-old", NamespaceUID: "namespace-original-uid",
+		ReceiptNamespace: "receipts-old", ReceiptNamespaceUID: "receipts-original-uid",
 		GenesisName: "kova-service-admission-genesis", GenesisUID: "genesis-original-uid",
 		Generation: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", ActiveLedgerUID: "active-original-uid",
 		QueueLedgerUID: "queue-original-uid", WorkerPoolID: "buildkit-old-pool",
 	}
 	stop := StopIntentRef{Namespace: "runner-old", Name: "stop-incident-one", UID: "stop-original-uid", DataDigest: "sha256:" + strings.Repeat("c", 64)}
 	receipts := []ReceiptRef{
-		{Kind: "grant", Namespace: "runner-old", Name: "kova-grant-intent-" + strings.Repeat("1", 32), UID: "grant-original-uid", DataDigest: "sha256:" + strings.Repeat("d", 64)},
-		{Kind: "pod-create", Namespace: "runner-old", Name: "kova-pod-create-intent-" + strings.Repeat("2", 32), UID: "pod-intent-original-uid", DataDigest: "sha256:" + strings.Repeat("e", 64)},
-		{Kind: "queue", Namespace: "runner-old", Name: "kova-admission-intent-" + strings.Repeat("3", 32), UID: "queue-original-uid", DataDigest: "sha256:" + strings.Repeat("f", 64)},
+		{Kind: "grant", Namespace: "receipts-old", Name: "kova-grant-intent-" + strings.Repeat("1", 32), UID: "grant-original-uid", DataDigest: "sha256:" + strings.Repeat("d", 64)},
+		{Kind: "pod-create", Namespace: "receipts-old", Name: "kova-pod-create-intent-" + strings.Repeat("2", 32), UID: "pod-intent-original-uid", DataDigest: "sha256:" + strings.Repeat("e", 64)},
+		{Kind: "queue", Namespace: "receipts-old", Name: "kova-admission-intent-" + strings.Repeat("3", 32), UID: "queue-original-uid", DataDigest: "sha256:" + strings.Repeat("f", 64)},
 	}
-	setDigest, err := DigestReceiptSet(epoch.Namespace, receipts)
+	setDigest, err := DigestReceiptSet(epoch, receipts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -187,16 +188,16 @@ func TestVerifyDrainPermitRejectsIncompleteOrUnorderedReceiptSet(t *testing.T) {
 	}
 	_, expected, roots, key = fixturePermit(t)
 	expected.Receipts[0], expected.Receipts[1] = expected.Receipts[1], expected.Receipts[0]
-	if _, err := DigestReceiptSet(expected.Epoch.Namespace, expected.Receipts); !errors.Is(err, ErrUnqualified) {
+	if _, err := DigestReceiptSet(expected.Epoch, expected.Receipts); !errors.Is(err, ErrUnqualified) {
 		t.Fatalf("unordered receipt set hashed: %v", err)
 	}
 	expected.Receipts[0] = expected.Receipts[1]
-	if _, err := DigestReceiptSet(expected.Epoch.Namespace, expected.Receipts); !errors.Is(err, ErrUnqualified) {
+	if _, err := DigestReceiptSet(expected.Epoch, expected.Receipts); !errors.Is(err, ErrUnqualified) {
 		t.Fatalf("duplicate receipt set hashed: %v", err)
 	}
 	expected.Receipts = []ReceiptRef{expected.Receipts[0], expected.Receipts[0]}
 	expected.Receipts[1].UID = "replacement-uid"
-	if _, err := DigestReceiptSet(expected.Epoch.Namespace, expected.Receipts); !errors.Is(err, ErrUnqualified) {
+	if _, err := DigestReceiptSet(expected.Epoch, expected.Receipts); !errors.Is(err, ErrUnqualified) {
 		t.Fatalf("same-name replacement set hashed: %v", err)
 	}
 }

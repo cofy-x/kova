@@ -4,6 +4,7 @@ serviceDaemon:
   runnerNamespace: kova-render-test-jobs
   admissionGenesis:
     enabled: true
+    recoveryReceiptNamespace: kova-render-test-receipts
     receiptSecret:
       name: render-test-receipt
       uid: render-test-not-a-live-secret-uid

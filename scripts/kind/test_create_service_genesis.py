@@ -54,15 +54,10 @@ class FakeInstaller(installer.Installer):
             return self.args.context
         if args[:3] == ("config", "view", "--minify"):
             return self.proxy if args[-1].endswith("proxy-url}") else self.endpoint
-        if args == (
-            "get",
-            "namespace",
-            self.args.runner_namespace,
-            "--ignore-not-found",
-            "-o",
-            "json",
-        ):
-            value = self.objects.get(("namespace", self.args.runner_namespace))
+        if len(args) == 6 and args[0:2] == ("get", "namespace") and args[2] in (
+            self.args.runner_namespace, self.args.receipt_namespace
+        ) and args[3:] == ("--ignore-not-found", "-o", "json"):
+            value = self.objects.get(("namespace", args[2]))
             return json.dumps(value) if value else ""
         if "pods" in args:
             return json.dumps({"items": self.pods})
@@ -74,7 +69,9 @@ class FakeInstaller(installer.Installer):
             kind = obj["kind"].lower()
             if kind == self.unknown_create:
                 raise installer.Stop("unknown create result")
-            obj["metadata"]["uid"] = kind + "-original"
+            obj["metadata"]["uid"] = (
+                obj["metadata"]["name"] + "-original" if kind == "namespace" else kind + "-original"
+            )
             if kind == "secret" and self.mutate_secret:
                 obj["data"]["receipt.json"] = "e30="
             if kind == "namespace":
@@ -93,6 +90,7 @@ class FakeInstaller(installer.Installer):
         contract = installer.expected_contract(
             self.args,
             common[common.index("--namespace-uid") + 1],
+            common[common.index("--receipt-namespace-uid") + 1],
             common[common.index("--generation") + 1],
         )
         if subcommand == "render-genesis":
@@ -161,6 +159,8 @@ class InstallerTests(unittest.TestCase):
                 "system-original",
                 "--runner-namespace",
                 "jobs-new",
+                "--receipt-namespace",
+                "receipts-new",
                 "--service-namespace",
                 "service",
                 "--release",
@@ -168,7 +168,7 @@ class InstallerTests(unittest.TestCase):
                 "--output-directory",
                 str(root / "evidence"),
                 "--acknowledge",
-                "kind-test/service/jobs-new",
+                "kind-test/service/jobs-new/receipts-new",
                 "--max-active-jobs",
                 "20",
                 "--max-active-jobs-per-requester",
@@ -182,11 +182,12 @@ class InstallerTests(unittest.TestCase):
             ]
         )
 
-    def test_fresh_install_creates_only_three_exact_objects(self):
+    def test_fresh_install_creates_only_four_exact_objects(self):
         fake = FakeInstaller(self.args)
         values_path = fake.run()
         values = json.loads(values_path.read_text())["serviceDaemon"]
-        self.assertEqual([obj["kind"] for obj in fake.writes], ["Namespace", "ConfigMap", "Secret"])
+        self.assertEqual([obj["kind"] for obj in fake.writes], ["Namespace", "Namespace", "ConfigMap", "Secret"])
+        self.assertEqual(values["admissionGenesis"]["recoveryReceiptNamespace"], "receipts-new")
         self.assertEqual(values["admissionGenesis"]["receiptSecret"]["uid"], "secret-original")
         self.assertEqual(values["runnerNamespace"], "jobs-new")
         self.assertEqual(values["maxQueuedJobs"], 1000)
@@ -198,6 +199,14 @@ class InstallerTests(unittest.TestCase):
     def test_existing_namespace_never_adopted(self):
         fake = FakeInstaller(self.args)
         fake.objects[("namespace", "jobs-new")] = {"metadata": {"uid": "old"}}
+        with self.assertRaises(installer.Stop):
+            fake.run()
+        self.assertEqual(fake.writes, [])
+        self.assertFalse(fake.directory.exists())
+
+    def test_existing_receipt_namespace_never_adopted(self):
+        fake = FakeInstaller(self.args)
+        fake.objects[("namespace", "receipts-new")] = {"metadata": {"uid": "old"}}
         with self.assertRaises(installer.Stop):
             fake.run()
         self.assertEqual(fake.writes, [])
@@ -229,7 +238,7 @@ class InstallerTests(unittest.TestCase):
         fake.replace_secret = True
         with self.assertRaises(installer.Stop):
             fake.run()
-        self.assertEqual(len(fake.writes), 3)
+        self.assertEqual(len(fake.writes), 4)
         self.assertFalse((fake.directory / "values.json").exists())
 
     def test_wrong_rendered_object_not_created(self):
@@ -237,7 +246,7 @@ class InstallerTests(unittest.TestCase):
         fake.wrong_proposal = True
         with self.assertRaises(installer.Stop):
             fake.run()
-        self.assertEqual(len(fake.writes), 1)
+        self.assertEqual(len(fake.writes), 2)
 
     def test_remote_endpoint_or_proxy_rejected_before_create(self):
         for key, value in (
@@ -274,7 +283,7 @@ class InstallerTests(unittest.TestCase):
         fake.wrong_receipt = True
         with self.assertRaises(installer.Stop):
             fake.run()
-        self.assertEqual(len(fake.writes), 2)
+        self.assertEqual(len(fake.writes), 3)
         self.assertFalse((fake.directory / "values.json").exists())
 
     def test_mutating_receipt_response_never_yields_values(self):
@@ -282,7 +291,7 @@ class InstallerTests(unittest.TestCase):
         fake.mutate_secret = True
         with self.assertRaises(installer.Stop):
             fake.run()
-        self.assertEqual(len(fake.writes), 3)
+        self.assertEqual(len(fake.writes), 4)
         self.assertFalse((fake.directory / "values.json").exists())
 
     def test_explicit_ack_context_and_namespace_are_required(self):
@@ -290,6 +299,7 @@ class InstallerTests(unittest.TestCase):
             ("acknowledge", "wrong"),
             ("context", "production"),
             ("runner_namespace", "service"),
+            ("receipt_namespace", "jobs-new"),
             ("max_queued_jobs", 1001),
         ):
             with self.subTest(key=key), patch.object(self.args, key, value):

@@ -170,14 +170,16 @@ An empty List is only a veto check, never proof of a fresh installation.
 
 The `kova admission-genesis` helper makes read-only, declarative proposals.
 Supply explicit global `--kubeconfig` and `--namespace` before the command,
-then `--namespace-uid`, `--generation` (32 lowercase hex characters), and
+then `--namespace-uid`, `--receipt-namespace`, its original
+`--receipt-namespace-uid`, `--generation` (32 lowercase hex characters), and
 all five `--max-active-jobs`, `--max-active-jobs-per-requester`,
 `--worker-slots`, `--max-queued-jobs`, and
 `--max-queued-jobs-per-requester` flags after its subcommand. After an
-external installer has created the fresh Namespace and recorded its UID:
+external installer has created distinct, never-used runner and recovery-receipt
+Namespaces and recorded both original UIDs:
 
 1. Run `render-genesis` with those exact inputs and save its ConfigMap JSON
-   privately. It directly checks the Namespace and refuses an existing
+   privately. It directly checks both Namespaces and refuses an existing
    Genesis. Create the manifest with **`kubectl create -f`**, never `apply` or
    replace. A failed/unknown create needs operator investigation, not a new
    generation or retry that could erase provisional UID pins.
@@ -188,7 +190,9 @@ external installer has created the fresh Namespace and recorded its UID:
    it with **`kubectl create -f`** in the Service Namespace; record its UID.
    Keep the private manifest and receipt outside Git.
 3. Only after the CRD serving and drain gates pass, set
-   `serviceDaemon.runnerNamespace` to the new Namespace and set
+   `serviceDaemon.runnerNamespace` to the new runner Namespace and
+   `serviceDaemon.admissionGenesis.recoveryReceiptNamespace` to the new
+   recovery-receipt Namespace; set
    `serviceDaemon.admissionGenesis.enabled=true`,
    `receiptSecret.name`, and the original `receiptSecret.uid` in the chart.
    The chart mounts the existing Secret; it never creates one. Missing receipt
@@ -200,7 +204,7 @@ external installer has created the fresh Namespace and recorded its UID:
 
 The local Kind quickstart uses the external
 [`create-service-genesis.py` installer](../../scripts/kind/create-service-genesis.py)
-and a never-used, separate runner namespace for each invocation.
+and never-used, distinct runner and recovery-receipt namespaces for each invocation.
 This script is intentionally Kind-only; production orchestration remains environment-owned.
 It captures create intents and original UID responses in a private evidence directory, emits a Helm values file only after exact readback, and never resets or adopts an existing namespace.
 An unknown create or partial installation stops without deleting evidence or retrying under a new identity.
@@ -325,7 +329,7 @@ slots without leaving usable capacity idle, and records each fixed allocation
 in job status. Runners resolve the headless Service into worker Pod IPs, avoid
 busy or cooling endpoints, and refresh DNS as replicas change.
 
-Active grants and HTTP queue intents use separate Kubernetes ConfigMap CAS ledgers. The active grant precedes Pod Create; a unique in-flight nonce fences a late old-leader Create. HTTP submission reserves one bounded queue intent before CR Create, and active grant commits before that intent is released. Do not delete either `kova-service-admission` or `kova-service-queue-admission` while the Service is running. Direct/admin CR writes are outside the HTTP queue quota, though active limits still apply. Unknown Create results may retain capacity until exact operator evidence resolves them.
+Active grants and HTTP queue intents use separate Kubernetes ConfigMap CAS ledgers. The active grant precedes Pod Create; a unique in-flight nonce fences a late old-leader Create. In the fresh Genesis v2 candidate, HTTP submission durably records an immutable, exact-UID queue receipt in the separately pinned recovery-receipt Namespace before its one CR Create. It retains the queue slot through active execution until terminal cleanup verifies the exact CR, records the cleanup disposition, UID-deletes the receipt, and directly observes the result. `maxQueuedJobs` therefore counts admitted active HTTP builds too; it is not merely a waiting-queue depth. Do not delete either `kova-service-admission` or `kova-service-queue-admission` while the Service is running. Direct/admin CR writes are outside the HTTP queue quota, though active limits still apply. Unknown Create results may retain capacity until exact operator evidence resolves them. Grant and Pod Create receipts are not yet wired into runtime; queue instrumentation alone does not authorize committed-loss drain or capacity release.
 The supported settings are `maxActiveJobs` 1–128, `workerSlots` 1–65535 and `maxQueuedJobs` 1–1000, with each per-requester limit no greater than its global limit. Both ledgers enforce separate 768 KiB encoded data budgets with room for an in-flight nonce, cleanup marker, fence and cursor at full supported occupancy. An existing ledger above the new bounds requires draining and migration to a fresh runner namespace; do not edit or delete it to force startup.
 
 This protocol **requires a stop-and-drain upgrade**: stop submissions, finish/delete old queued and active builds, verify all old runner Pods are gone, stop every old controller and HTTP replica, apply the updated CRD, and start the new version with a new runner namespace and fresh ledgers. A mixed-version or in-place rolling upgrade can bypass the fence. See the [admission design and recovery rules](../service-admission-design.md); real-apiserver migration validation is still required before claiming a deployed strict quota.

@@ -250,6 +250,7 @@ helm-template:
 	helm template $(RELEASE_NAME) ./charts/kova \
 		--set serviceDaemon.enabled=true \
 		--set serviceDaemon.runnerNamespace=kova-runner-genesis-test \
+		--set serviceDaemon.admissionGenesis.recoveryReceiptNamespace=kova-receipts-genesis-test \
 		--set serviceDaemon.admissionGenesis.enabled=true \
 		--set serviceDaemon.admissionGenesis.receiptSecret.name=original-receipt \
 		--set serviceDaemon.admissionGenesis.receiptSecret.uid=original-secret-uid >/dev/null

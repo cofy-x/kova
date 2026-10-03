@@ -54,23 +54,26 @@ const (
 // JSON Patch is applied to one object with UID/resourceVersion tests. Effects
 // inject a lost response either before or after persistence, not a retry.
 type fakeCore struct {
-	mu            sync.Mutex
-	namespace     *corev1.Namespace
-	objects       map[string]*corev1.ConfigMap
-	nextUID       int
-	nextRV        int
-	createEffects map[string][]responseEffect
-	patchEffects  map[string][]responseEffect
-	createCount   map[string]int
-	patchCount    map[string]int
-	beforeGet     map[string]func(*fakeCore)
-	beforePatch   map[string]func(*fakeCore)
+	mu               sync.Mutex
+	namespace        *corev1.Namespace
+	receiptNamespace *corev1.Namespace
+	objects          map[string]*corev1.ConfigMap
+	nextUID          int
+	nextRV           int
+	createEffects    map[string][]responseEffect
+	patchEffects     map[string][]responseEffect
+	createCount      map[string]int
+	patchCount       map[string]int
+	beforeGet        map[string]func(*fakeCore)
+	beforePatch      map[string]func(*fakeCore)
 }
 
 func newFakeCore(t *testing.T, r admissioncontract.Receipt) *fakeCore {
 	t.Helper()
 	return &fakeCore{
 		namespace: &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: r.Namespace, UID: types.UID(r.Contract.NamespaceUID)},
+			Status: corev1.NamespaceStatus{Phase: corev1.NamespaceActive}},
+		receiptNamespace: &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: r.Contract.ReceiptNamespace, UID: types.UID(r.Contract.ReceiptNamespaceUID)},
 			Status: corev1.NamespaceStatus{Phase: corev1.NamespaceActive}},
 		objects: map[string]*corev1.ConfigMap{r.GenesisName: genesisObject(t, r,
 			admissioncontract.GenesisData{Contract: r.Contract, Phase: admissioncontract.PhaseInitializing}, nil)},
@@ -93,6 +96,9 @@ func popEffect(effects map[string][]responseEffect, name string) responseEffect 
 func (f *fakeCore) GetNamespace(_ context.Context, name string) (*corev1.Namespace, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.receiptNamespace != nil && f.receiptNamespace.Name == name {
+		return f.receiptNamespace.DeepCopy(), nil
+	}
 	if f.namespace == nil || f.namespace.Name != name {
 		return nil, apierrors.NewNotFound(schema.GroupResource{Resource: "namespaces"}, name)
 	}
@@ -190,7 +196,7 @@ func testBootstrap(t *testing.T) (*fakeCore, Bootstrapper) {
 	limits := r.Contract.Limits
 	activeEmpty := fmt.Sprintf(`{"version":1,"fence":0,"maxJobs":%d,"maxPerRequester":%d,"workerSlots":%d,"active":{}}`,
 		limits.MaxActiveJobs, limits.MaxActiveJobsPerRequester, limits.WorkerSlots)
-	queueEmpty := fmt.Sprintf(`{"version":1,"globalLimit":%d,"requesterLimit":%d,"intents":{}}`,
+	queueEmpty := fmt.Sprintf(`{"version":2,"globalLimit":%d,"requesterLimit":%d,"intents":{}}`,
 		limits.MaxQueuedJobs, limits.MaxQueuedJobsPerRequester)
 	validate := func(key, contents string) func(*corev1.ConfigMap) error {
 		return func(cm *corev1.ConfigMap) error {
@@ -634,6 +640,7 @@ func TestBootstrapRefusesOriginalIdentityAndPreflightVeto(t *testing.T) {
 		alter func(*fakeCore, Bootstrapper)
 	}{
 		{name: "Namespace replacement", alter: func(f *fakeCore, _ Bootstrapper) { f.namespace.UID = "other-namespace" }},
+		{name: "receipt Namespace replacement", alter: func(f *fakeCore, _ Bootstrapper) { f.receiptNamespace.UID = "other-receipt-namespace" }},
 		{name: "Genesis replacement", alter: func(f *fakeCore, b Bootstrapper) { f.objects[b.Receipt.GenesisName].UID = "other-genesis" }},
 		{name: "Genesis limit drift", alter: func(f *fakeCore, b Bootstrapper) {
 			cm := f.objects[b.Receipt.GenesisName]

@@ -48,6 +48,7 @@ helm template kova "${ARCHIVE}" \
   -f "${ROOT}/scripts/chart/genesis-test-values.yaml" \
   --set serviceDaemon.enabled=true \
   --set serviceDaemon.runnerNamespace=jobs \
+  --set serviceDaemon.admissionGenesis.recoveryReceiptNamespace=receipts \
   --set imagePullSecrets.create=true \
   --set imagePullSecrets.name=kova-registry \
   --set imageRegistries[0].name=registry.example.com \

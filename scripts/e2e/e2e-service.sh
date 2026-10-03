@@ -12,6 +12,7 @@ KIND_KUBECONFIG=${KIND_KUBECONFIG:-.kind/kova-local.kubeconfig}
 RELEASE_NAME=${RELEASE_NAME:-kova}
 NAMESPACE=${NAMESPACE:-kova}
 SERVICE_RUNNER_NAMESPACE=${SERVICE_RUNNER_NAMESPACE:-kova-service-jobs-$(date -u +%Y%m%d%H%M%S)-$$}
+SERVICE_RECEIPT_NAMESPACE=${SERVICE_RECEIPT_NAMESPACE:-kova-service-receipts-$(date -u +%Y%m%d%H%M%S)-$$}
 CLUSTER_REGISTRY=${CLUSTER_REGISTRY:-kind-registry:5000}
 REGISTRY_HOST=${REGISTRY_HOST:-localhost:5002}
 SERVICE_PORT=${SERVICE_PORT:-18080}
@@ -60,6 +61,10 @@ if [[ -n "${BASELINE_CHART}" && "${SERVICE_RUNNER_NAMESPACE}" == "${NAMESPACE}" 
 fi
 if [[ "${SERVICE_RUNNER_NAMESPACE}" == "${NAMESPACE}" ]]; then
   echo 'error: Service E2E requires a separate, never-used runner namespace' >&2
+  exit 2
+fi
+if [[ "${SERVICE_RECEIPT_NAMESPACE}" == "${NAMESPACE}" || "${SERVICE_RECEIPT_NAMESPACE}" == "${SERVICE_RUNNER_NAMESPACE}" ]]; then
+  echo 'error: Service E2E requires a separate, never-used receipt namespace' >&2
   exit 2
 fi
 
@@ -237,7 +242,8 @@ genesis_values=$(python3 "${ROOT}/scripts/kind/create-service-genesis.py" \
   --kube-system-uid "${genesis_system_uid}" \
   --kova-cli "${KOVA_CLI}" --release "${RELEASE_NAME}" \
   --service-namespace "${NAMESPACE}" --runner-namespace "${SERVICE_RUNNER_NAMESPACE}" \
-  --acknowledge "${genesis_context}/${NAMESPACE}/${SERVICE_RUNNER_NAMESPACE}" \
+  --receipt-namespace "${SERVICE_RECEIPT_NAMESPACE}" \
+  --acknowledge "${genesis_context}/${NAMESPACE}/${SERVICE_RUNNER_NAMESPACE}/${SERVICE_RECEIPT_NAMESPACE}" \
   --output-directory "${ROOT}/.work/service-genesis/${SERVICE_RUNNER_NAMESPACE}" \
   --max-active-jobs "${SERVICE_MAX_ACTIVE_JOBS}" \
   --max-active-jobs-per-requester "${SERVICE_MAX_ACTIVE_JOBS_PER_REQUESTER}" \
@@ -280,6 +286,7 @@ helm upgrade --install "${RELEASE_NAME}" "${KOVA_CHART}" \
   --set serviceDaemon.enabled=true \
   --set "serviceDaemon.replicas=${service_replicas}" \
   --set-string "serviceDaemon.runnerNamespace=${SERVICE_RUNNER_NAMESPACE}" \
+  --set-string "serviceDaemon.admissionGenesis.recoveryReceiptNamespace=${SERVICE_RECEIPT_NAMESPACE}" \
   --set "serviceDaemon.maxActiveJobs=${SERVICE_MAX_ACTIVE_JOBS}" \
   --set "serviceDaemon.maxActiveJobsPerRequester=${SERVICE_MAX_ACTIVE_JOBS_PER_REQUESTER}" \
   --set "serviceDaemon.maxQueuedJobs=${SERVICE_MAX_QUEUED_JOBS}" \

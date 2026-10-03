@@ -71,15 +71,18 @@ func (r *KovaBuildReconciler) startBuild(ctx context.Context, build *kovav1.Kova
 		// build. An unchanged queue item must not generate its own 5s API loop.
 		return ctrl.Result{}, nil
 	}
-	// The active grant is already durable. Removing its matching queued
-	// intent afterward can temporarily double-count capacity, never overbook.
-	if err := r.queueStoreForNamespace(build.Namespace).ReleaseForBuild(ctx, build); err != nil {
-		if errors.Is(err, queueadmission.ErrDrift) {
-			if statusErr := r.markAdmissionRecoveryReason(ctx, build, "QueueIntentDrift", "queue intent does not match the build; release is blocked"); statusErr != nil {
-				return ctrl.Result{}, statusErr
+	// The queue-only recovery protocol retains its exact receipt link and
+	// quota slot through the active phase. A later grant-receipt handoff may
+	// transfer that link into the active ledger; until then, no early release.
+	if r.Genesis == nil {
+		if err := r.queueStoreForNamespace(build.Namespace).ReleaseForBuild(ctx, build); err != nil {
+			if errors.Is(err, queueadmission.ErrDrift) {
+				if statusErr := r.markAdmissionRecoveryReason(ctx, build, "QueueIntentDrift", "queue intent does not match the build; release is blocked"); statusErr != nil {
+					return ctrl.Result{}, statusErr
+				}
 			}
+			return ctrl.Result{}, err
 		}
-		return ctrl.Result{}, err
 	}
 	podName := buildPodName(build.Name)
 	pod := runner.PreparePod(runner.ManifestOptions{

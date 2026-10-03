@@ -64,6 +64,14 @@ func TestRealAPIGenesisBootstrapAndStatusRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	target := realapitest.OpenExistingGenesis(t, scheme)
+	receiptNamespace := os.Getenv("KOVA_GENESIS_REAL_API_RECEIPT_NAMESPACE")
+	receiptNamespaceUID := os.Getenv("KOVA_GENESIS_REAL_API_RECEIPT_NAMESPACE_UID")
+	if receiptNamespace == "" || receiptNamespaceUID == "" {
+		t.Skip("dedicated receipt Namespace name and original UID are required for this opt-in API test")
+	}
+	if receiptNamespace == target.Namespace {
+		t.Fatal("receipt Namespace must be separate from runner Namespace")
+	}
 	ctx := t.Context()
 	if err := genesisOldWorkVeto(ctx, target.Client, target.Namespace); err != nil {
 		t.Fatalf("dedicated test Namespace is not empty of old work: %v", err)
@@ -94,6 +102,7 @@ func TestRealAPIGenesisBootstrapAndStatusRoundTrip(t *testing.T) {
 		WorkerSlots: 2, MaxQueuedJobs: 10, MaxQueuedJobsPerRequester: 2}
 	spec := admissioncontract.InstallationSpec{Namespace: target.Namespace,
 		NamespaceUID: os.Getenv("KOVA_GENESIS_REAL_API_NAMESPACE_UID"), Generation: hex.EncodeToString(nonce[:]),
+		ReceiptNamespace: receiptNamespace, ReceiptNamespaceUID: receiptNamespaceUID,
 		Limits: admissioncontract.Limits{MaxActiveJobs: cfg.MaxActiveJobs,
 			MaxActiveJobsPerRequester: cfg.MaxActiveJobsPerRequester, WorkerSlots: cfg.WorkerSlots,
 			MaxQueuedJobs: cfg.MaxQueuedJobs, MaxQueuedJobsPerRequester: cfg.MaxQueuedJobsPerRequester}}

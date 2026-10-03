@@ -93,6 +93,9 @@ serviceDaemon:
   # receipt Secret or Genesis from these values.
   admissionGenesis:
     enabled: false
+    # Externally created, fresh receipt-only Namespace. Its original UID is
+    # pinned inside the immutable Genesis/Secret contract, not learned by Helm.
+    recoveryReceiptNamespace: ""
     receiptSecret:
       name: ""
       # Record the original Secret UID after external creation. A replacement

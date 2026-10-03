@@ -47,14 +47,16 @@ type Limits struct {
 }
 
 type Contract struct {
-	Version            int    `json:"version"`
-	NamespaceUID       string `json:"namespaceUID"`
-	Generation         string `json:"generation"`
-	ActiveLedgerName   string `json:"activeLedgerName"`
-	ActiveLedgerSchema int    `json:"activeLedgerSchema"`
-	QueueLedgerName    string `json:"queueLedgerName"`
-	QueueLedgerSchema  int    `json:"queueLedgerSchema"`
-	Limits             Limits `json:"limits"`
+	Version             int    `json:"version"`
+	NamespaceUID        string `json:"namespaceUID"`
+	ReceiptNamespace    string `json:"receiptNamespace"`
+	ReceiptNamespaceUID string `json:"receiptNamespaceUID"`
+	Generation          string `json:"generation"`
+	ActiveLedgerName    string `json:"activeLedgerName"`
+	ActiveLedgerSchema  int    `json:"activeLedgerSchema"`
+	QueueLedgerName     string `json:"queueLedgerName"`
+	QueueLedgerSchema   int    `json:"queueLedgerSchema"`
+	Limits              Limits `json:"limits"`
 }
 
 type Receipt struct {
@@ -105,23 +107,26 @@ func (l Limits) validate() error {
 		l.MaxQueuedJobs < 1 || l.MaxQueuedJobs > 1000 ||
 		l.MaxQueuedJobsPerRequester < 1 || l.MaxQueuedJobsPerRequester > l.MaxQueuedJobs ||
 		8192+3456*l.MaxActiveJobs > MaxLedgerDataBytes ||
-		4096+512*l.MaxQueuedJobs > MaxLedgerDataBytes {
+		4096+736*l.MaxQueuedJobs > MaxLedgerDataBytes {
 		return fmt.Errorf("admission receipt has unsupported limits")
 	}
 	return nil
 }
 
 func (c Contract) validate() error {
-	if c.Version != 1 || !ValidUID(c.NamespaceUID) || !validNonce(c.Generation) ||
+	if c.Version != 2 || !ValidUID(c.NamespaceUID) ||
+		len(validation.IsDNS1123Label(c.ReceiptNamespace)) != 0 || !ValidUID(c.ReceiptNamespaceUID) ||
+		!validNonce(c.Generation) ||
 		c.ActiveLedgerName != ActiveLedgerName || c.ActiveLedgerSchema != 1 ||
-		c.QueueLedgerName != QueueLedgerName || c.QueueLedgerSchema != 1 {
+		c.QueueLedgerName != QueueLedgerName || c.QueueLedgerSchema != 2 {
 		return fmt.Errorf("admission receipt has unsupported contract")
 	}
 	return c.Limits.validate()
 }
 
 func (r Receipt) Validate() error {
-	if len(validation.IsDNS1123Label(r.Namespace)) != 0 || r.GenesisName != GenesisName || !ValidUID(r.GenesisUID) {
+	if len(validation.IsDNS1123Label(r.Namespace)) != 0 || r.GenesisName != GenesisName ||
+		r.Namespace == r.Contract.ReceiptNamespace || !ValidUID(r.GenesisUID) {
 		return fmt.Errorf("admission receipt has invalid original identity")
 	}
 	return r.Contract.validate()
@@ -147,7 +152,7 @@ func allowContract(path []string, key string) bool {
 	case 1:
 		if path[0] == "contract" {
 			switch key {
-			case "version", "namespaceUID", "generation", "activeLedgerName", "activeLedgerSchema", "queueLedgerName", "queueLedgerSchema", "limits":
+			case "version", "namespaceUID", "receiptNamespace", "receiptNamespaceUID", "generation", "activeLedgerName", "activeLedgerSchema", "queueLedgerName", "queueLedgerSchema", "limits":
 				return true
 			}
 		}
@@ -179,7 +184,7 @@ func RequireKeys(raw []byte, keys ...string) error {
 }
 
 func requireContractKeys(raw []byte) error {
-	if err := RequireKeys(raw, "version", "namespaceUID", "generation", "activeLedgerName", "activeLedgerSchema", "queueLedgerName", "queueLedgerSchema", "limits"); err != nil {
+	if err := RequireKeys(raw, "version", "namespaceUID", "receiptNamespace", "receiptNamespaceUID", "generation", "activeLedgerName", "activeLedgerSchema", "queueLedgerName", "queueLedgerSchema", "limits"); err != nil {
 		return err
 	}
 	var values map[string]json.RawMessage
@@ -243,6 +248,21 @@ func (r Receipt) QualifyNamespace(ns *corev1.Namespace) error {
 	if ns == nil || ns.Name != r.Namespace || string(ns.UID) != r.Contract.NamespaceUID ||
 		ns.DeletionTimestamp != nil || ns.Status.Phase != corev1.NamespaceActive {
 		return fmt.Errorf("original admission Namespace is unavailable or changed")
+	}
+	return nil
+}
+
+// QualifyReceiptNamespace pins the independent, receipt-only failure domain.
+// Same-name Namespace recreation cannot become authority for a new receipt,
+// readback, or cleanup of the original admission epoch.
+func (r Receipt) QualifyReceiptNamespace(ns *corev1.Namespace) error {
+	if err := r.Validate(); err != nil {
+		return err
+	}
+	if ns == nil || ns.Name != r.Contract.ReceiptNamespace ||
+		string(ns.UID) != r.Contract.ReceiptNamespaceUID || ns.DeletionTimestamp != nil ||
+		ns.Status.Phase != corev1.NamespaceActive {
+		return fmt.Errorf("original recovery receipt Namespace is unavailable or changed")
 	}
 	return nil
 }

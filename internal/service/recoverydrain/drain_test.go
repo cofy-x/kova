@@ -84,6 +84,7 @@ func fixture(t *testing.T, existingBuild bool, withPod bool) (Input, *fakeDirect
 	t.Helper()
 	ctx := context.Background()
 	epoch := recoverypermit.EpochIdentity{Namespace: "runner-old", NamespaceUID: "namespace-uid",
+		ReceiptNamespace: "receipts-old", ReceiptNamespaceUID: "receipts-uid",
 		GenesisName: "kova-service-admission-genesis", GenesisUID: "genesis-uid",
 		Generation: strings.Repeat("a", 32), ActiveLedgerUID: "active-uid", QueueLedgerUID: "queue-uid", WorkerPoolID: "pool-old"}
 	build := &kovav1.KovaBuild{ObjectMeta: metav1.ObjectMeta{Namespace: epoch.Namespace, Name: "build-one", UID: "build-original-uid", ResourceVersion: "1"},
@@ -96,6 +97,7 @@ func fixture(t *testing.T, existingBuild bool, withPod bool) (Input, *fakeDirect
 		t.Fatal(err)
 	}
 	q := recoveryreceipt.QueueIntent{Namespace: epoch.Namespace, NamespaceUID: epoch.NamespaceUID,
+		ReceiptNamespace: epoch.ReceiptNamespace, ReceiptNamespaceUID: epoch.ReceiptNamespaceUID,
 		GenesisName: epoch.GenesisName, GenesisUID: epoch.GenesisUID, Generation: epoch.Generation,
 		ActiveLedgerUID: epoch.ActiveLedgerUID, QueueLedgerUID: epoch.QueueLedgerUID,
 		BuildName: build.Name, RequesterName: "alice", RequesterHash: queueadmission.HashRequester("alice"),
@@ -110,14 +112,19 @@ func fixture(t *testing.T, existingBuild bool, withPod bool) (Input, *fakeDirect
 	if err != nil {
 		t.Fatal(err)
 	}
-	refs := []recoverypermit.ReceiptRef{{Kind: "queue", Namespace: epoch.Namespace, Name: queueCM.Name, UID: string(queueCM.UID), DataDigest: queueDigest}}
-	objects := []client.Object{&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: epoch.Namespace, UID: types.UID(epoch.NamespaceUID)}}, queueCM}
+	refs := []recoverypermit.ReceiptRef{{Kind: "queue", Namespace: epoch.ReceiptNamespace, Name: queueCM.Name, UID: string(queueCM.UID), DataDigest: queueDigest}}
+	objects := []client.Object{
+		&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: epoch.Namespace, UID: types.UID(epoch.NamespaceUID)}, Status: corev1.NamespaceStatus{Phase: corev1.NamespaceActive}},
+		&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: epoch.ReceiptNamespace, UID: types.UID(epoch.ReceiptNamespaceUID)}, Status: corev1.NamespaceStatus{Phase: corev1.NamespaceActive}},
+		queueCM,
+	}
 	input := Input{MaxLiabilities: 8, Queues: []recoveryreceipt.QueueIntent{q}}
 	if existingBuild {
 		objects = append(objects, build)
 	}
 	if withPod {
 		pin := recoveryreceipt.PinnedBuild{Namespace: epoch.Namespace, NamespaceUID: epoch.NamespaceUID,
+			ReceiptNamespace: epoch.ReceiptNamespace, ReceiptNamespaceUID: epoch.ReceiptNamespaceUID,
 			GenesisName: epoch.GenesisName, GenesisUID: epoch.GenesisUID, Generation: epoch.Generation,
 			ActiveLedgerUID: epoch.ActiveLedgerUID, QueueLedgerUID: epoch.QueueLedgerUID,
 			BuildName: build.Name, BuildUID: string(build.UID), RequesterName: "alice", RequesterUID: "requester-uid",
@@ -149,8 +156,8 @@ func fixture(t *testing.T, existingBuild bool, withPod bool) (Input, *fakeDirect
 			t.Fatal(err)
 		}
 		refs = append(refs,
-			recoverypermit.ReceiptRef{Kind: "grant", Namespace: epoch.Namespace, Name: grantCM.Name, UID: string(grantCM.UID), DataDigest: grantDigest},
-			recoverypermit.ReceiptRef{Kind: "pod-create", Namespace: epoch.Namespace, Name: podCM.Name, UID: string(podCM.UID), DataDigest: podDigest})
+			recoverypermit.ReceiptRef{Kind: "grant", Namespace: epoch.ReceiptNamespace, Name: grantCM.Name, UID: string(grantCM.UID), DataDigest: grantDigest},
+			recoverypermit.ReceiptRef{Kind: "pod-create", Namespace: epoch.ReceiptNamespace, Name: podCM.Name, UID: string(podCM.UID), DataDigest: podDigest})
 		objects = append(objects, grantCM, podCM)
 		input.Grants = []recoveryreceipt.GrantIntent{grant}
 		input.PodCreates = []recoveryreceipt.PodCreateIntent{podIntent}
@@ -173,7 +180,7 @@ func fixture(t *testing.T, existingBuild bool, withPod bool) (Input, *fakeDirect
 	}
 	objects = append(objects, stop)
 	stopRef := recoverypermit.StopIntentRef{Namespace: epoch.Namespace, Name: stop.Name, UID: string(stop.UID), DataDigest: stopDigest}
-	setDigest, err := recoverypermit.DigestReceiptSet(epoch.Namespace, refs)
+	setDigest, err := recoverypermit.DigestReceiptSet(epoch, refs)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -384,6 +391,10 @@ func TestDrainMissingReceiptOrChangedNamespaceBlocksAllWrites(t *testing.T) {
 	}{
 		{"omitted intent", func(in Input, _ *fakeDirect) Input { in.Queues = nil; return in }},
 		{"wrong namespace UID", func(in Input, _ *fakeDirect) Input { in.Expected.Epoch.NamespaceUID = "replacement-uid"; return in }},
+		{"wrong receipt namespace UID", func(in Input, _ *fakeDirect) Input {
+			in.Expected.Epoch.ReceiptNamespaceUID = "replacement-uid"
+			return in
+		}},
 		{"low liability cap", func(in Input, _ *fakeDirect) Input { in.MaxLiabilities = 0; return in }},
 		{"changed signed digest", func(in Input, _ *fakeDirect) Input {
 			in.Expected.Receipts[0].DataDigest = "sha256:" + strings.Repeat("0", 64)
@@ -403,7 +414,7 @@ func TestDrainMissingReceiptOrChangedNamespaceBlocksAllWrites(t *testing.T) {
 
 func TestDrainRejectsUnlistedOldReceipt(t *testing.T) {
 	in, api, _ := fixture(t, false, false)
-	extra := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Namespace: in.Expected.Epoch.Namespace,
+	extra := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Namespace: in.Expected.Epoch.ReceiptNamespace,
 		Name: "kova-grant-intent-" + strings.Repeat("f", 32), UID: "extra-uid"}}
 	if err := api.Client.Create(context.Background(), extra); err != nil {
 		t.Fatal(err)
@@ -439,7 +450,7 @@ func TestDrainLateOriginalWinsAtomicNameRace(t *testing.T) {
 func TestNamespaceUIDReplacementBeforeFirstEffectIsUnknownAndDoesNotWrite(t *testing.T) {
 	in, api, _ := fixture(t, false, false)
 	api.getIntercept = func(obj client.Object) error {
-		if namespace, ok := obj.(*corev1.Namespace); ok && api.namespaceReads >= 2 {
+		if namespace, ok := obj.(*corev1.Namespace); ok && namespace.Name == in.Expected.Epoch.Namespace && api.namespaceReads >= 3 {
 			namespace.UID = "replacement-namespace-uid"
 		}
 		return nil
@@ -450,10 +461,24 @@ func TestNamespaceUIDReplacementBeforeFirstEffectIsUnknownAndDoesNotWrite(t *tes
 	}
 }
 
+func TestReceiptNamespaceUIDReplacementBeforeFirstEffectIsUnknownAndDoesNotWrite(t *testing.T) {
+	in, api, _ := fixture(t, false, false)
+	api.getIntercept = func(obj client.Object) error {
+		if namespace, ok := obj.(*corev1.Namespace); ok && namespace.Name == in.Expected.Epoch.ReceiptNamespace && api.namespaceReads >= 3 {
+			namespace.UID = "replacement-receipt-namespace-uid"
+		}
+		return nil
+	}
+	report, err := Drain(context.Background(), api, in)
+	if !errors.Is(err, ErrUnknown) || report.Stage != "occupancy-unknown" || api.creates != 0 {
+		t.Fatalf("replacement receipt namespace allowed write: %#v, %v, writes=%d", report, err, api.creates)
+	}
+}
+
 func TestNamespaceUIDReplacementBeforeOriginalHoldDoesNotUpdate(t *testing.T) {
 	in, api, _ := fixture(t, true, false)
 	api.getIntercept = func(obj client.Object) error {
-		if namespace, ok := obj.(*corev1.Namespace); ok && api.namespaceReads >= 2 {
+		if namespace, ok := obj.(*corev1.Namespace); ok && namespace.Name == in.Expected.Epoch.Namespace && api.namespaceReads >= 3 {
 			namespace.UID = "replacement-namespace-uid"
 		}
 		return nil
@@ -504,7 +529,7 @@ func TestStopLossAfterAttemptPreventsTombstoneCreate(t *testing.T) {
 func TestNamespaceReplacementAtFinalReadbackCannotReportOccupied(t *testing.T) {
 	in, api, _ := fixture(t, false, false)
 	api.getIntercept = func(obj client.Object) error {
-		if namespace, ok := obj.(*corev1.Namespace); ok && api.namespaceReads >= 5 {
+		if namespace, ok := obj.(*corev1.Namespace); ok && namespace.Name == in.Expected.Epoch.Namespace && api.namespaceReads >= 9 {
 			namespace.UID = "replacement-namespace-uid"
 		}
 		return nil

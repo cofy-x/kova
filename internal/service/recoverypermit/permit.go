@@ -47,18 +47,22 @@ var signatureDomain = []byte("KOVA-RECOVERY-DRAIN-PERMIT-V1\x00")
 // EpochIdentity is the original, incident-pinned namespace and Genesis
 // selection, not a lookup of whatever namespace or ledger exists now.
 type EpochIdentity struct {
-	Namespace       string `json:"namespace"`
-	NamespaceUID    string `json:"namespaceUid"`
-	GenesisName     string `json:"genesisName"`
-	GenesisUID      string `json:"genesisUid"`
-	Generation      string `json:"generation"`
-	ActiveLedgerUID string `json:"activeLedgerUid"`
-	QueueLedgerUID  string `json:"queueLedgerUid"`
-	WorkerPoolID    string `json:"workerPoolId"`
+	Namespace           string `json:"namespace"`
+	NamespaceUID        string `json:"namespaceUid"`
+	ReceiptNamespace    string `json:"receiptNamespace"`
+	ReceiptNamespaceUID string `json:"receiptNamespaceUid"`
+	GenesisName         string `json:"genesisName"`
+	GenesisUID          string `json:"genesisUid"`
+	Generation          string `json:"generation"`
+	ActiveLedgerUID     string `json:"activeLedgerUid"`
+	QueueLedgerUID      string `json:"queueLedgerUid"`
+	WorkerPoolID        string `json:"workerPoolId"`
 }
 
 func (e EpochIdentity) validate() error {
 	if len(validation.IsDNS1123Label(e.Namespace)) != 0 ||
+		len(validation.IsDNS1123Label(e.ReceiptNamespace)) != 0 ||
+		e.ReceiptNamespace == e.Namespace || !safeID(e.ReceiptNamespaceUID, maxOpaqueIDBytes) ||
 		len(validation.IsDNS1123Subdomain(e.GenesisName)) != 0 ||
 		!safeID(e.NamespaceUID, maxOpaqueIDBytes) || !safeID(e.GenesisUID, maxOpaqueIDBytes) ||
 		!safeID(e.ActiveLedgerUID, maxOpaqueIDBytes) || !safeID(e.QueueLedgerUID, maxOpaqueIDBytes) ||
@@ -99,7 +103,7 @@ type ReceiptRef struct {
 	DataDigest string `json:"dataDigest"`
 }
 
-func (r ReceiptRef) validate(namespace string) error {
+func (r ReceiptRef) validate(epoch EpochIdentity) error {
 	var prefix string
 	switch r.Kind {
 	case "queue":
@@ -111,7 +115,7 @@ func (r ReceiptRef) validate(namespace string) error {
 	default:
 		return ErrUnqualified
 	}
-	if r.Namespace != namespace || !strings.HasPrefix(r.Name, prefix) ||
+	if r.Namespace != epoch.ReceiptNamespace || !strings.HasPrefix(r.Name, prefix) ||
 		!lowerHex(strings.TrimPrefix(r.Name, prefix), 32) ||
 		!safeID(r.UID, maxOpaqueIDBytes) || !digestSHA256(r.DataDigest) {
 		return ErrUnqualified
@@ -138,12 +142,12 @@ func lessReceipt(a, b ReceiptRef) bool {
 // (kind, namespace, name) order. Missing, duplicate, or re-ordered refs
 // fail closed. The digest binds the list supplied; it cannot discover an
 // omitted receipt without independent API enumeration.
-func DigestReceiptSet(namespace string, refs []ReceiptRef) (string, error) {
-	if len(validation.IsDNS1123Label(namespace)) != 0 || len(refs) > maxReceiptRefs {
+func DigestReceiptSet(epoch EpochIdentity, refs []ReceiptRef) (string, error) {
+	if epoch.validate() != nil || len(refs) > maxReceiptRefs {
 		return "", ErrUnqualified
 	}
 	for i, ref := range refs {
-		if err := ref.validate(namespace); err != nil || i > 0 && !lessReceipt(refs[i-1], ref) {
+		if err := ref.validate(epoch); err != nil || i > 0 && !lessReceipt(refs[i-1], ref) {
 			return "", ErrUnqualified
 		}
 	}
@@ -388,7 +392,7 @@ func VerifyDrainPermit(raw []byte, expected Expectation, roots TrustRoots) (Drai
 			return DrainEvidence{}, ErrUnqualified
 		}
 	}
-	setDigest, err := DigestReceiptSet(expected.Epoch.Namespace, expected.Receipts)
+	setDigest, err := DigestReceiptSet(expected.Epoch, expected.Receipts)
 	if err != nil || setDigest != p.ReceiptSetDigest {
 		return DrainEvidence{}, ErrUnqualified
 	}

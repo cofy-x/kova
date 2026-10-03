@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/cofy-x/kova/internal/admissioncontract"
 	kovav1 "github.com/cofy-x/kova/internal/apis/kova/v1alpha1"
 	"github.com/cofy-x/kova/internal/buildcontract"
 	"github.com/cofy-x/kova/internal/kube"
@@ -82,6 +83,7 @@ func CLICommand() *cli.Command {
 			&cli.StringFlag{Name: "admission-genesis-receipt-secret-namespace", Usage: "original receipt Secret namespace"},
 			&cli.StringFlag{Name: "admission-genesis-receipt-secret-name", Usage: "original receipt Secret name"},
 			&cli.StringFlag{Name: "admission-genesis-receipt-secret-uid", Usage: "original immutable receipt Secret UID"},
+			&cli.StringFlag{Name: "recovery-receipt-namespace", Usage: "dedicated recovery receipt Namespace; must match immutable Genesis contract"},
 		},
 		Action: func(c *cli.Context) error {
 			ctrl.SetLogger(ctrlzap.New(ctrlzap.UseDevMode(false), ctrlzap.WriteTo(os.Stderr)))
@@ -217,6 +219,15 @@ func CLICommand() *cli.Command {
 			if err != nil {
 				return err
 			}
+			parsedReceipt, err := admissioncontract.ParseReceipt(receiptRaw)
+			if err != nil {
+				return err
+			}
+			receiptNamespace := parsedReceipt.Contract.ReceiptNamespace
+			if receiptNamespace == "" || c.String("recovery-receipt-namespace") != receiptNamespace ||
+				receiptNamespace == cfg.Namespace || receiptNamespace == receiptOptions.SecretNamespace {
+				return fmt.Errorf("dedicated recovery receipt Namespace must match immutable Genesis contract and differ from runner/Service namespaces")
+			}
 			controllerGuard, err := prepareGenesisRuntime(ctx, cfg, receiptRaw, controllerDirect, controllerReader, checkControllerSecret)
 			if err != nil {
 				return err
@@ -278,6 +289,9 @@ func CLICommand() *cli.Command {
 			}
 			server := httpapi.NewServer(cfg, httpKubeClient, httpClient, httpClient, readinessReader, authenticator, authorizer)
 			if err := server.WithGenesisGuards(httpGuard, readinessGuard); err != nil {
+				return err
+			}
+			if err := server.WithRecoveryReceipts(clientset.CoreV1().ConfigMaps(receiptNamespace)); err != nil {
 				return err
 			}
 			return startServiceComponents(ctx, stop, controllerGuard, mgr.Start, server.Start)

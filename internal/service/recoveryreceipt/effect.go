@@ -30,25 +30,29 @@ const (
 // namespace/Genesis/ledger epoch and one immutable KovaBuild. The worker-pool
 // ID must be externally configured for that epoch; it is not a recovery grant.
 type PinnedBuild struct {
-	Namespace       string `json:"namespace"`
-	NamespaceUID    string `json:"namespaceUid"`
-	GenesisName     string `json:"genesisName"`
-	GenesisUID      string `json:"genesisUid"`
-	Generation      string `json:"generation"`
-	ActiveLedgerUID string `json:"activeLedgerUid"`
-	QueueLedgerUID  string `json:"queueLedgerUid"`
-	BuildName       string `json:"buildName"`
-	BuildUID        string `json:"buildUid"`
-	RequesterName   string `json:"requesterName"`
-	RequesterUID    string `json:"requesterUid"`
-	RequesterHash   string `json:"requesterHash"`
-	RequestDigest   string `json:"requestDigest"`
-	SourceDigest    string `json:"sourceDigest"`
-	WorkerPoolID    string `json:"workerPoolId"`
+	Namespace           string `json:"namespace"`
+	NamespaceUID        string `json:"namespaceUid"`
+	ReceiptNamespace    string `json:"receiptNamespace"`
+	ReceiptNamespaceUID string `json:"receiptNamespaceUid"`
+	GenesisName         string `json:"genesisName"`
+	GenesisUID          string `json:"genesisUid"`
+	Generation          string `json:"generation"`
+	ActiveLedgerUID     string `json:"activeLedgerUid"`
+	QueueLedgerUID      string `json:"queueLedgerUid"`
+	BuildName           string `json:"buildName"`
+	BuildUID            string `json:"buildUid"`
+	RequesterName       string `json:"requesterName"`
+	RequesterUID        string `json:"requesterUid"`
+	RequesterHash       string `json:"requesterHash"`
+	RequestDigest       string `json:"requestDigest"`
+	SourceDigest        string `json:"sourceDigest"`
+	WorkerPoolID        string `json:"workerPoolId"`
 }
 
 func (b PinnedBuild) validate() error {
 	if len(validation.IsDNS1123Label(b.Namespace)) != 0 ||
+		len(validation.IsDNS1123Label(b.ReceiptNamespace)) != 0 ||
+		b.ReceiptNamespace == b.Namespace || !opaqueUID(b.ReceiptNamespaceUID) ||
 		len(validation.IsDNS1123Subdomain(b.GenesisName)) != 0 ||
 		len(validation.IsDNS1123Subdomain(b.BuildName)) != 0 ||
 		!opaqueUID(b.NamespaceUID) || !opaqueUID(b.GenesisUID) ||
@@ -214,14 +218,14 @@ func NewGrantConfigMap(g GrantIntent) (*corev1.ConfigMap, error) {
 	if err := g.validate(); err != nil {
 		return nil, err
 	}
-	return newEffectConfigMap(g.Build.Namespace, grantReceiptPrefix+g.GrantNonce, "grant", g)
+	return newEffectConfigMap(g.Build.ReceiptNamespace, grantReceiptPrefix+g.GrantNonce, "grant", g)
 }
 
 func NewPodCreateConfigMap(p PodCreateIntent) (*corev1.ConfigMap, error) {
 	if err := p.validate(); err != nil {
 		return nil, err
 	}
-	return newEffectConfigMap(p.Build.Namespace, podReceiptPrefix+p.PodAttemptNonce, "pod-create", p)
+	return newEffectConfigMap(p.Build.ReceiptNamespace, podReceiptPrefix+p.PodAttemptNonce, "pod-create", p)
 }
 
 // DigestData is a deterministic digest of the complete ConfigMap Data map,

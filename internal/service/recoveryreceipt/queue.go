@@ -18,6 +18,7 @@ import (
 	"unicode/utf8"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/validation"
 )
@@ -42,20 +43,22 @@ var (
 // RequestDigest is the queue ledger's canonical KovaBuild-spec digest; the
 // source digest is repeated explicitly for recovery and wrong-source checks.
 type QueueIntent struct {
-	Namespace       string
-	NamespaceUID    string
-	GenesisName     string
-	GenesisUID      string
-	Generation      string
-	ActiveLedgerUID string
-	QueueLedgerUID  string
-	BuildName       string
-	RequesterName   string
-	RequesterHash   string
-	RequesterUID    string
-	RequestDigest   string
-	SourceDigest    string
-	QueueNonce      string
+	Namespace           string
+	NamespaceUID        string
+	ReceiptNamespace    string
+	ReceiptNamespaceUID string
+	GenesisName         string
+	GenesisUID          string
+	Generation          string
+	ActiveLedgerUID     string
+	QueueLedgerUID      string
+	BuildName           string
+	RequesterName       string
+	RequesterHash       string
+	RequesterUID        string
+	RequestDigest       string
+	SourceDigest        string
+	QueueNonce          string
 }
 
 // ObservedQueueIntent binds the exact receipt to one Kubernetes object UID.
@@ -94,6 +97,8 @@ func opaqueUID(value string) bool {
 
 func (q QueueIntent) validate() error {
 	if len(validation.IsDNS1123Label(q.Namespace)) != 0 ||
+		len(validation.IsDNS1123Label(q.ReceiptNamespace)) != 0 ||
+		q.ReceiptNamespace == q.Namespace || !opaqueUID(q.ReceiptNamespaceUID) ||
 		len(validation.IsDNS1123Subdomain(q.GenesisName)) != 0 ||
 		len(validation.IsDNS1123Subdomain(q.BuildName)) != 0 ||
 		!opaqueUID(q.NamespaceUID) || !opaqueUID(q.GenesisUID) ||
@@ -122,21 +127,23 @@ func (q QueueIntent) name() string {
 
 func (q QueueIntent) data() map[string]string {
 	return map[string]string{
-		"version":         queueVersion,
-		"namespaceName":   q.Namespace,
-		"namespaceUID":    q.NamespaceUID,
-		"genesisName":     q.GenesisName,
-		"genesisUID":      q.GenesisUID,
-		"generation":      q.Generation,
-		"activeLedgerUID": q.ActiveLedgerUID,
-		"queueLedgerUID":  q.QueueLedgerUID,
-		"buildName":       q.BuildName,
-		"requesterName":   q.RequesterName,
-		"requesterHash":   q.RequesterHash,
-		"requesterUID":    q.RequesterUID,
-		"requestDigest":   q.RequestDigest,
-		"sourceDigest":    q.SourceDigest,
-		"queueNonce":      q.QueueNonce,
+		"version":              queueVersion,
+		"namespaceName":        q.Namespace,
+		"namespaceUID":         q.NamespaceUID,
+		"receiptNamespaceName": q.ReceiptNamespace,
+		"receiptNamespaceUID":  q.ReceiptNamespaceUID,
+		"genesisName":          q.GenesisName,
+		"genesisUID":           q.GenesisUID,
+		"generation":           q.Generation,
+		"activeLedgerUID":      q.ActiveLedgerUID,
+		"queueLedgerUID":       q.QueueLedgerUID,
+		"buildName":            q.BuildName,
+		"requesterName":        q.RequesterName,
+		"requesterHash":        q.RequesterHash,
+		"requesterUID":         q.RequesterUID,
+		"requestDigest":        q.RequestDigest,
+		"sourceDigest":         q.SourceDigest,
+		"queueNonce":           q.QueueNonce,
 	}
 }
 
@@ -149,7 +156,7 @@ func NewQueueConfigMap(q QueueIntent) (*corev1.ConfigMap, error) {
 	immutable := true
 	return &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
-			Namespace: q.Namespace,
+			Namespace: q.ReceiptNamespace,
 			Name:      q.name(),
 			Labels:    map[string]string{queueReceiptLabel: queueReceiptData},
 		},
@@ -164,7 +171,7 @@ func QualifyQueue(q QueueIntent, cm *corev1.ConfigMap) (ObservedQueueIntent, err
 	if err := q.validate(); err != nil {
 		return ObservedQueueIntent{}, err
 	}
-	if cm == nil || cm.Namespace != q.Namespace || cm.Name != q.name() ||
+	if cm == nil || cm.Namespace != q.ReceiptNamespace || cm.Name != q.name() ||
 		!opaqueUID(string(cm.UID)) || cm.ResourceVersion == "" ||
 		cm.DeletionTimestamp != nil || cm.Immutable == nil || !*cm.Immutable ||
 		len(cm.BinaryData) != 0 || len(cm.OwnerReferences) != 0 ||
@@ -189,8 +196,8 @@ func QualifyQueue(q QueueIntent, cm *corev1.ConfigMap) (ObservedQueueIntent, err
 // RecordQueueOnce makes one Create call and one direct named readback. A lost
 // Create response can be resolved by an exact read. A failed/missing read,
 // even after a successful Create response, leaves the effect unarmed. An
-// AlreadyExists or peer-created matching receipt is evidence only: callers
-// still need the original fresh queue-CAS ownership before one CR Create.
+// AlreadyExists or a peer-created matching receipt is evidence only and
+// returns unconfirmed here: it cannot arm this caller's CR Create.
 func RecordQueueOnce(ctx context.Context, api ConfigMaps, q QueueIntent) (ObservedQueueIntent, error) {
 	if api == nil {
 		return ObservedQueueIntent{}, fmt.Errorf("%w: direct ConfigMap API is missing", ErrInvalid)
@@ -214,6 +221,14 @@ func RecordQueueOnce(ctx context.Context, api ConfigMaps, q QueueIntent) (Observ
 			return ObservedQueueIntent{}, ErrChanged
 		}
 	} else if createErr == nil {
+		return ObservedQueueIntent{}, ErrUnconfirmed
+	}
+	// An AlreadyExists response definitively says this call did not create
+	// the receipt. A matching foreign object is evidence, not the original
+	// fresh CAS owner's pre-effect permission.
+	if apierrors.IsAlreadyExists(createErr) || apierrors.IsForbidden(createErr) ||
+		apierrors.IsInvalid(createErr) || apierrors.IsBadRequest(createErr) ||
+		apierrors.IsUnauthorized(createErr) {
 		return ObservedQueueIntent{}, ErrUnconfirmed
 	}
 	return observed, nil

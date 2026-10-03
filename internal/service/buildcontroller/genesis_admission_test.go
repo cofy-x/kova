@@ -79,9 +79,10 @@ func genesisAdmissionFixture(t *testing.T) (*KovaBuildReconciler, *controllerGen
 	build := queuedBuild("direct", "alice", 1, 1)
 	receipt := admissioncontract.Receipt{Namespace: cfg.Namespace, GenesisName: admissioncontract.GenesisName,
 		GenesisUID: "genesis-original", Contract: admissioncontract.Contract{
-			Version: 1, NamespaceUID: "namespace-original", Generation: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			Version: 2, NamespaceUID: "namespace-original", Generation: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			ReceiptNamespace: "receipts-57", ReceiptNamespaceUID: "receipts-original",
 			ActiveLedgerName: admissioncontract.ActiveLedgerName, ActiveLedgerSchema: 1,
-			QueueLedgerName: admissioncontract.QueueLedgerName, QueueLedgerSchema: 1,
+			QueueLedgerName: admissioncontract.QueueLedgerName, QueueLedgerSchema: 2,
 			Limits: admissioncontract.Limits{MaxActiveJobs: cfg.MaxActiveJobs, MaxActiveJobsPerRequester: cfg.MaxActiveJobsPerRequester,
 				WorkerSlots: cfg.WorkerSlots, MaxQueuedJobs: cfg.MaxQueuedJobs, MaxQueuedJobsPerRequester: cfg.MaxQueuedJobsPerRequester},
 		}}
@@ -116,9 +117,11 @@ func genesisAdmissionFixture(t *testing.T) (*KovaBuildReconciler, *controllerGen
 		Data: map[string]string{admissioncontract.GenesisDataKey: string(data)}}
 	namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: cfg.Namespace, UID: types.UID(receipt.Contract.NamespaceUID)},
 		Status: corev1.NamespaceStatus{Phase: corev1.NamespaceActive}}
+	receiptNamespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: receipt.Contract.ReceiptNamespace,
+		UID: types.UID(receipt.Contract.ReceiptNamespaceUID)}, Status: corev1.NamespaceStatus{Phase: corev1.NamespaceActive}}
 	scheme := testScheme(t)
 	base := crfake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&kovav1.KovaBuild{}).
-		WithObjects(namespace, genesis, active, queue, build).Build()
+		WithObjects(namespace, receiptNamespace, genesis, active, queue, build).Build()
 	api := &controllerGenesisAPI{Client: base}
 	bootstrap := admissiongenesis.Bootstrapper{API: api, Receipt: receipt,
 		Active: admissiongenesis.LedgerTemplate{Role: admissioncontract.Active, DataKey: admissioncontract.ActiveLedgerDataKey,

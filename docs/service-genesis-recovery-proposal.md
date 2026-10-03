@@ -13,17 +13,17 @@ A unified 1 MiB data guard might fit a conservative 962,560-byte combined bound,
 Keeping the two current CAS domains avoids making every queue mutation compete with every grant, Pod nonce, and cleanup fence.
 The numbers are candidate measurements; the separate #58 maximal payloads round-tripped on an isolated API server on 2026-10-02, but a unified wire shape, contention, and product recovery remain unmeasured. Reconsider this choice if those measurements justify unification.
 
-The environment installer, not Kova, first creates a previously unused, uniquely named runner Namespace and an `Initializing` Genesis named `kova-service-admission-genesis` in it.
+The environment installer, not Kova, first creates previously unused, uniquely named and distinct runner and recovery-receipt Namespaces, then an `Initializing` Genesis named `kova-service-admission-genesis` in the runner Namespace.
 After direct named reads, the installer publishes a trusted installation receipt to the Service Deployment, for example through an immutable Secret mounted as a file.
-The receipt contains the **original** runner Namespace name and UID, Genesis name and UID, a random installation generation, the active and queue ledger names and schema versions, and all five capacity limits (`maxActiveJobs`, `maxActiveJobsPerRequester`, `workerSlots`, `maxQueuedJobs`, `maxQueuedJobsPerRequester`).
+The receipt contains the **original** runner and recovery-receipt Namespace names and UIDs, Genesis name and UID, a random installation generation, the active and queue ledger names and schema versions, and all five capacity limits (`maxActiveJobs`, `maxActiveJobsPerRequester`, `workerSlots`, `maxQueuedJobs`, `maxQueuedJobsPerRequester`).
 These identifiers are not credentials, but the receipt's source and write access are part of the installation trust boundary.
 A Kova process must have the receipt before it starts; it never manufactures a receipt from a discovered object or an empty List, creates/replaces Genesis, or follows a changed UID.
 
-Genesis has one strictly decoded `genesis.json` data value with exactly the receipt's namespace UID, generation, ledger schemas, and limits, plus `phase`, `activeLedgerUID`, and `queueLedgerUID`.
+Genesis has one strictly decoded `genesis.json` data value with exactly the receipt's two Namespace UIDs, generation, ledger schemas, and limits, plus `phase`, `activeLedgerUID`, and `queueLedgerUID`.
 The externally created `Initializing` Genesis starts with both ledger UIDs empty and treats an absent/nil `immutable` field and explicit `false` as semantically equivalent.
 While still `Initializing`, each ledger UID may only move once from empty to the first directly observed canonical empty object UID; these are durable provisional pins, not admission authority.
 `Committed` requires both nonempty provisional UIDs to match the actual ledgers and explicit `immutable=true`.
-Genesis metadata UID must equal the receipt; the Namespace must retain the receipt's UID, be Active, and have no deletion timestamp.
+Genesis metadata UID must equal the receipt; both Namespaces must retain their receipt-pinned UIDs, be Active, and have no deletion timestamp.
 Reject unknown/missing/duplicate fields, extra ConfigMap data, changed limits/schema/generation, unexpected immutable state, deletion, or replacement.
 Receipt/Genesis disagreement is an actionable refusal, not an invitation to discover a new installation.
 
@@ -79,7 +79,7 @@ The gate must cover all current entry points, not only `/readyz` and HTTP POST:
 | Cancel, terminal, delete, and cleanup | Under a healthy original pair, read the exact accepted runner status before an annotation-driven cancel or timeout; a completed result wins, while an uncertain read retains the charge. Fence the exact bound active ledger, persist and directly read back a stop intent bound to the original CR/Pod UID and request before UID-preconditioned Pod deletion. A direct Pod `NotFound` completes only that durable stop or an already durable terminal receipt; a bare `NotFound`, missing/mismatched ledger, unresolved Create nonce, or changed Pod retains charge/finalizer and recovery evidence. Pair loss blocks cleanup completion even after a stop intent. |
 
 All replicas must use the same receipt and limits.
-Before any bootstrap write or manager/listener start, runtime wiring must assert `cfg.Namespace == receipt.Namespace` and equality of all five configured capacities to the receipt; a commit in Namespace A must never coexist with legacy admission in Namespace B.
+Before any bootstrap write or manager/listener start, runtime wiring must assert `cfg.Namespace == receipt.Namespace`, the separately configured recovery-receipt Namespace equals its original contract name, both Namespaces retain their pinned UIDs, and all five configured capacities equal the receipt; a commit in Namespace A must never coexist with legacy admission in Namespace B.
 Construct the Genesis direct clientset with the existing `singleAttemptWrites(rest.Config)` transport (or an equivalent one-wire-attempt transport), and test Retry-After plus unknown POST/PATCH responses; an arbitrary client-go clientset may replay a mutation.
 In Genesis mode, disable or remove the legacy `Server.Start` call to `initializeAdmission`; merely prepending `EnsureFresh` allows a committed pair deleted in the handoff window to be recreated by the old bootstrap path. Test loss of both committed ledgers between `EnsureFresh` and listener/manager start and require refusal without any replacement.
 A Genesis implementation must stamp the original Genesis and both ledger UIDs, CR UID, and durable Pod-Create nonce on the Pod before Create, then directly observe its Pod UID and persist the stable runner request identity with the `Starting` CR before any runner POST; these pre-loss facts are the independent witness for later evidence-only result recording if a ledger disappears.
@@ -94,15 +94,15 @@ Never reuse a runner Namespace name while an old writer or delayed request may s
 ## Installation, RBAC, and recovery boundary
 
 The installer records the original Namespace/Genesis UIDs and receipt outside runtime before starting Service replicas.
-The Service account needs direct `get` for the exact Namespace and receipt Secret, named `get`/conditional `patch` for Genesis and both ledgers, plus ledger Create permission; it must not receive ledger or Genesis `delete`.
+The Service account needs direct `get` for both exact Namespaces and the installation receipt Secret, named `get`/conditional `patch` for Genesis and both ledgers, plus ledger Create permission in the runner Namespace. The separately pinned recovery-receipt Namespace grants dynamic ConfigMap `create`/`get`/`delete` only there; runner Namespace RBAC must not grant broad ConfigMap `get` or `delete`, and must not grant ledger or Genesis `delete`.
 The candidate uses UID/resourceVersion/data-tested JSON Patch for ledger CAS, so its named RBAC grants `patch`, not the old `update` verb.
 Kubernetes RBAC cannot restrict `create configmaps` by `resourceNames`, so the application must fix the two allowed names and validate every object; installation and other privileged actors must be separately controlled.
 The installer must withhold new submission/direct-admin routes during bootstrap.
 A bypassing direct CR is not trusted merely because it exists, especially if it arrives in `Starting` phase.
 
 For upgrade or reviewed recovery: stop ingress and direct/admin writers; drain old queued and active work, verify old runner Pods are gone, and stop **every** old HTTP/controller/leader binary before provisioning.
-Keep the old namespace, ledgers, and receipts as evidence.
-Use a different, never-before-used runner Namespace **name**, provision its new Genesis and receipt externally, deploy only new binaries with the new route, verify the exact committed UIDs and readiness, then reopen traffic.
+Keep the old runner and recovery-receipt Namespaces, ledgers, and receipts as evidence.
+Use different, never-before-used runner and recovery-receipt Namespace **names**, provision the new Genesis and installation receipt externally, deploy only new binaries with the new route, verify the exact committed UIDs and readiness, then reopen traffic.
 Apply any required CRD/schema changes before the new Service starts.
 Do not perform an in-place rolling upgrade, reuse the old name, let old and new binaries overlap, or silently accept old schema/caps.
 If old work cannot drain, keep it isolated and let callers resubmit immutable inputs only when safe.
@@ -115,12 +115,12 @@ Rollback also requires a reviewed drained namespace boundary, not pointing an ol
 - Static chart/RBAC/receipt and migration checks, focused race tests, and an operator runbook that records exact UIDs and refusal reason without deleting evidence.
 - Narrow isolated Kind acceptance against exact candidate images and owned resources: pause/crash between writes, restart and leader/startup handoff, uncertain responses, late old writer, direct `Starting` bypass, and committed-ledger loss. Require exact identity/UID receipts, zero excess work, bounded actionable refusal for only unsafe states, and evidence-preserving cleanup. Do not inject faults into HK, touch the preserved old ledger-loss fixture, or call synthetic/fake-client tests real crash recovery.
 
-Current implementation checkpoint: the shipped Service entrypoint requires Genesis authority, and the read-only CLI helper renders create-only Genesis and immutable receipt Secret manifests.
+Current implementation checkpoint: the Service entrypoint requires Genesis authority, and the read-only CLI helper renders create-only Genesis and immutable receipt Secret manifests. The fresh Genesis v2 candidate pins a distinct recovery-receipt Namespace and records each HTTP queue reservation there before CR Create. Its queue quota stays charged through admitted active work until exact terminal receipt cleanup; this is more conservative than the earlier active-grant handoff. Grant and Pod Create receipt runtime wiring is still pending.
 The Kind-only external installer creates fresh identities and keeps private installation receipts; it never adopts or repairs an existing namespace.
 The Service requires the original Secret UID and exact mounted bytes before startup and each bootstrap write, with separate controller, HTTP and readiness Guard clients that retain one original binding without sharing rate-limit budgets.
 Deterministic fake-API tests cover partial fresh `Initializing` restart, exact ledger templates, runtime side-effect fences, accepted-result preservation and terminal-first stop; they do not prove that all external writers were stopped.
 An opt-in registry-free real-API gate covers Genesis/ledger conditional writes and the witness/stop-intent serving-CRD round-trip, but adding or compiling that gate is not a live PASS.
-If an original committed ledger is lost, terminal and Delete cleanup deliberately retain the charge/finalizer; no bounded authorized drain of that incident has been integrated.
+If an original committed ledger is lost, terminal and Delete cleanup deliberately retain the charge/finalizer; queue receipt instrumentation alone provides no bounded authorized drain of that incident.
 That separate recovery gap remains a hard no-go for the next RC.
 
 Sources for the proposed Kubernetes mechanisms: [API resourceVersion and conditional JSON Patch](https://kubernetes.io/docs/reference/using-api/api-concepts/#updates-to-existing-resources) and [immutable ConfigMap behavior](https://kubernetes.io/docs/concepts/configuration/configmap/#configmap-immutable).

@@ -27,7 +27,10 @@ import (
 )
 
 const (
-	maxLiabilities = 4096
+	// Each liability may also retain a recovery-attempt ConfigMap. Keep the
+	// accepted receipt count below half of the bounded inventory List so the
+	// attempt set and fixed Genesis/ledger objects cannot exhaust that read.
+	maxLiabilities = 2048
 	maxConfigMaps  = 8192
 	markerKey      = "kova.cofy.dev/recovery-tombstone"
 	markerValue    = "v1"
@@ -127,8 +130,15 @@ func Drain(ctx context.Context, api DirectAPI, in Input) (Report, error) {
 func qualifyStopAndNamespace(ctx context.Context, api DirectAPI, exp recoverypermit.Expectation) error {
 	var namespace corev1.Namespace
 	if err := api.Get(ctx, client.ObjectKey{Name: exp.Epoch.Namespace}, &namespace); err != nil ||
-		string(namespace.UID) != exp.Epoch.NamespaceUID || namespace.DeletionTimestamp != nil {
+		string(namespace.UID) != exp.Epoch.NamespaceUID || namespace.DeletionTimestamp != nil ||
+		namespace.Status.Phase != corev1.NamespaceActive {
 		return fmt.Errorf("old namespace UID is unavailable or changed: %v", err)
+	}
+	var receipts corev1.Namespace
+	if err := api.Get(ctx, client.ObjectKey{Name: exp.Epoch.ReceiptNamespace}, &receipts); err != nil ||
+		string(receipts.UID) != exp.Epoch.ReceiptNamespaceUID || receipts.DeletionTimestamp != nil ||
+		receipts.Status.Phase != corev1.NamespaceActive {
+		return fmt.Errorf("old receipt namespace UID is unavailable or changed: %v", err)
 	}
 	var stop corev1.ConfigMap
 	if err := api.Get(ctx, client.ObjectKey{Namespace: exp.StopIntent.Namespace, Name: exp.StopIntent.Name}, &stop); err != nil {
@@ -150,7 +160,7 @@ func qualifyInventory(ctx context.Context, api DirectAPI, in Input) ([]target, e
 	exp := in.Expected
 	provided := make(map[string]any, len(in.Queues)+len(in.Grants)+len(in.PodCreates))
 	add := func(kind string, cm *corev1.ConfigMap, value any) error {
-		if cm == nil || cm.Namespace != exp.Epoch.Namespace {
+		if cm == nil || cm.Namespace != exp.Epoch.ReceiptNamespace {
 			return ErrPreflight
 		}
 		key := refKey(kind, cm.Name)
@@ -192,7 +202,7 @@ func qualifyInventory(ctx context.Context, api DirectAPI, in Input) ([]target, e
 	// List all ConfigMaps, not only labelled ones: a changed/missing label may
 	// never make an old pre-effect receipt disappear from the inventory.
 	var all corev1.ConfigMapList
-	if err := api.List(ctx, &all, client.InNamespace(exp.Epoch.Namespace), client.Limit(maxConfigMaps)); err != nil {
+	if err := api.List(ctx, &all, client.InNamespace(exp.Epoch.ReceiptNamespace), client.Limit(maxConfigMaps)); err != nil {
 		return nil, fmt.Errorf("direct complete ConfigMap list: %w", err)
 	}
 	if all.Continue != "" || len(all.Items) > maxConfigMaps {
@@ -279,6 +289,7 @@ func linkTargets(in Input) ([]target, error) {
 	}
 	for _, q := range in.Queues {
 		if q.Namespace != epoch.Namespace || q.NamespaceUID != epoch.NamespaceUID || q.GenesisName != epoch.GenesisName ||
+			q.ReceiptNamespace != epoch.ReceiptNamespace || q.ReceiptNamespaceUID != epoch.ReceiptNamespaceUID ||
 			q.GenesisUID != epoch.GenesisUID || q.Generation != epoch.Generation ||
 			q.ActiveLedgerUID != epoch.ActiveLedgerUID || q.QueueLedgerUID != epoch.QueueLedgerUID || byBuild[q.BuildName] != nil {
 			return nil, errors.New("queue receipt epoch or build identity conflicts")
@@ -289,6 +300,7 @@ func linkTargets(in Input) ([]target, error) {
 	for _, g := range in.Grants {
 		b := g.Build
 		if b.Namespace != epoch.Namespace || b.NamespaceUID != epoch.NamespaceUID || b.GenesisName != epoch.GenesisName ||
+			b.ReceiptNamespace != epoch.ReceiptNamespace || b.ReceiptNamespaceUID != epoch.ReceiptNamespaceUID ||
 			b.GenesisUID != epoch.GenesisUID || b.Generation != epoch.Generation || b.ActiveLedgerUID != epoch.ActiveLedgerUID ||
 			b.QueueLedgerUID != epoch.QueueLedgerUID || b.WorkerPoolID != epoch.WorkerPoolID {
 			return nil, errors.New("grant receipt epoch conflicts")

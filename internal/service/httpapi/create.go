@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -13,8 +14,10 @@ import (
 	kovav1 "github.com/cofy-x/kova/internal/apis/kova/v1alpha1"
 	"github.com/cofy-x/kova/internal/logging"
 	"github.com/cofy-x/kova/internal/service/queueadmission"
+	"github.com/cofy-x/kova/internal/service/recoveryreceipt"
 
 	"github.com/labstack/echo/v4"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -58,6 +61,9 @@ func (s *Server) handleCreateBuild(c echo.Context) error {
 			if !sameBuildRequest(&existing, request) {
 				return conflict(c, "idempotency key is already used with different build parameters")
 			}
+			if err := s.verifyGenesisHTTPReplay(c.Request().Context(), &existing, request, principal.Username); err != nil {
+				return genesisHTTPReplayFailure(c, err)
+			}
 			return c.JSON(http.StatusOK, buildJobFromCR(&existing, s.cfg))
 		}
 		if !apierrors.IsNotFound(err) {
@@ -89,6 +95,9 @@ func (s *Server) handleCreateBuild(c echo.Context) error {
 	if err := s.checkGenesis(c.Request().Context()); err != nil {
 		return serviceUnavailable(c, err)
 	}
+	if s.genesisLedger != nil && s.receipts == nil {
+		return serviceUnavailable(c, fmt.Errorf("Genesis queue admission lacks a direct recovery receipt client"))
+	}
 	store := s.queueStore()
 	intent, fresh, err := store.Reserve(c.Request().Context(), &build)
 	if err != nil {
@@ -107,6 +116,11 @@ func (s *Server) handleCreateBuild(c echo.Context) error {
 		var existing kovav1.KovaBuild
 		err := s.reader.Get(c.Request().Context(), client.ObjectKey{Namespace: s.cfg.Namespace, Name: id}, &existing)
 		if apierrors.IsNotFound(err) {
+			if s.genesisLedger != nil && intent.CleanupKind == "rejected" {
+				if cleanupErr := store.ResumeRejectedCleanup(c.Request().Context(), id, intent.Nonce); cleanupErr != nil {
+					return serviceUnavailable(c, cleanupErr)
+				}
+			}
 			return queueAdmissionPending(c, id)
 		}
 		if err != nil {
@@ -115,14 +129,48 @@ func (s *Server) handleCreateBuild(c echo.Context) error {
 		if !sameBuildRequest(&existing, request) {
 			return conflict(c, "idempotency key is already used with different build parameters")
 		}
+		if err := s.verifyGenesisHTTPReplay(c.Request().Context(), &existing, request, principal.Username); err != nil {
+			return genesisHTTPReplayFailure(c, err)
+		}
 		return c.JSON(http.StatusOK, buildJobFromCR(&existing, s.cfg))
 	}
 	build.Annotations = map[string]string{queueadmission.IntentAnnotation: intent.Nonce}
+	var queueWitness recoveryreceipt.ObservedQueueIntent
+	if s.genesisLedger != nil {
+		receiptIntent, err := store.ReceiptIntent(&build, intent)
+		if err != nil {
+			return queueAdmissionPending(c, id)
+		}
+		if err := store.CheckReceiptNamespace(c.Request().Context()); err != nil {
+			return queueAdmissionPending(c, id)
+		}
+		// Only this fresh queue-CAS owner may make the receipt Create call.
+		// A successor observing the same queue intent never enters this branch.
+		queueWitness, err = recoveryreceipt.RecordQueueOnce(c.Request().Context(), s.receipts, receiptIntent)
+		if err != nil {
+			logging.Errorf("KovaBuild %s queue receipt outcome is unknown: %v", id, err)
+			return queueAdmissionPending(c, id)
+		}
+		if err := store.CheckReceiptNamespace(c.Request().Context()); err != nil {
+			return queueAdmissionPending(c, id)
+		}
+		if err := store.PinReceipt(c.Request().Context(), &build, intent, queueWitness); err != nil {
+			logging.Errorf("KovaBuild %s queue receipt pin is unconfirmed: %v", id, err)
+			return queueAdmissionPending(c, id)
+		}
+		build.Annotations[queueadmission.ReceiptUIDAnnotation] = queueWitness.ReceiptUID
+		build.Annotations[queueadmission.ReceiptDigestAnnotation] = queueWitness.DataDigest
+	}
 	// A reserve is not a reusable permission for a later name-addressed CR
 	// Create. On refusal the intent stays held; an absent CR is not proof that
 	// an already-sent Create cannot arrive later.
 	if err := s.checkGenesis(c.Request().Context()); err != nil {
 		return serviceUnavailable(c, err)
+	}
+	if s.genesisLedger != nil {
+		if err := store.CheckReceiptNamespace(c.Request().Context()); err != nil {
+			return serviceUnavailable(c, err)
+		}
 	}
 	if err := s.client.Create(c.Request().Context(), &build); err != nil {
 		if apierrors.IsAlreadyExists(err) {
@@ -134,12 +182,25 @@ func (s *Server) handleCreateBuild(c echo.Context) error {
 				if err := s.checkGenesis(c.Request().Context()); err != nil {
 					return serviceUnavailable(c, err)
 				}
-				if err := store.ReleaseRejected(c.Request().Context(), id, intent.Nonce); err != nil {
-					return internalError(c, err)
+				var releaseErr error
+				if s.genesisLedger != nil {
+					releaseErr = store.ReleaseRejectedReceipt(c.Request().Context(), &build, queueWitness)
+				} else {
+					releaseErr = store.ReleaseRejected(c.Request().Context(), id, intent.Nonce)
 				}
+				if releaseErr != nil {
+					return internalError(c, releaseErr)
+				}
+			} else if s.genesisLedger != nil &&
+				(existing.Annotations[queueadmission.ReceiptUIDAnnotation] != queueWitness.ReceiptUID ||
+					existing.Annotations[queueadmission.ReceiptDigestAnnotation] != queueWitness.DataDigest) {
+				return conflict(c, "existing KovaBuild has a different queue recovery receipt")
 			}
 			if !sameBuildRequest(&existing, request) {
 				return conflict(c, "idempotency key is already used with different build parameters")
+			}
+			if err := s.verifyGenesisHTTPReplay(c.Request().Context(), &existing, request, principal.Username); err != nil {
+				return genesisHTTPReplayFailure(c, err)
 			}
 			return c.JSON(http.StatusOK, buildJobFromCR(&existing, s.cfg))
 		}
@@ -147,7 +208,13 @@ func (s *Server) handleCreateBuild(c echo.Context) error {
 			if guardErr := s.checkGenesis(c.Request().Context()); guardErr != nil {
 				return serviceUnavailable(c, guardErr)
 			}
-			if releaseErr := store.ReleaseRejected(c.Request().Context(), id, intent.Nonce); releaseErr != nil {
+			var releaseErr error
+			if s.genesisLedger != nil {
+				releaseErr = store.ReleaseRejectedReceipt(c.Request().Context(), &build, queueWitness)
+			} else {
+				releaseErr = store.ReleaseRejected(c.Request().Context(), id, intent.Nonce)
+			}
+			if releaseErr != nil {
 				return internalError(c, releaseErr)
 			}
 			return internalError(c, err)
@@ -156,6 +223,59 @@ func (s *Server) handleCreateBuild(c echo.Context) error {
 		return queueAdmissionPending(c, id)
 	}
 	return c.JSON(http.StatusAccepted, buildJobFromCR(&build, s.cfg))
+}
+
+var errUnlinkedGenesisHTTPBuild = errors.New("existing KovaBuild is not linked to this HTTP submission")
+
+func genesisHTTPReplayFailure(c echo.Context, err error) error {
+	if errors.Is(err, errUnlinkedGenesisHTTPBuild) {
+		return conflict(c, "idempotency key belongs to a KovaBuild without this HTTP receipt link")
+	}
+	return serviceUnavailable(c, err)
+}
+
+// A same-name CR is not proof that this HTTP request reached the one authorized
+// Create. Active replays need the pinned live queue receipt; after normal
+// terminal cleanup, the exact CR settlement witness and absence of both the
+// charged queue entry and old receipt allow a read-only idempotent replay.
+func (s *Server) verifyGenesisHTTPReplay(ctx context.Context, build *kovav1.KovaBuild, request createBuildRequest, username string) error {
+	if s.genesisLedger == nil {
+		return nil
+	}
+	if build.Spec.Requester.Username != username || build.Spec.IdempotencyKey != request.IdempotencyKey ||
+		build.Annotations[queueadmission.IntentAnnotation] == "" ||
+		build.Annotations[queueadmission.ReceiptUIDAnnotation] == "" ||
+		build.Annotations[queueadmission.ReceiptDigestAnnotation] == "" {
+		return errUnlinkedGenesisHTTPBuild
+	}
+	settledUID := build.Annotations[queueadmission.ReceiptSettledAnnotation]
+	if settledUID == "" {
+		return s.queueStore().VerifyForBuild(ctx, build)
+	}
+	if settledUID != build.Annotations[queueadmission.ReceiptUIDAnnotation] ||
+		(build.DeletionTimestamp == nil && build.Status.Phase != kovav1.PhaseSucceeded &&
+			build.Status.Phase != kovav1.PhaseFailed && build.Status.Phase != kovav1.PhaseCancelled) {
+		return errUnlinkedGenesisHTTPBuild
+	}
+	store := s.queueStore()
+	if _, found, err := store.Lookup(ctx, build.Name); err != nil {
+		return err
+	} else if found {
+		return queueadmission.ErrDrift
+	}
+	if err := store.CheckReceiptNamespace(ctx); err != nil {
+		return err
+	}
+	var receipt corev1.ConfigMap
+	err := s.reader.Get(ctx, client.ObjectKey{Namespace: s.genesisLedger.Bootstrap.Receipt.Contract.ReceiptNamespace,
+		Name: "kova-admission-intent-" + build.Annotations[queueadmission.IntentAnnotation]}, &receipt)
+	if !apierrors.IsNotFound(err) {
+		if err != nil {
+			return err
+		}
+		return queueadmission.ErrDrift
+	}
+	return s.checkGenesis(ctx)
 }
 
 func definitiveCreateRejection(err error) bool {

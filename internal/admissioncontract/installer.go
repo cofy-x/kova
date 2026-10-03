@@ -18,10 +18,12 @@ const ReceiptSecretDataKey = "receipt.json"
 // Namespace UID and generation are inputs, never discovered and promoted to
 // trusted identities by this helper.
 type InstallationSpec struct {
-	Namespace    string
-	NamespaceUID string
-	Generation   string
-	Limits       Limits
+	Namespace           string
+	NamespaceUID        string
+	ReceiptNamespace    string
+	ReceiptNamespaceUID string
+	Generation          string
+	Limits              Limits
 }
 
 func (s InstallationSpec) Validate() error {
@@ -30,18 +32,22 @@ func (s InstallationSpec) Validate() error {
 }
 
 func (s InstallationSpec) contract() (Contract, error) {
-	if len(validation.IsDNS1123Label(s.Namespace)) != 0 {
+	if len(validation.IsDNS1123Label(s.Namespace)) != 0 ||
+		len(validation.IsDNS1123Label(s.ReceiptNamespace)) != 0 ||
+		s.Namespace == s.ReceiptNamespace {
 		return Contract{}, fmt.Errorf("admission installation has invalid Namespace name")
 	}
 	contract := Contract{
-		Version:            1,
-		NamespaceUID:       s.NamespaceUID,
-		Generation:         s.Generation,
-		ActiveLedgerName:   ActiveLedgerName,
-		ActiveLedgerSchema: 1,
-		QueueLedgerName:    QueueLedgerName,
-		QueueLedgerSchema:  1,
-		Limits:             s.Limits,
+		Version:             2,
+		NamespaceUID:        s.NamespaceUID,
+		ReceiptNamespace:    s.ReceiptNamespace,
+		ReceiptNamespaceUID: s.ReceiptNamespaceUID,
+		Generation:          s.Generation,
+		ActiveLedgerName:    ActiveLedgerName,
+		ActiveLedgerSchema:  1,
+		QueueLedgerName:     QueueLedgerName,
+		QueueLedgerSchema:   2,
+		Limits:              s.Limits,
 	}
 	if err := contract.validate(); err != nil {
 		return Contract{}, err
@@ -60,6 +66,15 @@ func (s InstallationSpec) qualifyNamespace(ctx context.Context, reader Reader) e
 	if ns == nil || ns.Name != s.Namespace || string(ns.UID) != s.NamespaceUID ||
 		ns.DeletionTimestamp != nil || ns.Status.Phase != corev1.NamespaceActive {
 		return fmt.Errorf("original admission Namespace is unavailable or changed")
+	}
+	receipts, err := reader.GetNamespace(ctx, s.ReceiptNamespace)
+	if err != nil {
+		return err
+	}
+	if receipts == nil || receipts.Name != s.ReceiptNamespace ||
+		string(receipts.UID) != s.ReceiptNamespaceUID || receipts.DeletionTimestamp != nil ||
+		receipts.Status.Phase != corev1.NamespaceActive {
+		return fmt.Errorf("original recovery receipt Namespace is unavailable or changed")
 	}
 	return nil
 }
@@ -113,7 +128,8 @@ func (r Receipt) ExportReceiptSecret(ctx context.Context, reader Reader, service
 	if err := r.Validate(); err != nil {
 		return nil, err
 	}
-	if len(validation.IsDNS1123Label(serviceNamespace)) != 0 || len(validation.IsDNS1123Subdomain(secretName)) != 0 {
+	if len(validation.IsDNS1123Label(serviceNamespace)) != 0 || len(validation.IsDNS1123Subdomain(secretName)) != 0 ||
+		serviceNamespace == r.Contract.ReceiptNamespace {
 		return nil, fmt.Errorf("admission receipt Secret has invalid identity")
 	}
 	if reader == nil {
@@ -124,6 +140,13 @@ func (r Receipt) ExportReceiptSecret(ctx context.Context, reader Reader, service
 		return nil, err
 	}
 	if err := r.QualifyNamespace(ns); err != nil {
+		return nil, err
+	}
+	receipts, err := reader.GetNamespace(ctx, r.Contract.ReceiptNamespace)
+	if err != nil {
+		return nil, err
+	}
+	if err := r.QualifyReceiptNamespace(receipts); err != nil {
 		return nil, err
 	}
 	genesis, err := reader.GetConfigMap(ctx, r.Namespace, r.GenesisName)
@@ -162,6 +185,9 @@ func ValidateReceiptSecret(secret *corev1.Secret, serviceNamespace, secretName, 
 	receipt, err := ParseReceipt(receiptRaw)
 	if err != nil {
 		return err
+	}
+	if serviceNamespace == receipt.Contract.ReceiptNamespace {
+		return fmt.Errorf("recovery receipt Namespace must be separate from Service namespace")
 	}
 	canonical, err := json.Marshal(receipt)
 	if err != nil {

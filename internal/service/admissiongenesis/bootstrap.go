@@ -147,6 +147,13 @@ func (b Bootstrapper) getOriginal(ctx context.Context) (*corev1.ConfigMap, admis
 	if err := b.Receipt.QualifyNamespace(ns); err != nil {
 		return nil, admissioncontract.GenesisData{}, err
 	}
+	receipts, err := b.API.GetNamespace(ctx, b.Receipt.Contract.ReceiptNamespace)
+	if err != nil {
+		return nil, admissioncontract.GenesisData{}, err
+	}
+	if err := b.Receipt.QualifyReceiptNamespace(receipts); err != nil {
+		return nil, admissioncontract.GenesisData{}, err
+	}
 	cm, err := b.API.GetConfigMap(ctx, b.Receipt.Namespace, b.Receipt.GenesisName)
 	if err != nil {
 		return nil, admissioncontract.GenesisData{}, err

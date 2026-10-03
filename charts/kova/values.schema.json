@@ -120,9 +120,10 @@
         "admissionGenesis": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["enabled", "receiptSecret"],
+          "required": ["enabled", "recoveryReceiptNamespace", "receiptSecret"],
           "properties": {
             "enabled": { "type": "boolean" },
+            "recoveryReceiptNamespace": { "type": "string" },
             "receiptSecret": {
               "type": "object",
               "additionalProperties": false,

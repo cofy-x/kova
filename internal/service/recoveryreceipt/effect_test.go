@@ -15,6 +15,7 @@ func examplePinnedBuild() PinnedBuild {
 	q := exampleQueueIntent()
 	return PinnedBuild{
 		Namespace: q.Namespace, NamespaceUID: q.NamespaceUID,
+		ReceiptNamespace: q.ReceiptNamespace, ReceiptNamespaceUID: q.ReceiptNamespaceUID,
 		GenesisName: q.GenesisName, GenesisUID: q.GenesisUID, Generation: q.Generation,
 		ActiveLedgerUID: q.ActiveLedgerUID, QueueLedgerUID: q.QueueLedgerUID,
 		BuildName: q.BuildName, BuildUID: "build-original-uid",
@@ -85,7 +86,7 @@ func TestEffectReceiptsAreImmutableBoundedAndUnowned(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if cm.Namespace != g.Build.Namespace || cm.Immutable == nil || !*cm.Immutable ||
+			if cm.Namespace != g.Build.ReceiptNamespace || cm.Immutable == nil || !*cm.Immutable ||
 				len(cm.OwnerReferences) != 0 || len(cm.Data) != 3 || cm.Data["kind"] != tc.kind ||
 				len(cm.Data["payload"]) > maxEffectJSONBytes || len(cm.Labels) != 1 {
 				t.Fatalf("unqualified receipt proposal: %#v", cm)

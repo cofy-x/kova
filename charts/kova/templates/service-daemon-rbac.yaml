@@ -2,6 +2,7 @@
 {{- $name := printf "%s-service" (include "kova.fullname" .) | trunc 63 | trimSuffix "-" }}
 {{- $serviceNamespace := include "kova.namespace" . }}
 {{- $runnerNamespace := default $serviceNamespace .Values.serviceDaemon.runnerNamespace }}
+{{- $receiptNamespace := .Values.serviceDaemon.admissionGenesis.recoveryReceiptNamespace }}
 {{- $saName := default "default" .Values.serviceDaemon.serviceAccount.name }}
 {{- if .Values.serviceDaemon.serviceAccount.create }}
 {{- $saName = default $name .Values.serviceDaemon.serviceAccount.name }}
@@ -107,6 +108,39 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
   name: {{ $name }}
+{{- if .Values.serviceDaemon.admissionGenesis.enabled }}
+---
+# This Role lives in a fresh, receipt-only namespace. Dynamic nonce-named
+# receipts need unenumerable resourceNames; no Delete grant reaches Genesis or
+# the quota ledgers in the distinct runner namespace.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $name }}-recovery-receipts
+  namespace: {{ $receiptNamespace }}
+  labels:
+    {{- include "kova.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["create", "get", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $name }}-recovery-receipts
+  namespace: {{ $receiptNamespace }}
+  labels:
+    {{- include "kova.labels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ $saName }}
+    namespace: {{ $serviceNamespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $name }}-recovery-receipts
+{{- end }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
@@ -178,7 +212,7 @@ metadata:
 rules:
   - apiGroups: [""]
     resources: ["namespaces"]
-    resourceNames: [{{ $runnerNamespace | quote }}]
+    resourceNames: [{{ $runnerNamespace | quote }}, {{ $receiptNamespace | quote }}]
     verbs: ["get"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1

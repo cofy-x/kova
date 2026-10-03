@@ -16,9 +16,10 @@ func testReceipt() admissioncontract.Receipt {
 	return admissioncontract.Receipt{
 		Namespace: "jobs-57", GenesisName: admissioncontract.GenesisName, GenesisUID: "genesis-uid",
 		Contract: admissioncontract.Contract{
-			Version: 1, NamespaceUID: "namespace-uid", Generation: strings.Repeat("a", 32),
+			Version: 2, NamespaceUID: "namespace-uid", ReceiptNamespace: "receipts-57",
+			ReceiptNamespaceUID: "receipt-namespace-uid", Generation: strings.Repeat("a", 32),
 			ActiveLedgerName: admissioncontract.ActiveLedgerName, ActiveLedgerSchema: 1,
-			QueueLedgerName: admissioncontract.QueueLedgerName, QueueLedgerSchema: 1,
+			QueueLedgerName: admissioncontract.QueueLedgerName, QueueLedgerSchema: 2,
 			Limits: admissioncontract.Limits{MaxActiveJobs: 128, MaxActiveJobsPerRequester: 8, WorkerSlots: 65535,
 				MaxQueuedJobs: 1000, MaxQueuedJobsPerRequester: 100},
 		},

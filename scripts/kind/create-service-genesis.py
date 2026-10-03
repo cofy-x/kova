@@ -53,15 +53,17 @@ def local_endpoint(value: str) -> bool:
     )
 
 
-def expected_contract(args: argparse.Namespace, namespace_uid: str, generation: str) -> dict:
+def expected_contract(args: argparse.Namespace, namespace_uid: str, receipt_namespace_uid: str, generation: str) -> dict:
     return {
-        "version": 1,
+        "version": 2,
         "namespaceUID": namespace_uid,
+        "receiptNamespace": args.receipt_namespace,
+        "receiptNamespaceUID": receipt_namespace_uid,
         "generation": generation,
         "activeLedgerName": "kova-service-admission",
         "activeLedgerSchema": 1,
         "queueLedgerName": "kova-service-queue-admission",
-        "queueLedgerSchema": 1,
+        "queueLedgerSchema": 2,
         "limits": {
             "maxActiveJobs": args.max_active_jobs,
             "maxActiveJobsPerRequester": args.max_active_jobs_per_requester,
@@ -133,17 +135,18 @@ def validate_options(args: argparse.Namespace) -> None:
         "explicit kube-system UID is required",
     )
     require(
-        dns_label(args.runner_namespace) and dns_label(args.service_namespace),
+        dns_label(args.runner_namespace) and dns_label(args.service_namespace)
+        and dns_label(args.receipt_namespace),
         "invalid namespace name",
     )
     require(
-        args.runner_namespace != args.service_namespace,
-        "runner namespace must be new and separate from the Service namespace",
+        len({args.runner_namespace, args.service_namespace, args.receipt_namespace}) == 3,
+        "runner, Service, and receipt namespaces must be pairwise distinct",
     )
     require(dns_label(args.release), "invalid release name")
     require(
-        args.acknowledge == f"{args.context}/{args.service_namespace}/{args.runner_namespace}",
-        "fresh-install acknowledgement must match context/service-namespace/runner-namespace",
+        args.acknowledge == f"{args.context}/{args.service_namespace}/{args.runner_namespace}/{args.receipt_namespace}",
+        "fresh-install acknowledgement must match context/service-namespace/runner-namespace/receipt-namespace",
     )
     require(1 <= args.max_active_jobs <= 128, "unsupported active limit")
     require(
@@ -336,6 +339,13 @@ class Installer:
         require(
             not existing, "runner namespace already exists; installation never adopts or resets it"
         )
+        existing_receipts = self.kubectl(
+            "get", "namespace", args.receipt_namespace, "--ignore-not-found", "-o", "json"
+        ).strip()
+        require(
+            not existing_receipts,
+            "receipt namespace already exists; installation never adopts or resets it",
+        )
         selector = f"app.kubernetes.io/instance={args.release},app.kubernetes.io/component=service"
         pods = json.loads(
             self.kubectl("-n", args.service_namespace, "get", "pods", "-l", selector, "-o", "json")
@@ -363,6 +373,7 @@ class Installer:
                 "serviceNamespace": args.service_namespace,
                 "serviceNamespaceUID": service_uid,
                 "runnerNamespace": args.runner_namespace,
+                "receiptNamespace": args.receipt_namespace,
                 "generation": generation,
                 "kubeconfigSHA256": self.kubeconfig_sha,
                 "cliSHA256": self.cli_sha,
@@ -384,7 +395,24 @@ class Installer:
             observed.get("status", {}).get("phase") == "Active",
             "new Namespace is not Active; retain original identity and inspect",
         )
-        common = ["--namespace-uid", namespace_uid, "--generation", generation]
+        receipt_ns = self.create(
+            "receipt-namespace",
+            {"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": args.receipt_namespace}},
+        )
+        receipt_namespace_uid = object_uid(receipt_ns, "Namespace", args.receipt_namespace)
+        observed_receipts = self.read("namespace", args.receipt_namespace)
+        require(
+            object_uid(observed_receipts, "Namespace", args.receipt_namespace)
+            == receipt_namespace_uid
+            and observed_receipts.get("status", {}).get("phase") == "Active",
+            "new receipt Namespace changed or is not Active; retain original identity and inspect",
+        )
+        common = [
+            "--namespace-uid", namespace_uid,
+            "--receipt-namespace", args.receipt_namespace,
+            "--receipt-namespace-uid", receipt_namespace_uid,
+            "--generation", generation,
+        ]
         for name in (
             "max-active-jobs",
             "max-active-jobs-per-requester",
@@ -401,7 +429,7 @@ class Installer:
             and manifest["metadata"].get("namespace") == args.runner_namespace,
             "CLI proposed a different Genesis object",
         )
-        contract = expected_contract(args, namespace_uid, generation)
+        contract = expected_contract(args, namespace_uid, receipt_namespace_uid, generation)
         genesis_data = {
             "contract": contract,
             "phase": "Initializing",
@@ -480,10 +508,18 @@ class Installer:
             == namespace_uid,
             "runner namespace changed",
         )
+        require(
+            object_uid(
+                self.read("namespace", args.receipt_namespace), "Namespace", args.receipt_namespace
+            )
+            == receipt_namespace_uid,
+            "receipt namespace changed",
+        )
         private_json(
             self.directory / "identities.json",
             {
                 "namespaceUID": namespace_uid,
+                "receiptNamespaceUID": receipt_namespace_uid,
                 "genesisUID": genesis_uid,
                 "secretUID": secret_uid,
                 "generation": generation,
@@ -495,6 +531,7 @@ class Installer:
                 "runnerNamespace": args.runner_namespace,
                 "admissionGenesis": {
                     "enabled": True,
+                    "recoveryReceiptNamespace": args.receipt_namespace,
                     "receiptSecret": {"name": secret_name, "uid": secret_uid},
                 },
                 "maxActiveJobs": args.max_active_jobs,
@@ -517,6 +554,7 @@ def parser() -> argparse.ArgumentParser:
         "kube-system-uid",
         "kova-cli",
         "runner-namespace",
+        "receipt-namespace",
         "service-namespace",
         "release",
         "output-directory",
