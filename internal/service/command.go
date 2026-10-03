@@ -1,7 +1,6 @@
 package service
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -42,6 +41,13 @@ import (
 )
 
 func CLICommand() *cli.Command {
+	return serviceCLICommand(rest.InClusterConfig)
+}
+
+// The shipped command always loads in-cluster credentials. The unexported
+// constructor lets opt-in process tests use an identity-pinned API transport
+// without replacing the actual Service startup, manager, or HTTP wiring.
+func serviceCLICommand(loadKubeConfig func() (*rest.Config, error)) *cli.Command {
 	defaults := runner.DefaultConfig()
 	return &cli.Command{
 		Name:  "service",
@@ -134,7 +140,7 @@ func CLICommand() *cli.Command {
 			if err := validateSourcePodBudget(sourceVolumeSizeLimit, runnerResources, sourceFetchResources); err != nil {
 				return err
 			}
-			restConfig, err := rest.InClusterConfig()
+			restConfig, err := loadKubeConfig()
 			if err != nil {
 				return err
 			}
@@ -174,7 +180,7 @@ func CLICommand() *cli.Command {
 			if err != nil {
 				return err
 			}
-			ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+			ctx, stop := signal.NotifyContext(c.Context, os.Interrupt, syscall.SIGTERM)
 			defer stop()
 			cfg := config.Config{
 				Listen:                     c.String("listen"),

@@ -53,6 +53,51 @@ Each child has a 45-second absolute deadline and the parent has a 12-minute budg
 The v3 fixture/schema adaptation is not itself live v3 qualification, and earlier v1 process-gate evidence cannot certify the changed contract.
 The historical waiting-only queue fixtures below also need explicit adaptation before they can qualify the active-inclusive HTTP queue cap introduced in v2 and retained in v3.
 
+## Source-Bound Actual Service Control-Plane Fault Gate
+
+`TestRealAPIActualServiceControlPlane` is a separate, opt-in seven-fixture gate.
+Each child invokes the same complete Service CLI Action as the shipped command, including receipt qualification, bootstrap, real controller-runtime manager/cache/reconciler, HTTP listener, and leader election.
+Only the unexported Kubernetes configuration loader changes: the test uses its pinned dedicated Kind endpoint through a parent-owned loopback fault proxy instead of in-cluster credentials.
+The normal CLI still requires in-cluster credentials and has no fault-injection flags.
+This test binary is not a candidate container image, and this control-plane gate is not runner, build-result, recovery-drain, deployed-RBAC, or final API-load qualification.
+
+The matrix requires these seven distinct case names:
+
+- `lost-active-create`, `lost-active-pin`, `lost-queue-create`, `lost-queue-pin`, and `lost-commit`: the proxy consumes a successful original API response, closes the actual downstream connection without delivering it, and requires the Service to qualify the committed pair with exactly one upstream attempt for that mutation.
+- `late-active-create`: the parent captures one exact original Create body, kills and joins its caller, lets successors commit, and forwards that captured request exactly once; the still-present committed ledger must produce a conflict without UID changes.
+- `late-active-create-after-loss`: after successor commit and leader handoff, the parent UID-deletes only this case's newly committed active ledger and forwards the captured old Create once; a distinct replacement UID must not rebind immutable Genesis, the survivor must return readiness 503, and another actual Service startup must refuse without a listener or API writes.
+
+The deletion case requires explicit, separately reviewed live-fault authorization for the exact disposable fixture, as well as its manifest acknowledgement.
+Adding the test or setting its acknowledgement is not evidence of a live PASS or permission to mutate a shared cluster.
+Never run it against HK, old preserved ledger-loss fixtures, reused runner namespace names, or the earlier ten-process bootstrap fixtures.
+All seven runner/control namespaces, original UIDs, receipts, empty-workload vetoes, and absent Lease identities are checked before the first child starts.
+Namespace freshness and stopped external writers remain the external installer's responsibility, not facts inferred from empty Lists.
+
+Create a private JSON manifest outside Git, selected only with `KOVA_GENESIS_SERVICE_MANIFEST=/absolute/private/service-matrix.json`.
+The strict root fields are `schemaVersion: 1`, the full lowercase 40-character `sourceCommit`, `testBinarySHA256`, absolute `kubeconfig`, `kubeconfigSHA256`, `context`, `kubeSystemUID`, `controlPlaneID`, `oldWritersStopped: true`, `cleanupOnSuccess: false`, and `cases`.
+The exact dedicated context must satisfy the existing Kind process-target identity check, including original running control-plane container ID and its loopback API port.
+Each case has `name`, explicit `allowCommittedLedgerDeletion` (true only for the final deletion case), and `fixture`.
+The fixture fields are `namespace`, `namespaceUID`, `genesisUID`, absolute `receiptFile`, `receiptSHA256`, `secretNamespace`, `secretNamespaceUID`, `secretName`, and `secretUID`; do not include the earlier process gate's `stage` or `point` fields.
+All fourteen runner/control namespace names must be distinct, begin `kova-genesis-svc-`, and retain distinct original UIDs.
+Each receipt Secret is immutable and its UID and exact mounted bytes are pinned.
+
+Compile only a clean reviewed source candidate into a private test executable, explicitly stamping `github.com/cofy-x/kova/internal/version.Commit` with that same full source SHA through Go's `-ldflags=-X` option.
+Record that source SHA, the exact build command, and the executable SHA256 in the external acceptance receipt; the manifest binds both stamp and executable hash, and every child verifies them before using Kubernetes.
+Run the executable with `-test.run=^TestRealAPIActualServiceControlPlane$ -test.timeout=25m -test.v` only after the fixture and destructive-case plan have been approved.
+Do not use an unstamped `go test` invocation as the live gate.
+
+Each case has a 140-second deadline, each child an independent at-most-three-minute absolute deadline, and the parent a twenty-minute deadline.
+The parent owns and joins only the exact PIDs it spawned; Lease UID and holder identities are mapped to the actual successful Lease writers before killing the leader and proving survivor handoff on the same Lease UID.
+Held request bodies remain in bounded parent memory, bound to a SHA256 and one forwarding authority; cancellation never releases them automatically.
+The proxy permits only the scoped bootstrap, Lease/event operations, and necessary reads/watches, and records any rejected operation as a test failure.
+All Pod/CR mutation, Pod Exec, arbitrary resource access, and source/registry activity are outside this gate; HTTP probes are readiness and empty-list GET only.
+No API object is automatically cleaned up, including on success; the intentionally missing original ledger and its replacement remain evidence.
+Any unknown outcome, unexpected operation, identity drift, or failed process join stops the matrix, and its partially used namespaces must not be rerun as fresh fixtures.
+
+This gate does not collect Service client budget histograms or measure loaded job stages.
+Its proxy one-attempt assertions establish fault semantics only, not a production QPS budget or reconcile-latency distribution.
+Focused local safety tests use `go test ./internal/service -run 'TestActualService|TestServiceFactory' -count=1`; these fake-upstream safety checks must not be reported as the opt-in real-API result.
+
 ## Network Overrides
 
 Kova defaults to the official Ubuntu image, upstream GitHub release URLs,
