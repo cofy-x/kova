@@ -10,6 +10,8 @@ images:
 
 serviceDaemon:
   enabled: true
+  # The fixture owner must first provision a fresh Genesis and supply its
+  # runnerNamespace and immutable receipt Secret name/UID in a separate file.
   replicas: 2
   authentication:
     mode: tokenreview

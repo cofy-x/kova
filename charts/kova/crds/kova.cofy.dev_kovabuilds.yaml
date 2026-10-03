@@ -134,6 +134,87 @@ spec:
             type: object
           status:
             properties:
+              admissionGenesisStopIntent:
+                description: |-
+                  AdmissionGenesisStopIntent is durably recorded before a UID-scoped
+                  forced stop. An absent Pod alone can never manufacture this intent.
+                properties:
+                  buildUID:
+                    maxLength: 256
+                    type: string
+                  podCreateAttempt:
+                    maxLength: 32
+                    pattern: ^[a-f0-9]{32}$
+                    type: string
+                  podUID:
+                    maxLength: 256
+                    type: string
+                  reason:
+                    enum:
+                    - Cancelled
+                    - Deleted
+                    - BuildTimedOut
+                    type: string
+                  runnerRequestID:
+                    maxLength: 256
+                    type: string
+                required:
+                - buildUID
+                - podCreateAttempt
+                - podUID
+                - reason
+                - runnerRequestID
+                type: object
+              admissionGenesisWitness:
+                description: |-
+                  AdmissionGenesisWitness is recorded only for a runner created under an
+                  externally committed admission Genesis. It binds a directly observed Pod
+                  UID and the runner request to the original CR and ledger installation.
+                properties:
+                  activeLedgerUID:
+                    maxLength: 256
+                    type: string
+                  buildUID:
+                    maxLength: 256
+                    type: string
+                  generation:
+                    maxLength: 32
+                    pattern: ^[a-f0-9]{32}$
+                    type: string
+                  genesisUID:
+                    maxLength: 256
+                    type: string
+                  namespaceUID:
+                    maxLength: 256
+                    type: string
+                  podCreateAttempt:
+                    maxLength: 32
+                    pattern: ^[a-f0-9]{32}$
+                    type: string
+                  podName:
+                    maxLength: 253
+                    type: string
+                  podUID:
+                    maxLength: 256
+                    type: string
+                  queueLedgerUID:
+                    maxLength: 256
+                    type: string
+                  runnerRequestID:
+                    maxLength: 256
+                    type: string
+                required:
+                - activeLedgerUID
+                - buildUID
+                - generation
+                - genesisUID
+                - namespaceUID
+                - podCreateAttempt
+                - podName
+                - podUID
+                - queueLedgerUID
+                - runnerRequestID
+                type: object
               allocatedConcurrency:
                 format: int32
                 type: integer

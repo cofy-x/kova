@@ -11,8 +11,9 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/cofy-x/kova/internal/admissioncontract"
+	"github.com/cofy-x/kova/internal/admissionjson"
 	kovav1 "github.com/cofy-x/kova/internal/apis/kova/v1alpha1"
-	"github.com/cofy-x/kova/internal/service/admissionjson"
 	"github.com/cofy-x/kova/internal/service/config"
 	"github.com/cofy-x/kova/internal/service/queueadmission"
 
@@ -27,7 +28,8 @@ import (
 const (
 	AdmissionLedgerName       = "kova-service-admission"
 	reservationConfigMap      = AdmissionLedgerName
-	reservationDataKey        = "reservations.json"
+	AdmissionLedgerDataKey    = "reservations.json"
+	reservationDataKey        = AdmissionLedgerDataKey
 	bootstrapAttemptKey       = "kova.cofy.dev/admission-bootstrap"
 	podCreateAttemptKey       = "kova.cofy.dev/create-attempt"
 	maxReservationCASAttempts = 16
@@ -101,10 +103,23 @@ func (r *KovaBuildReconciler) ensureLiveAdmissionBuild(ctx context.Context, buil
 }
 
 func (r *KovaBuildReconciler) readReservations(ctx context.Context, namespace string) (*corev1.ConfigMap, reservationState, error) {
+	if r.Genesis != nil {
+		if r.APIReader == nil {
+			return nil, reservationState{}, fmt.Errorf("Genesis admission requires a direct API reader")
+		}
+		if err := r.Genesis.Check(ctx); err != nil {
+			return nil, reservationState{}, err
+		}
+	}
 	key := client.ObjectKey{Namespace: namespace, Name: reservationConfigMap}
 	var cm corev1.ConfigMap
 	if err := r.reader().Get(ctx, key, &cm); err != nil {
 		return nil, reservationState{}, err
+	}
+	if r.Genesis != nil {
+		if err := r.Genesis.CheckLedger(&cm, admissioncontract.Active); err != nil {
+			return nil, reservationState{}, err
+		}
 	}
 	state, err := decodeReservations(&cm)
 	if err == nil {
@@ -114,6 +129,10 @@ func (r *KovaBuildReconciler) readReservations(ctx context.Context, namespace st
 }
 
 func (r *KovaBuildReconciler) initializeReservations(ctx context.Context, namespace string) (*corev1.ConfigMap, reservationState, bool, error) {
+	if r.Genesis != nil {
+		cm, state, err := r.readReservations(ctx, namespace)
+		return cm, state, false, err
+	}
 	var bootstrapNonce string
 	for retry := 0; retry < maxReservationCASAttempts; retry++ {
 		cm, state, err := r.readReservations(ctx, namespace)
@@ -229,7 +248,23 @@ func CheckAdmissionLedger(ctx context.Context, reader client.Reader, namespace s
 	if err := reader.Get(ctx, client.ObjectKey{Namespace: namespace, Name: reservationConfigMap}, &cm); err != nil {
 		return err
 	}
-	state, err := decodeReservations(&cm)
+	return ValidateAdmissionLedgerForGenesis(&cm, cfg)
+}
+
+// GenesisEmptyAdmissionData and ValidateAdmissionLedgerForGenesis expose the
+// existing schema/limit checks to the separate, not-yet-wired bootstrapper.
+// They do not authorize admission or create a ledger.
+func GenesisEmptyAdmissionData(cfg config.Config) (string, error) {
+	r := &KovaBuildReconciler{Cfg: cfg}
+	encoded, err := encodeReservations(r.freshReservations())
+	return string(encoded), err
+}
+
+func ValidateAdmissionLedgerForGenesis(cm *corev1.ConfigMap, cfg config.Config) error {
+	if cm == nil {
+		return fmt.Errorf("active admission ledger is missing")
+	}
+	state, err := decodeReservations(cm)
 	if err != nil {
 		return err
 	}
@@ -358,6 +393,9 @@ func (r *KovaBuildReconciler) writeReservations(ctx context.Context, cm *corev1.
 	data, err := encodeReservations(state)
 	if err != nil {
 		return err
+	}
+	if r.Genesis != nil {
+		return r.Genesis.PatchLedgerData(ctx, cm, admissioncontract.Active, string(data))
 	}
 	copy := cm.DeepCopy()
 	copy.Data = map[string]string{reservationDataKey: string(data)}
@@ -633,8 +671,16 @@ func (r *KovaBuildReconciler) reservationCovered(ctx context.Context, namespace 
 	if err := r.reader().Get(ctx, client.ObjectKey{Namespace: namespace, Name: reservationConfigMap}, &latest); err != nil {
 		return false, err
 	}
+	if r.Genesis != nil {
+		if err := r.Genesis.CheckLedger(&latest, admissioncontract.Active); err != nil {
+			return false, err
+		}
+	}
 	current, err := decodeReservations(&latest)
 	if err != nil {
+		return false, err
+	}
+	if err := r.validateReservationLimits(current); err != nil {
 		return false, err
 	}
 	entry, ok := current.Active[reservationKey(build)]

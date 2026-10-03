@@ -109,3 +109,23 @@ after the Starting transition persists; telemetry is best effort, not an
 exactly-once receipt. Missing/backwards timestamps are omitted, not zero-filled.
 Compare client p95/p99, queue, these segments, target execution, API/CAS errors,
 and node **requests as well as usage** before increasing concurrent admission.
+
+### Service Kubernetes API attribution
+
+The Service exports three Prometheus metric families through controller-runtime's existing `/metrics` endpoint: `kova_service_kube_limiter_wait_seconds`, `kova_service_kube_wire_round_trip_seconds`, and `kova_service_kube_wire_requests_total`.
+They are available without enabling OTel only when `--metrics-bind-address=127.0.0.1:<port>` is configured; the default `0` exposes no scrape endpoint.
+The endpoint is loopback-only inside each Service Pod and has no built-in authentication, so use an operator-owned Pod port-forward to scrape each replica separately.
+Do not expose it through the public Service.
+
+Each Service replica has four independent client-go rate-limiter budgets: `controller`, `leader`, `readiness`, and `http`.
+Clientsets and controller-runtime clients copied from one traffic-class config share its single limiter and keep the same metric class.
+`limiter_wait_seconds` measures one client-go `Wait(ctx)` call before the HTTP attempt and labels only the fixed class and `ok`, `canceled`, `deadline`, or `error` outcome.
+Canceled waits are observed once; they are not wire requests.
+`wire_requests_total` counts each actual RoundTrip by fixed class, normalized `get`/`list`/`watch` or mutation verb, fixed Kubernetes resource bucket, and common status code or bounded status class.
+The `transport_error` status means no usable HTTP response; it is not an HTTP 5xx.
+`wire_round_trip_seconds` records the same attempt from entering the transport until response headers or transport error, labeled only by class and resource.
+It excludes limiter wait, response-body reading/decoding, controller CAS processing and, for watches, the lifetime of the stream after initial headers.
+One high-level GET may make multiple wire attempts, and the metric counts those attempts separately; Service mutation requests still suppress client-go `Retry-After` wire retries.
+No namespace, object name, requester, token, URL path or query is used as a label.
+These per-Pod process metrics are non-durable observations, not an exactly-once request receipt or an API-server-wide QPS total.
+For a guarded-admission burst, measure the final Genesis-enabled `Guard.Check` path: its receipt Secret GETs and Namespace, Genesis, and ledger reads/writes contribute to these client budgets and wire counts around each admitted effect. The metrics diagnose that cost; they do not justify bypassing any guard or receipt check.

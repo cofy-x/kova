@@ -91,10 +91,14 @@ func (b *boundedErrorBuffer) Len() int { return b.buffer.Len() }
 func (c Client) SourceTargets(ctx context.Context, build *kovav1.KovaBuild, sourcePath string) ([]buildcontract.TargetSpec, error) {
 	stdout := boundedResponseBuffer{overflowErr: ErrRunnerResponseTooLarge}
 	var stderr boundedErrorBuffer
+	command := []string{"kovad", "source", "inspect", "--input", sourcePath}
+	if uid := expectedPodUID(build); uid != "" {
+		command = append(command, "--expected-pod-uid", uid)
+	}
 	err := c.Kube.Exec(ctx, build.Namespace, build.Status.RunnerPodName, kube.ExecOptions{
 		Stdout:  &stdout,
 		Stderr:  &stderr,
-		Command: []string{"kovad", "source", "inspect", "--input", sourcePath},
+		Command: command,
 	})
 	if stdout.overflow {
 		return nil, fmt.Errorf("inspect source contract: %w", ErrRunnerResponseTooLarge)
@@ -129,7 +133,7 @@ func (c Client) SubmitBuild(ctx context.Context, build *kovav1.KovaBuild, source
 	err := c.Kube.Exec(ctx, build.Namespace, build.Status.RunnerPodName, kube.ExecOptions{
 		Stdout:  &stdout,
 		Stderr:  &stderr,
-		Command: daemonclient.TransportCommand("POST", daemonclient.BuildPath, BuildQuery(build, c.BuildkitPlatformAddrs, c.RegistryPlainHTTP), sourcePath),
+		Command: daemonclient.TransportCommandForPodUID("POST", daemonclient.BuildPath, BuildQuery(build, c.BuildkitPlatformAddrs, c.RegistryPlainHTTP), sourcePath, expectedPodUID(build)),
 	})
 	if stdout.overflow {
 		return fmt.Errorf("submit build: %w", ErrRunnerResponseTooLarge)
@@ -153,7 +157,7 @@ func (c Client) BuildStatus(ctx context.Context, build *kovav1.KovaBuild) (runne
 	err := c.Kube.Exec(ctx, build.Namespace, build.Status.RunnerPodName, kube.ExecOptions{
 		Stdout:  &stdout,
 		Stderr:  &stderr,
-		Command: daemonclient.TransportCommand("GET", daemonclient.StatusPath, "", ""),
+		Command: daemonclient.TransportCommandForPodUID("GET", daemonclient.StatusPath, "", "", expectedPodUID(build)),
 	})
 	if stdout.overflow {
 		return runner.BuildState{}, fmt.Errorf("%w: %w", ErrInvalidBuildStatus, ErrRunnerResponseTooLarge)
@@ -172,7 +176,7 @@ func (c Client) CancelBuild(ctx context.Context, build *kovav1.KovaBuild) error 
 	var stderr boundedErrorBuffer
 	err := c.Kube.Exec(ctx, build.Namespace, build.Status.RunnerPodName, kube.ExecOptions{
 		Stderr:  &stderr,
-		Command: daemonclient.TransportCommand("POST", daemonclient.CancelPath, "", ""),
+		Command: daemonclient.TransportCommandForPodUID("POST", daemonclient.CancelPath, "", "", expectedPodUID(build)),
 	})
 	if err != nil {
 		return ExecError("cancel build", stderr.Diagnostic(), err)
@@ -186,7 +190,7 @@ func (c Client) Post(ctx context.Context, build *kovav1.KovaBuild, path string, 
 	err := c.Kube.Exec(ctx, build.Namespace, build.Status.RunnerPodName, kube.ExecOptions{
 		Stdout:  &out,
 		Stderr:  &stderr,
-		Command: daemonclient.TransportCommand("POST", "/api/v1/"+path, query, ""),
+		Command: daemonclient.TransportCommandForPodUID("POST", "/api/v1/"+path, query, "", expectedPodUID(build)),
 	})
 	if out.overflow {
 		return nil, ErrExportTooLarge
@@ -241,6 +245,13 @@ func RequestID(build *kovav1.KovaBuild) string {
 		return string(build.UID)
 	}
 	return build.Namespace + "/" + build.Name
+}
+
+func expectedPodUID(build *kovav1.KovaBuild) string {
+	if build != nil && build.Status.AdmissionGenesisWitness != nil {
+		return build.Status.AdmissionGenesisWitness.PodUID
+	}
+	return ""
 }
 
 func ExecError(action string, stderr []byte, err error) error {

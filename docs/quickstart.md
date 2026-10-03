@@ -10,6 +10,7 @@ Container Registry by default.
 - Helm with OCI registry support
 - `kubectl` access that can create namespaced workloads
 - `openssl` for generating the development Service token
+- `jq` and an explicit absolute `KOVA_KUBECONFIG` for create-only installation receipts
 
 Choose a tag from the
 [GitHub release page](https://github.com/cofy-x/kova/releases), then set it once
@@ -20,7 +21,19 @@ selected tag, including a prerelease suffix when applicable:
 export KOVA_VERSION=vX.Y.Z
 export KOVA_CHART_VERSION=${KOVA_VERSION#v}
 export KOVA_PLATFORM=linux/amd64 # or linux/arm64 for the worker nodes
+export KOVA_KUBECONFIG=/absolute/path/to/the-selected-cluster.kubeconfig
+export KUBECONFIG="${KOVA_KUBECONFIG}"
 ```
+
+Install the matching CLI before provisioning admission authority:
+
+```bash
+go install "github.com/cofy-x/kova/cmd/kova@${KOVA_VERSION}"
+kova version
+```
+
+This source guide describes the required Genesis contract in the next candidate.
+Do not combine it with an older release that lacks `kova admission-genesis`; use that release's versioned guide instead.
 
 ## Install Kova
 
@@ -34,16 +47,55 @@ kubectl -n kova create secret generic kova-service-auth \
   --from-literal=token="${KOVA_SERVICE_TOKEN}"
 ```
 
-Apply the selected release CRD, then install the public OCI chart with the Service enabled:
+Use that same explicit kubeconfig for every Kubernetes and Helm command.
+
+This is a fresh installation, not an in-place upgrade.
+For an existing Service, first follow the [stop-and-drain migration and Genesis installation gates](deployment/kubernetes.md).
+Never reuse an old runner namespace name or run old and new writers together.
+
+Apply the selected release CRD, then externally create a fresh runner namespace, Genesis and immutable receipt.
+The helper only reads Kubernetes; the explicit `kubectl create` operations own installation.
+Run this block in Bash; keep its private receipt directory outside Git.
+If any create has an unknown result, stop and inspect the retained original identities; do not rerun or replace it.
 
 ```bash
+set -euo pipefail
 helm show crds oci://ghcr.io/cofy-x/charts/kova \
   --version "${KOVA_CHART_VERSION}" | kubectl apply -f -
+umask 077
+export KOVA_RUNNER_NAMESPACE=kova-jobs-$(openssl rand -hex 6)
+genesis_directory=$(mktemp -d)
+genesis_generation=$(openssl rand -hex 16)
+kubectl create namespace "${KOVA_RUNNER_NAMESPACE}" -o json >"${genesis_directory}/namespace.json"
+genesis_inputs=(
+  --namespace-uid "$(jq -r .metadata.uid "${genesis_directory}/namespace.json")"
+  --generation "${genesis_generation}"
+  --max-active-jobs 20 --max-active-jobs-per-requester 4
+  --worker-slots 20 --max-queued-jobs 1000 --max-queued-jobs-per-requester 100
+)
+kova --kubeconfig "${KOVA_KUBECONFIG}" --namespace "${KOVA_RUNNER_NAMESPACE}" \
+  admission-genesis render-genesis "${genesis_inputs[@]}" >"${genesis_directory}/genesis.json"
+kubectl create -f "${genesis_directory}/genesis.json" -o json >"${genesis_directory}/genesis-created.json"
+kova --kubeconfig "${KOVA_KUBECONFIG}" --namespace "${KOVA_RUNNER_NAMESPACE}" \
+  admission-genesis export-receipt-secret "${genesis_inputs[@]}" \
+  --genesis-uid "$(jq -r .metadata.uid "${genesis_directory}/genesis-created.json")" \
+  --service-namespace kova --secret-name kova-admission-receipt >"${genesis_directory}/receipt.json"
+kubectl create -f "${genesis_directory}/receipt.json" -o json >"${genesis_directory}/receipt-created.json"
+genesis_secret_uid=$(jq -r .metadata.uid "${genesis_directory}/receipt-created.json")
+```
+
+Install the public OCI chart using those original identities:
+
+```bash
 helm upgrade --install kova oci://ghcr.io/cofy-x/charts/kova \
   --version "${KOVA_CHART_VERSION}" \
   --namespace kova \
   --create-namespace \
   --set serviceDaemon.enabled=true \
+  --set-string "serviceDaemon.runnerNamespace=${KOVA_RUNNER_NAMESPACE}" \
+  --set serviceDaemon.admissionGenesis.enabled=true \
+  --set serviceDaemon.admissionGenesis.receiptSecret.name=kova-admission-receipt \
+  --set-string "serviceDaemon.admissionGenesis.receiptSecret.uid=${genesis_secret_uid}" \
   --set serviceDaemon.authentication.mode=static \
   --set serviceDaemon.authentication.staticPrincipal=kova:quickstart \
   --set serviceDaemon.authentication.staticTokenSecret.name=kova-service-auth \
@@ -58,7 +110,7 @@ Grant the quick-start principal permission to submit through the Service. This
 Role does not grant direct access to `KovaBuild`, Pods, or Secrets:
 
 ```bash
-kubectl -n kova create rolebinding kova-quickstart \
+kubectl -n "${KOVA_RUNNER_NAMESPACE}" create rolebinding kova-quickstart \
   --role=kova-service-submitter \
   --user=kova:quickstart
 ```
@@ -75,12 +127,11 @@ kubectl -n kova rollout status deployment/kova
 kubectl -n kova get pods,service
 ```
 
-## Install the CLI
+## Verify the CLI
 
-Install the matching workstation client with Go:
+The CLI installed before Genesis provisioning must still match the runtime release:
 
 ```bash
-go install "github.com/cofy-x/kova/cmd/kova@${KOVA_VERSION}"
 kova version
 ```
 
@@ -96,10 +147,12 @@ registry requires authentication, create a Docker registry Secret in the
 runner namespace:
 
 ```bash
-kubectl -n kova create secret docker-registry kova-registry \
-  --docker-server REGISTRY_HOST \
-  --docker-username REGISTRY_USERNAME \
-  --docker-password REGISTRY_PASSWORD
+for namespace in kova "${KOVA_RUNNER_NAMESPACE}"; do
+  kubectl -n "${namespace}" create secret docker-registry kova-registry \
+    --docker-server REGISTRY_HOST \
+    --docker-username REGISTRY_USERNAME \
+    --docker-password REGISTRY_PASSWORD
+done
 ```
 
 Keep the command out of shared shell history in real environments. Prefer the
@@ -185,11 +238,17 @@ low-level debugging. The
 
 ## Uninstall
 
+Stop submissions and drain all builds and runners before removing their controller or workers.
+Preserve caller-owned results and the installation receipts first.
+After the [drain gate](deployment/kubernetes.md#cross-version-service-upgrade) passes:
+
 ```bash
 helm uninstall kova --namespace kova
-kubectl delete namespace kova
-rm -rf .work/kova-quickstart
 ```
+
+The separate runner namespace and original Genesis/receipt remain as evidence.
+An environment owner may dispose of them only after verifying their original UIDs and resolving every unknown operation.
+Do not reuse that runner namespace name for a later installation.
 
 The chart does not create clusters, cloud accounts, output registries, or
 provider credentials. Those resources remain owned by the consuming

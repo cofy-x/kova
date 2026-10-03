@@ -13,8 +13,10 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/cofy-x/kova/internal/admissioncontract"
+	"github.com/cofy-x/kova/internal/admissionjson"
 	kovav1 "github.com/cofy-x/kova/internal/apis/kova/v1alpha1"
-	"github.com/cofy-x/kova/internal/service/admissionjson"
+	"github.com/cofy-x/kova/internal/service/admissiongenesis"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -26,7 +28,8 @@ import (
 const (
 	ConfigMapName    = "kova-service-queue-admission"
 	IntentAnnotation = "kova.cofy.dev/queue-intent"
-	dataKey          = "queue.json"
+	LedgerDataKey    = "queue.json"
+	dataKey          = LedgerDataKey
 	maxLedgerBytes   = 768 * 1024
 	maxHeaderBytes   = 4096
 	maxIntentBytes   = 512
@@ -57,6 +60,7 @@ type state struct {
 type Store struct {
 	Client         client.Client
 	Reader         client.Reader
+	Genesis        *admissiongenesis.Guard
 	Namespace      string
 	GlobalLimit    int
 	RequesterLimit int
@@ -93,6 +97,30 @@ func (s Store) key() client.ObjectKey {
 
 func (s Store) freshState() state {
 	return state{Version: 1, GlobalLimit: s.GlobalLimit, RequesterLimit: s.RequesterLimit, Intents: map[string]Intent{}}
+}
+
+// GenesisEmptyQueueData and ValidateQueueLedgerForGenesis reuse the current
+// bounded queue schema without letting the bootstrapper create an intent.
+func GenesisEmptyQueueData(globalLimit, requesterLimit int) (string, error) {
+	encoded, err := encodeState((Store{GlobalLimit: globalLimit, RequesterLimit: requesterLimit}).freshState())
+	return string(encoded), err
+}
+
+func ValidateQueueLedgerForGenesis(cm *corev1.ConfigMap, globalLimit, requesterLimit int) error {
+	if cm == nil {
+		return fmt.Errorf("queue admission ledger is missing")
+	}
+	if len(cm.Data) != 1 || len(cm.Data[dataKey]) == 0 || len(cm.Data[dataKey]) > maxLedgerBytes || len(cm.BinaryData) != 0 {
+		return fmt.Errorf("queue admission ledger has invalid data keys or size")
+	}
+	var current state
+	if err := admissionjson.Decode([]byte(cm.Data[dataKey]), &current, allowedQueueField); err != nil {
+		return err
+	}
+	if current.GlobalLimit != globalLimit || current.RequesterLimit != requesterLimit {
+		return fmt.Errorf("queue admission ledger limits differ from receipt")
+	}
+	return validateState(current)
 }
 
 // A 253-byte DNS build ID, two 64-byte hashes, one 32-byte nonce, a
@@ -174,9 +202,22 @@ func allowedQueueField(path []string, key string) bool {
 }
 
 func (s Store) read(ctx context.Context) (*corev1.ConfigMap, state, error) {
+	if s.Genesis != nil {
+		if s.Reader == nil {
+			return nil, state{}, fmt.Errorf("Genesis queue admission requires a direct API reader")
+		}
+		if err := s.Genesis.Check(ctx); err != nil {
+			return nil, state{}, err
+		}
+	}
 	var cm corev1.ConfigMap
 	if err := s.reader().Get(ctx, s.key(), &cm); err != nil {
 		return nil, state{}, err
+	}
+	if s.Genesis != nil {
+		if err := s.Genesis.CheckLedger(&cm, admissioncontract.Queue); err != nil {
+			return nil, state{}, err
+		}
 	}
 	if len(cm.Data) != 1 || len(cm.Data[dataKey]) == 0 || len(cm.Data[dataKey]) > maxLedgerBytes || len(cm.BinaryData) != 0 {
 		return nil, state{}, fmt.Errorf("queue ledger %s has invalid data keys or size", s.key())
@@ -206,6 +247,9 @@ func (s Store) CheckReady(ctx context.Context) error {
 // Service startup must run this before creating the active ledger, otherwise
 // rejecting legacy builds here would leave an unusable half-initialized pair.
 func (s Store) PreflightInitialization(ctx context.Context) error {
+	if s.Genesis != nil {
+		return s.CheckReady(ctx)
+	}
 	if err := validateLimits(s.GlobalLimit, s.RequesterLimit); err != nil {
 		return fmt.Errorf("queue ledger %s has invalid replica limits", s.key())
 	}
@@ -254,6 +298,9 @@ func (s Store) write(ctx context.Context, cm *corev1.ConfigMap, next state) erro
 	if err != nil {
 		return err
 	}
+	if s.Genesis != nil {
+		return s.Genesis.PatchLedgerData(ctx, cm, admissioncontract.Queue, string(data))
+	}
 	copy := cm.DeepCopy()
 	copy.Data = map[string]string{dataKey: string(data)}
 	return s.Client.Update(ctx, copy)
@@ -283,6 +330,9 @@ func waitCAS(ctx context.Context, attempt int) error {
 // made ready. Direct/admin CRs created after startup must not be mistaken for
 // legacy state merely because no HTTP submission has happened yet.
 func (s Store) EnsureInitialized(ctx context.Context) error {
+	if s.Genesis != nil {
+		return s.CheckReady(ctx)
+	}
 	for retry := 0; retry < maxCASAttempts; retry++ {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -389,6 +439,11 @@ func (s Store) Lookup(ctx context.Context, id string) (Intent, bool, error) {
 func (s Store) VerifyForBuild(ctx context.Context, build *kovav1.KovaBuild) error {
 	nonce := build.Annotations[IntentAnnotation]
 	if nonce == "" {
+		if s.Genesis != nil {
+			// Direct/admin CRs do not consume HTTP quota, but they still
+			// require the original committed queue ledger before a grant.
+			return s.CheckReady(ctx)
+		}
 		return nil // Direct/admin CRs are outside the HTTP queue quota.
 	}
 	entry, found, err := s.Lookup(ctx, build.Name)

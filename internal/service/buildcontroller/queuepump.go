@@ -8,6 +8,7 @@ import (
 	"time"
 
 	kovav1 "github.com/cofy-x/kova/internal/apis/kova/v1alpha1"
+	"github.com/cofy-x/kova/internal/service/admissiongenesis"
 	"github.com/cofy-x/kova/internal/service/config"
 	"github.com/cofy-x/kova/internal/service/queueadmission"
 
@@ -37,10 +38,11 @@ const (
 // direct CR/Pod checks and commits its active grant and fairness cursor in one
 // resourceVersion CAS. No individual queued build needs a capacity timer.
 type AdmissionPump struct {
-	Reader client.Reader
-	Cfg    config.Config
-	wake   chan event.GenericEvent
-	kick   chan event.GenericEvent
+	Reader  client.Reader
+	Cfg     config.Config
+	Genesis *admissiongenesis.Guard
+	wake    chan event.GenericEvent
+	kick    chan event.GenericEvent
 	// Repeated CR Create/status events can all point at the same fair head.
 	// This is a leader-local traffic hint, never the source of grant truth.
 	lastWakeUID      types.UID
@@ -117,7 +119,7 @@ func (p *AdmissionPump) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 	}
 	// A missing or changed ledger is not an invitation to reconstruct it from
 	// cache. Both ledgers remain authoritative across leader transitions.
-	r := KovaBuildReconciler{APIReader: p.Reader, Cfg: p.Cfg}
+	r := KovaBuildReconciler{APIReader: p.Reader, Cfg: p.Cfg, Genesis: p.Genesis}
 	ledger, state, err := r.readReservations(ctx, p.Cfg.Namespace)
 	if err != nil {
 		return ctrl.Result{}, err
@@ -146,7 +148,7 @@ func (p *AdmissionPump) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 		// the pump validates it before any possible grant.
 		return result, nil
 	}
-	queue := queueadmission.Store{Reader: p.Reader, Namespace: p.Cfg.Namespace,
+	queue := queueadmission.Store{Reader: p.Reader, Genesis: p.Genesis, Namespace: p.Cfg.Namespace,
 		GlobalLimit: p.Cfg.MaxQueuedJobs, RequesterLimit: p.Cfg.MaxQueuedJobsPerRequester}
 	if err := queue.CheckReady(ctx); err != nil {
 		return ctrl.Result{}, err
@@ -213,7 +215,7 @@ func (p *AdmissionPump) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 // never authorizes ignoring a lost ledger, changed intent, identity mismatch,
 // or closing grant. This bounded reread is needed only after apparent drift.
 func (p *AdmissionPump) recoverConcurrentGrant(ctx context.Context, selectedLedgerRV string, selected *kovav1.KovaBuild, queue queueadmission.Store) (bool, error) {
-	r := KovaBuildReconciler{APIReader: p.Reader, Cfg: p.Cfg}
+	r := KovaBuildReconciler{APIReader: p.Reader, Cfg: p.Cfg, Genesis: p.Genesis}
 	ledger, state, err := r.readReservations(ctx, p.Cfg.Namespace)
 	if err != nil {
 		return false, err

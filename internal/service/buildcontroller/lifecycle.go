@@ -10,6 +10,7 @@ import (
 	kovav1 "github.com/cofy-x/kova/internal/apis/kova/v1alpha1"
 	"github.com/cofy-x/kova/internal/buildcontract"
 	"github.com/cofy-x/kova/internal/runner"
+	"github.com/cofy-x/kova/internal/service/admissiongenesis"
 	"github.com/cofy-x/kova/internal/service/queueadmission"
 	"github.com/cofy-x/kova/internal/service/runnerexec"
 	"github.com/cofy-x/kova/internal/sourcebundle"
@@ -118,6 +119,11 @@ func (r *KovaBuildReconciler) startBuild(ctx context.Context, build *kovav1.Kova
 		// A previous Create may have persisted before its response or the
 		// Starting status update was lost. The stamped nonce proves which
 		// attempt reached storage; no second Create is needed.
+		if r.Genesis != nil {
+			if _, err := r.witnessFromPod(build, owned); err != nil {
+				return ctrl.Result{}, err
+			}
+		}
 		if observed := owned.Annotations[podCreateAttemptKey]; observed != "" {
 			if err := r.completePodCreate(ctx, build, observed); err != nil {
 				return ctrl.Result{}, err
@@ -141,6 +147,9 @@ func (r *KovaBuildReconciler) startBuild(ctx context.Context, build *kovav1.Kova
 			pod.Annotations = map[string]string{}
 		}
 		pod.Annotations[podCreateAttemptKey] = attempt
+		if err := r.stampGenesisPod(ctx, build, &pod, attempt); err != nil {
+			return ctrl.Result{}, err
+		}
 		if err := r.Create(ctx, &pod); err != nil {
 			if !apierrors.IsAlreadyExists(err) {
 				if definitivePodCreateRejection(err) {
@@ -157,6 +166,14 @@ func (r *KovaBuildReconciler) startBuild(ctx context.Context, build *kovav1.Kova
 			}
 			if owned == nil {
 				return ctrl.Result{}, fmt.Errorf("runner Pod %s/%s disappeared after AlreadyExists", build.Namespace, podName)
+			}
+			if r.Genesis != nil {
+				if _, err := r.witnessFromPod(build, owned); err != nil {
+					return ctrl.Result{}, err
+				}
+				if owned.Annotations[podCreateAttemptKey] != attempt {
+					return ctrl.Result{}, fmt.Errorf("Genesis runner Pod Create was won by another attempt")
+				}
 			}
 			if err := r.completePodCreate(ctx, build, attempt); err != nil {
 				return ctrl.Result{}, err
@@ -176,10 +193,29 @@ func (r *KovaBuildReconciler) startBuild(ctx context.Context, build *kovav1.Kova
 	build.Status.ObservedGeneration = build.Generation
 	build.Status.AllocatedConcurrency = int32(decision.Allocation)
 	build.Status.RunnerPodName = podName
+	if r.Genesis != nil {
+		// The API-assigned Pod UID is not known until a direct post-Create
+		// observation. Persist it and the request identity in Starting status
+		// before any path may submit work to the runner.
+		observed, err := r.getOwnedPod(ctx, build)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		witness, err := r.witnessFromPod(build, observed)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		build.Status.AdmissionGenesisWitness = witness
+	}
 	build.Status.StartedAt = &now
 	build.Status.Message = ""
 	apiMeta.RemoveStatusCondition(&build.Status.Conditions, admissionRecoveryCondition)
 	setPhaseCondition(build, kovav1.PhaseStarting, "RunnerCreated", "runner Pod was created")
+	if r.Genesis != nil {
+		if err := r.Genesis.Check(ctx); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
 	if err := r.Status().Update(ctx, build); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -190,14 +226,66 @@ func definitivePodCreateRejection(err error) bool {
 	return apierrors.IsForbidden(err) || apierrors.IsInvalid(err) || apierrors.IsBadRequest(err) || apierrors.IsUnauthorized(err)
 }
 
+// A cancellation request is not proof that an accepted runner has stopped.
+// Observe its exact pre-loss Pod/CR/request witness before any fence or stop:
+// a terminal response moves into receipt verification, an uncertain read
+// preserves the charge, and only a still-live nonterminal response may take
+// the UID-safe cancellation path while the original pair remains healthy.
+func (r *KovaBuildReconciler) reconcileGenesisCancellation(ctx context.Context, build *kovav1.KovaBuild) (ctrl.Result, error) {
+	pairErr := r.Genesis.Check(ctx)
+	if pairErr != nil && !apierrors.IsNotFound(pairErr) && !errors.Is(pairErr, admissiongenesis.ErrChanged) {
+		return ctrl.Result{}, pairErr
+	}
+	current, _, err := r.directGenesisWitness(ctx, build)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if pairErr == nil {
+		if _, err := r.directGenesisCharge(ctx, current); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
+	if current.Status.Phase == kovav1.PhaseVerifying {
+		return r.reconcileVerifying(ctx, current)
+	}
+	if current.Status.Phase != kovav1.PhaseStarting && current.Status.Phase != kovav1.PhaseRunning {
+		return ctrl.Result{}, fmt.Errorf("Genesis cancellation has no observable active phase")
+	}
+	client := runnerexec.Client{Kube: r.Kube, BuildkitPlatformAddrs: r.Cfg.BuildkitPlatformAddrs}
+	state, err := r.observeBuildStatus(ctx, client, current)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if state.Status == "idle" {
+		if current.Status.Phase != kovav1.PhaseStarting {
+			return ctrl.Result{}, fmt.Errorf("Genesis Running runner reported idle; accepted request outcome is uncertain")
+		}
+		return r.stopGenesisRunner(ctx, current, "Cancelled")
+	}
+	done, _, err := runner.WaitDecision(state.Status)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if done {
+		return r.finishObservedBuild(ctx, current, client, state)
+	}
+	if pairErr != nil {
+		return ctrl.Result{}, pairErr
+	}
+	return r.stopGenesisRunner(ctx, current, "Cancelled")
+}
+
 func (r *KovaBuildReconciler) cancelBuild(ctx context.Context, build *kovav1.KovaBuild) (ctrl.Result, error) {
+	if r.Genesis != nil && build.Status.AdmissionGenesisWitness != nil {
+		return ctrl.Result{}, fmt.Errorf("Genesis accepted runner cancellation requires exact terminal observation before stop")
+	}
 	if err := r.fenceReservation(ctx, build); err != nil {
 		return ctrl.Result{}, err
 	}
 	if err := validateRunnerPodStatusName(build); err != nil {
 		return ctrl.Result{}, err
 	}
-	if build.Status.Phase == kovav1.PhaseRunning && build.Status.RunnerPodName != "" {
+	if r.Genesis == nil && build.Status.Phase == kovav1.PhaseRunning && build.Status.RunnerPodName != "" {
 		// Cancellation remains effective when the daemon is already unavailable;
 		// deleting the runner Pod is the authoritative stop operation.
 		cancelCtx, stop := context.WithTimeout(ctx, r.verificationAttemptTimeout())
@@ -212,15 +300,24 @@ func (r *KovaBuildReconciler) cancelBuild(ctx context.Context, build *kovav1.Kov
 
 func (r *KovaBuildReconciler) submitWhenReady(ctx context.Context, build *kovav1.KovaBuild) (ctrl.Result, error) {
 	client := runnerexec.Client{Kube: r.Kube, BuildkitPlatformAddrs: r.Cfg.BuildkitPlatformAddrs, RegistryPlainHTTP: r.Cfg.RegistryPlainHTTP}
+	var pod corev1.Pod
+	if r.Genesis != nil {
+		current, witnessedPod, err := r.directGenesisGrant(ctx, build)
+		if err != nil {
+			return r.observeExistingGenesisSubmission(ctx, build, client, err)
+		}
+		build, pod = current, *witnessedPod
+	}
 	if expired, result, err := r.reconcileExpiredBuild(ctx, build, client); expired {
 		return result, err
 	}
-	var pod corev1.Pod
-	if err := r.getRunnerPod(ctx, build, &pod); err != nil {
-		if apierrors.IsNotFound(err) {
-			return ctrl.Result{}, r.finish(ctx, build, kovav1.PhaseFailed, "RunnerUnavailable", "runner Pod disappeared before the build was submitted")
+	if r.Genesis == nil {
+		if err := r.getRunnerPod(ctx, build, &pod); err != nil {
+			if apierrors.IsNotFound(err) {
+				return ctrl.Result{}, r.finish(ctx, build, kovav1.PhaseFailed, "RunnerUnavailable", "runner Pod disappeared before the build was submitted")
+			}
+			return ctrl.Result{}, err
 		}
-		return ctrl.Result{}, err
 	}
 	if !podReady(&pod) {
 		if reason, message, failed := sourceFetchFailure(&pod); failed {
@@ -250,6 +347,13 @@ func (r *KovaBuildReconciler) submitWhenReady(ctx context.Context, build *kovav1
 	if err := r.clearPollFailure(ctx, build); err != nil {
 		return ctrl.Result{}, err
 	}
+	if r.Genesis != nil {
+		current, witnessedPod, err := r.directGenesisGrant(ctx, build)
+		if err != nil {
+			return r.observeExistingGenesisSubmission(ctx, build, client, err)
+		}
+		build, pod = current, *witnessedPod
+	}
 	operationCtx := ctx
 	cancelOperation := func() {}
 	if r.Cfg.MaxBuildDuration > 0 && build.Status.StartedAt != nil {
@@ -277,12 +381,44 @@ func (r *KovaBuildReconciler) submitWhenReady(ctx context.Context, build *kovav1
 	if !buildcontract.EqualTargetSpecSets(contractTargets(build.Spec.Targets), sourceTargets) {
 		return ctrl.Result{}, r.finish(ctx, build, kovav1.PhaseFailed, "InvalidTargets", "source targets do not exactly match requested targets")
 	}
+	if r.Genesis != nil {
+		current, witnessedPod, err := r.directGenesisGrant(ctx, build)
+		if err != nil {
+			return r.observeExistingGenesisSubmission(ctx, build, client, err)
+		}
+		build, pod = current, *witnessedPod
+	}
 	if expired, result, err := r.reconcileExpiredBuild(ctx, build, client); expired {
 		return result, err
+	}
+	if r.Genesis != nil {
+		current, witnessedPod, err := r.directGenesisGrant(ctx, build)
+		if err != nil {
+			return r.observeExistingGenesisSubmission(ctx, build, client, err)
+		}
+		build, pod = current, *witnessedPod
 	}
 	submitStarted := time.Now()
 	submitErr := client.SubmitBuild(operationCtx, build, sourcePath(build))
 	recordServiceStage(ctx, "submit", submitStarted, submitErr)
+	if r.Genesis != nil {
+		current, after, err := r.directGenesisWitness(ctx, build)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if !samePodUID(&pod, after) {
+			return ctrl.Result{}, fmt.Errorf("Genesis runner Pod UID changed across build submission")
+		}
+		build = current
+		state, statusErr := r.observeBuildStatus(ctx, client, build)
+		if statusErr != nil {
+			return r.retryStatusObservation(ctx, build, statusErr)
+		}
+		if state.Status == "idle" {
+			return ctrl.Result{RequeueAfter: r.activeRequeueAfter(build, time.Second)}, nil
+		}
+		return r.markSubmittedWithTimings(ctx, build, state, after)
+	}
 	if submitErr != nil {
 		// The POST can be accepted even when exec loses its response. The
 		// runner's request ID makes the next submission safe if observation
@@ -302,7 +438,33 @@ func (r *KovaBuildReconciler) submitWhenReady(ctx context.Context, build *kovav1
 	return r.markSubmittedWithTimings(ctx, build, runner.BuildState{Status: "running"}, &pod)
 }
 
+// A pre-loss POST may have been accepted even though its reply or the active
+// ledger later vanished. This path performs only a witness-bound status GET;
+// it never retries SubmitBuild without the original live grant.
+func (r *KovaBuildReconciler) observeExistingGenesisSubmission(ctx context.Context, build *kovav1.KovaBuild, exec runnerexec.Client, grantErr error) (ctrl.Result, error) {
+	if err := r.Genesis.Check(ctx); err == nil ||
+		(!apierrors.IsNotFound(err) && !errors.Is(err, admissiongenesis.ErrChanged)) {
+		// A healthy pair with no live grant is a bypass or cleanup race;
+		// an unavailable API is not proof of committed ledger loss. Neither
+		// grants permission to contact the runner.
+		return ctrl.Result{}, grantErr
+	}
+	current, pod, err := r.directGenesisWitness(ctx, build)
+	if err != nil {
+		return ctrl.Result{}, grantErr
+	}
+	state, err := r.observeBuildStatus(ctx, exec, current)
+	if err != nil || state.Status == "idle" {
+		return ctrl.Result{}, grantErr
+	}
+	return r.markSubmittedWithTimings(ctx, current, state, pod)
+}
+
 func (r *KovaBuildReconciler) markSubmitted(ctx context.Context, build *kovav1.KovaBuild, state runner.BuildState) (ctrl.Result, error) {
+	if r.Genesis != nil && (build.Status.AdmissionGenesisWitness == nil ||
+		state.RequestID != build.Status.AdmissionGenesisWitness.RunnerRequestID) {
+		return ctrl.Result{}, fmt.Errorf("Genesis runner acceptance lacks exact request witness")
+	}
 	if state.RequestID != "" && state.RequestID != runnerexec.RequestID(build) {
 		return ctrl.Result{}, r.finish(ctx, build, kovav1.PhaseFailed, "RunnerProtocolError", "runner reported a different build request")
 	}
@@ -353,6 +515,13 @@ func sourceFetchFailure(pod *corev1.Pod) (string, string, bool) {
 }
 
 func (r *KovaBuildReconciler) pollBuild(ctx context.Context, build *kovav1.KovaBuild) (ctrl.Result, error) {
+	if r.Genesis != nil {
+		current, _, err := r.directGenesisWitness(ctx, build)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		build = current
+	}
 	client := runnerexec.Client{Kube: r.Kube, BuildkitPlatformAddrs: r.Cfg.BuildkitPlatformAddrs}
 	if expired, result, err := r.reconcileExpiredBuild(ctx, build, client); expired {
 		return result, err
@@ -397,9 +566,30 @@ func (r *KovaBuildReconciler) finishObservedBuild(ctx context.Context, build *ko
 }
 
 func (r *KovaBuildReconciler) observeBuildStatus(ctx context.Context, client runnerexec.Client, build *kovav1.KovaBuild) (runner.BuildState, error) {
+	var before *corev1.Pod
+	if r.Genesis != nil {
+		_, witnessed, err := r.directGenesisWitness(ctx, build)
+		if err != nil {
+			return runner.BuildState{}, err
+		}
+		before = witnessed
+	}
 	statusCtx, cancel := context.WithTimeout(ctx, terminalObservationTimeout)
 	defer cancel()
-	return client.BuildStatus(statusCtx, build)
+	state, err := client.BuildStatus(statusCtx, build)
+	if err != nil || r.Genesis == nil {
+		return state, err
+	}
+	_, after, err := r.directGenesisWitness(ctx, build)
+	if err != nil {
+		return runner.BuildState{}, err
+	}
+	if !samePodUID(before, after) ||
+		(state.Status != "idle" && state.RequestID != build.Status.AdmissionGenesisWitness.RunnerRequestID) ||
+		(state.Status == "idle" && state.RequestID != "") {
+		return runner.BuildState{}, fmt.Errorf("Genesis runner status lacks exact Pod and request identity")
+	}
+	return state, nil
 }
 
 func (r *KovaBuildReconciler) reconcileExpiredBuild(ctx context.Context, build *kovav1.KovaBuild, client runnerexec.Client) (bool, ctrl.Result, error) {
@@ -407,6 +597,29 @@ func (r *KovaBuildReconciler) reconcileExpiredBuild(ctx context.Context, build *
 		return false, ctrl.Result{}, nil
 	}
 	state, err := r.observeBuildStatus(ctx, client, build)
+	if r.Genesis != nil {
+		if err != nil {
+			// An uncertain status is not permission to erase an accepted result.
+			return true, ctrl.Result{}, err
+		}
+		if state.Status == "idle" {
+			if build.Status.Phase != kovav1.PhaseStarting {
+				return true, ctrl.Result{}, fmt.Errorf("Genesis Running runner reported idle at expiry; accepted request outcome is uncertain")
+			}
+			result, stopErr := r.stopGenesisRunner(ctx, build, "BuildTimedOut")
+			return true, result, stopErr
+		}
+		done, _, decisionErr := runner.WaitDecision(state.Status)
+		if decisionErr != nil {
+			return true, ctrl.Result{}, decisionErr
+		}
+		if done {
+			result, finishErr := r.finishObservedBuild(ctx, build, client, state)
+			return true, result, finishErr
+		}
+		result, stopErr := r.stopGenesisRunner(ctx, build, "BuildTimedOut")
+		return true, result, stopErr
+	}
 	if err == nil && (state.RequestID == "" || state.RequestID == runnerexec.RequestID(build)) {
 		if done, _, decisionErr := runner.WaitDecision(state.Status); decisionErr == nil && done {
 			result, finishErr := r.finishObservedBuild(ctx, build, client, state)
@@ -426,6 +639,11 @@ func (r *KovaBuildReconciler) clearPollFailure(ctx context.Context, build *kovav
 }
 
 func (r *KovaBuildReconciler) retryStatusObservation(ctx context.Context, build *kovav1.KovaBuild, observationErr error) (ctrl.Result, error) {
+	if r.Genesis != nil && build.Status.AdmissionGenesisWitness != nil {
+		// Poll-window expiry must not convert a transport uncertainty into a
+		// forced stop without a witnessed nonterminal runner response.
+		return ctrl.Result{}, observationErr
+	}
 	if build.Status.RunnerPodName == "" {
 		return ctrl.Result{}, fmt.Errorf("running KovaBuild %s/%s has no runner Pod name", build.Namespace, build.Name)
 	}
@@ -451,6 +669,9 @@ func (r *KovaBuildReconciler) retryStatusObservation(ctx context.Context, build 
 		build.Status.PollFailureSince = &now
 	}
 	if r.Cfg.PollRetryWindow > 0 && time.Since(build.Status.PollFailureSince.Time) >= r.Cfg.PollRetryWindow {
+		if err := r.requireUIDSafePodStop(); err != nil {
+			return ctrl.Result{}, err
+		}
 		if err := r.deleteOwnedRunnerPodAndConfirm(ctx, build, &pod); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -501,8 +722,14 @@ func (r *KovaBuildReconciler) expireActiveBuild(ctx context.Context, build *kova
 	if r.Cfg.MaxBuildDuration <= 0 || build.Status.StartedAt == nil || time.Since(build.Status.StartedAt.Time) < r.Cfg.MaxBuildDuration {
 		return false, ctrl.Result{}, nil
 	}
+	if r.Genesis != nil {
+		return true, ctrl.Result{}, fmt.Errorf("Genesis expiry requires exact nonterminal runner observation before forced stop")
+	}
 	if build.Status.RunnerPodName != "" {
 		if err := validateRunnerPodStatusName(build); err != nil {
+			return true, ctrl.Result{}, err
+		}
+		if err := r.requireUIDSafePodStop(); err != nil {
 			return true, ctrl.Result{}, err
 		}
 		cancelCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
@@ -562,6 +789,15 @@ func (r *KovaBuildReconciler) reconcileTerminal(ctx context.Context, build *kova
 }
 
 func (r *KovaBuildReconciler) reconcileDelete(ctx context.Context, build *kovav1.KovaBuild) (ctrl.Result, error) {
+	if r.Genesis != nil && build.Status.AdmissionGenesisWitness != nil && !isTerminalPhase(build.Status.Phase) {
+		if build.Status.AdmissionGenesisStopIntent != nil {
+			return r.resumeGenesisStop(ctx, build)
+		}
+		// A CR deletion explicitly discards the build result. Unlike the
+		// cancellation annotation, it is not a request to retain a completed
+		// result for verification; still, its Pod stop needs a durable intent.
+		return r.stopGenesisRunner(ctx, build, "Deleted")
+	}
 	if err := r.fenceReservation(ctx, build); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -606,6 +842,35 @@ func (r *KovaBuildReconciler) deleteRunnerAndConfirm(ctx context.Context, build 
 	if err := validateRunnerPodStatusName(build); err != nil {
 		return err
 	}
+	if r.Genesis != nil {
+		if err := r.Genesis.Check(ctx); err != nil {
+			return err
+		}
+		if r.APIReader == nil {
+			return fmt.Errorf("Genesis cleanup requires a direct API reader")
+		}
+		if build.Status.AdmissionGenesisWitness == nil {
+			pod, err := r.getOwnedPod(ctx, build)
+			if err != nil || pod == nil {
+				return err
+			}
+			return fmt.Errorf("Genesis cleanup refuses a runner Pod without durable witness")
+		}
+		current, pod, err := r.directGenesisStopState(ctx, build)
+		if err != nil {
+			return err
+		}
+		if pod == nil {
+			if !isTerminalPhase(current.Status.Phase) {
+				return fmt.Errorf("Genesis cleanup cannot infer a nonterminal result from Pod absence")
+			}
+			return nil
+		}
+		if !isTerminalPhase(current.Status.Phase) && !validGenesisStopIntent(current) {
+			return fmt.Errorf("Genesis cleanup lacks a terminal result or durable stop intent")
+		}
+		return r.deleteOwnedRunnerPodAndConfirm(ctx, current, pod)
+	}
 	pod, err := r.getOwnedPod(ctx, build)
 	if err != nil || pod == nil {
 		return err
@@ -619,6 +884,27 @@ func (r *KovaBuildReconciler) deleteOwnedRunnerPodAndConfirm(ctx context.Context
 	}
 	if pod.UID == "" {
 		return fmt.Errorf("refusing to delete runner Pod %s/%s without a UID", pod.Namespace, pod.Name)
+	}
+	if r.Genesis != nil {
+		if err := r.Genesis.Check(ctx); err != nil {
+			return err
+		}
+		current, observed, err := r.directGenesisStopState(ctx, build)
+		if err != nil {
+			return err
+		}
+		if observed == nil || observed.UID != pod.UID ||
+			(!isTerminalPhase(current.Status.Phase) && !validGenesisStopIntent(current)) {
+			return fmt.Errorf("Genesis Pod deletion lacks exact durable terminal or stop witness")
+		}
+		entry, err := r.directGenesisCharge(ctx, current)
+		if err != nil {
+			return err
+		}
+		if !entry.Closing {
+			return fmt.Errorf("Genesis Pod deletion lacks fenced active charge")
+		}
+		build, pod = current, observed
 	}
 	if observed := pod.Annotations[podCreateAttemptKey]; observed != "" {
 		if err := r.completePodCreate(ctx, build, observed); err != nil {

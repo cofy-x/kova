@@ -11,7 +11,7 @@ WORKER_IMAGE=${WORKER_IMAGE:-localhost:5002/kova:worker-dev}
 KIND_KUBECONFIG=${KIND_KUBECONFIG:-.kind/kova-local.kubeconfig}
 RELEASE_NAME=${RELEASE_NAME:-kova}
 NAMESPACE=${NAMESPACE:-kova}
-SERVICE_RUNNER_NAMESPACE=${SERVICE_RUNNER_NAMESPACE:-${NAMESPACE}}
+SERVICE_RUNNER_NAMESPACE=${SERVICE_RUNNER_NAMESPACE:-kova-service-jobs-$(date -u +%Y%m%d%H%M%S)-$$}
 CLUSTER_REGISTRY=${CLUSTER_REGISTRY:-kind-registry:5000}
 REGISTRY_HOST=${REGISTRY_HOST:-localhost:5002}
 SERVICE_PORT=${SERVICE_PORT:-18080}
@@ -40,6 +40,12 @@ REQUIRE_LEGACY_CRD=${REQUIRE_LEGACY_CRD:-false}
 RESULT_JSONL=${RESULT_JSONL:-}
 KOVA_PLATFORM=$(kova_platform)
 
+if [[ "${KIND_KUBECONFIG}" == /* ]]; then
+  kind_kubeconfig=${KIND_KUBECONFIG}
+else
+  kind_kubeconfig=${ROOT}/${KIND_KUBECONFIG}
+fi
+
 case ${REQUIRE_LEGACY_CRD} in
   true|false) ;;
   *) echo "error: REQUIRE_LEGACY_CRD must be true or false" >&2; exit 2 ;;
@@ -52,12 +58,52 @@ if [[ -n "${BASELINE_CHART}" && "${SERVICE_RUNNER_NAMESPACE}" == "${NAMESPACE}" 
   echo 'error: baseline Service migration requires a fresh runner namespace' >&2
   exit 2
 fi
+if [[ "${SERVICE_RUNNER_NAMESPACE}" == "${NAMESPACE}" ]]; then
+  echo 'error: Service E2E requires a separate, never-used runner namespace' >&2
+  exit 2
+fi
 
 require_cmd curl
 require_cmd docker
 require_cmd helm
 require_cmd jq
 require_cmd kubectl
+require_cmd python3
+
+# Rendering is read-only. Reject an environment overlay that would redirect
+# the Service away from the namespace whose external receipt we will create.
+service_render=$(helm template "${RELEASE_NAME}" "${KOVA_CHART}" --namespace "${NAMESPACE}" \
+  -f "${KOVA_VALUES}" -f "${ROOT}/scripts/chart/genesis-test-values.yaml" \
+  --set serviceDaemon.enabled=true --show-only templates/service-daemon-deployment.yaml)
+if ! awk -v expected="${NAMESPACE}" '
+  /^metadata:$/ { metadata = 1; next }
+  metadata && /^[^ ]/ { metadata = 0 }
+  metadata && /^  namespace:/ { if ($2 != expected) exit 1; found++ }
+  END { if (found != 1) exit 1 }
+' <<<"${service_render}"; then
+  echo 'error: Service values redirect the deployment outside the selected namespace' >&2
+  exit 2
+fi
+
+# An existing live Service is not a fresh-install fixture. Never delete all
+# old CRs/runners or disable their controller just to make a new test fit.
+if [[ -z "${BASELINE_CHART}" && -f "${kind_kubeconfig}" ]]; then
+  old_service=$(kubectl --kubeconfig "${kind_kubeconfig}" -n "${NAMESPACE}" \
+    get deployment "${RELEASE_NAME}-service" --ignore-not-found -o json)
+  if [[ -n "${old_service}" ]] && ! jq -e '.spec.replicas == 0' <<<"${old_service}" >/dev/null; then
+    echo 'error: existing Service must be externally stopped and drained before a fresh E2E install' >&2
+    exit 2
+  fi
+  if [[ -n "${old_service}" ]]; then
+    old_runner_namespace=$(jq -er '
+      [.spec.template.spec.containers[].args[]? | select(startswith("--namespace="))] |
+      if length == 1 then .[0] | ltrimstr("--namespace=") else error("ambiguous runner namespace") end
+    ' <<<"${old_service}")
+    KUBECONFIG="${kind_kubeconfig}" NAMESPACE="${NAMESPACE}" \
+      RUNNER_NAMESPACE="${old_runner_namespace}" RELEASE_NAME="${RELEASE_NAME}" \
+      "${ROOT}/scripts/deployment/verify-kovabuild-drained.sh"
+  fi
+fi
 
 # Opt-in receipts are allocated before any Kind/image side effects. The base
 # names a private .work/ location; each invocation gets a distinct file.
@@ -98,10 +144,10 @@ if [[ -n "${BASELINE_CHART}" ]]; then
     KIND_LOAD_IMAGES=false \
     VERIFY_RETRY_CRD_SCHEMA=false \
     "${ROOT}/scripts/kind/deploy-kind.sh"
-  kubectl --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" -n "${NAMESPACE}" \
+  kubectl --kubeconfig "${kind_kubeconfig}" -n "${NAMESPACE}" \
     scale "deployment/${RELEASE_NAME}-service" --replicas=0 >/dev/null
   drain_deadline=$((SECONDS + 120))
-  until KUBECONFIG="${ROOT}/${KIND_KUBECONFIG}" NAMESPACE="${NAMESPACE}" RELEASE_NAME="${RELEASE_NAME}" \
+  until KUBECONFIG="${kind_kubeconfig}" NAMESPACE="${NAMESPACE}" RELEASE_NAME="${RELEASE_NAME}" \
     "${ROOT}/scripts/deployment/verify-kovabuild-drained.sh"; do
     if (( SECONDS >= drain_deadline )); then
       echo 'error: old Service did not drain after scale-down' >&2
@@ -110,34 +156,24 @@ if [[ -n "${BASELINE_CHART}" ]]; then
     sleep 2
   done
   if [[ "${REQUIRE_LEGACY_CRD}" == true ]]; then
-    KUBECONFIG="${ROOT}/${KIND_KUBECONFIG}" \
+    KUBECONFIG="${kind_kubeconfig}" \
       "${ROOT}/scripts/deployment/verify-kovabuild-crd.sh" --expect-legacy
-    KUBECONFIG="${ROOT}/${KIND_KUBECONFIG}" \
+    KUBECONFIG="${kind_kubeconfig}" \
       "${ROOT}/scripts/deployment/probe-kovabuild-status.sh" --expect-pruned
-    KUBECONFIG="${ROOT}/${KIND_KUBECONFIG}" NAMESPACE="${NAMESPACE}" RELEASE_NAME="${RELEASE_NAME}" \
+    KUBECONFIG="${kind_kubeconfig}" NAMESPACE="${NAMESPACE}" RELEASE_NAME="${RELEASE_NAME}" \
       "${ROOT}/scripts/deployment/verify-kovabuild-drained.sh"
   fi
   baseline_revision=$(helm history "${RELEASE_NAME}" \
-    --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" \
+    --kubeconfig "${kind_kubeconfig}" \
     --namespace "${NAMESPACE}" -o json | jq -r 'last.revision')
   helm show crds "${KOVA_CHART}" | \
-    kubectl --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" apply -f -
-  KUBECONFIG="${ROOT}/${KIND_KUBECONFIG}" \
+    kubectl --kubeconfig "${kind_kubeconfig}" apply -f -
+  KUBECONFIG="${kind_kubeconfig}" \
     "${ROOT}/scripts/deployment/verify-kovabuild-crd.sh"
-  KUBECONFIG="${ROOT}/${KIND_KUBECONFIG}" \
+  KUBECONFIG="${kind_kubeconfig}" \
     "${ROOT}/scripts/deployment/probe-kovabuild-status.sh" --expect-persisted
 else
   "${ROOT}/scripts/kind/deploy-kind.sh"
-fi
-
-# The baseline path passed a drain gate; never erase an unknown old build or
-# runner to make migration appear safe. The non-baseline quickstart keeps its
-# historical cleanup of test-owned resources in the disposable Kind namespace.
-if [[ -z "${BASELINE_CHART}" ]]; then
-  kubectl --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" -n "${NAMESPACE}" \
-    delete kovabuild --all --ignore-not-found --wait=false || true
-  kubectl --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" -n "${NAMESPACE}" \
-    delete pod -l 'app.kubernetes.io/name=kova-runner' --ignore-not-found || true
 fi
 
 legacy_upgrade_probe=legacy-starting-upgrade-probe
@@ -146,19 +182,14 @@ if [[ -n "${BASELINE_CHART}" ]]; then
   # The production drain gate must pass immediately before upgrading. The
   # optional legacy-CRD fixture below then injects an intentionally unsafe
   # old build to prove the new namespace does not touch it.
-  KUBECONFIG="${ROOT}/${KIND_KUBECONFIG}" NAMESPACE="${NAMESPACE}" RELEASE_NAME="${RELEASE_NAME}" \
+  KUBECONFIG="${kind_kubeconfig}" NAMESPACE="${NAMESPACE}" RELEASE_NAME="${RELEASE_NAME}" \
     "${ROOT}/scripts/deployment/verify-kovabuild-drained.sh"
-  if kubectl --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" get namespace "${SERVICE_RUNNER_NAMESPACE}" >/dev/null 2>&1; then
-    echo "error: fresh runner namespace ${SERVICE_RUNNER_NAMESPACE} already exists" >&2
-    exit 1
-  fi
-  kubectl --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" create namespace "${SERVICE_RUNNER_NAMESPACE}" >/dev/null
 fi
 if [[ "${REQUIRE_LEGACY_CRD}" == true ]]; then
   # Inject a late old Starting runner after the production drain gate passes.
   # The new controller must not touch its old namespace if an operator bypasses
   # that gate or a late old request reaches the API server.
-  KUBECONFIG="${ROOT}/${KIND_KUBECONFIG}" NAMESPACE="${NAMESPACE}" RELEASE_NAME="${RELEASE_NAME}" \
+  KUBECONFIG="${kind_kubeconfig}" NAMESPACE="${NAMESPACE}" RELEASE_NAME="${RELEASE_NAME}" \
     "${ROOT}/scripts/deployment/verify-kovabuild-drained.sh"
   jq -n --arg namespace "${NAMESPACE}" --arg name "${legacy_upgrade_probe}" \
     --arg target "${SERVICE_TARGET}" --arg platform "${KOVA_PLATFORM}" \
@@ -167,7 +198,7 @@ if [[ "${REQUIRE_LEGACY_CRD}" == true ]]; then
         source:{uri:"oci://registry.invalid/source@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
           digest:"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
         build:{format:"oci",concurrency:1}}}' | \
-    kubectl --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" create -f - >/dev/null
+    kubectl --kubeconfig "${kind_kubeconfig}" create -f - >/dev/null
   jq -n --arg namespace "${NAMESPACE}" --arg name "${legacy_upgrade_pod}" \
     --arg image "${BASELINE_RUNNER_IMAGE}" \
     '{apiVersion:"v1",kind:"Pod",metadata:{name:$name,namespace:$namespace,
@@ -175,19 +206,19 @@ if [[ "${REQUIRE_LEGACY_CRD}" == true ]]; then
       spec:{restartPolicy:"Never",securityContext:{runAsNonRoot:true,runAsUser:65532,runAsGroup:65532},
         containers:[{name:"runner",image:$image,imagePullPolicy:"IfNotPresent",command:["kovad","daemon"],
           readinessProbe:{exec:{command:["/usr/bin/test","-S","/tmp/kova.sock"]},periodSeconds:1,timeoutSeconds:1}}]}}' | \
-    kubectl --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" create -f - >/dev/null
-  kubectl --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" -n "${NAMESPACE}" \
+    kubectl --kubeconfig "${kind_kubeconfig}" create -f - >/dev/null
+  kubectl --kubeconfig "${kind_kubeconfig}" -n "${NAMESPACE}" \
     wait "pod/${legacy_upgrade_pod}" --for=condition=Ready --timeout=120s
-  legacy_status=$(kubectl --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" -n "${NAMESPACE}" \
+  legacy_status=$(kubectl --kubeconfig "${kind_kubeconfig}" -n "${NAMESPACE}" \
     exec "${legacy_upgrade_pod}" -- kovad transport --method GET --path /api/v1/build/status)
   if ! jq -e '.status == "idle" and .capabilities == null' <<<"${legacy_status}" >/dev/null; then
     echo "error: old runner is not idle without protocol capability: ${legacy_status}" >&2
     exit 1
   fi
-  kubectl --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" -n "${NAMESPACE}" \
+  kubectl --kubeconfig "${kind_kubeconfig}" -n "${NAMESPACE}" \
     patch kovabuild "${legacy_upgrade_probe}" --type=merge --subresource=status \
     -p "{\"status\":{\"phase\":\"Starting\",\"runnerPodName\":\"${legacy_upgrade_pod}\",\"allocatedConcurrency\":1}}" >/dev/null
-  if gate_output=$(KUBECONFIG="${ROOT}/${KIND_KUBECONFIG}" NAMESPACE="${NAMESPACE}" RELEASE_NAME="${RELEASE_NAME}" \
+  if gate_output=$(KUBECONFIG="${kind_kubeconfig}" NAMESPACE="${NAMESPACE}" RELEASE_NAME="${RELEASE_NAME}" \
     "${ROOT}/scripts/deployment/verify-kovabuild-drained.sh" 2>&1); then
     echo 'error: quiescence gate accepted an old Starting runner' >&2
     exit 1
@@ -198,16 +229,33 @@ if [[ "${REQUIRE_LEGACY_CRD}" == true ]]; then
   fi
 fi
 
+genesis_context=$(kubectl --kubeconfig "${kind_kubeconfig}" config current-context)
+genesis_system_uid=$(kubectl --kubeconfig "${kind_kubeconfig}" get namespace kube-system -o jsonpath='{.metadata.uid}')
+mkdir -p "${ROOT}/.work/service-genesis"
+genesis_values=$(python3 "${ROOT}/scripts/kind/create-service-genesis.py" \
+  --kubeconfig "${kind_kubeconfig}" --context "${genesis_context}" \
+  --kube-system-uid "${genesis_system_uid}" \
+  --kova-cli "${KOVA_CLI}" --release "${RELEASE_NAME}" \
+  --service-namespace "${NAMESPACE}" --runner-namespace "${SERVICE_RUNNER_NAMESPACE}" \
+  --acknowledge "${genesis_context}/${NAMESPACE}/${SERVICE_RUNNER_NAMESPACE}" \
+  --output-directory "${ROOT}/.work/service-genesis/${SERVICE_RUNNER_NAMESPACE}" \
+  --max-active-jobs "${SERVICE_MAX_ACTIVE_JOBS}" \
+  --max-active-jobs-per-requester "${SERVICE_MAX_ACTIVE_JOBS_PER_REQUESTER}" \
+  --worker-slots "${SERVICE_WORKER_SLOTS}" \
+  --max-queued-jobs "${SERVICE_MAX_QUEUED_JOBS}" \
+  --max-queued-jobs-per-requester "${SERVICE_MAX_QUEUED_JOBS_PER_REQUESTER}")
+echo "Genesis installation evidence: $(dirname "${genesis_values}")" >&2
+
 sync_service_auth_secret() (
   local token_file
   umask 077
   token_file=$(mktemp "${TMPDIR:-/tmp}/kova-service-e2e-token.XXXXXX")
   trap 'rm -f "${token_file}"' EXIT
   printf '%s' "${SERVICE_AUTH_TOKEN}" >"${token_file}"
-  kubectl --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" -n "${NAMESPACE}" \
+  kubectl --kubeconfig "${kind_kubeconfig}" -n "${NAMESPACE}" \
     create secret generic "${SERVICE_AUTH_SECRET}" --from-file=token="${token_file}" \
     --dry-run=client -o yaml | \
-    kubectl --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" apply -f - >/dev/null
+    kubectl --kubeconfig "${kind_kubeconfig}" apply -f - >/dev/null
 )
 sync_service_auth_secret
 
@@ -218,9 +266,10 @@ if [[ -n "${BASELINE_CHART}" ]]; then
   service_replicas=0
 fi
 helm upgrade --install "${RELEASE_NAME}" "${KOVA_CHART}" \
-  --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" \
+  --kubeconfig "${kind_kubeconfig}" \
   --namespace "${NAMESPACE}" --create-namespace --wait --timeout 180s \
   -f "${KOVA_VALUES}" \
+  -f "${genesis_values}" \
   --set-string "images.controller.repository=${CONTROLLER_IMAGE%:*}" \
   --set-string "images.controller.tag=${CONTROLLER_IMAGE##*:}" \
   --set-string "images.runner.repository=${RUNNER_IMAGE%:*}" \
@@ -244,41 +293,41 @@ helm upgrade --install "${RELEASE_NAME}" "${KOVA_CHART}" \
   --set serviceDaemon.runnerImagePullSecret= \
   --set-string "serviceDaemon.registryPlainHTTP[0]=${CLUSTER_REGISTRY}"
 
-kubectl --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" -n "${SERVICE_RUNNER_NAMESPACE}" \
+kubectl --kubeconfig "${kind_kubeconfig}" -n "${SERVICE_RUNNER_NAMESPACE}" \
   create rolebinding "${RELEASE_NAME}-e2e-submitter" \
   --role="${RELEASE_NAME}-service-submitter" --user=kova:e2e \
   --dry-run=client -o yaml | \
-  kubectl --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" apply -f - >/dev/null
+  kubectl --kubeconfig "${kind_kubeconfig}" apply -f - >/dev/null
 
 if [[ -n "${BASELINE_CHART}" ]]; then
-  kubectl --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" -n "${NAMESPACE}" \
+  kubectl --kubeconfig "${kind_kubeconfig}" -n "${NAMESPACE}" \
     scale "deployment/${RELEASE_NAME}-service" --replicas="${SERVICE_REPLICAS}" >/dev/null
-  kubectl --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" -n "${NAMESPACE}" \
+  kubectl --kubeconfig "${kind_kubeconfig}" -n "${NAMESPACE}" \
     rollout status "deployment/${RELEASE_NAME}-service" --timeout=180s
 fi
 if [[ "${REQUIRE_LEGACY_CRD}" == true ]]; then
   # The upgraded Service watches only the fresh runner namespace. A late old
   # Starting CR and idle old runner must remain untouched in the old one.
   sleep 5
-  observed=$(kubectl --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" -n "${NAMESPACE}" \
+  observed=$(kubectl --kubeconfig "${kind_kubeconfig}" -n "${NAMESPACE}" \
     get kovabuild "${legacy_upgrade_probe}" -o json)
   if ! jq -e '.status.phase == "Starting" and .status.runnerPodName == "kova-job-legacy-starting-upgrade-probe"' \
     <<<"${observed}" >/dev/null; then
     echo "error: upgraded Service touched an old-namespace Starting build: ${observed}" >&2
     exit 1
   fi
-  legacy_status=$(kubectl --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" -n "${NAMESPACE}" \
+  legacy_status=$(kubectl --kubeconfig "${kind_kubeconfig}" -n "${NAMESPACE}" \
     exec "${legacy_upgrade_pod}" -- kovad transport --method GET --path /api/v1/build/status)
   if ! jq -e '.status == "idle"' <<<"${legacy_status}" >/dev/null; then
     echo "error: upgraded Service submitted to the old-namespace runner: ${legacy_status}" >&2
     exit 1
   fi
-  kubectl --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" -n "${NAMESPACE}" \
+  kubectl --kubeconfig "${kind_kubeconfig}" -n "${NAMESPACE}" \
     delete kovabuild "${legacy_upgrade_probe}" --wait=true --timeout=60s >/dev/null
-  kubectl --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" -n "${NAMESPACE}" \
+  kubectl --kubeconfig "${kind_kubeconfig}" -n "${NAMESPACE}" \
     delete pod "${legacy_upgrade_pod}" --wait=true --timeout=60s >/dev/null
 fi
-kubectl --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" -n "${NAMESPACE}" \
+kubectl --kubeconfig "${kind_kubeconfig}" -n "${NAMESPACE}" \
   rollout status "deployment/${RELEASE_NAME}-service" --timeout=180s
 
 too_many_targets=$(jq -n --arg registry "${CLUSTER_REGISTRY}" --arg platform "${KOVA_PLATFORM}" \
@@ -286,7 +335,7 @@ too_many_targets=$(jq -n --arg registry "${CLUSTER_REGISTRY}" --arg platform "${
 if jq -n --argjson targets "${too_many_targets}" --arg namespace "${SERVICE_RUNNER_NAMESPACE}" --arg uri \
   "oci://${CLUSTER_REGISTRY}/kova-sources/invalid@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" \
   '{apiVersion:"kova.cofy.dev/v1alpha1",kind:"KovaBuild",metadata:{name:"too-many-targets",namespace:$namespace},spec:{requester:{username:"e2e"},targets:$targets,source:{uri:$uri,digest:"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},build:{format:"oci",concurrency:1}}}' | \
-  kubectl --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" create --dry-run=server -f - >/dev/null 2>&1; then
+  kubectl --kubeconfig "${kind_kubeconfig}" create --dry-run=server -f - >/dev/null 2>&1; then
   echo "error: Kubernetes API accepted 101 logical targets" >&2
   exit 1
 fi
@@ -296,7 +345,7 @@ assert_kubernetes_rejects_targets() {
   if jq -n --argjson targets "${targets}" --arg namespace "${SERVICE_RUNNER_NAMESPACE}" --arg uri \
     "oci://${CLUSTER_REGISTRY}/kova-sources/invalid@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" \
     '{apiVersion:"kova.cofy.dev/v1alpha1",kind:"KovaBuild",metadata:{generateName:"invalid-targets-",namespace:$namespace},spec:{requester:{username:"e2e"},targets:$targets,source:{uri:$uri,digest:"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},build:{format:"oci",concurrency:1}}}' | \
-    kubectl --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" create --dry-run=server -f - >/dev/null 2>&1; then
+    kubectl --kubeconfig "${kind_kubeconfig}" create --dry-run=server -f - >/dev/null 2>&1; then
     echo "error: Kubernetes API accepted ${label} targets" >&2
     exit 1
   fi
@@ -325,7 +374,7 @@ source_uri=${source_uri/oci:\/\/${REGISTRY_HOST}/oci:\/\/${CLUSTER_REGISTRY}}
 [[ "${source_digest}" =~ ^sha256:[a-f0-9]{64}$ ]]
 
 port_forward_log=$(mktemp)
-kubectl --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" -n "${NAMESPACE}" \
+kubectl --kubeconfig "${kind_kubeconfig}" -n "${NAMESPACE}" \
   port-forward "svc/${RELEASE_NAME}-service" "${SERVICE_PORT}:8080" >"${port_forward_log}" 2>&1 &
 port_forward_pid=$!
 cleanup() {
@@ -468,7 +517,7 @@ printf '%s' "${results}" | jq -e --arg image "${SERVICE_TARGET}" --arg digest "$
 printf '%s' "${results}" | jq -r \
   '"Service E2E: negative contract fixture failed as expected; positive build succeeded; source=" + .source_digest +
    "; outputs=" + ([.outputs[] | .format + "@" + .manifest_digest] | join(","))'
-kubectl --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" -n "${SERVICE_RUNNER_NAMESPACE}" get kovabuild "${job_id}" \
+kubectl --kubeconfig "${kind_kubeconfig}" -n "${SERVICE_RUNNER_NAMESPACE}" get kovabuild "${job_id}" \
   -o jsonpath='{.status.outputs[0].manifestDigest}' | grep -E '^sha256:[a-f0-9]{64}$' >/dev/null
 
 terminal_logs_status=$(curl -sS -o /dev/null -w '%{http_code}' "${auth_header[@]}" \
@@ -484,7 +533,7 @@ cleanup_deadline=$((SECONDS + 120))
 while (( SECONDS < cleanup_deadline )); do
   remaining=0
   for completed_job_id in "${failed_job_id}" "${job_id}"; do
-    if kubectl --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" -n "${SERVICE_RUNNER_NAMESPACE}" \
+    if kubectl --kubeconfig "${kind_kubeconfig}" -n "${SERVICE_RUNNER_NAMESPACE}" \
       get kovabuild "${completed_job_id}" >/dev/null 2>&1; then
       remaining=1
     fi
@@ -493,7 +542,7 @@ while (( SECONDS < cleanup_deadline )); do
   sleep 5
 done
 for completed_job_id in "${failed_job_id}" "${job_id}"; do
-  if kubectl --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" -n "${SERVICE_RUNNER_NAMESPACE}" \
+  if kubectl --kubeconfig "${kind_kubeconfig}" -n "${SERVICE_RUNNER_NAMESPACE}" \
     get kovabuild "${completed_job_id}" >/dev/null 2>&1; then
     echo "error: KovaBuild ${completed_job_id} was not removed after TTL" >&2
     exit 1
@@ -501,11 +550,11 @@ for completed_job_id in "${failed_job_id}" "${job_id}"; do
 done
 
 if [[ -n "${baseline_revision}" ]]; then
-  kubectl --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" -n "${NAMESPACE}" \
+  kubectl --kubeconfig "${kind_kubeconfig}" -n "${NAMESPACE}" \
     scale "deployment/${RELEASE_NAME}-service" --replicas=0 >/dev/null
   drained_namespace() {
     local runner_namespace=$1
-    KUBECONFIG="${ROOT}/${KIND_KUBECONFIG}" NAMESPACE="${NAMESPACE}" \
+    KUBECONFIG="${kind_kubeconfig}" NAMESPACE="${NAMESPACE}" \
       RUNNER_NAMESPACE="${runner_namespace}" RELEASE_NAME="${RELEASE_NAME}" \
       "${ROOT}/scripts/deployment/verify-kovabuild-drained.sh"
   }
@@ -518,9 +567,9 @@ if [[ -n "${baseline_revision}" ]]; then
     sleep 2
   done
   helm rollback "${RELEASE_NAME}" "${baseline_revision}" \
-    --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" --namespace "${NAMESPACE}" \
+    --kubeconfig "${kind_kubeconfig}" --namespace "${NAMESPACE}" \
     --wait --timeout 180s
-  kubectl --kubeconfig "${ROOT}/${KIND_KUBECONFIG}" -n "${NAMESPACE}" \
+  kubectl --kubeconfig "${kind_kubeconfig}" -n "${NAMESPACE}" \
     rollout status "deployment/${RELEASE_NAME}" --timeout=180s
 fi
 

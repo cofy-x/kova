@@ -22,8 +22,12 @@ func TransportCLICommand() *cli.Command {
 			&cli.StringFlag{Name: "path", Required: true},
 			&cli.StringFlag{Name: "query"},
 			&cli.StringFlag{Name: "input"},
+			&cli.StringFlag{Name: "expected-pod-uid"},
 		},
 		Action: func(c *cli.Context) error {
+			if err := daemonclient.ValidateExpectedPodUID(c.String("expected-pod-uid")); err != nil {
+				return err
+			}
 			query, err := url.ParseQuery(c.String("query"))
 			if err != nil {
 				return err

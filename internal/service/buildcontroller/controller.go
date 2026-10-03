@@ -9,6 +9,7 @@ import (
 	"github.com/cofy-x/kova/internal/buildcontract"
 	"github.com/cofy-x/kova/internal/kube"
 	"github.com/cofy-x/kova/internal/observability"
+	"github.com/cofy-x/kova/internal/service/admissiongenesis"
 	"github.com/cofy-x/kova/internal/service/config"
 	"github.com/cofy-x/kova/internal/service/queueadmission"
 
@@ -39,6 +40,7 @@ type KovaBuildReconciler struct {
 	Kube     kube.API
 	Cfg      config.Config
 	Recorder record.EventRecorder
+	Genesis  *admissiongenesis.Guard
 	// APIReader bypasses the manager cache for capacity and recovery reads.
 	APIReader         client.Reader
 	verificationOnce  sync.Once
@@ -47,7 +49,7 @@ type KovaBuildReconciler struct {
 
 func (r *KovaBuildReconciler) queueStoreForNamespace(namespace string) queueadmission.Store {
 	return queueadmission.Store{
-		Client: r.Client, Reader: r.reader(), Namespace: namespace,
+		Client: r.Client, Reader: r.reader(), Genesis: r.Genesis, Namespace: namespace,
 		GlobalLimit: r.Cfg.MaxQueuedJobs, RequesterLimit: r.Cfg.MaxQueuedJobsPerRequester,
 	}
 }
@@ -61,14 +63,30 @@ func (r *KovaBuildReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return r.reconcileDelete(ctx, &build)
 	}
 	if controllerutil.AddFinalizer(&build, cleanupFinalizer) {
+		if r.Genesis != nil {
+			if err := r.Genesis.Check(ctx); err != nil {
+				return ctrl.Result{}, err
+			}
+		}
 		if err := r.Update(ctx, &build); err != nil {
 			return ctrl.Result{}, err
 		}
 		return ctrl.Result{Requeue: true}, nil
 	}
+	// A persisted stop decision survives the UID delete and a lost terminal
+	// status response. Resume it before any runner GET or fresh cancellation.
+	if r.Genesis != nil && build.Status.AdmissionGenesisStopIntent != nil && !isTerminalPhase(build.Status.Phase) {
+		return r.resumeGenesisStop(ctx, &build)
+	}
 	// Once the runner reported failure, cancellation cannot rewrite that
 	// outcome; only bounded partial-receipt verification remains.
 	if cancellationRequested(&build) && !isTerminalPhase(build.Status.Phase) && build.Status.Phase != kovav1.PhaseFailedVerifying {
+		if r.Genesis != nil && build.Status.AdmissionGenesisWitness != nil {
+			switch build.Status.Phase {
+			case kovav1.PhaseStarting, kovav1.PhaseRunning, kovav1.PhaseVerifying:
+				return r.reconcileGenesisCancellation(ctx, &build)
+			}
+		}
 		return r.cancelBuild(ctx, &build)
 	}
 	if isTerminalPhase(build.Status.Phase) {
@@ -76,6 +94,11 @@ func (r *KovaBuildReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	}
 	switch build.Status.Phase {
 	case "", kovav1.PhaseQueued:
+		if r.Genesis != nil {
+			if err := r.Genesis.Check(ctx); err != nil {
+				return ctrl.Result{}, err
+			}
+		}
 		if _, err := buildcontract.NormalizeTargetSpecs(contractTargets(build.Spec.Targets)); err != nil {
 			return ctrl.Result{}, r.finish(ctx, &build, kovav1.PhaseFailed, "InvalidTargets", err.Error())
 		}

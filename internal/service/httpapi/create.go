@@ -25,6 +25,11 @@ func (s *Server) handleCreateBuild(c echo.Context) error {
 	if err := s.authorize(c.Request().Context(), principal, "create", ""); err != nil {
 		return authorizationFailure(c, err)
 	}
+	// Even an idempotent POST replay cannot use a replaced or lost original
+	// installation as authority. Read-only GET routes remain available.
+	if err := s.checkGenesis(c.Request().Context()); err != nil {
+		return serviceUnavailable(c, err)
+	}
 	// The CRD bounds these identities by Unicode characters. Reject an
 	// unsupported authenticated identity before writing a durable queue intent.
 	if principal.Username == "" || !utf8.ValidString(principal.Username) || utf8.RuneCountInString(principal.Username) > 253 ||
@@ -81,6 +86,9 @@ func (s *Server) handleCreateBuild(c echo.Context) error {
 	if err := s.checkActiveAdmissionLedger(c.Request().Context()); err != nil {
 		return serviceUnavailable(c, err)
 	}
+	if err := s.checkGenesis(c.Request().Context()); err != nil {
+		return serviceUnavailable(c, err)
+	}
 	store := s.queueStore()
 	intent, fresh, err := store.Reserve(c.Request().Context(), &build)
 	if err != nil {
@@ -110,6 +118,12 @@ func (s *Server) handleCreateBuild(c echo.Context) error {
 		return c.JSON(http.StatusOK, buildJobFromCR(&existing, s.cfg))
 	}
 	build.Annotations = map[string]string{queueadmission.IntentAnnotation: intent.Nonce}
+	// A reserve is not a reusable permission for a later name-addressed CR
+	// Create. On refusal the intent stays held; an absent CR is not proof that
+	// an already-sent Create cannot arrive later.
+	if err := s.checkGenesis(c.Request().Context()); err != nil {
+		return serviceUnavailable(c, err)
+	}
 	if err := s.client.Create(c.Request().Context(), &build); err != nil {
 		if apierrors.IsAlreadyExists(err) {
 			var existing kovav1.KovaBuild
@@ -117,6 +131,9 @@ func (s *Server) handleCreateBuild(c echo.Context) error {
 				return internalError(c, getErr)
 			}
 			if existing.Annotations[queueadmission.IntentAnnotation] != intent.Nonce {
+				if err := s.checkGenesis(c.Request().Context()); err != nil {
+					return serviceUnavailable(c, err)
+				}
 				if err := store.ReleaseRejected(c.Request().Context(), id, intent.Nonce); err != nil {
 					return internalError(c, err)
 				}
@@ -127,6 +144,9 @@ func (s *Server) handleCreateBuild(c echo.Context) error {
 			return c.JSON(http.StatusOK, buildJobFromCR(&existing, s.cfg))
 		}
 		if definitiveCreateRejection(err) {
+			if guardErr := s.checkGenesis(c.Request().Context()); guardErr != nil {
+				return serviceUnavailable(c, guardErr)
+			}
 			if releaseErr := store.ReleaseRejected(c.Request().Context(), id, intent.Nonce); releaseErr != nil {
 				return internalError(c, releaseErr)
 			}

@@ -88,6 +88,16 @@ serviceDaemon:
   maxQueuedJobs: 1000
   maxQueuedJobsPerRequester: 100
   workerSlots: 20
+  # Opt-in only after an external installer has created a new runner Namespace,
+  # Initializing Genesis, and immutable receipt Secret. Kova never creates the
+  # receipt Secret or Genesis from these values.
+  admissionGenesis:
+    enabled: false
+    receiptSecret:
+      name: ""
+      # Record the original Secret UID after external creation. A replacement
+      # at the same name must never become the Service's authority.
+      uid: ""
   controllerConcurrency: 4
   # Each Service Pod gives build-controller and HTTP admission independent
   # Kubernetes REST budgets at these values. Lease renewal and readiness
