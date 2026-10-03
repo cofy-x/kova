@@ -476,7 +476,7 @@ func (a *podTemplateAPI) preflight(ctx context.Context, m podTemplateManifest, p
 				metav1.ListMeta `json:"metadata"`
 				Items           []json.RawMessage `json:"items"`
 			}
-			if _, err := a.request(ctx, "GET", "/api/v1/namespaces/"+ns.Name+"/"+resourceName, nil, &list); err != nil || len(list.Items) != 0 ||
+			if _, err := a.request(ctx, "GET", "/api/v1/namespaces/"+ns.Name+"/"+resourceName, nil, &list); err != nil || list.Items == nil || len(list.Items) != 0 ||
 				list.Kind != kind || list.APIVersion != "v1" || list.ResourceVersion == "" || list.Continue != "" || (list.RemainingItemCount != nil && *list.RemainingItemCount != 0) {
 				return errors.New("dedicated Namespace list is incomplete or contains existing Pods/admission resource policies")
 			}
@@ -1004,6 +1004,12 @@ func TestPodTemplateGatePreflightRefusals(t *testing.T) {
 		},
 		"list missing RV": func(o map[string]any) {
 			o["/api/v1/namespaces/"+m.Positive.Name+"/pods"].(map[string]any)["metadata"] = map[string]any{}
+		},
+		"list missing items": func(o map[string]any) {
+			delete(o["/api/v1/namespaces/"+m.Positive.Name+"/pods"].(map[string]any), "items")
+		},
+		"list null items": func(o map[string]any) {
+			o["/api/v1/namespaces/"+m.Positive.Name+"/pods"].(map[string]any)["items"] = nil
 		},
 		"partial empty page": func(o map[string]any) {
 			o["/api/v1/namespaces/"+m.Positive.Name+"/pods"].(map[string]any)["metadata"] = map[string]any{"resourceVersion": "100", "continue": "more"}
