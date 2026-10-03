@@ -36,10 +36,18 @@ The only successful stage is **`occupied-not-drained`**. It proves name occupanc
 
 ## External disposal boundary
 
-`recoverydisposal` currently verifies externally signed, independently pinned authorization and closure records only.
+`recoverydisposal` currently verifies externally signed, independently pinned authorization, exact-object execution-plan, and closure records only.
 It has no signer, Kubernetes mutation executor, physical-retirement detector, route writer, or capacity-release method.
 Its receipt-oriented authorization cannot authorize broad deletion of direct/admin objects, tombstones, or runner-namespace occupancy-attempt ConfigMaps.
-A separate exact-object execution plan must cover those physical identities and their independently approved dispositions.
+The independent execution-plan schema covers those physical identities and their separately approved dispositions, without converting verification into mutation permission.
+It separates historical original identities from current tombstones and separates all archived records from the narrower set of actionable targets.
+Its independently pinned limits allow at most 8,192 archived objects and 8,192 targets; larger inventories fail closed and are not silently split into supposedly complete batches.
+Only known namespaced resources and the specified Kova-owned finalizers can appear in a target, and all namespace, control-object, occupant, signature-domain, and canonical digest checks remain required.
+
+`recoveryinventory.Collect` provides a separate read-only archival observation: three namespace identity reads, six unfiltered Lists (KovaBuilds, Pods, and ConfigMaps in each old namespace), and three final identity reads.
+It preserves unstructured fields and non-target objects, including unlabeled ConfigMaps, and returns no partial snapshot on error, pagination, identity drift, or exceeded object/byte bounds.
+Its ceilings are 8,192 objects including the two namespace records, 2 MiB per object, and 64 MiB total; each of its twelve API calls has a ten-second context bound, and the caller must also use an uncached client with bounded transport responses.
+The output is `inventory-observed-not-retired`, not an atomic cross-resource snapshot, a durable archive, all Kubernetes resource kinds, or proof that no old effect can still arrive.
 
 Before any namespace deletion, an external observer must archive the complete bounded CR, Pod, and relevant ConfigMap inventory, immutable receipts, stop/genesis/ledger evidence, terminal results, and explicit Unknown/discard approvals outside both old namespaces.
 The observer must prove retirement of old Service, runner, worker, network, and already-admitted in-flight effects; a namespace's `Terminating` state does not supply that proof.

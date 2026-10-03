@@ -99,6 +99,32 @@ This gate does not collect Service client budget histograms or measure loaded jo
 Its proxy one-attempt assertions establish fault semantics only, not a production QPS budget or reconcile-latency distribution.
 Focused local safety tests use `go test ./internal/service -run 'TestActualService|TestServiceFactory' -count=1`; these fake-upstream safety checks must not be reported as the opt-in real-API result.
 
+## Source-Bound Pod Template API Defaulting Gate
+
+`TestRealAPIPodTemplateDigestRoundTrip` is an independent, opt-in real-API gate for the canonical Pod Spec digest.
+It prepares three Pods using the production `runner.PreparePod` and Genesis defaulting helpers: the source-fetch/Secret-volume baseline, limits-only CPU/memory/ephemeral-storage resources on regular and init containers, and a negative default-ServiceAccount pull-secret injection.
+The positive before/after digests must match; the negative digest must differ, with the declared injected pull secret accounting for the difference.
+The existing digest annotation is not trusted in place of recomputing the complete canonical template.
+
+An externally approved installer must create a fresh, dedicated single-node `kind-kova-pod-template-*` cluster, two distinct `kova-pod-template-*` namespaces, their default ServiceAccounts, and two immutable dummy dockerconfig Secrets containing only `{"auths":{}}`.
+The positive ServiceAccount has no pull secret; the negative one references its exact dummy Secret.
+No CRD, KovaBuild, real credential, image publication, or registry is needed.
+Pods permanently retain a scheduling gate, contradictory node selector/affinity, token automount disabled, and `imagePullPolicy: Never`.
+Each uses its real namespace as owner, so this is not production KovaBuild-owner, status persistence, runner, or recovery-drain qualification.
+
+Both `KOVA_POD_TEMPLATE_REAL_API_MANIFEST=/absolute/private/manifest.json` and `KOVA_POD_TEMPLATE_REAL_API_MANIFEST_SHA256=<sha256>` are required; partial opt-in fails.
+The strict manifest fields are absolute `sourceDirectory`, clean full `sourceCommit`, `testBinarySHA256`, absolute private `kubeconfig`, `kubeconfigSHA256`, `context`, `kubeSystemUID`, `controlPlaneID`, `preparedAfter`, `expiresAt`, a new absolute `receiptPath`, `positive`, `negative`, `baselinePod`, `limitsPod`, and `negativePod`.
+Each namespace object contains `name`, `uid`, `serviceAccountUID`, `serviceAccountRV`, `secretName`, `secretUID`, and `secretRV`.
+The cluster and namespaces must have been created in the declared fresh time window, which is at most one hour; time is only a fixture restriction, never retirement proof.
+Pin the cached or published immutable Kind node reference in the external run plan, and pin the exact running control-plane container ID and loopback HTTPS port through the kubeconfig and manifest.
+
+Compile a clean reviewed `./internal/service/buildcontroller` test binary with `github.com/cofy-x/kova/internal/version.Commit` stamped to the exact source SHA, and record that command and binary hash outside Git.
+After explicit fixture approval, run only `-test.run=^TestRealAPIPodTemplateDigestRoundTrip$ -test.timeout=3m -test.v`.
+The test has a two-minute context and ten-second API calls, a transport-level read allowlist, and one permitted POST per declared Pod; unknown, rejected, or lost-response Creates are never reissued.
+It rechecks source, manifest, cluster, namespace, ServiceAccount and Secret identities before each Create and fsyncs append-only private JSONL intent/readback checkpoints.
+All API objects remain on success and failure; the receipt file cannot be overwritten or reused.
+Source safety tests and a compiled executable are not a live PASS, and this narrow gate never qualifies the complete committed-loss disposal path.
+
 ## Network Overrides
 
 Kova defaults to the official Ubuntu image, upstream GitHub release URLs,
