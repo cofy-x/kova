@@ -59,7 +59,10 @@ The shared Service-Pod Kubernetes client rate limiter is a bounded safety budget
 Keep separate measurements of POST latency, queued-to-grant latency, phase-specific reconcile p95/p99, client-side throttle wait, API verb/resource QPS, and cleanup delay.
 Do not infer a high-concurrency service SLA from a successful synthetic Kind queue alone.
 
-### Historical #44 dedicated Kind fixture — not Genesis v2 acceptance
+### Historical #44 dedicated Kind fixture — not current Genesis acceptance
+
+The current candidate requires Genesis v3, active schema 2, a pinned worker pool identity and runner manifest, and all three pre-effect receipts.
+The v2 active-inclusive HTTP queue accounting described here remains in v3; earlier queue-only or waiting-only acceptance does not qualify the expanded execution and cleanup protocol.
 
 The commands and assertions below describe the older waiting-only queue fixture. Its one active plus two waiting jobs assumed `maxQueuedJobsPerRequester=2`; Genesis v2 counts the active HTTP build too. Do **not** run these commands unchanged against a v2 installation or interpret their old PASS as v2 acceptance. A separate v2 fixture must use the external two-Namespace Genesis installer, verify queue receipts, and update all active-inclusive quota and cleanup assertions; that live adaptation is not part of this queue-only slice.
 

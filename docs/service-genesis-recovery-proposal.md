@@ -8,8 +8,9 @@ Do not use this note to repair a released or live namespace.
 
 Retain the separate active and HTTP-queue ConfigMap ledgers and add one externally provisioned Genesis ConfigMap.
 This deliberately revises the September 28 issue-comment preference for one unified quota ledger: the current #58 candidate independently budgets at most 128 active grants and 1000 queue intents under separate 768 KiB guards.
-Its two separately encoded synthetic maximal states are 434,767 and 503,066 bytes; their 937,833-byte sum already exceeds a 768 KiB unified guard by 151,401 bytes, while a unified wire shape and outer API envelope remain unmeasured.
-A unified 1 MiB data guard might fit a conservative 962,560-byte combined bound, but server acceptance, metadata/cleanup headroom, and CAS contention are unproved.
+The earlier #58 schemas measured separately encoded synthetic maximal states of 434,767 and 503,066 bytes; their 937,833-byte sum already exceeded a 768 KiB unified guard by 151,401 bytes.
+Those historical sizes are not the v3 receipt-instrumented bounds: the current maximal active test, including grant and Pod receipt fields, measures 709,253 bytes under its 776,192-byte reserved bound and 786,432-byte data guard.
+A unified wire shape, server acceptance, metadata/cleanup headroom, and CAS contention remain unproved.
 Keeping the two current CAS domains avoids making every queue mutation compete with every grant, Pod nonce, and cleanup fence.
 The numbers are candidate measurements; the separate #58 maximal payloads round-tripped on an isolated API server on 2026-10-02, but a unified wire shape, contention, and product recovery remain unmeasured. Reconsider this choice if those measurements justify unification.
 
@@ -118,12 +119,21 @@ Rollback also requires a reviewed drained namespace boundary, not pointing an ol
 - Static chart/RBAC/receipt and migration checks, focused race tests, and an operator runbook that records exact UIDs and refusal reason without deleting evidence.
 - Narrow isolated Kind acceptance against exact candidate images and owned resources: pause/crash between writes, restart and leader/startup handoff, uncertain responses, late old writer, direct `Starting` bypass, and committed-ledger loss. Require exact identity/UID receipts, zero excess work, bounded actionable refusal for only unsafe states, and evidence-preserving cleanup. Do not inject faults into HK, touch the preserved old ledger-loss fixture, or call synthetic/fake-client tests real crash recovery.
 
-Current implementation checkpoint: the Service entrypoint requires Genesis authority, and the read-only CLI helper renders create-only Genesis and immutable receipt Secret manifests. The fresh Genesis v2 candidate pins a distinct recovery-receipt Namespace and records each HTTP queue reservation there before CR Create. Its queue quota stays charged through admitted active work until exact terminal receipt cleanup; this is more conservative than the earlier active-grant handoff. Grant and Pod Create receipt runtime wiring is still pending.
+Current implementation checkpoint: the Service entrypoint requires v3 Genesis authority, and the read-only CLI helper renders create-only Genesis and immutable receipt Secret manifests.
+The fresh candidate records HTTP queue, active-grant, and Pod-Create receipts in its distinct pinned recovery-receipt Namespace before their respective effects.
+The grant nonce, grant fence, directly observed opaque ledger resourceVersion, and receipt UID/digest are durable; only the fresh CAS owner can issue the receipt Create.
+Pod creation spends a permanent attempt nonce, arms the canonical template digest, pins the receipt, then commits a separate in-flight issue fence before its sole Create.
+Restarts observe uncertain attempts without replaying them, and normal terminal cleanup settles the Pod receipt before the grant receipt and finally the HTTP queue receipt.
+The queue quota stays charged through admitted active work until exact terminal cleanup; this is more conservative than the earlier active-grant handoff.
+The pre-loss CR status witness also pins the full canonical Pod template digest, so evidence-only result observation after ledger loss cannot trust a changed image/spec or a restamped annotation.
 The Kind-only external installer creates fresh identities and keeps private installation receipts; it never adopts or repairs an existing namespace.
 The Service requires the original Secret UID and exact mounted bytes before startup and each bootstrap write, with separate controller, HTTP and readiness Guard clients that retain one original binding without sharing rate-limit budgets.
 Deterministic fake-API tests cover partial fresh `Initializing` restart, exact ledger templates, runtime side-effect fences, accepted-result preservation and terminal-first stop; they do not prove that all external writers were stopped.
 An opt-in registry-free real-API gate covers Genesis/ledger conditional writes and the witness/stop-intent serving-CRD round-trip, but adding or compiling that gate is not a live PASS.
-If an original committed ledger is lost, terminal and Delete cleanup deliberately retain the charge/finalizer; queue receipt instrumentation alone provides no bounded authorized drain of that incident.
+If an original committed ledger is lost, terminal and Delete cleanup deliberately retain the charge/finalizer; the three pre-effect receipts do not by themselves authorize disposal or release capacity.
+The separate `recoverydisposal` package currently validates externally signed, independently pinned disposal and closure evidence only; it has no Kubernetes mutation executor, signer, route writer, capacity-release method, or physical-retirement detector.
+Its signatures authenticate the exact record, not the truth of namespace retirement, complete inventory, durable result escrow, or one-successor capacity transfer.
+The source-bound actual Service control-plane gate is implemented and covered by local safety tests, but still requires separately approved fresh real-API fixtures; it does not qualify runner execution or full drain.
 That separate recovery gap remains a hard no-go for the next RC.
 
 Sources for the proposed Kubernetes mechanisms: [API resourceVersion and conditional JSON Patch](https://kubernetes.io/docs/reference/using-api/api-concepts/#updates-to-existing-resources) and [immutable ConfigMap behavior](https://kubernetes.io/docs/concepts/configuration/configmap/#configmap-immutable).
