@@ -20,7 +20,7 @@ for tag in v1.2.3 v1.2.3-rc.1; do
 done
 
 # Mutate only the copied chart. Helm must render it successfully, and the real
-# packaging assertion must reject a different canonical digest or a mutable tag.
+# packaging assertion must reject a different digest, mutable tag, or trailing text.
 fixture=${test_dir}/fixture
 mkdir -p "${fixture}/scripts/release" "${fixture}/scripts/chart" "${fixture}/charts"
 cp "${root}/scripts/common.sh" "${fixture}/scripts/common.sh"
@@ -30,7 +30,8 @@ cp -R "${root}/charts/kova" "${fixture}/charts/kova"
 
 for image in \
   'ghcr.io/cofy-x/kova@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc' \
-  'ghcr.io/cofy-x/kova:runner-{{ .Chart.AppVersion }}'; do
+  'ghcr.io/cofy-x/kova:runner-{{ .Chart.AppVersion }}' \
+  'ghcr.io/cofy-x/kova@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb garbage'; do
   awk -v image="${image}" '
     /^            - --runner-image=/ { $0 = "            - --runner-image=" image }
     { print }

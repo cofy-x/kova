@@ -44,7 +44,7 @@ helm template kova "${ARCHIVE}" \
 
 grep -F "image: \"ghcr.io/cofy-x/kova:controller-${TAG}\"" "${rendered}" >/dev/null
 grep -F "image: \"ghcr.io/cofy-x/kova:worker-${TAG}\"" "${rendered}" >/dev/null
-runner_image_arg=$(awk '$1 == "-" && $2 ~ /^--runner-image=/ { print $2 }' "${rendered}")
+runner_image_arg=$(awk '$1 == "-" && $2 ~ /^--runner-image=/ { sub(/^[[:space:]]*-[[:space:]]*/, ""); print }' "${rendered}")
 if [[ "${runner_image_arg}" != "--runner-image=ghcr.io/cofy-x/kova@${RENDER_RUNNER_DIGEST}" ]]; then
   echo "error: packaged Service runner image must match render fixture ghcr.io/cofy-x/kova@${RENDER_RUNNER_DIGEST}" >&2
   exit 1
