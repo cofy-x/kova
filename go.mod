@@ -4,7 +4,7 @@ go 1.26.8
 
 require (
 	github.com/google/go-containerregistry v0.22.1
-	github.com/labstack/echo/v4 v4.15.4
+	github.com/labstack/echo/v4 v4.16.0
 	github.com/urfave/cli/v2 v2.27.7
 	go.opentelemetry.io/otel v1.46.0
 	go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploggrpc v0.22.0
