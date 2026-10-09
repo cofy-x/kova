@@ -2,7 +2,8 @@
 
 This page documents a finite implementation slice for [#62](https://github.com/cofy-x/kova/issues/62), not a completed recovery procedure or a production acceptance result.
 The fresh Genesis v3 candidate records queue, active-grant, and Pod-Create pre-effect receipts, and pins the external worker-pool identity and runner OCI manifest/index digest.
-The committed-loss disposal executor and its isolated runtime acceptance remain incomplete.
+The complete committed-loss incident procedure and its isolated runtime acceptance remain incomplete.
+An opt-in exact-object executor is available as a library slice, not an automatic recovery controller or an operator CLI.
 Do not invoke the drain coordinator against a live installation from this branch.
 
 ## Boundary
@@ -36,8 +37,10 @@ The only successful stage is **`occupied-not-drained`**. It proves name occupanc
 
 ## External disposal boundary
 
-`recoverydisposal` currently verifies externally signed, independently pinned authorization, exact-object execution-plan, and closure records only.
-It has no signer, Kubernetes mutation executor, physical-retirement detector, route writer, or capacity-release method.
+`recoverydisposal` verifies externally signed, independently pinned authorization, exact-object execution-plan, and closure records.
+Those pure verifiers never authorize a Kubernetes mutation by themselves.
+The separate opt-in `Execute` library also requires a differently scoped, independently pinned mutation grant and qualified archived object bodies.
+It has no signer, physical-retirement detector, route writer, namespace-delete method, capacity-release method, or automatic Service/CLI invocation.
 Its receipt-oriented authorization cannot authorize broad deletion of direct/admin objects, tombstones, or runner-namespace occupancy-attempt ConfigMaps.
 The independent execution-plan schema covers those physical identities and their separately approved dispositions, without converting verification into mutation permission.
 It separates historical original identities from current tombstones and separates all archived records from the narrower set of actionable targets.
@@ -53,6 +56,12 @@ Before any namespace deletion, an external observer must archive the complete bo
 The observer must prove retirement of old Service, runner, worker, network, and already-admitted in-flight effects; a namespace's `Terminating` state does not supply that proof.
 Object-count, per-object byte, total archive byte, and API-call bounds must fail closed rather than truncate the inventory.
 
-A future one-shot executor may only act on the separately signed exact namespace/name/UID and qualified archived projection, after the external authority starts normal deletion of both original namespace UIDs.
-It must preserve foreign finalizers, never force-finalize a namespace, never adopt a replacement UID, and never create a successor or release capacity.
+The finite executor can act only on the separately signed exact namespace/name/UID and qualified archived projection, after the external authority starts normal deletion of both original namespace UIDs.
+It preflights every target and archive before any mutation, guards the original cluster and both Terminating namespace identities, and uses fresh UID/resourceVersion conditional Delete and finalizer-only JSON Patch.
+Only explicitly allowed Kova finalizers may be removed; foreign finalizers, spec, status, data, labels, annotations and owner references remain qualified against the archive.
+It never force-finalizes a namespace, adopts a replacement UID, creates a successor or releases capacity.
+API-interface calls, object bytes and grant lifetime are bounded; the supplied uncached client must independently bound transport responses and prohibit automatic mutation retries.
+The interface-call count is not a wire-request count or proof of API latency.
+An unknown response stops that invocation without retry or polling; a later invocation starts with fresh direct qualification, not a remembered resourceVersion.
+Pending objects are reported as pending, not disposed; even observing all exact targets absent is not an incident closure or capacity-release proof.
 Even observing both old namespace UIDs absent is only an API observation: physical retirement, persistent name non-reuse, one-successor allocation, and route compare-and-swap remain independently verified external closure requirements.

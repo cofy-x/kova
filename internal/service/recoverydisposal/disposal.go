@@ -1,8 +1,10 @@
 // Package recoverydisposal verifies externally issued, bounded old-epoch
-// disposal and closure records. It deliberately has no signer, Kubernetes
-// client, deletion method, route writer, or capacity-release method. A valid
-// signature binds evidence; it cannot itself prove physical retirement,
-// receipt-set completeness, or that a future identity fence will be honored.
+// disposal and closure records. Its separate opt-in exact-object executor
+// additionally requires an independently verified mutation grant and archived
+// object qualification; plan or closure verification alone cannot authorize a
+// write. There is no signer, namespace deletion, route writer or capacity
+// release. A signature cannot prove physical retirement, archive durability,
+// receipt-set completeness or that an external identity fence will be honored.
 package recoverydisposal
 
 import (

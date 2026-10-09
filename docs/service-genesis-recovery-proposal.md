@@ -131,7 +131,9 @@ The Service requires the original Secret UID and exact mounted bytes before star
 Deterministic fake-API tests cover partial fresh `Initializing` restart, exact ledger templates, runtime side-effect fences, accepted-result preservation and terminal-first stop; they do not prove that all external writers were stopped.
 An opt-in registry-free real-API gate covers Genesis/ledger conditional writes and the witness/stop-intent serving-CRD round-trip, but adding or compiling that gate is not a live PASS.
 If an original committed ledger is lost, terminal and Delete cleanup deliberately retain the charge/finalizer; the three pre-effect receipts do not by themselves authorize disposal or release capacity.
-The separate `recoverydisposal` package currently validates externally signed, independently pinned disposal and closure evidence only; it has no Kubernetes mutation executor, signer, route writer, capacity-release method, or physical-retirement detector.
+The separate `recoverydisposal` package validates externally signed, independently pinned disposal and closure evidence; verification alone is not execution permission.
+Its opt-in exact-object library executor additionally requires a separately verified mutation grant and archived body qualification after both original namespaces are Terminating.
+It does not provide a signer, operator CLI, namespace deletion, route writer, capacity-release method or physical-retirement detector, and is not a complete incident procedure.
 Its signatures authenticate the exact record, not the truth of namespace retirement, complete inventory, durable result escrow, or one-successor capacity transfer.
 The source-bound actual Service control-plane gate is implemented and covered by local safety tests, but still requires separately approved fresh real-API fixtures; it does not qualify runner execution or full drain.
 That separate recovery gap remains a hard no-go for the next RC.

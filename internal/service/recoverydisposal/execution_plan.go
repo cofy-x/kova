@@ -73,9 +73,10 @@ type ExecutionEvidence struct {
 // ExecutionLimits are independently selected ceilings, not estimates inferred
 // from active admission capacity. MaxObjects bounds actionable targets while
 // MaxArchiveObjects independently bounds the complete archive, including
-// non-actionable objects. MaxCalls is a future direct-API call budget,
-// not a promise that execution can finish within it. Overflow must block the
-// whole plan; these limits never permit silently truncating or re-batching an
+// non-actionable objects. MaxCalls bounds executor API-interface calls, not
+// transport wire attempts or a promise that execution can finish within it.
+// Overflow must block the whole plan; these limits never permit silently
+// truncating or re-batching an
 // allegedly complete inventory.
 type ExecutionLimits struct {
 	MaxObjects            int   `json:"maxObjects"`
@@ -115,8 +116,9 @@ type ExecutionResource struct {
 // Only one UID may occupy a GVR/namespace/name in that inventory; historical
 // originals belong in ExecutionDisposition, not in a second same-name target.
 // ArchiveResourceVersion is an observation, not a reusable future CAS token.
-// A future executor would need fresh direct UID/RV/body qualification, both
-// exact old namespaces Terminating, and conditional per-object operations.
+// The separate executor requires fresh direct UID/RV/body qualification, both
+// exact old namespaces Terminating, a distinct mutation grant, and conditional
+// per-object operations.
 // AllowedKovaFinalizers is a sorted subset, never permission to erase all
 // finalizers. Foreign finalizers are not included or authorized here.
 type ExecutionTarget struct {
