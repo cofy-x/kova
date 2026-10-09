@@ -35,6 +35,28 @@ def dns_label(value: str) -> bool:
     return len(value) <= 63 and re.fullmatch(r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?", value) is not None
 
 
+def runner_manifest_reference(value: str) -> bool:
+    """Require an explicit registry, including a Kind DNS label with a port."""
+    if len(value) > 512:
+        return False
+    match = re.fullmatch(
+        r"([^/]+)/[a-z0-9]+(?:[._/-][a-z0-9]+)*@sha256:[0-9a-f]{64}", value
+    )
+    if match is None:
+        return False
+    authority = match.group(1)
+    host, separator, port = authority.partition(":")
+    if separator and (
+        re.fullmatch(r"[1-9][0-9]{0,4}", port) is None or int(port) > 65535
+    ):
+        return False
+    return (
+        len(host) <= 253
+        and all(dns_label(label) for label in host.split("."))
+        and (host == "localhost" or "." in host or bool(separator))
+    )
+
+
 def strict_object(pairs: list[tuple[str, object]]) -> dict:
     result = {}
     for key, value in pairs:
@@ -151,12 +173,7 @@ def validate_options(args: argparse.Namespace) -> None:
         "an explicit stable worker pool identity is required",
     )
     require(
-        len(args.runner_image) <= 512
-        and re.fullmatch(
-            r"(?:[a-z0-9][a-z0-9.-]*\.[a-z0-9.-]+|localhost)(?::[0-9]+)?/"
-            r"[a-z0-9]+(?:[._/-][a-z0-9]+)*@sha256:[0-9a-f]{64}",
-            args.runner_image,
-        ) is not None,
+        runner_manifest_reference(args.runner_image),
         "runner image must be an explicit repository@sha256 OCI manifest digest",
     )
     require(

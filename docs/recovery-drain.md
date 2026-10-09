@@ -3,8 +3,8 @@
 This page documents a finite implementation slice for [#62](https://github.com/cofy-x/kova/issues/62), not a completed recovery procedure or a production acceptance result.
 The fresh Genesis v3 candidate records queue, active-grant, and Pod-Create pre-effect receipts, and pins the external worker-pool identity and runner OCI manifest/index digest.
 The complete committed-loss incident procedure and its isolated runtime acceptance remain incomplete.
-An opt-in exact-object executor is available as a library slice, not an automatic recovery controller or an operator CLI.
-Do not invoke the drain coordinator against a live installation from this branch.
+An opt-in exact-object executor is available as a library and through the separate `kova-recovery dispose-exact` operator tool, never as an automatic recovery controller or an ordinary user-client command.
+Its isolated runtime acceptance remains incomplete; neither this tool nor a successful preflight authorizes invoking a drain or disposal against a live installation.
 
 ## Boundary
 
@@ -40,7 +40,7 @@ The only successful stage is **`occupied-not-drained`**. It proves name occupanc
 `recoverydisposal` verifies externally signed, independently pinned authorization, exact-object execution-plan, and closure records.
 Those pure verifiers never authorize a Kubernetes mutation by themselves.
 The separate opt-in `Execute` library also requires a differently scoped, independently pinned mutation grant and qualified archived object bodies.
-It has no signer, physical-retirement detector, route writer, namespace-delete method, capacity-release method, or automatic Service/CLI invocation.
+It has no signer, physical-retirement detector, route writer, namespace-delete method, capacity-release method, or automatic Service/user-CLI invocation.
 Its receipt-oriented authorization cannot authorize broad deletion of direct/admin objects, tombstones, or runner-namespace occupancy-attempt ConfigMaps.
 The independent execution-plan schema covers those physical identities and their separately approved dispositions, without converting verification into mutation permission.
 It separates historical original identities from current tombstones and separates all archived records from the narrower set of actionable targets.
@@ -65,3 +65,59 @@ The interface-call count is not a wire-request count or proof of API latency.
 An unknown response stops that invocation without retry or polling; a later invocation starts with fresh direct qualification, not a remembered resourceVersion.
 Pending objects are reported as pending, not disposed; even observing all exact targets absent is not an incident closure or capacity-release proof.
 Even observing both old namespace UIDs absent is only an API observation: physical retirement, persistent name non-reuse, one-successor allocation, and route compare-and-swap remain independently verified external closure requirements.
+
+## Explicit operator entrypoint
+
+`go build ./cmd/kova-recovery` builds a separate CGO-free operator executable.
+It is intentionally not registered in `kova`, the controller, daemon, or Helm startup, and is not added to ordinary user-client release artifacts.
+It has one command, `dispose-exact`; without `--execute` it only qualifies local inputs and makes zero API calls.
+The existing execution-plan and mutation-grant schemas remain separate; a plan, a signature, or a local preflight alone never grants mutation authority.
+
+```bash
+kova-recovery dispose-exact \
+  --pins /secure/incident/pins.json \
+  --pins-digest sha256:<independently-pinned-whole-file-digest> \
+  --plan /secure/incident/plan.json \
+  --grant /secure/incident/grant.json \
+  --target-archives /secure/incident/targets.json
+```
+
+Only after the environment's separately reviewed retirement, archival and no-reuse procedure has passed, both original namespaces are normally deleting, and the exact mutation scope is explicitly approved, add `--execute --ca-file /secure/incident/ca.pem --credentials /secure/incident/credentials.json`.
+This is one bounded invocation, not a retry loop; any unknown, expired grant, response loss, identity drift, body drift, or exceeded bound stops it.
+The report always states `incidentClosed=false`, `capacityReleased=false` and `successorCreated=false`, including when every exact target is absent at a direct read.
+An error can accompany an unknown partial report; do not reinterpret a nonzero exit or a pending report as successful disposal.
+
+All files are explicit regular files; symlinks are refused.
+The whole pins digest must come from a trusted channel independent of the file and the incoming envelopes.
+Pins contain the existing `ExecutionPlanExpectation` and `MutationGrantExpectation` under `plan` and `grant`, separately configured sorted `planRoots` and `grantRoots` arrays (`issuer`, `keyId`, lowercase 32-byte `publicKeyHex`), and `connection`.
+The existing Go expectation field names (`EnvelopeDigest`, `PlanDigest`, `Payload`) are preserved.
+Each file must be exactly its compact canonical JSON, without indentation or trailing newline; duplicate/unknown fields, excessive nesting, array cardinality and token counts fail closed before typed decoding.
+The plan/pins ceiling is 16 MiB, grant 32 KiB, and actionable archive bodies 64 MiB total, with individual object and count limits also supplied by the independently pinned plan.
+`targets.json` is a canonical array of full exact target object bodies in plan order; it is only the actionable subset, never proof that the full incident archive is complete or durable.
+Target archives and credentials must have no group/other permission bits; their bodies are never ordinary output.
+
+The canonical `connection` record has exactly `version="1"`, `serverUrl` (HTTPS origin only), `tlsServerName`, `caSha256` (digest of the exact CA file bytes), and `systemNamespaceUid`.
+Its whole canonical JSON digest must equal the existing plan's `cluster.apiIdentityDigest`, and its system UID must equal the plan's pinned cluster UID.
+TLS validates that independently selected server name against only the pinned CA bytes; no system CA fallback, insecure flag, default proxy, kubeconfig discovery, exec credential plugin or redirect is used.
+Credentials have exactly `bearerToken`, `clientCertificatePem` and `clientKeyPem`, with one static token or one mTLS pair, never both.
+Fresh HTTP/1 connections disable connection reuse, HTTP/2 and automatic mutation replay; API errors are redacted rather than echoing sensitive response bodies.
+Requests have a ten-second bound, response headers a 64 KiB ceiling, response bodies at most the plan's object ceiling and 16 MiB, and the whole command at most fifteen minutes and never beyond the separately enforced grant expiry.
+The adapter allows direct reads of only three original namespace guards and the exact plan targets, UID/resourceVersion-conditional background Delete of those targets, and the executor's finalizer-only four-operation JSON Patch.
+No Namespace Delete/finalize, Create, List, status/spec edit, route or ledger-charge operation is exposed.
+The archived/current object comparison recognizes only Kubernetes' first deletion transition from an undeleting positive generation to exactly generation+1 with a valid deletion timestamp, including objects first marked by normal namespace GC.
+It never ignores generation, spec/status drift, a second increment or deletion reversal; an already-deleting archive remains bound to its original generation.
+Any non-deleting archived or current target carrying Kubernetes' built-in `orphan` or `foregroundDeletion` finalizer blocks the whole preflight before any write, because Background Delete would itself remove those foreign finalizers.
+
+## External owner interface and isolated acceptance plan
+
+The environment owner supplies four independently reviewable facts, not new Kova storage or cloud APIs: old Service/runner/BuildKit/network and already admitted in-flight effects cannot resume; a complete bounded inventory/results/Unknown-discard archive has been written and read back outside both old namespaces; both old namespace names are persistently fenced against reuse; and a single successor capacity assignment plus route UID/resourceVersion CAS has been externally committed only after old liabilities are zero.
+These facts feed the existing evidence digests and signed records; Kova supplies no signer and does not infer their truth from signatures, empty Lists, `Terminating`, local daemon join, or target absence.
+The daemon's exact request retire barrier can contribute only process-local join observations, not remote BuildKit settlement or restart-persistent retirement.
+No successor or route mutation belongs to `dispose-exact`.
+
+A new real-API gate must first pin a fresh dedicated cluster, candidate source/binary/images, API TLS identity, never-used runner/receipt namespace names and UIDs, and caller-owned evidence destination.
+The authorized scope must separately include normal deletion of those exact new namespace UIDs and exact Kova finalizer removal; historical A/B fixture permissions do not include that disposal.
+Use bounded cases for terminal-result and explicitly approved Unknown, grant/Pod/queue evidence, daemon upload/retire join, lost Delete/Patch responses, late side effects, same-name replacement UIDs, wrong archived/template digests, leader/process death, foreign finalizers and full-capacity cross-epoch cutover.
+Each case must independently record physical writer/worker/network retirement and in-flight settlement, full outside-namespace archival readback, permanent name non-reuse and one-successor route CAS.
+Unknown halts the case and preserves every API object and outside archive; no shared registry, old fixture, live deployment, force namespace finalization, automatic cleanup, RC publication or issue closure is authorized by this plan.
+TLS mock/race tests qualify the finite entrypoint and transport behavior only; #62 remains open until the reviewed external procedure and this separately authorized runtime gate pass.
