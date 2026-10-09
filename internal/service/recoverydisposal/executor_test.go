@@ -19,6 +19,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	kjson "sigs.k8s.io/json"
 )
 
 type executorFixture struct {
@@ -92,10 +93,12 @@ func newExecutorFixture(t *testing.T) executorFixture {
 			obj.Object["immutable"] = true
 			obj.Object["data"] = map[string]any{"evidence": "do-not-log-body"}
 		case "kovabuilds":
+			obj.SetGeneration(1)
 			obj.SetFinalizers(append(obj.GetFinalizers(), "example.com/foreign"))
 			obj.Object["spec"] = map[string]any{"executionMode": "archived"}
 			obj.Object["status"] = map[string]any{"phase": "Failed", "qualified": true}
 		case "pods":
+			obj.SetGeneration(1)
 			obj.Object["spec"] = map[string]any{"containers": []any{map[string]any{"name": "runner", "image": "registry.test/runner@" + hash('a')}}}
 			obj.Object["status"] = map[string]any{"phase": "Failed"}
 		}
@@ -206,6 +209,9 @@ func (a *executorAPI) Delete(ctx context.Context, obj client.Object, opts ...cli
 	if len(current.GetFinalizers()) == 0 {
 		delete(a.objects, key)
 	} else {
+		if current.GetGeneration() > 0 {
+			current.SetGeneration(current.GetGeneration() + 1)
+		}
 		current.SetDeletionTimestamp(&metav1.Time{Time: time.Now().UTC()})
 		current.SetResourceVersion(nextExecutionRV(current.GetResourceVersion()))
 	}
@@ -252,7 +258,7 @@ func (a *executorAPI) Patch(ctx context.Context, obj client.Object, patch client
 		return apierrors.NewConflict(schema.GroupResource{Resource: "objects"}, obj.GetName(), errors.New("JSONPatch test failed"))
 	}
 	result := &unstructured.Unstructured{}
-	if err := json.Unmarshal(updated, &result.Object); err != nil {
+	if err := kjson.UnmarshalCaseSensitivePreserveInts(updated, &result.Object); err != nil {
 		return err
 	}
 	result.SetResourceVersion(nextExecutionRV(current.GetResourceVersion()))

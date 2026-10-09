@@ -94,7 +94,10 @@ type exactExecutor struct {
 }
 
 type qualifiedArchive struct {
-	projection []byte
+	projection    []byte
+	generation    int64
+	hasGeneration bool
+	deleting      bool
 }
 
 func execute(ctx context.Context, api ExecutionAPI, plan VerifiedExecutionPlan, grant VerifiedMutationGrant, archives []json.RawMessage, now func() time.Time) (ExecutionReport, error) {
@@ -104,46 +107,18 @@ func execute(ctx context.Context, api ExecutionAPI, plan VerifiedExecutionPlan, 
 		!grant.current(now()) || ctx.Err() != nil || len(archives) != len(plan.payload.Targets) {
 		return r, ErrUnqualified
 	}
-	// Reserve the worst-case calls for a target requiring both Delete and
-	// finalizer Patch, including fresh readbacks and all identity guards. A
-	// ceiling too small for this complete plan fails before even a GET; it is
-	// never split into misleadingly complete batches after partial mutation.
-	if plan.payload.Limits.MaxCalls < 9+24*len(plan.payload.Targets) {
-		return r, ErrExecutionBudget
-	}
 	// Keep an overall timer as well as per-call checks. Once started, a wall
 	// clock rollback must not repeatedly rebuild and extend the grant window.
 	executionCtx, cancel := context.WithDeadline(ctx, grant.expiresAt)
 	defer cancel()
-	x := exactExecutor{ctx: executionCtx, api: api, plan: plan.Payload(), grant: grant, now: now, report: r,
-		refs: make([]qualifiedArchive, len(archives))}
-	var totalArchiveBytes int64
-	for _, raw := range archives {
-		if executionCtx.Err() != nil || !grant.current(now()) {
-			return r, ErrUnqualified
-		}
-		if int64(len(raw)) > x.plan.Limits.MaxObjectArchiveBytes {
-			return r, ErrUnqualified
-		}
-		totalArchiveBytes += int64(len(raw))
-		if totalArchiveBytes > executionMaxTargetArchiveBytes {
-			return r, ErrExecutionBudget
-		}
-		if totalArchiveBytes > x.plan.Limits.MaxArchiveBytes || totalArchiveBytes > x.plan.Evidence.ArchiveBytes {
-			return r, ErrUnqualified
-		}
+	_, refs, err := preflightArchives(executionCtx, plan, archives, func() bool { return grant.current(now()) })
+	if err != nil {
+		return r, err
 	}
-	for i, raw := range archives {
-		if executionCtx.Err() != nil || !grant.current(now()) {
-			return r, ErrUnqualified
-		}
-		target := x.plan.Targets[i]
-		ref, digest, err := qualifyArchive(target, raw)
-		if err != nil || digest != target.QualificationDigest || executionCtx.Err() != nil || !grant.current(now()) {
-			return r, ErrUnqualified
-		}
-		x.refs[i] = ref
+	if !grant.current(now()) {
+		return r, ErrUnqualified
 	}
+	x := exactExecutor{ctx: executionCtx, api: api, plan: plan.Payload(), grant: grant, now: now, report: r, refs: refs}
 	x.report.Stage = "unknown"
 	fail := func(err error) (ExecutionReport, error) { return x.report, err }
 	if err := x.guard(); err != nil {
@@ -254,7 +229,7 @@ func (x *exactExecutor) target(i int) (*unstructured.Unstructured, bool, error) 
 	if err := x.account(obj); err != nil {
 		return nil, false, err
 	}
-	projection, err := executionProjection(t, obj)
+	projection, err := executionObservedProjection(t, obj, x.refs[i])
 	if err != nil || !bytes.Equal(projection, x.refs[i].projection) {
 		return nil, false, ErrExecutionUnknown
 	}
@@ -334,7 +309,7 @@ func (x *exactExecutor) dispose(i int) (string, error) {
 		if err := x.account(obj); err != nil {
 			return "", err
 		}
-		projection, qualificationErr := executionProjection(x.plan.Targets[i], obj)
+		projection, qualificationErr := executionObservedProjection(x.plan.Targets[i], obj, x.refs[i])
 		remaining, finalizerErr := executionFinalizers(obj)
 		deleting, _ = executionDeleting(obj)
 		if qualificationErr != nil || finalizerErr != nil || !bytes.Equal(projection, x.refs[i].projection) ||
@@ -395,6 +370,11 @@ func qualifyArchive(t ExecutionTarget, raw []byte) (qualifiedArchive, string, er
 	if err != nil {
 		return qualifiedArchive{}, "", ErrUnqualified
 	}
+	generation, hasGeneration, err := unstructured.NestedInt64(obj.Object, "metadata", "generation")
+	deleting, deletionErr := executionDeleting(obj)
+	if err != nil || deletionErr != nil || generation < 0 {
+		return qualifiedArchive{}, "", ErrUnqualified
+	}
 	record := struct {
 		Version           string            `json:"version"`
 		Resource          ExecutionResource `json:"resource"`
@@ -413,7 +393,31 @@ func qualifyArchive(t ExecutionTarget, raw []byte) (qualifiedArchive, string, er
 	if err != nil {
 		return qualifiedArchive{}, "", ErrUnqualified
 	}
-	return qualifiedArchive{projection: projection}, digestBytes(encoded), nil
+	return qualifiedArchive{projection: projection, generation: generation, hasGeneration: hasGeneration, deleting: deleting}, digestBytes(encoded), nil
+}
+
+// Kubernetes increments generation once when a positive-generation object
+// first enters deletion (generic Store.markAsDeleting / rest.BeforeDelete).
+// Normalize only that exact transition, never spec/status changes, a second
+// increment, undeleting, or drift before deletion. All other projection fields
+// still have to equal the qualified archive.
+func executionObservedProjection(t ExecutionTarget, obj *unstructured.Unstructured, archive qualifiedArchive) ([]byte, error) {
+	deleting, err := executionDeleting(obj)
+	if err != nil || archive.deleting && !deleting {
+		return nil, ErrUnqualified
+	}
+	projection, err := executionProjection(t, obj)
+	if err != nil || bytes.Equal(projection, archive.projection) {
+		return projection, err
+	}
+	generation, present, err := unstructured.NestedInt64(obj.Object, "metadata", "generation")
+	if err != nil || archive.deleting || !deleting || !archive.hasGeneration || !present ||
+		archive.generation <= 0 || archive.generation == 9223372036854775807 || generation != archive.generation+1 {
+		return nil, ErrUnqualified
+	}
+	copy := obj.DeepCopy()
+	copy.SetGeneration(archive.generation)
+	return executionProjection(t, copy)
 }
 
 func executionProjection(t ExecutionTarget, obj *unstructured.Unstructured) ([]byte, error) {
@@ -422,12 +426,20 @@ func executionProjection(t ExecutionTarget, obj *unstructured.Unstructured) ([]b
 		string(obj.GetUID()) != t.UID || !safeID(obj.GetResourceVersion(), maxIDBytes) {
 		return nil, ErrUnqualified
 	}
-	if _, err := executionDeleting(obj); err != nil {
+	deleting, err := executionDeleting(obj)
+	if err != nil {
 		return nil, err
 	}
 	finalizers, err := executionFinalizers(obj)
 	if err != nil {
 		return nil, err
+	}
+	// Background propagation itself removes these Kubernetes finalizers.
+	// Refuse every non-deleting archive/current target before any mutation;
+	// the executor must not promise foreign-finalizer preservation then erase
+	// one as an unintended side effect of Delete.
+	if !deleting && (slices.Contains(finalizers, metav1.FinalizerOrphanDependents) || slices.Contains(finalizers, metav1.FinalizerDeleteDependents)) {
+		return nil, ErrUnqualified
 	}
 	copy := obj.DeepCopy()
 	for _, field := range []string{"resourceVersion", "managedFields", "deletionTimestamp", "deletionGracePeriodSeconds"} {

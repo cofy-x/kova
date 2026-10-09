@@ -133,7 +133,8 @@ An opt-in registry-free real-API gate covers Genesis/ledger conditional writes a
 If an original committed ledger is lost, terminal and Delete cleanup deliberately retain the charge/finalizer; the three pre-effect receipts do not by themselves authorize disposal or release capacity.
 The separate `recoverydisposal` package validates externally signed, independently pinned disposal and closure evidence; verification alone is not execution permission.
 Its opt-in exact-object library executor additionally requires a separately verified mutation grant and archived body qualification after both original namespaces are Terminating.
-It does not provide a signer, operator CLI, namespace deletion, route writer, capacity-release method or physical-retirement detector, and is not a complete incident procedure.
+The separate opt-in `kova-recovery dispose-exact` operator executable now supplies bounded artifact loading, independently pinned API/TLS connection identity and explicit grant-gated invocation of that executor; it is not registered in the ordinary user client or Service startup.
+It still provides no signer, namespace deletion, route writer, capacity-release method or physical-retirement detector, and is not a complete incident procedure.
 Its signatures authenticate the exact record, not the truth of namespace retirement, complete inventory, durable result escrow, or one-successor capacity transfer.
 The source-bound actual Service control-plane gate is implemented and covered by local safety tests, but still requires separately approved fresh real-API fixtures; it does not qualify runner execution or full drain.
 That separate recovery gap remains a hard no-go for the next RC.
