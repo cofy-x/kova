@@ -31,7 +31,10 @@ func TestReceiptRejectsPreExecutionIdentityVersions(t *testing.T) {
 
 func TestRunnerManifestDigestRequiresImmutableCanonicalReference(t *testing.T) {
 	digest := "sha256:" + strings.Repeat("a", 64)
-	for _, value := range []string{"example.com/kova/runner@" + digest, "localhost:5002/kova@" + digest} {
+	for _, value := range []string{
+		"example.com/kova/runner@" + digest, "localhost:5002/kova@" + digest,
+		"kind-registry-issue47-fresh:5000/kova@" + digest,
+	} {
 		got, err := RunnerManifestDigest(value)
 		if err != nil || got != digest {
 			t.Fatalf("qualified runner %q: %q, %v", value, got, err)

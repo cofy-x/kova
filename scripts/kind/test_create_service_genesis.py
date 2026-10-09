@@ -219,6 +219,26 @@ class InstallerTests(unittest.TestCase):
                 self.assertFalse(Path(self.args.output_directory).exists())
                 setattr(self.args, field, prior)
 
+    def test_explicit_kind_registry_hostname_with_port_is_supported(self):
+        self.args.runner_image = "kind-registry-issue47-fresh:5000/kova@sha256:" + "a" * 64
+        fake = FakeInstaller(self.args)
+        values = json.loads(fake.run().read_text())
+        self.assertEqual(
+            values["images"]["runner"]["repository"], "kind-registry-issue47-fresh:5000/kova"
+        )
+
+    def test_registry_authority_cannot_fall_back_to_default_or_malformed_route(self):
+        for authority in (
+            "kova", "registry:0", "registry:65536", "registry:05000", "registry:+5000",
+            "registry:", "registry:5000:5001", "registry..example", "-registry:5000",
+            "registry-:5000", "user@registry:5000", "registry.example.", "REGISTRY:5000",
+        ):
+            with self.subTest(authority=authority):
+                self.args.runner_image = authority + "/kova@sha256:" + "a" * 64
+                with self.assertRaises(installer.Stop):
+                    FakeInstaller(self.args)
+                self.assertFalse(Path(self.args.output_directory).exists())
+
     def test_existing_namespace_never_adopted(self):
         fake = FakeInstaller(self.args)
         fake.objects[("namespace", "jobs-new")] = {"metadata": {"uid": "old"}}
