@@ -233,6 +233,7 @@ lint-scripts:
 	find scripts -name '*.sh' -print0 | xargs -0 -n1 bash -n
 	python3 -m unittest discover -s scripts/kind -p 'test_create_service_genesis.py'
 	python3 -m unittest discover -s scripts/kind -p 'test_resolve_runner_image.py'
+	python3 -m unittest discover -s scripts/e2e/tests -p 'test_service_burst.py'
 	bash scripts/chart/test-image-args.sh
 	bash scripts/e2e/test-service-migration-preflight.sh
 	bash scripts/e2e/test-release-artifacts.sh
