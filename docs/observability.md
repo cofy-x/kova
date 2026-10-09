@@ -109,3 +109,48 @@ after the Starting transition persists; telemetry is best effort, not an
 exactly-once receipt. Missing/backwards timestamps are omitted, not zero-filled.
 Compare client p95/p99, queue, these segments, target execution, API/CAS errors,
 and node **requests as well as usage** before increasing concurrent admission.
+
+### Optional bounded BuildKit progress observations
+
+The runner requests `buildctl --progress=rawjson` and projects the pinned BuildKit v0.31.2 [`SolveStatus` schema](https://github.com/moby/buildkit/blob/v0.31.2/client/graph.go) into optional `build_observation` fields on result JSONL, including `summary=true` exports.
+It decodes base64 build log payloads and warnings into the existing bounded failure-log tail; it does not persist a raw progress trace.
+The projection accepts at most 64 MiB of input, 65,536 nonempty records, 4,096 vertex identities and 16,384 vertex/status intervals, with a 1 MiB record limit.
+No raw vertex name, digest, status ID, target or registry reference is retained in the observation or introduced as a metric label.
+After its total-byte/event/state budget is exhausted the observation becomes `unavailable`, while a separate 1 MiB-per-record diagnostic decoder continues feeding the existing 1 MiB retained log tail until the build command exits or its existing context deadline expires.
+That diagnostic decoder has bounded memory/record size, not a 64 MiB total processing budget; oversized records are discarded with an explicit diagnostic marker, and later valid records still preserve final errors and connection-refused cooldown hints.
+
+Schema version 1 contains fixed availability/reason vocabulary, vertex and cached-vertex interval counts, integer-nanosecond interval unions, export/push overlap, and optional Nydus command wall time.
+`observed` means the bounded stream's observed intervals closed normally; it is not an accepted solve-session receipt, a throughput qualification or an issue-closure verdict.
+Malformed/oversized streams are `unavailable`; partial streams, command failure and cancellation are `incomplete` when trustworthy closed intervals remain.
+Missing timing fields are absent, never inferred as zero.
+Only the exact image exporter vertex and its known `pushing layers`/`pushing manifest for …` status IDs qualify export/push intervals.
+The exporter digest may have multiple intervals because BuildKit v0.31.2 [uses a later finalize callback for registry push](https://github.com/moby/buildkit/blob/v0.31.2/solver/llbsolver/solver.go).
+Vertex, export and push unions may overlap, and push need not be nested in the first export interval; do not add these numbers or subtract push from aggregate target time to manufacture execution time.
+Nydus conversion/push remains one command-wall observation, not an invented split.
+BuildKit accepted/active worker solve sessions are explicitly `unavailable`; one command invocation is not one accepted worker session.
+
+The controller copies this optional fixed-size observation into the exact output's `status.verificationResults[].buildObservation`, including failed output receipts, before deleting the runner.
+Malformed optional observation data is normalized to `unavailable/invalid_observation` without changing pushed-digest verification or successful build semantics, and old entries without the field remain valid.
+Operators can inspect the pinned KovaBuild's durable verification status or a retained runner's result export; the current public `/results` response and SDKs do not expose this internal diagnostic field.
+Retention is still the KovaBuild's existing bounded TTL, not a durable-log or caller-receipt lifecycle.
+These fields do not by themselves complete the bounded c8/c12 concurrency experiment or replace independent worker-session observation.
+
+### Service Kubernetes API attribution
+
+The Service exports three Prometheus metric families through controller-runtime's existing `/metrics` endpoint: `kova_service_kube_limiter_wait_seconds`, `kova_service_kube_wire_round_trip_seconds`, and `kova_service_kube_wire_requests_total`.
+They are available without enabling OTel only when `--metrics-bind-address=127.0.0.1:<port>` is configured; the default `0` exposes no scrape endpoint.
+The endpoint is loopback-only inside each Service Pod and has no built-in authentication, so use an operator-owned Pod port-forward to scrape each replica separately.
+Do not expose it through the public Service.
+
+Each Service replica has four independent client-go rate-limiter budgets: `controller`, `leader`, `readiness`, and `http`.
+Clientsets and controller-runtime clients copied from one traffic-class config share its single limiter and keep the same metric class.
+`limiter_wait_seconds` measures one client-go `Wait(ctx)` call before the HTTP attempt and labels only the fixed class and `ok`, `canceled`, `deadline`, or `error` outcome.
+Canceled waits are observed once; they are not wire requests.
+`wire_requests_total` counts each actual RoundTrip by fixed class, normalized `get`/`list`/`watch` or mutation verb, fixed Kubernetes resource bucket, and common status code or bounded status class.
+The `transport_error` status means no usable HTTP response; it is not an HTTP 5xx.
+`wire_round_trip_seconds` records the same attempt from entering the transport until response headers or transport error, labeled only by class and resource.
+It excludes limiter wait, response-body reading/decoding, controller CAS processing and, for watches, the lifetime of the stream after initial headers.
+One high-level GET may make multiple wire attempts, and the metric counts those attempts separately; Service mutation requests still suppress client-go `Retry-After` wire retries.
+No namespace, object name, requester, token, URL path or query is used as a label.
+These per-Pod process metrics are non-durable observations, not an exactly-once request receipt or an API-server-wide QPS total.
+For a guarded-admission burst, measure the final Genesis-enabled `Guard.Check` path: its receipt Secret GETs and Namespace, Genesis, and ledger reads/writes contribute to these client budgets and wire counts around each admitted effect. The metrics diagnose that cost; they do not justify bypassing any guard or receipt check.

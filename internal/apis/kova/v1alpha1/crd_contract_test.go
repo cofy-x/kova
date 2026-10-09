@@ -42,6 +42,20 @@ func TestGeneratedCRDMatchesBoundedBuildContract(t *testing.T) {
 			t.Fatalf("status.%s schema = %#v, want %#v", field, got, want)
 		}
 	}
+	stop, ok := status["admissionGenesisStopIntent"].(map[string]any)
+	if !ok || stop["type"] != "object" {
+		t.Fatalf("Genesis forced-stop intent schema = %#v", status["admissionGenesisStopIntent"])
+	}
+	stopFields := stop["properties"].(map[string]any)
+	for _, field := range []string{"buildUID", "podUID", "podCreateAttempt", "runnerRequestID", "reason"} {
+		if _, ok := stopFields[field].(map[string]any); !ok {
+			t.Fatalf("Genesis forced-stop intent lacks %s", field)
+		}
+	}
+	reasons := stopFields["reason"].(map[string]any)["enum"].([]any)
+	if len(reasons) != 3 || reasons[0] != "Cancelled" || reasons[1] != "Deleted" || reasons[2] != "BuildTimedOut" {
+		t.Fatalf("Genesis forced-stop reasons = %#v", reasons)
+	}
 	targets := spec["targets"].(map[string]any)
 	outputs := status["outputs"].(map[string]any)
 	build := spec["build"].(map[string]any)["properties"].(map[string]any)
@@ -91,6 +105,31 @@ func TestGeneratedCRDMatchesBoundedBuildContract(t *testing.T) {
 	}
 	if int(outputs["maxItems"].(float64)) != MaxConcreteOutputs {
 		t.Fatalf("outputs.maxItems = %v", outputs["maxItems"])
+	}
+	verification := status["verificationResults"].(map[string]any)
+	observation := verification["items"].(map[string]any)["properties"].(map[string]any)["buildObservation"].(map[string]any)
+	if observation["type"] != "object" {
+		t.Fatal("missing bounded observation schema")
+	}
+	observationFields := observation["properties"].(map[string]any)
+	if len(observationFields) != 15 {
+		t.Fatalf("unexpected observation fields: %d", len(observationFields))
+	}
+	for field, raw := range observationFields {
+		property := raw.(map[string]any)
+		if property["type"] != "string" && property["type"] != "integer" {
+			t.Fatalf("non-scalar observation field %s: %#v", field, property)
+		}
+		if property["type"] == "integer" && (property["maximum"] == nil || property["minimum"] == nil) {
+			t.Fatalf("unbounded integer %s", field)
+		}
+		if property["type"] == "string" && property["enum"] == nil {
+			t.Fatalf("unbounded vocabulary %s", field)
+		}
+	}
+	workerAvailability := observationFields["workerSessionsAvailability"].(map[string]any)["enum"].([]any)
+	if len(workerAvailability) != 1 || workerAvailability[0] != "unavailable" {
+		t.Fatal("worker sessions must remain unavailable")
 	}
 	outputPlatform := outputs["items"].(map[string]any)["properties"].(map[string]any)["platform"].(map[string]any)
 	if values := outputPlatform["enum"].([]any); len(values) != 2 || values[0] != "linux/amd64" || values[1] != "linux/arm64" {

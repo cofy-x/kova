@@ -1,7 +1,6 @@
 package service
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -12,11 +11,12 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/cofy-x/kova/internal/admissioncontract"
 	kovav1 "github.com/cofy-x/kova/internal/apis/kova/v1alpha1"
 	"github.com/cofy-x/kova/internal/buildcontract"
 	"github.com/cofy-x/kova/internal/kube"
-	"github.com/cofy-x/kova/internal/logging"
 	"github.com/cofy-x/kova/internal/runner"
+	"github.com/cofy-x/kova/internal/service/admissiongenesis"
 	serviceauth "github.com/cofy-x/kova/internal/service/auth"
 	"github.com/cofy-x/kova/internal/service/buildcontroller"
 	"github.com/cofy-x/kova/internal/service/config"
@@ -41,6 +41,13 @@ import (
 )
 
 func CLICommand() *cli.Command {
+	return serviceCLICommand(rest.InClusterConfig)
+}
+
+// The shipped command always loads in-cluster credentials. The unexported
+// constructor lets opt-in process tests use an identity-pinned API transport
+// without replacing the actual Service startup, manager, or HTTP wiring.
+func serviceCLICommand(loadKubeConfig func() (*rest.Config, error)) *cli.Command {
 	defaults := runner.DefaultConfig()
 	return &cli.Command{
 		Name:  "service",
@@ -49,6 +56,7 @@ func CLICommand() *cli.Command {
 			&cli.StringFlag{Name: "listen", Value: ":8080", Usage: "HTTP listen address"},
 			&cli.StringFlag{Name: "namespace", Value: defaults.Namespace, Usage: "Kubernetes namespace for runner Pods"},
 			&cli.StringFlag{Name: "runner-image", EnvVars: []string{"KOVA_RUNNER_IMAGE"}, Usage: "runner image used for created Pods"},
+			&cli.StringFlag{Name: "worker-pool-id", Usage: "externally pinned worker capacity identity; must match admission Genesis"},
 			&cli.StringFlag{Name: "runner-image-pull-policy", Value: defaults.RunnerImagePullPolicy, Usage: "runner image pull policy"},
 			&cli.StringFlag{Name: "runner-image-pull-secret", Value: defaults.ImagePullSecret, Usage: "runner image pull secret name"},
 			&cli.StringSliceFlag{Name: "runner-node-selector", Usage: "node selector for runner Pods; repeatable key=value"},
@@ -78,9 +86,27 @@ func CLICommand() *cli.Command {
 			&cli.StringFlag{Name: "metrics-bind-address", Value: "0", Usage: "disabled by default; optional loopback controller-runtime Prometheus metrics address"},
 			&cli.BoolFlag{Name: "leader-elect", Value: true, Usage: "enable controller-runtime leader election"},
 			&cli.StringFlag{Name: "leader-election-namespace", Usage: "namespace used for controller leader election leases; defaults to --namespace"},
+			&cli.StringFlag{Name: "admission-genesis-receipt-file", Usage: "read-only mounted immutable admission receipt Secret data file"},
+			&cli.StringFlag{Name: "admission-genesis-receipt-secret-namespace", Usage: "original receipt Secret namespace"},
+			&cli.StringFlag{Name: "admission-genesis-receipt-secret-name", Usage: "original receipt Secret name"},
+			&cli.StringFlag{Name: "admission-genesis-receipt-secret-uid", Usage: "original immutable receipt Secret UID"},
+			&cli.StringFlag{Name: "recovery-receipt-namespace", Usage: "dedicated recovery receipt Namespace; must match immutable Genesis contract"},
 		},
 		Action: func(c *cli.Context) error {
 			ctrl.SetLogger(ctrlzap.New(ctrlzap.UseDevMode(false), ctrlzap.WriteTo(os.Stderr)))
+			receiptOptions := genesisReceiptOptions{
+				File:            c.String("admission-genesis-receipt-file"),
+				SecretNamespace: c.String("admission-genesis-receipt-secret-namespace"),
+				SecretName:      c.String("admission-genesis-receipt-secret-name"),
+				SecretUID:       c.String("admission-genesis-receipt-secret-uid"),
+			}
+			genesisEnabled, err := receiptOptions.enabled()
+			if err != nil {
+				return err
+			}
+			if !genesisEnabled {
+				return fmt.Errorf("kova service requires an externally installed admission Genesis receipt; legacy admission is not a shipped runtime mode")
+			}
 			if err := validateKubeClientRateLimit(c.Int("kube-client-qps"), c.Int("kube-client-burst")); err != nil {
 				return err
 			}
@@ -114,7 +140,7 @@ func CLICommand() *cli.Command {
 			if err := validateSourcePodBudget(sourceVolumeSizeLimit, runnerResources, sourceFetchResources); err != nil {
 				return err
 			}
-			restConfig, err := rest.InClusterConfig()
+			restConfig, err := loadKubeConfig()
 			if err != nil {
 				return err
 			}
@@ -135,6 +161,14 @@ func CLICommand() *cli.Command {
 			if err != nil {
 				return err
 			}
+			controllerClientset, err := kubernetes.NewForConfig(restConfig)
+			if err != nil {
+				return err
+			}
+			readinessClientset, err := kubernetes.NewForConfig(readinessConfig)
+			if err != nil {
+				return err
+			}
 			scheme := runtime.NewScheme()
 			utilruntime.Must(corev1.AddToScheme(scheme))
 			utilruntime.Must(kovav1.AddToScheme(scheme))
@@ -146,12 +180,13 @@ func CLICommand() *cli.Command {
 			if err != nil {
 				return err
 			}
-			ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+			ctx, stop := signal.NotifyContext(c.Context, os.Interrupt, syscall.SIGTERM)
 			defer stop()
 			cfg := config.Config{
 				Listen:                     c.String("listen"),
 				Namespace:                  c.String("namespace"),
 				RunnerImage:                strings.TrimSpace(c.String("runner-image")),
+				WorkerPoolID:               c.String("worker-pool-id"),
 				RunnerImagePullPolicy:      c.String("runner-image-pull-policy"),
 				RunnerImagePullSecret:      c.String("runner-image-pull-secret"),
 				RunnerNodeSelector:         runnerNodeSelector,
@@ -179,6 +214,42 @@ func CLICommand() *cli.Command {
 				ControllerConcurrency:      c.Int("controller-concurrency"),
 			}
 			if err := validateCapacityConfig(cfg); err != nil {
+				return err
+			}
+			cfg.RunnerImageDigest, err = admissioncontract.RunnerManifestDigest(cfg.RunnerImage)
+			if err != nil {
+				return err
+			}
+			controllerReader, err := ctrlclient.New(restConfig, ctrlclient.Options{Scheme: scheme})
+			if err != nil {
+				return err
+			}
+			controllerDirect := admissiongenesis.DirectClient{Client: controllerClientset}
+			httpDirect := admissiongenesis.DirectClient{Client: clientset}
+			readinessDirect := admissiongenesis.DirectClient{Client: readinessClientset}
+			receiptRaw, checkControllerSecret, err := receiptOptions.loadAndCheck(ctx, controllerDirect)
+			if err != nil {
+				return err
+			}
+			parsedReceipt, err := admissioncontract.ParseReceipt(receiptRaw)
+			if err != nil {
+				return err
+			}
+			receiptNamespace := parsedReceipt.Contract.ReceiptNamespace
+			if receiptNamespace == "" || c.String("recovery-receipt-namespace") != receiptNamespace ||
+				receiptNamespace == cfg.Namespace || receiptNamespace == receiptOptions.SecretNamespace {
+				return fmt.Errorf("dedicated recovery receipt Namespace must match immutable Genesis contract and differ from runner/Service namespaces")
+			}
+			controllerGuard, err := prepareGenesisRuntime(ctx, cfg, receiptRaw, controllerDirect, controllerReader, checkControllerSecret)
+			if err != nil {
+				return err
+			}
+			httpGuard, err := forkGenesisGuard(ctx, controllerGuard, httpDirect, receiptOptions.checkRaw(receiptRaw, httpDirect))
+			if err != nil {
+				return err
+			}
+			readinessGuard, err := forkGenesisGuard(ctx, controllerGuard, readinessDirect, receiptOptions.checkRaw(receiptRaw, readinessDirect))
+			if err != nil {
 				return err
 			}
 			authenticator, err := serviceauth.New(cfg.AuthMode, cfg.AuthToken, cfg.AuthStaticPrincipal, clientset.AuthenticationV1().TokenReviews())
@@ -213,26 +284,30 @@ func CLICommand() *cli.Command {
 				return err
 			}
 			admissionPump := buildcontroller.NewAdmissionPump(mgr.GetAPIReader(), cfg)
+			admissionPump.Genesis = controllerGuard
 			if err := admissionPump.SetupWithManager(mgr); err != nil {
 				return err
 			}
 			if err := (&buildcontroller.KovaBuildReconciler{
-				Client:    mgr.GetClient(),
-				APIReader: mgr.GetAPIReader(),
-				Scheme:    mgr.GetScheme(),
-				Kube:      controllerKubeClient,
-				Cfg:       cfg,
-				Recorder:  mgr.GetEventRecorderFor("kova-service"),
+				Client:           mgr.GetClient(),
+				APIReader:        mgr.GetAPIReader(),
+				Scheme:           mgr.GetScheme(),
+				Kube:             controllerKubeClient,
+				Cfg:              cfg,
+				Genesis:          controllerGuard,
+				RecoveryReceipts: controllerClientset.CoreV1().ConfigMaps(receiptNamespace),
+				Recorder:         mgr.GetEventRecorderFor("kova-service"),
 			}).SetupWithManager(mgr, admissionPump.WakeEvents()); err != nil {
 				return err
 			}
-			go func() {
-				if err := httpapi.NewServer(cfg, httpKubeClient, httpClient, httpClient, readinessReader, authenticator, authorizer).Start(ctx); err != nil {
-					logging.Errorf("Kova Service HTTP server stopped: %v", err)
-					stop()
-				}
-			}()
-			return mgr.Start(ctx)
+			server := httpapi.NewServer(cfg, httpKubeClient, httpClient, httpClient, readinessReader, authenticator, authorizer)
+			if err := server.WithGenesisGuards(httpGuard, readinessGuard); err != nil {
+				return err
+			}
+			if err := server.WithRecoveryReceipts(clientset.CoreV1().ConfigMaps(receiptNamespace)); err != nil {
+				return err
+			}
+			return startServiceComponents(ctx, stop, controllerGuard, mgr.Start, server.Start)
 		},
 	}
 }
@@ -274,6 +349,10 @@ func configureKubeClientRateLimit(config *rest.Config, qps, burst int) {
 }
 
 func configureKubeClientRateLimits(config *rest.Config, qps, burst int) (*rest.Config, *rest.Config, *rest.Config) {
+	return configureKubeClientRateLimitsWithMetrics(config, qps, burst, serviceKubeClientMetrics)
+}
+
+func configureKubeClientRateLimitsWithMetrics(config *rest.Config, qps, burst int, metrics *kubeClientMetricSet) (*rest.Config, *rest.Config, *rest.Config) {
 	leaderConfig := rest.CopyConfig(config)
 	readinessConfig := rest.CopyConfig(config)
 	httpConfig := rest.CopyConfig(config)
@@ -281,6 +360,10 @@ func configureKubeClientRateLimits(config *rest.Config, qps, burst int) (*rest.C
 	configureKubeClientRateLimit(readinessConfig, 5, 10)
 	configureKubeClientRateLimit(httpConfig, qps, burst)
 	configureKubeClientRateLimit(config, qps, burst)
+	instrumentKubeClientConfig(leaderConfig, kubeClassLeader, metrics)
+	instrumentKubeClientConfig(readinessConfig, kubeClassReadiness, metrics)
+	instrumentKubeClientConfig(httpConfig, kubeClassHTTP, metrics)
+	instrumentKubeClientConfig(config, kubeClassController, metrics)
 	return leaderConfig, readinessConfig, httpConfig
 }
 

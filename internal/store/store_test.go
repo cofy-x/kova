@@ -71,3 +71,15 @@ func TestEntryPreservesPushedManifestDigestInJSON(t *testing.T) {
 		t.Fatalf("manifest digest = %q, want %q", got.ManifestDigest, want.ManifestDigest)
 	}
 }
+
+func TestEntryOptionalObservationCannotInvalidateSuccessOrDigest(t *testing.T) {
+	for _, observation := range []string{`true`, `{"availability":"secret"}`, `{"schemaVersion":1,"availability":"observed","vertexCount":999999}`} {
+		var entry Entry
+		if err := json.Unmarshal([]byte(`{"success":true,"manifest_digest":"sha256:exact","build_observation":`+observation+`}`), &entry); err != nil {
+			t.Fatal(err)
+		}
+		if !entry.Success || entry.ManifestDigest != "sha256:exact" || entry.BuildObservation.Availability != "unavailable" || entry.BuildObservation.Reason != "invalid_observation" {
+			t.Fatalf("entry=%#v", entry)
+		}
+	}
+}

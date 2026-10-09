@@ -51,3 +51,40 @@ func TestTransportCommandUsesTypedPath(t *testing.T) {
 		t.Fatalf("command = %q, want %q", strings.Join(got, " "), want)
 	}
 }
+
+func TestTransportCommandCarriesExpectedPodUIDOnlyWhenPresent(t *testing.T) {
+	legacy := TransportCommand(http.MethodPost, BuildPath, "", "source.zip")
+	if got := TransportCommandForPodUID(http.MethodPost, BuildPath, "", "source.zip", ""); strings.Join(got, " ") != strings.Join(legacy, " ") {
+		t.Fatalf("legacy command changed: %v", got)
+	}
+	got := TransportCommandForPodUID(http.MethodPost, BuildPath, "", "source.zip", "pod-original")
+	if strings.Join(got[len(got)-2:], " ") != "--expected-pod-uid pod-original" {
+		t.Fatalf("expected Pod UID missing from transport command: %v", got)
+	}
+}
+
+func TestExpectedPodUIDPreflightFailsClosed(t *testing.T) {
+	t.Setenv(RunnerPodUIDEnv, "temporary")
+	if err := os.Unsetenv(RunnerPodUIDEnv); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateExpectedPodUID(""); err != nil {
+		t.Fatalf("legacy runner without UID fence was refused: %v", err)
+	}
+	if err := ValidateExpectedPodUID("pod-original"); err == nil {
+		t.Fatal("caller claimed a Pod UID in an unpinned container")
+	}
+	t.Setenv(RunnerPodUIDEnv, "pod-replacement")
+	for _, expected := range []string{"", "pod-original"} {
+		if err := ValidateExpectedPodUID(expected); err == nil {
+			t.Fatalf("replacement Pod accepted expected UID %q", expected)
+		}
+	}
+	if err := ValidateExpectedPodUID("pod-replacement"); err != nil {
+		t.Fatalf("exact target Pod UID was refused: %v", err)
+	}
+	t.Setenv(RunnerPodUIDEnv, "")
+	if err := ValidateExpectedPodUID(""); err == nil {
+		t.Fatal("empty Downward API Pod UID was treated as legacy")
+	}
+}

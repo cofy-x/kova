@@ -5,16 +5,21 @@ images:
     repository: ghcr.io/cofy-x/kova
     # Empty uses controller-<Chart.appVersion>.
     tag: ""
+    # Optional OCI manifest digest; when set, takes precedence over tag.
+    digest: ""
     pullPolicy: IfNotPresent
   runner:
     repository: ghcr.io/cofy-x/kova
     # Empty uses runner-<Chart.appVersion>.
     tag: ""
+    # Required for Service: exact OCI manifest/index digest pinned in Genesis.
+    digest: ""
     pullPolicy: IfNotPresent
   worker:
     repository: ghcr.io/cofy-x/kova
     # Empty uses worker-<Chart.appVersion>.
     tag: ""
+    digest: ""
     pullPolicy: IfNotPresent
 
 nameOverride: ""
@@ -88,6 +93,21 @@ serviceDaemon:
   maxQueuedJobs: 1000
   maxQueuedJobsPerRequester: 100
   workerSlots: 20
+  # External capacity-domain identity, not derived from mutable endpoints.
+  workerPoolID: ""
+  # Opt-in only after an external installer has created a new runner Namespace,
+  # Initializing Genesis, and immutable receipt Secret. Kova never creates the
+  # receipt Secret or Genesis from these values.
+  admissionGenesis:
+    enabled: false
+    # Externally created, fresh receipt-only Namespace. Its original UID is
+    # pinned inside the immutable Genesis/Secret contract, not learned by Helm.
+    recoveryReceiptNamespace: ""
+    receiptSecret:
+      name: ""
+      # Record the original Secret UID after external creation. A replacement
+      # at the same name must never become the Service's authority.
+      uid: ""
   controllerConcurrency: 4
   # Each Service Pod gives build-controller and HTTP admission independent
   # Kubernetes REST budgets at these values. Lease renewal and readiness

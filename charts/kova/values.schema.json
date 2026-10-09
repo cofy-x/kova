@@ -117,6 +117,25 @@
         "maxQueuedJobs": { "type": "integer", "minimum": 1, "maximum": 1000 },
         "maxQueuedJobsPerRequester": { "type": "integer", "minimum": 1 },
         "workerSlots": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "workerPoolID": { "type": "string", "maxLength": 128, "pattern": "^[A-Za-z0-9._:/@+\\-]*$" },
+        "admissionGenesis": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["enabled", "recoveryReceiptNamespace", "receiptSecret"],
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "recoveryReceiptNamespace": { "type": "string" },
+            "receiptSecret": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["name", "uid"],
+              "properties": {
+                "name": { "type": "string" },
+                "uid": { "type": "string" }
+              }
+            }
+          }
+        },
         "controllerConcurrency": { "type": "integer", "minimum": 2, "maximum": 32 },
         "kubeClientQPS": { "type": "integer", "minimum": 1, "maximum": 100 },
         "kubeClientBurst": { "type": "integer", "minimum": 1, "maximum": 200 },
@@ -283,6 +302,7 @@
       "properties": {
         "repository": { "type": "string", "minLength": 1 },
         "tag": { "type": "string" },
+        "digest": { "type": "string", "pattern": "^(|sha256:[0-9a-f]{64})$" },
         "pullPolicy": { "type": "string", "enum": ["Always", "IfNotPresent", "Never"] }
       }
     },

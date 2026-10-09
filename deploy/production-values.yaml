@@ -1,6 +1,8 @@
 # Provider-neutral production starting point. The released chart selects its
 # matching controller, runner, and worker images automatically. Override only
 # environment-owned registry, capacity, and scheduling inputs.
+# Service additionally requires images.runner.digest and serviceDaemon.workerPoolID
+# matching the externally installed v3 Genesis contract.
 
 imagePullSecrets:
   # Set name to an existing pull secret, or set create=true with
@@ -32,6 +34,9 @@ serviceAccount:
 
 serviceDaemon:
   enabled: true
+  # Supply environment-created fresh runner/receipt Namespaces and exact
+  # admissionGenesis immutable receipt Secret identity. Rendering intentionally fails
+  # without that separate installation overlay; never copy test identities.
   replicas: 2
   authentication:
     mode: tokenreview

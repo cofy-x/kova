@@ -5,6 +5,7 @@ import (
 	"testing"
 	"unicode/utf8"
 
+	"github.com/cofy-x/kova/internal/buildobservation"
 	"github.com/cofy-x/kova/internal/store"
 )
 
@@ -31,6 +32,20 @@ func TestBoundedSummaryEntryDropsLogsAndTruncatesUTF8Reason(t *testing.T) {
 	entry := store.Entry{Target: "registry.example/demo:dev", Success: false, Logs: strings.Repeat("secret log", 1000), Reason: strings.Repeat("a", 2047) + "界"}
 	summary := boundedSummaryEntry(entry)
 	if summary.Logs != "" || len(summary.Reason) > 2048 || !utf8.ValidString(summary.Reason) || summary.Target != entry.Target || entry.Logs == "" {
+		t.Fatalf("summary=%#v", summary)
+	}
+}
+
+func TestBoundedSummaryEntryCopiesOnlyFiniteObservation(t *testing.T) {
+	entry := store.Entry{Target: "registry.example/app:dev", Success: true, BuildObservation: buildobservation.Unavailable("missing_stream")}
+	summary := boundedSummaryEntry(entry)
+	summary.BuildObservation.Reason = "invalid_observation"
+	if entry.BuildObservation.Reason != "missing_stream" {
+		t.Fatal("summary aliases retained observation")
+	}
+	entry.BuildObservation.Reason = strings.Repeat("arbitrary raw payload", 1000)
+	summary = boundedSummaryEntry(entry)
+	if summary.BuildObservation.Reason != "invalid_observation" || !summary.Success {
 		t.Fatalf("summary=%#v", summary)
 	}
 }

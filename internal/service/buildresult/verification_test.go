@@ -45,6 +45,23 @@ func TestCollectReceiptsTransportErrorRemainsPending(t *testing.T) {
 	}
 }
 
+func TestCollectReceiptsRetainsOptionalObservationOnSuccessAndFailure(t *testing.T) {
+	for _, success := range []bool{true, false} {
+		results := []kovav1.BuildVerificationResult{{Format: "oci", Image: "registry.example/app:dev", Platform: "linux/amd64", State: "pending"}}
+		transient, hard := CollectReceipts(context.Background(), exporterFunc(func(context.Context, *kovav1.KovaBuild, string, string) ([]byte, error) {
+			return []byte(fmt.Sprintf(`{"target":"registry.example/app:dev","success":%t,"manifest_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","build_observation":{"schemaVersion":1,"availability":"unavailable","reason":"malformed_stream","exportAvailability":"unavailable","pushAvailability":"unavailable","nydusAvailability":"unavailable","workerSessionsAvailability":"unavailable"}}`+"\n", success)), nil
+		}), &kovav1.KovaBuild{}, results)
+		if transient != "" || hard == success || results[0].BuildObservation.Availability != "unavailable" || results[0].BuildObservation.Reason != "malformed_stream" {
+			t.Fatalf("success=%t hard=%t results=%#v", success, hard, results)
+		}
+		copy := (&kovav1.KovaBuild{Status: kovav1.KovaBuildStatus{VerificationResults: results}}).DeepCopy()
+		copy.Status.VerificationResults[0].BuildObservation.Reason = "invalid_observation"
+		if results[0].BuildObservation.Reason != "malformed_stream" {
+			t.Fatal("Kubernetes DeepCopy aliased telemetry")
+		}
+	}
+}
+
 func TestCollectReceiptsOversizedExportFailsClosed(t *testing.T) {
 	results := []kovav1.BuildVerificationResult{{Format: "oci", Image: "registry.example/one:dev", Platform: "linux/amd64", State: "pending"}}
 	transient, hard := CollectReceipts(context.Background(), exporterFunc(func(context.Context, *kovav1.KovaBuild, string, string) ([]byte, error) {

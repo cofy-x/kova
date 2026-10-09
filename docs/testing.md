@@ -24,6 +24,107 @@ CI executes this gate on the minimum supported Python 3.10 and current Python 3.
 `make sdk-examples` builds and truly executes the public Go and Python examples against a local fake Service.
 It verifies immutable source and target requests, caller idempotency, stable multi-output receipts, server-returned immutable references, typed API errors, timeout, caller cancellation, terminal cancellation, partial failure, reference receipt shape, and bearer-token secrecy without Kubernetes or a registry.
 
+## Opt-in Genesis bootstrap process gate
+
+`TestRealAPIGenesisProcessBootstrap` exercises the actual runtime bootstrap function at five write points, before and after each known API response, using ten killed-and-joined child processes followed by ten successor processes.
+It does not start a Service listener, manager, leader election, runner, BuildKit worker, registry, or build workload.
+An after-response pause is not an unknown-response or network-loss simulation.
+
+First use the external create-only installer to prepare ten distinct fresh runner/recovery-receipt Namespace pairs, ten Initializing Genesises, and ten immutable installation receipt Secrets in a separate control Namespace.
+The operator must attest that no old or competing writer can use these identities.
+Do not reuse a Namespace from an earlier run, including a successful run.
+The gate only accepts dedicated `kind-kova-genesis-api-*` or `kind-kova-genesis-process-*` contexts with an exact owned control-plane container ID and a pinned loopback HTTPS API binding.
+
+The private absolute manifest requires `kubeconfig`, its `kubeconfigSHA256`, `context`, `kubeSystemUID`, `controlPlaneID`, an explicit `cleanupOnSuccess` boolean, and exactly ten `cases`.
+Each case pins `stage` (`active-create`, `active-pin`, `queue-create`, `queue-pin`, or `commit`), `point` (`before` or `after`), `namespace`, `namespaceUID`, `receiptNamespace`, `receiptNamespaceUID`, `genesisUID`, absolute `receiptFile`, `receiptSHA256`, `secretNamespace`, `secretNamespaceUID`, `secretName`, and `secretUID`.
+Each recovery-receipt Namespace must be unique and disjoint from every runner and control Namespace, and its original name/UID must match the immutable v3 receipt.
+The receipt also pins an externally assigned worker pool identity and the exact runner OCI manifest/index reference; the gate derives no authority from a mutable tag or image configuration ID.
+All ten fixtures are preflighted before the first runtime write; bounded receipt-Namespace inventory rejects existing receipts, workloads, Secrets, pagination, or read failures, allowing only the system `kube-root-ca.crt` ConfigMap if present.
+The strict schema and opt-in-free refusal tests live in the [process gate implementation](../internal/service/genesis_process_realapi_test.go).
+
+```bash
+KOVA_GENESIS_PROCESS_API_MANIFEST=/absolute/private/matrix.json \
+  go test ./internal/service -run '^TestRealAPIGenesisProcessBootstrap$' -count=1 -timeout=15m -v
+```
+
+Use `cleanupOnSuccess=false` to retain every test object for exact-UID inspection.
+No API cleanup occurs on a failed test path before cleanup; an explicitly opted-in successful cleanup is sequential, and a later deletion failure can leave a partially cleaned fixture that requires inspection.
+Each child has a 45-second absolute deadline and the parent has a 12-minute budget; a timeout retains all unresolved API state.
+The v3 fixture/schema adaptation is not itself live v3 qualification, and earlier v1 process-gate evidence cannot certify the changed contract.
+The historical waiting-only queue fixtures below also need explicit adaptation before they can qualify the active-inclusive HTTP queue cap introduced in v2 and retained in v3.
+
+## Source-Bound Actual Service Control-Plane Fault Gate
+
+`TestRealAPIActualServiceControlPlane` is a separate, opt-in seven-fixture gate.
+Each child invokes the same complete Service CLI Action as the shipped command, including receipt qualification, bootstrap, real controller-runtime manager/cache/reconciler, HTTP listener, and leader election.
+Only the unexported Kubernetes configuration loader changes: the test uses its pinned dedicated Kind endpoint through a parent-owned loopback fault proxy instead of in-cluster credentials.
+The normal CLI still requires in-cluster credentials and has no fault-injection flags.
+This test binary is not a candidate container image, and this control-plane gate is not runner, build-result, recovery-drain, deployed-RBAC, or final API-load qualification.
+
+The matrix requires these seven distinct case names:
+
+- `lost-active-create`, `lost-active-pin`, `lost-queue-create`, `lost-queue-pin`, and `lost-commit`: the proxy consumes a successful original API response, closes the actual downstream connection without delivering it, and requires the Service to qualify the committed pair with exactly one upstream attempt for that mutation.
+- `late-active-create`: the parent captures one exact original Create body, kills and joins its caller, lets successors commit, and forwards that captured request exactly once; the still-present committed ledger must produce a conflict without UID changes.
+- `late-active-create-after-loss`: after successor commit and leader handoff, the parent UID-deletes only this case's newly committed active ledger and forwards the captured old Create once; a distinct replacement UID must not rebind immutable Genesis, the survivor must return readiness 503, and another actual Service startup must refuse without a listener or API writes.
+
+The deletion case requires explicit, separately reviewed live-fault authorization for the exact disposable fixture, as well as its manifest acknowledgement.
+Adding the test or setting its acknowledgement is not evidence of a live PASS or permission to mutate a shared cluster.
+Never run it against HK, old preserved ledger-loss fixtures, reused runner namespace names, or the earlier ten-process bootstrap fixtures.
+All seven runner/receipt/control namespace triples, original UIDs, receipts, empty-workload vetoes, and absent Lease identities are checked before the first child starts.
+Namespace freshness and stopped external writers remain the external installer's responsibility, not facts inferred from empty Lists.
+
+Create a private JSON manifest outside Git, selected only with `KOVA_GENESIS_SERVICE_MANIFEST=/absolute/private/service-matrix.json`.
+The strict root fields are `schemaVersion: 1`, the full lowercase 40-character `sourceCommit`, `testBinarySHA256`, absolute `kubeconfig`, `kubeconfigSHA256`, `context`, `kubeSystemUID`, `controlPlaneID`, `oldWritersStopped: true`, `cleanupOnSuccess: false`, and `cases`.
+The exact dedicated context must satisfy the existing Kind process-target identity check, including original running control-plane container ID and its loopback API port.
+Each case has `name`, explicit `allowCommittedLedgerDeletion` (true only for the final deletion case), and `fixture`.
+The fixture fields are `namespace`, `namespaceUID`, `receiptNamespace`, `receiptNamespaceUID`, `genesisUID`, absolute `receiptFile`, `receiptSHA256`, `secretNamespace`, `secretNamespaceUID`, `secretName`, and `secretUID`; do not include the earlier process gate's `stage` or `point` fields.
+All twenty-one runner/receipt/control namespace names must be distinct, begin `kova-genesis-svc-`, and retain distinct original UIDs.
+The v3 receipt pins the worker pool and runner manifest reference used in the actual Service arguments; the proxy still forbids all runner Pod or build creation.
+Each receipt Secret is immutable and its UID and exact mounted bytes are pinned.
+
+Compile only a clean reviewed source candidate into a private test executable, explicitly stamping `github.com/cofy-x/kova/internal/version.Commit` with that same full source SHA through Go's `-ldflags=-X` option.
+Record that source SHA, the exact build command, and the executable SHA256 in the external acceptance receipt; the manifest binds both stamp and executable hash, and every child verifies them before using Kubernetes.
+Run the executable with `-test.run=^TestRealAPIActualServiceControlPlane$ -test.timeout=25m -test.v` only after the fixture and destructive-case plan have been approved.
+Do not use an unstamped `go test` invocation as the live gate.
+
+Each case has a 140-second deadline, each child an independent at-most-three-minute absolute deadline, and the parent a twenty-minute deadline.
+The parent owns and joins only the exact PIDs it spawned; Lease UID and holder identities are mapped to the actual successful Lease writers before killing the leader and proving survivor handoff on the same Lease UID.
+Held request bodies remain in bounded parent memory, bound to a SHA256 and one forwarding authority; cancellation never releases them automatically.
+The proxy permits only the scoped bootstrap, Lease/event operations, and necessary reads/watches, and records any rejected operation as a test failure.
+All Pod/CR mutation, Pod Exec, arbitrary resource access, and source/registry activity are outside this gate; HTTP probes are readiness and empty-list GET only.
+No API object is automatically cleaned up, including on success; the intentionally missing original ledger and its replacement remain evidence.
+Any unknown outcome, unexpected operation, identity drift, or failed process join stops the matrix, and its partially used namespaces must not be rerun as fresh fixtures.
+
+This gate does not collect Service client budget histograms or measure loaded job stages.
+Its proxy one-attempt assertions establish fault semantics only, not a production QPS budget or reconcile-latency distribution.
+Focused local safety tests use `go test ./internal/service -run 'TestActualService|TestServiceFactory' -count=1`; these fake-upstream safety checks must not be reported as the opt-in real-API result.
+
+## Source-Bound Pod Template API Defaulting Gate
+
+`TestRealAPIPodTemplateDigestRoundTrip` is an independent, opt-in real-API gate for the canonical Pod Spec digest.
+It prepares three Pods using the production `runner.PreparePod` and Genesis defaulting helpers: the source-fetch/Secret-volume baseline, limits-only CPU/memory/ephemeral-storage resources on regular and init containers, and a negative default-ServiceAccount pull-secret injection.
+The positive before/after digests must match; the negative digest must differ, with the declared injected pull secret accounting for the difference.
+The existing digest annotation is not trusted in place of recomputing the complete canonical template.
+
+An externally approved installer must create a fresh, dedicated single-node `kind-kova-pod-template-*` cluster, two distinct `kova-pod-template-*` namespaces, their default ServiceAccounts, and two immutable dummy dockerconfig Secrets containing only `{"auths":{}}`.
+The positive ServiceAccount has no pull secret; the negative one references its exact dummy Secret.
+No CRD, KovaBuild, real credential, image publication, or registry is needed.
+Pods permanently retain a scheduling gate, contradictory node selector/affinity, token automount disabled, and `imagePullPolicy: Never`.
+Each uses its real namespace as owner, so this is not production KovaBuild-owner, status persistence, runner, or recovery-drain qualification.
+
+Both `KOVA_POD_TEMPLATE_REAL_API_MANIFEST=/absolute/private/manifest.json` and `KOVA_POD_TEMPLATE_REAL_API_MANIFEST_SHA256=<sha256>` are required; partial opt-in fails.
+The strict manifest fields are absolute `sourceDirectory`, clean full `sourceCommit`, `testBinarySHA256`, absolute private `kubeconfig`, `kubeconfigSHA256`, `context`, `kubeSystemUID`, `controlPlaneID`, `preparedAfter`, `expiresAt`, a new absolute `receiptPath`, `positive`, `negative`, `baselinePod`, `limitsPod`, and `negativePod`.
+Each namespace object contains `name`, `uid`, `serviceAccountUID`, `serviceAccountRV`, `secretName`, `secretUID`, and `secretRV`.
+The cluster and namespaces must have been created in the declared fresh time window, which is at most one hour; time is only a fixture restriction, never retirement proof.
+Pin the cached or published immutable Kind node reference in the external run plan, and pin the exact running control-plane container ID and loopback HTTPS port through the kubeconfig and manifest.
+
+Compile a clean reviewed `./internal/service/buildcontroller` test binary with `github.com/cofy-x/kova/internal/version.Commit` stamped to the exact source SHA, and record that command and binary hash outside Git.
+After explicit fixture approval, run only `-test.run=^TestRealAPIPodTemplateDigestRoundTrip$ -test.timeout=3m -test.v`.
+The test has a two-minute context and ten-second API calls, a transport-level read allowlist, and one permitted POST per declared Pod; unknown, rejected, or lost-response Creates are never reissued.
+It rechecks source, manifest, cluster, namespace, ServiceAccount and Secret identities before each Create and fsyncs append-only private JSONL intent/readback checkpoints.
+All API objects remain on success and failure; the receipt file cannot be overwritten or reused.
+Source safety tests and a compiled executable are not a live PASS, and this narrow gate never qualifies the complete committed-loss disposal path.
+
 ## Network Overrides
 
 Kova defaults to the official Ubuntu image, upstream GitHub release URLs,

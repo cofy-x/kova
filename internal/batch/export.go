@@ -10,6 +10,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/cofy-x/kova/internal/buildobservation"
 	"github.com/cofy-x/kova/internal/logging"
 	"github.com/cofy-x/kova/internal/observability"
 	"github.com/cofy-x/kova/internal/source"
@@ -94,6 +95,7 @@ func RunExport(opts Options) (err error) {
 
 func boundedSummaryEntry(entry store.Entry) store.Entry {
 	entry.Logs = ""
+	entry.BuildObservation = buildobservation.Normalize(entry.BuildObservation)
 	if len(entry.Reason) > 2048 {
 		entry.Reason = entry.Reason[:2048]
 		for !utf8.ValidString(entry.Reason) {

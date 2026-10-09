@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -250,20 +251,27 @@ func TestQueueLedgerRejectsCorruptRequesterCount(t *testing.T) {
 func TestMaximumQueueLedgerFitsBelowConfigMapLimit(t *testing.T) {
 	store, _ := testStore(t, 1000, 1000)
 	snapshot := store.freshState()
+	snapshot.Version = 2
 	for i := 0; i < 1000; i++ {
-		id := fmt.Sprintf("idem-%020d", i)
+		// A maximum-length DNS subdomain plus every v2 receipt/cleanup field
+		// exercises the bound at the exact configured 1000-slot queue cap.
+		id := strings.Repeat("a", 63) + "." + strings.Repeat("b", 63) + "." +
+			strings.Repeat("c", 63) + "." + strings.Repeat("d", 56) + fmt.Sprintf("%05d", i)
 		snapshot.Intents[id] = Intent{
 			RequesterHash: HashRequester(fmt.Sprintf("requester-%d", i)),
 			RequestDigest: HashRequester(fmt.Sprintf("request-%d", i)),
 			Nonce:         "00112233445566778899aabbccddeeff",
-			CreatedAtUnix: 1,
+			CreatedAtUnix: 9223372036854775807,
+			ReceiptUID:    strings.Repeat("a", 64),
+			ReceiptDigest: "sha256:" + strings.Repeat("b", 64),
+			CleanupKind:   cleanupTerminal,
 		}
 	}
-	data, err := json.Marshal(snapshot)
+	data, err := encodeState(snapshot)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(data) >= maxLedgerBytes {
+	if len(data) > maxLedgerBytes {
 		t.Fatalf("1000 intents require %d bytes, exceeding %d-byte guard", len(data), maxLedgerBytes)
 	}
 }

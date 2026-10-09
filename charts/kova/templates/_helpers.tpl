@@ -81,7 +81,11 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- $repository := required (printf "Values.images.%s.repository is required" .role) $image.repository -}}
 {{- $defaultTag := printf "%s-%s" .role .root.Chart.AppVersion -}}
 {{- $tag := default $defaultTag $image.tag -}}
+{{- if $image.digest -}}
+{{- printf "%s@%s" $repository $image.digest -}}
+{{- else -}}
 {{- printf "%s:%s" $repository $tag -}}
+{{- end -}}
 {{- end -}}
 
 {{- define "kova.roleImagePullPolicy" -}}

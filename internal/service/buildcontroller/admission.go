@@ -7,6 +7,7 @@ import (
 
 	kovav1 "github.com/cofy-x/kova/internal/apis/kova/v1alpha1"
 	"github.com/cofy-x/kova/internal/service/queueadmission"
+	"github.com/cofy-x/kova/internal/service/recoverydrain"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -21,6 +22,14 @@ type admissionDecision struct {
 // admission commits a durable reservation before its caller may create a Pod.
 // The ConfigMap resourceVersion serializes grants across reconciles and leaders.
 func (r *KovaBuildReconciler) admission(ctx context.Context, build *kovav1.KovaBuild) (admissionDecision, error) {
+	var grantNonce string
+	if r.Genesis != nil {
+		var err error
+		grantNonce, err = newPodCreateAttempt()
+		if err != nil {
+			return admissionDecision{}, err
+		}
+	}
 	for retry := 0; retry < maxReservationCASAttempts; retry++ {
 		if err := ctx.Err(); err != nil {
 			return admissionDecision{}, err
@@ -59,13 +68,27 @@ func (r *KovaBuildReconciler) admission(ctx context.Context, build *kovav1.KovaB
 			if existing.Closing {
 				return admissionDecision{}, fmt.Errorf("%w: %s/%s grant is closing", errAdmissionClosed, build.Namespace, build.Name)
 			}
+			if r.Genesis != nil {
+				if err := r.verifyPinnedGrant(ctx, build, existing); err != nil {
+					return admissionDecision{}, err
+				}
+			}
 			return admissionDecision{Admitted: true, Allocation: existing.Slots}, nil
 		}
 		decision := decideAdmission(build, builds.Items, reservations.Active, r.Cfg.MaxActiveJobs, r.Cfg.MaxActiveJobsPerRequester, r.Cfg.WorkerSlots, reservations.LastGrantedRequesterHash)
 		if !decision.Admitted {
 			return decision, nil
 		}
-		reservations.Active[key] = activeReservation{BuildName: build.Name, Requester: requesterKey(build), Slots: decision.Allocation}
+		entry := activeReservation{BuildName: build.Name, Requester: requesterKey(build), Slots: decision.Allocation}
+		if r.Genesis != nil {
+			// ResourceVersion is the actual CAS fence. The numeric field is
+			// only receipt evidence and cannot be zero for a grant intent.
+			if reservations.Fence == 0 {
+				reservations.Fence = 1
+			}
+			entry.GrantNonce, entry.GrantFence = grantNonce, reservations.Fence
+		}
+		reservations.Active[key] = entry
 		// The next requester must be chosen from the last committed grant, not
 		// from a process-local cursor that disappears on leader handoff. The
 		// cursor and grant share one resourceVersion CAS.
@@ -78,6 +101,11 @@ func (r *KovaBuildReconciler) admission(ctx context.Context, build *kovav1.KovaB
 				continue
 			}
 			return admissionDecision{}, err
+		}
+		if r.Genesis != nil {
+			if err := r.finishFreshGrant(ctx, build, entry); err != nil {
+				return admissionDecision{}, err
+			}
 		}
 		return decision, nil
 	}
@@ -160,7 +188,8 @@ func queuedAdmissionCandidates(builds []kovav1.KovaBuild, active map[string]acti
 		// Deleting and cancellation-requested builds can remain Queued while
 		// cleanup is blocked. They will never receive a real grant, so they
 		// must not consume one in the virtual fair-share allocation either.
-		if item.DeletionTimestamp.IsZero() && !cancellationRequested(item) &&
+		if !recoverydrain.IsInertBuildTombstone(item) &&
+			item.DeletionTimestamp.IsZero() && !cancellationRequested(item) &&
 			(item.Status.Phase == "" || item.Status.Phase == kovav1.PhaseQueued) && active[reservationKey(item)].Slots == 0 {
 			queued = append(queued, item)
 		}
