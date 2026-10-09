@@ -367,6 +367,100 @@ spec:
                     BuildVerificationResult is a bounded, durable receipt for one concrete output.
                     PushedDigest is evidence from the runner's exact push, not a mutable tag lookup.
                   properties:
+                    buildObservation:
+                      description: |-
+                        BuildObservation is optional, bounded diagnosis retained with this exact
+                        output. Missing/invalid observations never decide artifact correctness.
+                      properties:
+                        availability:
+                          enum:
+                          - observed
+                          - incomplete
+                          - unavailable
+                          type: string
+                        cachedVertexIntervalCount:
+                          format: int32
+                          maximum: 16384
+                          minimum: 0
+                          type: integer
+                        exportAvailability:
+                          enum:
+                          - observed
+                          - unavailable
+                          type: string
+                        exportPushOverlapNanoseconds:
+                          format: int64
+                          maximum: 86400000000000
+                          minimum: 0
+                          type: integer
+                        exportUnionNanoseconds:
+                          format: int64
+                          maximum: 86400000000000
+                          minimum: 0
+                          type: integer
+                        nydusAvailability:
+                          enum:
+                          - observed
+                          - incomplete
+                          - unavailable
+                          type: string
+                        nydusWallNanoseconds:
+                          format: int64
+                          maximum: 86400000000000
+                          minimum: 0
+                          type: integer
+                        pushAvailability:
+                          enum:
+                          - observed
+                          - unavailable
+                          type: string
+                        pushUnionNanoseconds:
+                          format: int64
+                          maximum: 86400000000000
+                          minimum: 0
+                          type: integer
+                        reason:
+                          enum:
+                          - missing_stream
+                          - malformed_stream
+                          - limit_exceeded
+                          - partial_stream
+                          - command_failed
+                          - cancelled
+                          - invalid_observation
+                          type: string
+                        schemaVersion:
+                          format: int32
+                          maximum: 1
+                          minimum: 1
+                          type: integer
+                        vertexCount:
+                          format: int32
+                          maximum: 4096
+                          minimum: 0
+                          type: integer
+                        vertexIntervalCount:
+                          format: int32
+                          maximum: 16384
+                          minimum: 0
+                          type: integer
+                        vertexUnionNanoseconds:
+                          format: int64
+                          maximum: 86400000000000
+                          minimum: 0
+                          type: integer
+                        workerSessionsAvailability:
+                          enum:
+                          - unavailable
+                          type: string
+                      required:
+                      - availability
+                      - exportAvailability
+                      - nydusAvailability
+                      - pushAvailability
+                      - schemaVersion
+                      - workerSessionsAvailability
+                      type: object
                     error:
                       maxLength: 2048
                       type: string

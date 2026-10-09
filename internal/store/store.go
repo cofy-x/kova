@@ -9,33 +9,36 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cofy-x/kova/internal/buildobservation"
 	"github.com/cofy-x/kova/internal/logging"
 )
 
 // Entry is stored in LMDB and exported as JSONL.
 type Entry struct {
-	StartedAt      string `json:"started_at"`
-	FinishedAt     string `json:"finished_at"`
-	Elapsed        string `json:"elapsed"`
-	Target         string `json:"target"`
-	NodeIP         string `json:"node_ip,omitempty"`
-	ManifestDigest string `json:"manifest_digest,omitempty"`
-	Success        bool   `json:"success"`
-	Logs           string `json:"logs,omitempty"`
-	Reason         string `json:"reason,omitempty"`
+	StartedAt        string                        `json:"started_at"`
+	FinishedAt       string                        `json:"finished_at"`
+	Elapsed          string                        `json:"elapsed"`
+	Target           string                        `json:"target"`
+	NodeIP           string                        `json:"node_ip,omitempty"`
+	ManifestDigest   string                        `json:"manifest_digest,omitempty"`
+	Success          bool                          `json:"success"`
+	Logs             string                        `json:"logs,omitempty"`
+	Reason           string                        `json:"reason,omitempty"`
+	BuildObservation *buildobservation.Observation `json:"build_observation,omitempty"`
 }
 
 func (r *Entry) UnmarshalJSON(data []byte) error {
 	type rawResultEntry struct {
-		StartedAt      string          `json:"started_at"`
-		FinishedAt     string          `json:"finished_at"`
-		Elapsed        json.RawMessage `json:"elapsed"`
-		Target         string          `json:"target"`
-		NodeIP         string          `json:"node_ip,omitempty"`
-		ManifestDigest string          `json:"manifest_digest,omitempty"`
-		Success        bool            `json:"success"`
-		Logs           string          `json:"logs,omitempty"`
-		Reason         string          `json:"reason,omitempty"`
+		StartedAt        string          `json:"started_at"`
+		FinishedAt       string          `json:"finished_at"`
+		Elapsed          json.RawMessage `json:"elapsed"`
+		Target           string          `json:"target"`
+		NodeIP           string          `json:"node_ip,omitempty"`
+		ManifestDigest   string          `json:"manifest_digest,omitempty"`
+		Success          bool            `json:"success"`
+		Logs             string          `json:"logs,omitempty"`
+		Reason           string          `json:"reason,omitempty"`
+		BuildObservation json.RawMessage `json:"build_observation,omitempty"`
 	}
 
 	var raw rawResultEntry
@@ -57,6 +60,7 @@ func (r *Entry) UnmarshalJSON(data []byte) error {
 	r.Success = raw.Success
 	r.Logs = raw.Logs
 	r.Reason = raw.Reason
+	r.BuildObservation = buildobservation.Decode(raw.BuildObservation)
 	return nil
 }
 

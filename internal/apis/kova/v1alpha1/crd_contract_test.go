@@ -106,6 +106,31 @@ func TestGeneratedCRDMatchesBoundedBuildContract(t *testing.T) {
 	if int(outputs["maxItems"].(float64)) != MaxConcreteOutputs {
 		t.Fatalf("outputs.maxItems = %v", outputs["maxItems"])
 	}
+	verification := status["verificationResults"].(map[string]any)
+	observation := verification["items"].(map[string]any)["properties"].(map[string]any)["buildObservation"].(map[string]any)
+	if observation["type"] != "object" {
+		t.Fatal("missing bounded observation schema")
+	}
+	observationFields := observation["properties"].(map[string]any)
+	if len(observationFields) != 15 {
+		t.Fatalf("unexpected observation fields: %d", len(observationFields))
+	}
+	for field, raw := range observationFields {
+		property := raw.(map[string]any)
+		if property["type"] != "string" && property["type"] != "integer" {
+			t.Fatalf("non-scalar observation field %s: %#v", field, property)
+		}
+		if property["type"] == "integer" && (property["maximum"] == nil || property["minimum"] == nil) {
+			t.Fatalf("unbounded integer %s", field)
+		}
+		if property["type"] == "string" && property["enum"] == nil {
+			t.Fatalf("unbounded vocabulary %s", field)
+		}
+	}
+	workerAvailability := observationFields["workerSessionsAvailability"].(map[string]any)["enum"].([]any)
+	if len(workerAvailability) != 1 || workerAvailability[0] != "unavailable" {
+		t.Fatal("worker sessions must remain unavailable")
+	}
 	outputPlatform := outputs["items"].(map[string]any)["properties"].(map[string]any)["platform"].(map[string]any)
 	if values := outputPlatform["enum"].([]any); len(values) != 2 || values[0] != "linux/amd64" || values[1] != "linux/arm64" {
 		t.Fatalf("output platform schema = %#v", outputPlatform)

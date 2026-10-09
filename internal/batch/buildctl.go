@@ -8,8 +8,10 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/cofy-x/kova/internal/buildobservation"
 	"github.com/cofy-x/kova/internal/logging"
 	"github.com/cofy-x/kova/internal/observability"
 	"github.com/cofy-x/kova/internal/scheduler"
@@ -62,19 +64,20 @@ func executeBuild(ctx context.Context, spec source.Spec, addr *scheduler.Addr, o
 	defer buildCancel()
 
 	var outputBuf boundedTailBuffer
-	digest, err := runBuildCommands(buildCtx, spec, addr, opts, &outputBuf)
+	digest, observation, err := runObservedBuildCommands(buildCtx, spec, addr, opts, &outputBuf)
 	buildErr = err
 	finishedAt := time.Now()
 	elapsed := finishedAt.Sub(startedAt)
 
 	entry := store.Entry{
-		StartedAt:      startedAt.Format(time.RFC3339),
-		FinishedAt:     finishedAt.Format(time.RFC3339),
-		Elapsed:        logging.FormatElapsed(elapsed),
-		Target:         spec.Target,
-		NodeIP:         nodeIP,
-		ManifestDigest: digest,
-		Success:        err == nil,
+		StartedAt:        startedAt.Format(time.RFC3339),
+		FinishedAt:       finishedAt.Format(time.RFC3339),
+		Elapsed:          logging.FormatElapsed(elapsed),
+		Target:           spec.Target,
+		NodeIP:           nodeIP,
+		ManifestDigest:   digest,
+		Success:          err == nil,
+		BuildObservation: observation,
 	}
 
 	if err != nil {
@@ -95,24 +98,42 @@ func executeBuild(ctx context.Context, spec source.Spec, addr *scheduler.Addr, o
 }
 
 func runBuildCommands(ctx context.Context, spec source.Spec, addr *scheduler.Addr, opts Options, outputBuf io.Writer) (string, error) {
+	digest, _, err := runObservedBuildCommands(ctx, spec, addr, opts, outputBuf)
+	return digest, err
+}
+
+func runObservedBuildCommands(ctx context.Context, spec source.Spec, addr *scheduler.Addr, opts Options, outputBuf io.Writer) (string, *buildobservation.Observation, error) {
 	if source.FormatIsOCI(spec.Format) {
-		return runBuildctl(ctx, spec, addr, opts, outputBuf)
+		return runObservedBuildctl(ctx, spec, addr, opts, outputBuf)
 	}
 
 	ociSpec := spec
 	ociSpec.Target = source.StripNydusV3Suffix(spec.Target)
-	ociDigest, err := runBuildctl(ctx, ociSpec, addr, opts, outputBuf)
+	ociDigest, observation, err := runObservedBuildctl(ctx, ociSpec, addr, opts, outputBuf)
 	if err != nil {
-		return "", err
+		return "", observation, err
 	}
 	ref, err := name.ParseReference(ociSpec.Target, name.WeakValidation)
 	if err != nil {
-		return "", fmt.Errorf("parse Nydus source reference: %w", err)
+		return "", observation, fmt.Errorf("parse Nydus source reference: %w", err)
 	}
 	// Conversion must consume this build's OCI image, even if another job
 	// overwrites the intermediate tag before nydusify starts pulling it.
 	sourceRef := ref.Context().Name() + "@" + ociDigest
-	return runNydusify(ctx, sourceRef, spec.Target, opts, outputBuf)
+	started := time.Now()
+	digest, err := runNydusify(ctx, sourceRef, spec.Target, opts, outputBuf)
+	observation.NydusWallNanoseconds = nanosecondsPointer(int64(time.Since(started)))
+	observation.NydusAvailability = "observed"
+	if err != nil {
+		observation.NydusAvailability = "incomplete"
+		if observation.Availability == "observed" {
+			observation.Availability, observation.Reason = "incomplete", "command_failed"
+			if ctx.Err() != nil {
+				observation.Reason = "cancelled"
+			}
+		}
+	}
+	return digest, buildobservation.Normalize(observation), err
 }
 
 func runNydusify(ctx context.Context, sourceRef, target string, opts Options, outputBuf io.Writer) (string, error) {
@@ -142,31 +163,58 @@ func runNydusify(ctx context.Context, sourceRef, target string, opts Options, ou
 	return validatePushedDigest(pushed.Digest, "Nydusify")
 }
 
-func runBuildctl(ctx context.Context, spec source.Spec, addr *scheduler.Addr, opts Options, outputBuf io.Writer) (string, error) {
+func runObservedBuildctl(ctx context.Context, spec source.Spec, addr *scheduler.Addr, opts Options, outputBuf io.Writer) (digest string, observation *buildobservation.Observation, resultErr error) {
+	// stdout and the projected stderr now use different exec copy goroutines.
+	// Serialize their shared diagnostic sink even for a non-concurrent writer.
+	sharedOutput := &lockedCommandWriter{writer: outputBuf}
+	projection := newProgressProjection(commandOutput(opts.Verbose, os.Stderr, sharedOutput))
+	defer func() { observation = projection.finish(resultErr, ctx.Err() != nil) }()
 	metadata, err := os.CreateTemp("", "kova-buildctl-metadata-*.json")
 	if err != nil {
-		return "", fmt.Errorf("create BuildKit metadata file: %w", err)
+		return "", nil, fmt.Errorf("create BuildKit metadata file: %w", err)
 	}
 	metadataPath := metadata.Name()
 	defer os.Remove(metadataPath)
 	if err := metadata.Close(); err != nil {
-		return "", fmt.Errorf("close BuildKit metadata file: %w", err)
+		return "", nil, fmt.Errorf("close BuildKit metadata file: %w", err)
 	}
-	args := append(buildCommandArgs(spec, addr), "--metadata-file", metadataPath)
-	if err := runCommand(ctx, opts.Verbose, outputBuf, "buildctl", args...); err != nil {
-		return "", err
+	args := append(buildCommandArgs(spec, addr), "--metadata-file", metadataPath, "--progress=rawjson")
+	cmd := exec.CommandContext(ctx, "buildctl", args...)
+	cmd.Stdout = commandOutput(opts.Verbose, os.Stdout, sharedOutput)
+	cmd.Stderr = projection
+	if err := cmd.Run(); err != nil {
+		return "", nil, err
 	}
 	data, err := os.ReadFile(metadataPath)
 	if err != nil {
-		return "", fmt.Errorf("read BuildKit metadata: %w", err)
+		return "", nil, fmt.Errorf("read BuildKit metadata: %w", err)
 	}
 	var pushed struct {
 		Digest string `json:"containerimage.digest"`
 	}
 	if err := json.Unmarshal(data, &pushed); err != nil {
-		return "", fmt.Errorf("parse BuildKit metadata: %w", err)
+		return "", nil, fmt.Errorf("parse BuildKit metadata: %w", err)
 	}
-	return validatePushedDigest(pushed.Digest, "BuildKit")
+	digest, err = validatePushedDigest(pushed.Digest, "BuildKit")
+	return digest, nil, err
+}
+
+func commandOutput(verbose bool, terminal, output io.Writer) io.Writer {
+	if verbose {
+		return io.MultiWriter(terminal, output)
+	}
+	return output
+}
+
+type lockedCommandWriter struct {
+	mu     sync.Mutex
+	writer io.Writer
+}
+
+func (w *lockedCommandWriter) Write(data []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.writer.Write(data)
 }
 
 func validatePushedDigest(value, tool string) (string, error) {
@@ -179,12 +227,13 @@ func validatePushedDigest(value, tool string) (string, error) {
 
 func runCommand(ctx context.Context, verbose bool, outputBuf io.Writer, name string, args ...string) error {
 	cmd := exec.CommandContext(ctx, name, args...)
+	sharedOutput := &lockedCommandWriter{writer: outputBuf}
 	if verbose {
-		cmd.Stdout = io.MultiWriter(os.Stdout, outputBuf)
-		cmd.Stderr = io.MultiWriter(os.Stderr, outputBuf)
+		cmd.Stdout = io.MultiWriter(os.Stdout, sharedOutput)
+		cmd.Stderr = io.MultiWriter(os.Stderr, sharedOutput)
 	} else {
-		cmd.Stdout = outputBuf
-		cmd.Stderr = outputBuf
+		cmd.Stdout = sharedOutput
+		cmd.Stderr = sharedOutput
 	}
 	return cmd.Run()
 }

@@ -2,6 +2,7 @@ package v1alpha1
 
 import (
 	"github.com/cofy-x/kova/internal/buildcontract"
+	"github.com/cofy-x/kova/internal/buildobservation"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -234,6 +235,9 @@ type BuildVerificationResult struct {
 	State string `json:"state"`
 	// +kubebuilder:validation:MaxLength=2048
 	Error string `json:"error,omitempty"`
+	// BuildObservation is optional, bounded diagnosis retained with this exact
+	// output. Missing/invalid observations never decide artifact correctness.
+	BuildObservation *buildobservation.Observation `json:"buildObservation,omitempty"`
 }
 
 // +kubebuilder:object:root=true

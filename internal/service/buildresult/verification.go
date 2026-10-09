@@ -7,6 +7,7 @@ import (
 	"sync"
 
 	kovav1 "github.com/cofy-x/kova/internal/apis/kova/v1alpha1"
+	"github.com/cofy-x/kova/internal/buildobservation"
 	"github.com/cofy-x/kova/internal/service/runnerexec"
 	"github.com/cofy-x/kova/internal/source"
 	"github.com/google/go-containerregistry/pkg/v1"
@@ -68,6 +69,7 @@ func CollectReceipts(ctx context.Context, exporter Exporter, build *kovav1.KovaB
 				failed = true
 				continue
 			}
+			result.BuildObservation = buildobservation.Normalize(entry.BuildObservation)
 			if !entry.Success {
 				result.State, result.Error = "failed", "runner reported failed output"
 				failed = true

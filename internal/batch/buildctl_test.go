@@ -19,10 +19,12 @@ func installFakeBuildCommands(t *testing.T) string {
 	buildctl := `#!/bin/sh
 set -eu
 metadata=
+if [ -n "${FAKE_BUILDKIT_ARGS:-}" ]; then printf '%s\n' "$@" > "$FAKE_BUILDKIT_ARGS"; fi
 while [ "$#" -gt 0 ]; do
   if [ "$1" = "--metadata-file" ]; then metadata=$2; shift 2; else shift; fi
 done
 test -n "$metadata"
+if [ -n "${FAKE_BUILDKIT_PROGRESS:-}" ]; then printf '%s\n' "$FAKE_BUILDKIT_PROGRESS" >&2; fi
 printf '{"containerimage.digest":"%s"}' "$FAKE_BUILDKIT_DIGEST" > "$metadata"
 `
 	if err := os.WriteFile(filepath.Join(dir, "buildctl"), []byte(buildctl), 0700); err != nil {
