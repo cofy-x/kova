@@ -1,7 +1,7 @@
 # Service Admission Design
 
 The original scope of [#44](https://github.com/cofy-x/kova/issues/44) is closed; additional real fault-chain acceptance is tracked by [#59](https://github.com/cofy-x/kova/issues/59).
-This document describes the two-ledger baseline and identifies the queue-receipt behavior introduced in Genesis v2 and retained by the current v3 candidate.
+This document describes the current Genesis v3 two-ledger contract, including the active-inclusive queue-receipt behavior introduced in Genesis v2.
 The v3 candidate additionally pins worker-pool and runner OCI identities and instruments active-grant and Pod-Create receipts.
 Neither the baseline tests nor this candidate claim a live committed-loss recovery PASS.
 Do not deploy this branch through an in-place rolling upgrade.
@@ -19,7 +19,13 @@ The Service has two independent, namespaced ConfigMap ledgers. Kubernetes `resou
 
 The current two-ledger schema supports `maxActiveJobs` 1–128, `workerSlots` 1–65535, and `maxQueuedJobs` 1–1000; each per-requester limit must be positive and no greater than its global limit. The active ledger has its own 768 KiB JSON-data guard. An active UID key is at most 256 UTF-8 bytes, build name at most 253 DNS bytes, requester at most 253 Unicode code points, and each grant has at most one unresolved 32-character lowercase hex Pod nonce. Queue digests, hashes and nonces must be exact lowercase hex. Both ledgers reject extra ConfigMap data keys, unknown/duplicate JSON fields, invalid identities and unsupported encoded state on read and before write; legal older version-1 optional-field omissions remain readable. A missing active ledger now blocks terminal/deletion capacity release and finalizer cleanup instead of treating unknown capacity as free.
 
-At the full supported counts, conservative JSON bounds are `8192 + 3456 × maxActiveJobs` bytes for active state and, for Genesis v2, `4096 + 736 × maxQueuedJobs` bytes for queue state, including receipt UID/digest and cleanup disposition in every queue entry. At 128 active grants the bound is 450560 bytes, leaving at least 335872 bytes below the active guard; at 1000 v2 queue intents the bound is 740096 bytes, leaving at least 46336 bytes below the queue guard. The earlier v1 queue bound was `4096 + 512 × maxQueuedJobs`; do not use it to size a v2 ledger. Deterministic maximal-identity fixtures use Go's actual JSON encoder to exercise both versions. The active fence value may wrap from `MaxUint64` to zero: the Kubernetes `resourceVersion` CAS, not numeric ordering, fences a stale writer. These are encoded-capacity proofs, not throughput or real-API acceptance.
+At the full supported counts, conservative JSON bounds for the current Genesis v3 contract (active and queue state schema 2) are `8192 + 6000 × maxActiveJobs` bytes for active state and `4096 + 736 × maxQueuedJobs` bytes for queue state.
+The active entry reserve includes grant and Pod receipt UID/digest links, the observed grant resourceVersion, permanent Pod attempt nonce and template digest, and cleanup markers; the queue bound includes receipt UID/digest and cleanup disposition in every entry.
+At 128 active grants the bound is 776192 bytes, leaving at least 10240 bytes below the active guard; at 1000 schema-2 queue intents the bound is 740096 bytes, leaving at least 46336 bytes below the queue guard.
+The earlier v1 queue bound was `4096 + 512 × maxQueuedJobs`; do not use it to size a schema-2 ledger.
+Deterministic maximal-identity fixtures use Go's actual JSON encoder to exercise both state schema versions.
+The active fence value may wrap from `MaxUint64` to zero: the Kubernetes `resourceVersion` CAS, not numeric ordering, fences a stale writer.
+These are encoded-capacity proofs, not throughput or real-API acceptance.
 
 An existing ledger with configuration or state outside this supported contract cannot be made valid by reducing flags while work remains. Drain old work, verify runner cleanup, stop old writers and migrate to fresh runner and recovery-receipt Namespaces with the reviewed version. The legacy partial-pair startup still fails closed. Genesis v2's [fresh bootstrap](service-genesis-recovery-proposal.md) can finish a partial canonical pair only before commitment under its exact original external identity; it does not repair a committed lost ledger.
 
