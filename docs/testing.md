@@ -147,7 +147,9 @@ Source, binary, manifest, Kind identity and immutable receipt pins are checked b
 
 Compile a clean reviewed `./internal/service/buildcontroller` test executable, stamping `github.com/cofy-x/kova/internal/version.Commit` to that same full source SHA, and record its build command and SHA256 outside Git.
 Only **after separate fixture/operation approval**, run that executable with `-test.run=^TestRealAPIGenesisV3FullTableLifecycle$ -test.timeout=5m -test.v` and the two manifest variables.
-Its context is three minutes, individual HTTP calls are ten seconds, and the transport caps 1500 calls and 64 mutations, six-MiB request bodies and two-MiB responses.
+Its context is three minutes, individual HTTP calls are ten seconds, and the transport caps 3500 calls and 64 mutations, six-MiB request bodies and two-MiB responses.
+All typed and controller-runtime clients share one explicit 20-QPS, burst-20 token bucket; this test-only policy does not change production client limits.
+The call budget covers the full, repeatedly direct-qualified lifecycle, not 3500 calls guaranteed to finish within the deadline; timeout still stops and retains the fixture.
 Only the two fresh ledger ConfigMaps, one actual API-assigned-UID CR and at most three queue/grant/Pod-intent receipt ConfigMaps can be created.
 Genesis and ledger patches require original UID/resourceVersion tests and exact data-only operations; each mutation body has at most one wire attempt, with unknown, redirect, throttle or server-error outcomes stopping this gate.
 The dedicated verified HTTP/1 transport disables proxies, keep-alive reuse, HTTP/2 and redirects so an upstream call cannot hide a transport retry.
@@ -161,7 +163,8 @@ The final queue reserve has no CR/effect and is retained as a charged intent.
 All namespaces, Genesis, ledgers and the terminal CR remain on success and failure; only ordinary effect receipts may be UID-deleted by the tested product protocol.
 An ambiguous deletion acknowledgement stops further writes; unresolved state and append-only private JSONL checkpoints remain for inspection.
 Each successful Create's original API-assigned UID and each effect receipt's canonical data digest are fsynced before any subsequent API call; a failed assignment journal stops the transport.
-The bounded final journal records measured maximum-state and post-release ledger bytes, the original CR/ledger UIDs, single-attempt upstream call/mutation counts and zero permitted Pod POSTs (not inferred worker/runtime activity).
+Every lifecycle checkpoint persists current call/mutation counts; the bounded final journal records measured maximum-state and post-release ledger bytes, the original CR/ledger UIDs, single-attempt upstream call/mutation counts and zero permitted Pod POSTs (not inferred worker/runtime activity).
+The failure journal reserves eight KiB within the unchanged 64-KiB journal limit for a safe local timeout/rate-wait enum, final counters, owned UIDs and receipt data digests, never a raw exception or Secret data.
 The call count is also the HTTP wire-attempt upper bound, not proof every request was sent: a dial/TLS failure can send no HTTP request.
 Never rerun the same fixture as fresh, and never report source/mock PASS or an absent final pass checkpoint as live API qualification.
 This narrow gate supplies capacity evidence only; it does not by itself settle the separate deep-queue or worker/client-budget acceptance requirements.

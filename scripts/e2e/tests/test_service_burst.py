@@ -311,6 +311,120 @@ def history(target: str, ref: str = "actual-server-ref", *, completed: bool = Tr
     return {"type": 1, "record": record} if completed else {"record": record}
 
 
+class BuildkitJSONSchemaTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.fixtures = Path(__file__).resolve().parent / "fixtures"
+        self.workers = (self.fixtures / "buildkit-v0.31.2-workers.json").read_bytes()
+        self.worker = json.loads(self.workers)[0]
+
+    def test_actual_go_worker_serialization_uses_lowercase_client_tags(self):
+        self.assertEqual(
+            burst.worker_identity(self.workers),
+            ("serialized-worker-1", burst.BUILDKIT_REVISION),
+        )
+        self.worker["buildkitVersion"]["dockerfileVersion"] = "docker/dockerfile:1"
+        self.assertEqual(
+            burst.worker_identity(burst.canonical([self.worker]))[0],
+            "serialized-worker-1",
+        )
+
+    def test_worker_collection_and_non_object_shapes_fail_closed(self):
+        for value in (
+            None,
+            {},
+            [],
+            [None],
+            [1],
+            ["worker"],
+            [self.worker, self.worker],
+        ):
+            with self.subTest(value=value), self.assertRaises(burst.UnknownOutcome):
+                burst.worker_identity(burst.canonical(value))
+        for field in self.worker:
+            changed = {key: value for key, value in self.worker.items() if key != field}
+            with self.subTest(missing=field), self.assertRaises(burst.UnknownOutcome):
+                burst.worker_identity(burst.canonical([changed]))
+
+    def test_go_field_names_are_not_json_aliases_even_with_lowercase_fields(self):
+        for old, actual in (("ID", "id"), ("BuildkitVersion", "buildkitVersion")):
+            changed = {**self.worker, old: self.worker[actual]}
+            with self.subTest(alias=old), self.assertRaises(burst.UnknownOutcome):
+                burst.worker_identity(burst.canonical([changed]))
+            del changed[actual]
+            with self.subTest(old_schema=old), self.assertRaises(burst.UnknownOutcome):
+                burst.worker_identity(burst.canonical([changed]))
+
+    def test_worker_version_and_identity_remain_exactly_pinned(self):
+        for field, invalid in (
+            ("id", None),
+            ("id", ""),
+            ("id", "worker/other"),
+            ("id", "w" * 129),
+            ("buildkitVersion", None),
+            ("buildkitVersion", []),
+            ("buildkitVersion", "v0.31.2"),
+        ):
+            with (
+                self.subTest(field=field, invalid=invalid),
+                self.assertRaises(burst.UnknownOutcome),
+            ):
+                burst.worker_identity(burst.canonical([{**self.worker, field: invalid}]))
+        for field, invalid in (
+            ("package", "other/package"),
+            ("version", "v0.31.1"),
+            ("revision", "0" * 40),
+            ("revision", True),
+            ("dockerfileVersion", None),
+            ("Revision", burst.BUILDKIT_REVISION),
+        ):
+            changed = {
+                **self.worker,
+                "buildkitVersion": {**self.worker["buildkitVersion"], field: invalid},
+            }
+            with (
+                self.subTest(field=field, invalid=invalid),
+                self.assertRaises(burst.UnknownOutcome),
+            ):
+                burst.worker_identity(burst.canonical([changed]))
+
+    def test_worker_duplicate_keys_malformed_and_oversized_responses_are_unknown(self):
+        for raw in (
+            self.workers.replace(b'"id":', b'"id":"other","id":', 1),
+            self.workers.replace(b'"revision":', b'"revision":"other","revision":', 1),
+            b"not-json",
+            b"[\xff]",
+            b" " * ((1 << 20) + 1),
+        ):
+            with (
+                self.subTest(raw_length=len(raw)),
+                self.assertRaises(burst.UnknownOutcome),
+            ):
+                burst.worker_identity(raw)
+
+    def test_actual_go_history_serialization_retains_protobuf_tags_and_nanoseconds(
+        self,
+    ):
+        raw = (self.fixtures / "buildkit-v0.31.2-histories.jsonl").read_bytes()
+        target = "fixture.invalid/image:owned"
+        active, complete = raw.splitlines()
+        self.assertNotIn("type", json.loads(active))
+        self.assertIsNone(burst.project_history(active, {target})[0]["completed_ns"])
+        rows = burst.project_history(raw, {target})
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["solve_ref"], "serialized-solve-ref")
+        self.assertEqual(rows[0]["created_ns"], 1791511200123456789)
+        self.assertEqual(rows[0]["completed_ns"], 1791511202987654321)
+        self.assertEqual(rows[0]["pushed_digest"], DIGEST)
+        failed = json.loads(complete)
+        failed["record"]["error"] = {"code": 13, "message": "synthetic failure"}
+        with self.assertRaises(burst.MeasuredFailure):
+            burst.project_history(burst.canonical(failed), {target})
+        wrong_case = json.loads(complete)
+        wrong_case["record"]["ref"] = wrong_case["record"].pop("Ref")
+        with self.assertRaises(burst.UnknownOutcome):
+            burst.project_history(burst.canonical(wrong_case), {target})
+
+
 class BurstObservationTests(unittest.TestCase):
     def setUp(self) -> None:
         self.plan = plan()
@@ -584,8 +698,12 @@ class BurstObservationTests(unittest.TestCase):
             return burst.canonical(
                 [
                     {
-                        "ID": "worker-" + pin["uid"],
-                        "BuildkitVersion": {
+                        "id": "worker-" + pin["uid"],
+                        "labels": None,
+                        "platforms": None,
+                        "gcPolicy": None,
+                        "cdiDevices": None,
+                        "buildkitVersion": {
                             "package": "github.com/moby/buildkit",
                             "version": "v0.31.2",
                             "revision": burst.BUILDKIT_REVISION,
@@ -789,7 +907,20 @@ class BurstContractTests(unittest.TestCase):
             for label, path in files.items():
                 argv.extend((f"--{label}", str(path)))
             output = io.StringIO()
-            with patch.object(sys, "argv", argv), patch("sys.stdout", output):
+            with (
+                patch.object(sys, "argv", argv),
+                patch("sys.stdout", output),
+                patch.object(
+                    burst,
+                    "command",
+                    side_effect=AssertionError("check must not execute commands"),
+                ),
+                patch.object(
+                    burst,
+                    "run_campaign",
+                    side_effect=AssertionError("check must not run live"),
+                ),
+            ):
                 self.assertEqual(burst.main(), 0)
             self.assertEqual(json.loads(output.getvalue())["live_ready"], False)
 

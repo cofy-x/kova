@@ -773,6 +773,7 @@ func TestListGetLogsExportPreheatAndCancel(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:              "abc",
 			Namespace:         "jobs",
+			UID:               "original-build",
 			CreationTimestamp: now,
 		},
 		Status: kovav1.KovaBuildStatus{
@@ -837,6 +838,7 @@ func TestCancelDoesNotOperateRunnerDirectly(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "abc",
 			Namespace: "jobs",
+			UID:       "original-build",
 		},
 		Status: kovav1.KovaBuildStatus{
 			Phase:         kovav1.PhaseRunning,

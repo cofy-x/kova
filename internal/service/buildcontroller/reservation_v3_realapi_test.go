@@ -33,11 +33,51 @@ import (
 	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
+	"k8s.io/client-go/util/flowcontrol"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	kjson "sigs.k8s.io/json"
 )
 
 const capacityPrefix = "kova-v3-capacity-"
+
+const (
+	capacityFailureReserve = 8 * 1024
+	capacityCallLimit      = 3500
+	capacityClientQPS      = 20
+	capacityClientBurst    = 20
+)
+
+type capacityRateLimiter struct {
+	flowcontrol.RateLimiter
+	mu         sync.Mutex
+	waitFailed bool
+}
+
+func (l *capacityRateLimiter) Wait(ctx context.Context) error {
+	l.mu.Lock()
+	closed := l.waitFailed
+	l.mu.Unlock()
+	if closed {
+		return errors.New("capacity local rate wait already refused; stop and retain")
+	}
+	err := l.RateLimiter.Wait(ctx)
+	if err != nil {
+		l.mu.Lock()
+		l.waitFailed = true
+		l.mu.Unlock()
+	}
+	return err
+}
+
+func capacityClientConfig(original *rest.Config) *rest.Config {
+	cfg := rest.CopyConfig(original)
+	// One finite limiter is shared by every typed/controller REST client.
+	// Per-resource default 5 QPS buckets cannot fit this exact direct-read
+	// lifecycle within its unchanged three-minute context.
+	cfg.QPS, cfg.Burst = capacityClientQPS, capacityClientBurst
+	cfg.RateLimiter = &capacityRateLimiter{RateLimiter: flowcontrol.NewTokenBucketRateLimiter(cfg.QPS, cfg.Burst)}
+	return cfg
+}
 
 type capacityNamespace struct {
 	Name string `json:"name"`
@@ -206,7 +246,7 @@ func (g *capacityTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if g.unknown || r.URL.Scheme+"://"+r.URL.Host != g.origin || r.URL.User != nil || r.URL.RawPath != "" || r.URL.Fragment != "" ||
-		(r.URL.RawQuery != "" && (r.Method != http.MethodGet || r.URL.RawQuery != "limit=1")) || g.calls >= 1500 {
+		!capacityQueryAllowed(r) || g.calls >= capacityCallLimit {
 		return nil, errors.New("capacity API request escaped origin/path/read budget")
 	}
 	g.calls++
@@ -217,7 +257,7 @@ func (g *capacityTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 		}
 		return g.forward(r)
 	}
-	if r.Body == nil || g.mutations >= 64 || r.URL.RawQuery != "" {
+	if r.Body == nil || g.mutations >= 64 {
 		return nil, errors.New("capacity mutation body/budget is invalid")
 	}
 	raw, err := io.ReadAll(io.LimitReader(r.Body, 6*1024*1024+1))
@@ -401,6 +441,85 @@ func (g *capacityTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	return response, nil
 }
 
+func capacityQueryAllowed(r *http.Request) bool {
+	// client-go copies http.Client.Timeout into Request.timeout and sends the
+	// canonical timeout=10s query. Keep the actual 10s client deadline intact.
+	// Compare raw bytes, not decoded values: duplicates, escaping, selectors,
+	// watches, alternative durations and noncanonical ordering stay forbidden.
+	if r.Method == http.MethodGet {
+		_, _, kind, _, name := capacityAddress(r.URL.Path)
+		if name == "" {
+			return kind != "" && (r.URL.RawQuery == "limit=1" || r.URL.RawQuery == "limit=1&timeout=10s")
+		}
+		return r.URL.RawQuery == "" || r.URL.RawQuery == "timeout=10s"
+	}
+	switch r.Method {
+	case http.MethodPost, http.MethodPatch, http.MethodPut, http.MethodDelete:
+		return r.URL.RawQuery == "" || r.URL.RawQuery == "timeout=10s"
+	}
+	return false
+}
+
+func capacityNamespaceReason(ns *corev1.Namespace, pin capacityNamespace, prepared, now time.Time, readErr error) string {
+	switch {
+	case readErr != nil || ns == nil:
+		return "NAMESPACE_READ_UNKNOWN"
+	case string(ns.UID) != pin.UID:
+		return "NAMESPACE_UID_CHANGED"
+	case ns.DeletionTimestamp != nil:
+		return "NAMESPACE_DELETING"
+	case ns.Status.Phase != corev1.NamespaceActive:
+		return "NAMESPACE_NOT_ACTIVE"
+	case pin.Name != "kube-system" && (ns.CreationTimestamp.Time.Before(prepared) || ns.CreationTimestamp.Time.After(now)):
+		return "NAMESPACE_FRESHNESS_CHANGED"
+	}
+	return ""
+}
+
+func capacityFailureRow(ctx context.Context, reason string, g *capacityTransport, limiter flowcontrol.RateLimiter) map[string]any {
+	switch reason {
+	case "NAMESPACE_READ_UNKNOWN", "NAMESPACE_UID_CHANGED", "NAMESPACE_DELETING", "NAMESPACE_NOT_ACTIVE", "NAMESPACE_FRESHNESS_CHANGED", "RECEIPT_LIST_PREFLIGHT_UNKNOWN":
+	default:
+		reason = "UNCLASSIFIED"
+	}
+	if limited, ok := limiter.(*capacityRateLimiter); ok {
+		limited.mu.Lock()
+		if limited.waitFailed {
+			reason = "LOCAL_RATE_LIMIT_WAIT_REFUSED"
+		}
+		limited.mu.Unlock()
+	}
+	switch ctx.Err() {
+	case context.DeadlineExceeded:
+		reason = "LOCAL_CONTEXT_DEADLINE"
+	case context.Canceled:
+		reason = "LOCAL_CONTEXT_CANCELLED"
+	}
+	row := map[string]any{"stage": "unknown-retained", "reason": reason, "podPostsPermitted": false, "runtimeCancellationProved": false}
+	if g != nil {
+		g.mu.Lock()
+		defer g.mu.Unlock()
+		owned, digests := map[string]string{}, map[string]string{}
+		for path, uid := range g.owned {
+			owned[path] = uid
+		}
+		for path, digest := range g.receiptDigests {
+			digests[path] = digest
+		}
+		row["apiTransportCalls"], row["apiTransportMutationAttempts"] = g.calls, g.mutations
+		row["apiUpstreamCalls"], row["apiUpstreamMutations"], row["apiWireAttemptsUpperBound"] = g.wireCalls, g.wireMutations, g.wireCalls
+		row["podPosts"], row["ownedUIDs"], row["receiptDataDigests"] = g.wirePodPosts, owned, digests
+	}
+	return row
+}
+
+func (g *capacityTransport) counters() map[string]int {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return map[string]int{"apiTransportCalls": g.calls, "apiTransportMutationAttempts": g.mutations,
+		"apiUpstreamCalls": g.wireCalls, "apiUpstreamMutations": g.wireMutations, "apiWireAttemptsUpperBound": g.wireCalls, "podPosts": g.wirePodPosts}
+}
+
 func (g *capacityTransport) forward(r *http.Request) (*http.Response, error) {
 	g.wireCalls++
 	if r.Method != http.MethodGet {
@@ -523,6 +642,19 @@ func (g *capacityTransport) qualifyResponse(r *http.Request, code int, raw []byt
 			itemMap, ok := item.(map[string]any)
 			if !ok {
 				return false
+			}
+			// Typed Kubernetes Lists carry the GVK on the qualified parent;
+			// their items may omit TypeMeta. Inherit only absent fields in this
+			// local qualification projection, never explicit null/empty/conflict
+			// or the raw response returned to the client.
+			for field, expected := range map[string]string{"apiVersion": apiVersion, "kind": kind} {
+				if value, present := itemMap[field]; present {
+					if value != expected {
+						return false
+					}
+				} else {
+					itemMap[field] = expected
+				}
 			}
 			im, ok := itemMap["metadata"].(map[string]any)
 			if !ok {
@@ -754,21 +886,23 @@ func TestRealAPIGenesisV3FullTableLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal("fresh private output receipt cannot be created")
 	}
-	complete := false
+	complete, unknownReason := false, "UNCLASSIFIED"
+	var transport *capacityTransport
 	defer func() {
 		if !complete {
-			_ = json.NewEncoder(file).Encode(map[string]any{"stage": "unknown-retained", "podPostsPermitted": false, "runtimeCancellationProved": false})
-			_ = file.Sync()
+			if raw, err := json.Marshal(capacityFailureRow(ctx, unknownReason, transport, apiConfig.RateLimiter)); err == nil && len(raw)+1 <= capacityFailureReserve {
+				_, _ = file.Write(append(raw, '\n'))
+				_ = file.Sync()
+			}
 		}
 		_ = file.Close()
 	}()
 	stageCount, receiptBytes := 0, 0
-	var transport *capacityTransport
 	journal := func(row map[string]any) error {
 		stageCount++
 		raw, err := json.Marshal(row)
 		receiptBytes += len(raw) + 1
-		if err != nil || stageCount > 20 || len(raw) > 16*1024 || receiptBytes > 64*1024-256 {
+		if err != nil || stageCount > 20 || len(raw) > 16*1024 || receiptBytes > 64*1024-capacityFailureReserve {
 			return errors.New("capacity journal size/stage budget exceeded")
 		}
 		if n, err := file.Write(append(raw, '\n')); err != nil || n != len(raw)+1 {
@@ -784,12 +918,16 @@ func TestRealAPIGenesisV3FullTableLifecycle(t *testing.T) {
 			"genesisUID": original.GenesisUID, "podPostsPermitted": false, "runtimeCancellationProved": false}
 		if transport != nil {
 			row["ownedUIDs"], row["receiptDataDigests"] = transport.owned, transport.receiptDigests
+			for field, count := range transport.counters() {
+				row[field] = count
+			}
 		}
 		if journal(row) != nil {
 			t.Fatal("capacity output receipt unavailable; retain API objects")
 		}
 	}
 	write("begin-retain-all")
+	apiConfig = capacityClientConfig(apiConfig)
 	apiConfig.ContentType, apiConfig.AcceptContentTypes = "application/json", "application/json"
 	upstream, err := capacitySingleWireTransport(apiConfig)
 	if err != nil {
@@ -832,9 +970,9 @@ func TestRealAPIGenesisV3FullTableLifecycle(t *testing.T) {
 		}
 		for _, n := range []capacityNamespace{m.Runner, m.Control, m.Receipts, {Name: "kube-system", UID: m.KubeSystemUID}} {
 			ns, err := clientset.CoreV1().Namespaces().Get(ctx, n.Name, metav1.GetOptions{})
-			if err != nil || string(ns.UID) != n.UID || ns.DeletionTimestamp != nil || ns.Status.Phase != corev1.NamespaceActive ||
-				(n.Name != "kube-system" && (ns.CreationTimestamp.Time.Before(m.PreparedAfter) || ns.CreationTimestamp.Time.After(time.Now()))) {
-				return errors.New("original fresh Namespace identity/phase changed")
+			if reason := capacityNamespaceReason(ns, n, m.PreparedAfter, time.Now(), err); reason != "" {
+				unknownReason = reason
+				return errors.New("original fresh Namespace preflight: " + reason)
 			}
 		}
 		secret, err := clientset.CoreV1().Secrets(m.Control.Name).Get(ctx, m.SecretName, metav1.GetOptions{})
@@ -870,6 +1008,7 @@ func TestRealAPIGenesisV3FullTableLifecycle(t *testing.T) {
 		}
 		cms, err := clientset.CoreV1().ConfigMaps(m.Receipts.Name).List(ctx, metav1.ListOptions{Limit: 1})
 		if err != nil || len(cms.Items) > 1 || cms.Continue != "" || (len(cms.Items) == 1 && cms.Items[0].Name != "kube-root-ca.crt") {
+			unknownReason = "RECEIPT_LIST_PREFLIGHT_UNKNOWN"
 			return errors.New("receipt Namespace must contain no old receipts")
 		}
 		return nil
