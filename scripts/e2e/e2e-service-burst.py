@@ -93,6 +93,10 @@ class MeasuredFailure(RuntimeError):
     """A fully identified workload failed; exact-UID cleanup is still safe."""
 
 
+class ReceiptRetirementPending(UnknownOutcome):
+    """Read-only transient after known terminal jobs; never receipt ownership."""
+
+
 DIAGNOSTIC_CHECKPOINTS = frozenset(
     {"resource_read", "resource_journal", "worker_observation", "campaign"}
 )
@@ -1120,8 +1124,183 @@ def assert_empty_ledgers(active: dict, queue: dict, limits: dict) -> None:
         raise UnknownOutcome("admission ledgers are nonempty or limits drifted")
 
 
+def pending_receipts_for_completed_builds(
+    receipts: list[dict],
+    builds: dict[str, dict],
+    active: dict,
+    plan: dict,
+    runtime: dict,
+    contract: dict,
+) -> None:
+    """Reject foreign pending evidence; never authorize its use or deletion."""
+    fixture, genesis = plan["fixture"], runtime["genesis"]
+    allocations = json.loads(active["data"]["reservations.json"], object_pairs_hook=unique_pairs)[
+        "active"
+    ]
+    for cm in receipts:
+        meta, data = cm.get("metadata", {}), cm.get("data", {})
+        if meta.get("name") == "kube-root-ca.crt":
+            if meta.get("namespace") != fixture["receipt_namespace"]:
+                raise UnknownOutcome("root CA receipt namespace changed")
+            continue
+        if (
+            meta.get("namespace") != fixture["receipt_namespace"]
+            or UID.fullmatch(meta.get("uid", "")) is None
+            or not meta.get("resourceVersion")
+            or meta.get("deletionTimestamp")
+            or meta.get("ownerReferences")
+            or cm.get("immutable") is not True
+            or cm.get("binaryData")
+            or type(data) is not dict
+        ):
+            raise UnknownOutcome("foreign or changed pending receipt object")
+        labels = meta.get("labels", {})
+        if labels == {"kova.cofy.dev/admission-receipt": "queue-intent"}:
+            name = data.get("buildName")
+            build = builds.get(name)
+            if build is None:
+                raise UnknownOutcome("pending queue receipt belongs to an unknown build")
+            annotations = build["metadata"].get("annotations", {})
+            nonce = annotations.get("kova.cofy.dev/queue-intent", "")
+            expected = {
+                "version": "1",
+                "namespaceName": fixture["runner_namespace"],
+                "namespaceUID": fixture["runner_namespace_uid"],
+                "receiptNamespaceName": fixture["receipt_namespace"],
+                "receiptNamespaceUID": fixture["receipt_namespace_uid"],
+                "genesisName": GENESIS_NAME,
+                "genesisUID": genesis["genesis_uid"],
+                "generation": contract["generation"],
+                "activeLedgerUID": genesis["active_ledger_uid"],
+                "queueLedgerUID": genesis["queue_ledger_uid"],
+                "buildName": name,
+                "requesterName": runtime["requester"],
+                "requesterHash": sha(runtime["requester"].encode()),
+                "requesterUID": runtime["requester_uid"],
+                "requestDigest": data.get("requestDigest"),
+                "sourceDigest": build["spec"]["source"]["digest"],
+                "queueNonce": nonce,
+            }
+            if (
+                re.fullmatch(r"[0-9a-f]{32}", nonce) is None
+                or data != expected
+                or SHA.fullmatch(data.get("requestDigest", "")) is None
+                or meta["name"] != "kova-admission-intent-" + nonce
+                or meta["uid"] != annotations.get("kova.cofy.dev/queue-receipt-uid")
+                or "sha256:" + sha(canonical(data))
+                != annotations.get("kova.cofy.dev/queue-receipt-digest")
+            ):
+                raise UnknownOutcome("pending queue receipt changed its original CR/epoch pins")
+            continue
+        kind = labels.get("kova.cofy.dev/recovery-receipt")
+        if (
+            labels != {"kova.cofy.dev/recovery-receipt": kind}
+            or kind not in ("grant", "pod-create")
+            or set(data) != {"version", "kind", "payload"}
+            or data["version"] != "1"
+            or data["kind"] != kind
+            or type(data["payload"]) is not str
+            or len(data["payload"].encode()) > 16384
+        ):
+            raise UnknownOutcome("unrecognized pending receipt kind/schema")
+        payload = json.loads(data["payload"], object_pairs_hook=unique_pairs)
+        binding = payload.get("build", {})
+        build = builds.get(binding.get("buildName"))
+        if build is None:
+            raise UnknownOutcome("pending effect receipt belongs to an unknown build")
+        build_uid = build["metadata"]["uid"]
+        entry = allocations.get(build_uid)
+        expected_binding = {
+            "namespace": fixture["runner_namespace"],
+            "namespaceUid": fixture["runner_namespace_uid"],
+            "receiptNamespace": fixture["receipt_namespace"],
+            "receiptNamespaceUid": fixture["receipt_namespace_uid"],
+            "genesisName": GENESIS_NAME,
+            "genesisUid": genesis["genesis_uid"],
+            "generation": contract["generation"],
+            "activeLedgerUid": genesis["active_ledger_uid"],
+            "queueLedgerUid": genesis["queue_ledger_uid"],
+            "buildName": build["metadata"]["name"],
+            "buildUid": build_uid,
+            "requesterName": runtime["requester"],
+            "requesterUid": runtime["requester_uid"],
+            "requesterHash": sha(runtime["requester"].encode()),
+            "requestDigest": binding.get("requestDigest"),
+            "sourceDigest": build["spec"]["source"]["digest"],
+            "workerPoolId": genesis["worker_pool_id"],
+        }
+        if (
+            binding != expected_binding
+            or SHA.fullmatch(binding.get("requestDigest", "")) is None
+            or type(entry) is not dict
+            or entry.get("buildName") != build["metadata"]["name"]
+        ):
+            raise UnknownOutcome("pending effect receipt changed its original CR/epoch")
+        prefix, uid_key, digest_key = (
+            ("kova-grant-intent-", "grantReceiptUID", "grantReceiptDigest")
+            if kind == "grant"
+            else ("kova-pod-create-intent-", "podReceiptUID", "podReceiptDigest")
+        )
+        nonce = entry.get("grantNonce" if kind == "grant" else "podAttemptNonce", "")
+        if (
+            re.fullmatch(r"[0-9a-f]{32}", nonce) is None
+            or meta["name"] != prefix + nonce
+            or meta["uid"] != entry.get(uid_key)
+            or "sha256:" + sha(canonical(data)) != entry.get(digest_key)
+        ):
+            raise UnknownOutcome("pending effect receipt changed original ledger UID/digest pins")
+        annotations = build["metadata"].get("annotations", {})
+        queue_link = {
+            "name": "kova-admission-intent-" + annotations.get("kova.cofy.dev/queue-intent", ""),
+            "uid": annotations.get("kova.cofy.dev/queue-receipt-uid"),
+            "dataDigest": annotations.get("kova.cofy.dev/queue-receipt-digest"),
+        }
+        if kind == "grant":
+            expected_payload = {
+                "build": expected_binding,
+                "admissionMode": "queued",
+                "queueReceipt": queue_link,
+                "grantNonce": nonce,
+                "activeLedgerFence": entry.get("grantFence"),
+                "activeLedgerResourceVersion": entry.get("grantObservedRV"),
+                "allocatedWorkerSlots": entry.get("slots"),
+            }
+        else:
+            witness = build.get("status", {}).get("admissionGenesisWitness", {})
+            if (
+                witness.get("buildUID") != build_uid
+                or witness.get("runnerRequestID") != build_uid
+                or witness.get("podCreateAttempt") != entry.get("podAttemptNonce")
+                or witness.get("podTemplateDigest") != entry.get("podTemplateDigest")
+            ):
+                raise UnknownOutcome(
+                    "pending Pod witness differs from original build/ledger attempt"
+                )
+            expected_payload = {
+                "build": expected_binding,
+                "grantReceipt": {
+                    "name": "kova-grant-intent-" + entry.get("grantNonce", ""),
+                    "uid": entry.get("grantReceiptUID"),
+                    "dataDigest": entry.get("grantReceiptDigest"),
+                },
+                "podName": witness.get("podName"),
+                "podAttemptNonce": witness.get("podCreateAttempt"),
+                "podTemplateDigest": witness.get("podTemplateDigest"),
+                "runnerImageDigest": plan["candidate"]["role_images"]["runner"].rsplit("@", 1)[-1],
+                "buildRequestId": witness.get("runnerRequestID"),
+            }
+        if payload != expected_payload:
+            raise UnknownOutcome("pending effect receipt changed original grant/Pod attempt")
+
+
 def fixture_preflight(
-    kube: Kube, plan: dict, runtime: dict, deadline: float, *, empty: bool
+    kube: Kube,
+    plan: dict,
+    runtime: dict,
+    deadline: float,
+    *,
+    empty: bool,
+    retiring_builds: dict[str, dict] | None = None,
 ) -> list[dict]:
     fixture, genesis = plan["fixture"], runtime["genesis"]
     if (
@@ -1319,7 +1498,12 @@ def fixture_preflight(
         or item.get("metadata", {}).get("namespace") != fixture["receipt_namespace"]
         for item in receipts
     ):
-        raise UnknownOutcome("recovery-receipt namespace is not empty during normal build probe")
+        if not empty and retiring_builds:
+            pending_receipts_for_completed_builds(
+                receipts, retiring_builds, active, plan, runtime, receipt["contract"]
+            )
+            raise ReceiptRetirementPending("terminal receipt retirement is not yet empty")
+        raise UnknownOutcome("fresh recovery-receipt namespace is not empty")
     return pods
 
 
@@ -3026,7 +3210,7 @@ def qualify_cleanup_pods(pods: list[dict], known: dict[str, dict], namespace: st
 
 def campaign_objects_preflight(
     kube: Kube, plan: dict, runtime: dict, known: dict[str, dict], deadline: float
-) -> None:
+) -> dict[str, dict]:
     namespace = plan["fixture"]["runner_namespace"]
     builds = kube.list(deadline, "kovabuild", namespace)
     by_name = {item.get("metadata", {}).get("name"): item for item in builds}
@@ -3034,7 +3218,46 @@ def campaign_objects_preflight(
         raise UnknownOutcome("runner namespace KovaBuild set differs from confirmed campaign IDs")
     for name, item in known.items():
         check_build(by_name[name], item["entry"], runtime, plan, item["uid"])
+        if item.get("terminal") and by_name[name].get("status", {}).get("phase") != "Succeeded":
+            raise UnknownOutcome("original completed campaign CR changed terminal phase")
     qualify_cleanup_pods(kube.list(deadline, "pod", namespace), known, namespace)
+    return by_name
+
+
+def wait_between_waves(
+    kube: Kube,
+    plan: dict,
+    runtime: dict,
+    known: dict[str, dict],
+    journal: Journal,
+    deadline: float,
+) -> None:
+    # Succeeded precedes reconcileTerminal's multi-CAS Pod/receipt retirement.
+    # Do not accept or delete any receipt based on its prefix/self-description.
+    # Every observation keeps the complete original CR/Pod/epoch guard, and
+    # the next POST still requires the strict rootCA-only namespace gate.
+    end = min(deadline, time.monotonic() + 30)
+    waiting = False
+    while time.monotonic() < end:
+        originals = campaign_objects_preflight(kube, plan, runtime, known, end)
+        try:
+            fixture_preflight(kube, plan, runtime, end, empty=False, retiring_builds=originals)
+        except ReceiptRetirementPending:
+            if not known or not all(item.get("terminal") is True for item in known.values()):
+                raise UnknownOutcome("receipts before a fully known successful campaign") from None
+            if not waiting:
+                journal.append(
+                    "terminal_receipt_retirement_wait", known_uids=len(known), max_seconds=30
+                )
+                waiting = True
+            time.sleep(min(1, max(0, end - time.monotonic())))
+            continue
+        if time.monotonic() >= end:
+            raise UnknownOutcome("terminal receipt observation exceeded original deadline")
+        if waiting:
+            journal.append("terminal_receipt_retirement_empty", known_uids=len(known))
+        return
+    raise UnknownOutcome("terminal receipt retirement did not become empty in original budget")
 
 
 def qualify_delete_response(code: int, raw: bytes, item: dict, runtime: dict, plan: dict) -> None:
@@ -3430,8 +3653,7 @@ def run_campaign(
         for label, entries in waves:
             sampler.check()
             check_registry_container(plan, runtime, injection_deadline)
-            fixture_preflight(kube, plan, runtime, injection_deadline, empty=False)
-            campaign_objects_preflight(kube, plan, runtime, known, injection_deadline)
+            wait_between_waves(kube, plan, runtime, known, journal, injection_deadline)
             phase_started = time.monotonic()
             phase_seconds = (
                 plan["budget_seconds"]["warmup"]
@@ -3468,6 +3690,7 @@ def run_campaign(
             if delta["missing"]:
                 attribution_complete = False
             journal.append("wave_complete", label=label, **summary)
+        wait_between_waves(kube, plan, runtime, known, journal, injection_deadline)
         sampler.close()
         sampler = None
         # Close the independent worker-side histories before CR deletion.
