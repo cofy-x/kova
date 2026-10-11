@@ -331,16 +331,16 @@ func (g *capacityTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 		if genesis {
 			key, maxBytes = admissioncontract.GenesisDataKey, admissioncontract.MaxContractJSONBytes
 		}
-		var old string
-		if ops[2].Op != "test" || ops[2].Path != "/data/"+key || json.Unmarshal(ops[2].Value, &old) != nil || len(old) > maxBytes {
+		var old *string
+		if ops[2].Op != "test" || ops[2].Path != "/data/"+key || json.Unmarshal(ops[2].Value, &old) != nil || old == nil || len(*old) > maxBytes {
 			return nil, errors.New("PATCH lacks exact old data CAS")
 		}
 		next := 3
 		if genesis && next < len(ops) && ops[next].Op == "test" && ops[next].Path == "/immutable" && string(ops[next].Value) == "false" {
 			next++
 		}
-		var proposed string
-		if next >= len(ops) || ops[next].Op != "replace" || ops[next].Path != "/data/"+key || json.Unmarshal(ops[next].Value, &proposed) != nil || len(proposed) > maxBytes {
+		var proposed *string
+		if next >= len(ops) || ops[next].Op != "replace" || ops[next].Path != "/data/"+key || json.Unmarshal(ops[next].Value, &proposed) != nil || proposed == nil || len(*proposed) > maxBytes {
 			return nil, errors.New("PATCH must replace only fixed bounded data")
 		}
 		next++
@@ -611,9 +611,23 @@ func (g *capacityTransport) qualifyResponse(r *http.Request, code int, raw []byt
 		if code == 404 {
 			return r.Method == http.MethodGet && name != "" && status.Reason == metav1.StatusReasonNotFound && status.Details != nil && status.Details.Name == name && status.Details.Group == group && status.Details.Kind == resource
 		}
-		// A stale JSON Patch `test` can return a generic 422 Invalid Status
-		// without details. Product code proves changed original data/RV by
-		// direct readback before classifying it as CAS contention.
+		// Kubernetes JSON Patch Apply failures encode a generic 422 with
+		// details:{} (not nil). Only this exact official shape is added for
+		// the two owned ledgers, after RoundTrip qualified the full CAS body.
+		// A direct original-ledger readback still proves any CAS contention.
+		details, detailsOK := object["details"].(map[string]any)
+		metadata, metadataOK := object["metadata"].(map[string]any)
+		originalUID := g.patches[r.URL.Path]
+		genericLedgerPatch := r.Method == http.MethodPatch && r.Header.Get("Content-Type") == "application/json-patch+json" &&
+			kind == "ConfigMap" && (name == admissioncontract.ActiveLedgerName || name == admissioncontract.QueueLedgerName) &&
+			originalUID != "" && g.owned[r.URL.Path] == originalUID && code == http.StatusUnprocessableEntity && status.Reason == metav1.StatusReasonInvalid &&
+			status.Message == "the server rejected our request due to an error in our request" &&
+			detailsOK && len(details) == 0 && metadataOK && len(metadata) == 0
+		if genericLedgerPatch {
+			return true
+		}
+		// Retain the previous nil-details and exact named-resource contracts;
+		// null is not normalized into the new empty-object branch above.
 		return r.Method == http.MethodPatch && name != "" && (code == 422 && status.Reason == metav1.StatusReasonInvalid || code == 409 && status.Reason == metav1.StatusReasonConflict) &&
 			(status.Details == nil || status.Details.Name == name && status.Details.Group == group && status.Details.Kind == resource)
 	}

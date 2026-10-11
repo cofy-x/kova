@@ -152,6 +152,9 @@ All typed and controller-runtime clients share one explicit 20-QPS, burst-20 tok
 The call budget covers the full, repeatedly direct-qualified lifecycle, not 3500 calls guaranteed to finish within the deadline; timeout still stops and retains the fixture.
 Only the two fresh ledger ConfigMaps, one actual API-assigned-UID CR and at most three queue/grant/Pod-intent receipt ConfigMaps can be created.
 Genesis and ledger patches require original UID/resourceVersion tests and exact data-only operations; each mutation body has at most one wire attempt, with unknown, redirect, throttle or server-error outcomes stopping this gate.
+For the two original owned ledgers, the sealed PATCH path additionally recognizes Kubernetes' exact generic 422 `Invalid` Status with empty-object metadata/details and its fixed message; the product's direct readback must still prove advancement of that same valid original ledger before classifying CAS contention.
+The prior nil-details error contract remains unchanged; null is not normalized into this additional empty-object branch.
+PATCH old-data and proposed-data CAS values must be JSON strings; null is refused before any upstream call.
 The dedicated verified HTTP/1 transport disables proxies, keep-alive reuse, HTTP/2 and redirects so an upstream call cannot hide a transport retry.
 Duplicate JSON and unqualified responses stop all later wire calls: named absence needs an exact NotFound Status, and successful mutations must acknowledge the original UID and proposed body; a collection 404 is never an empty List.
 Every Pod POST is forbidden, including an unschedulable one.
