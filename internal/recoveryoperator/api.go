@@ -97,8 +97,26 @@ func newExactAPI(p Prepared, caPath, credentialsPath string) (*exactAPI, error) 
 		digestCanonical(p.connection) != p.plan.Payload().Cluster.APIIdentityDigest {
 		return nil, ErrInput
 	}
+	a, err := newConnectionAPI(p.connection, min(int64(maxResponseBytes), p.plan.Payload().Limits.MaxObjectArchiveBytes), caPath, credentialsPath)
+	if err != nil {
+		return nil, err
+	}
+	a.namespacePins[p.plan.Payload().Source.Namespace] = p.plan.Payload().Source.NamespaceUID
+	a.namespacePins[p.plan.Payload().Source.ReceiptNamespace] = p.plan.Payload().Source.ReceiptNamespaceUID
+	for _, t := range p.plan.Payload().Targets {
+		a.resources[targetKey(t.Resource, t.Namespace, t.Name)] = t
+	}
+	return a, nil
+}
+
+// Connection construction is shared; each caller retains its own closed API
+// allowlist. This does not add any operation to the disposal adapter.
+func newConnectionAPI(connection ConnectionRecord, responseLimit int64, caPath, credentialsPath string) (*exactAPI, error) {
+	if !validConnection(connection) || responseLimit <= 0 || responseLimit > maxResponseBytes {
+		return nil, ErrInput
+	}
 	ca, err := readRegularFile(caPath, maxCredentialBytes, false)
-	if err != nil || digest(ca) != p.connection.CASHA256 {
+	if err != nil || digest(ca) != connection.CASHA256 {
 		return nil, ErrInput
 	}
 	pool := x509.NewCertPool()
@@ -113,7 +131,7 @@ func newExactAPI(p Prepared, caPath, credentialsPath string) (*exactAPI, error) 
 	if decodeCanonical(raw, &credentials) != nil {
 		return nil, ErrInput
 	}
-	tlsConfig := &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: pool, ServerName: p.connection.TLSServerName}
+	tlsConfig := &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: pool, ServerName: connection.TLSServerName}
 	if credentials.BearerToken != "" {
 		if len(credentials.BearerToken) > 65536 || strings.ContainsAny(credentials.BearerToken, " \r\n\t") ||
 			credentials.ClientCertificatePEM != "" || credentials.ClientKeyPEM != "" {
@@ -134,14 +152,8 @@ func newExactAPI(p Prepared, caPath, credentialsPath string) (*exactAPI, error) 
 		TLSHandshakeTimeout: 5 * time.Second, ResponseHeaderTimeout: 10 * time.Second, MaxResponseHeaderBytes: 64 * 1024}
 	a := &exactAPI{http: &http.Client{Transport: transport, Timeout: 10 * time.Second,
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }},
-		connection: p.connection, token: credentials.BearerToken, resources: map[string]recoverydisposal.ExecutionTarget{},
-		namespacePins: map[string]string{"kube-system": p.connection.SystemNamespaceUID,
-			p.plan.Payload().Source.Namespace:        p.plan.Payload().Source.NamespaceUID,
-			p.plan.Payload().Source.ReceiptNamespace: p.plan.Payload().Source.ReceiptNamespaceUID},
-		responseLimit: min(int64(maxResponseBytes), p.plan.Payload().Limits.MaxObjectArchiveBytes)}
-	for _, t := range p.plan.Payload().Targets {
-		a.resources[targetKey(t.Resource, t.Namespace, t.Name)] = t
-	}
+		connection: connection, token: credentials.BearerToken, resources: map[string]recoverydisposal.ExecutionTarget{},
+		namespacePins: map[string]string{"kube-system": connection.SystemNamespaceUID}, responseLimit: responseLimit}
 	return a, nil
 }
 
@@ -230,9 +242,20 @@ func (a *exactAPI) request(ctx context.Context, method, path, contentType string
 		return apierrors.NewNotFound(schema.GroupResource{Group: r.Group, Resource: r.Resource}, out.GetName())
 	}
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
+		if res.StatusCode == http.StatusConflict && method == http.MethodPost && out != nil {
+			var status metav1.Status
+			strict, decodeErr := kjson.UnmarshalStrict(raw, &status, kjson.DisallowDuplicateFields, kjson.DisallowUnknownFields)
+			r := resourceFor(out)
+			if decodeErr == nil && len(strict) == 0 && status.APIVersion == "v1" && status.Kind == "Status" &&
+				status.Status == metav1.StatusFailure && status.Reason == metav1.StatusReasonAlreadyExists && status.Code == 409 &&
+				status.Details != nil && status.Details.Name == out.GetName() && status.Details.Group == r.Group && status.Details.Kind == r.Resource {
+				return apierrors.NewAlreadyExists(schema.GroupResource{Group: r.Group, Resource: r.Resource}, out.GetName())
+			}
+		}
 		return errAPI
 	}
 	if (method == http.MethodGet || method == http.MethodPatch) && res.StatusCode != http.StatusOK ||
+		method == http.MethodPost && res.StatusCode != http.StatusCreated ||
 		method == http.MethodDelete && res.StatusCode != http.StatusOK && res.StatusCode != http.StatusAccepted {
 		return errAPI
 	}
