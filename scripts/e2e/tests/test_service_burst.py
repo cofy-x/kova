@@ -839,6 +839,17 @@ class BurstObservationTests(unittest.TestCase):
         with self.assertRaises(burst.UnknownOutcome):
             burst.project_history(raw + b"\n" + burst.canonical(changed), {self.target})
 
+    def test_deprecated_descriptor_requires_identical_scalar_types(self):
+        for size in (True, 1.0):
+            with self.subTest(size_type=type(size).__name__):
+                event = history(self.target)
+                descriptor = event["record"]["Result"]["Results"]["0"]
+                descriptor["size"] = 1
+                event["record"]["Result"]["ResultDeprecated"] = {**descriptor, "size": size}
+                self.assertEqual(event["record"]["Result"]["ResultDeprecated"], descriptor)
+                with self.assertRaises(burst.UnknownOutcome):
+                    burst.project_history(burst.canonical(event), {self.target})
+
     def test_history_fail_closed_on_foreign_malformed_changed_and_limit(self):
         for changed in (
             history("foreign"),

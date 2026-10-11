@@ -2160,7 +2160,13 @@ def history_output_digest(record: dict) -> str:
                 )
             )
         )
-        or ("ResultDeprecated" in result and result["ResultDeprecated"] != descriptor)
+        or (
+            "ResultDeprecated" in result
+            and (
+                type(result["ResultDeprecated"]) is not dict
+                or canonical(result["ResultDeprecated"]) != canonical(descriptor)
+            )
+        )
     ):
         raise UnknownOutcome("completed worker image exporter descriptor is malformed or changed")
     return descriptor["digest"]
