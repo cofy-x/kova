@@ -25,7 +25,45 @@ func NewCLIApp() *cli.App {
 				&cli.StringFlag{Name: "ca-file", Usage: "explicit CA bytes matching the independent connection record; required only with --execute"},
 				&cli.StringFlag{Name: "credentials", Usage: "private canonical static bearer token or mTLS credential file; required only with --execute"},
 				&cli.DurationFlag{Name: "timeout", Value: time.Minute, Usage: "whole-invocation deadline, greater than zero and at most 15m; grant expiry is also enforced"},
-			}, Action: runRecoveryDisposal}}}
+			}, Action: runRecoveryDisposal}, stageCommand("collect-exact"), stageCommand("drain-exact")}}
+}
+
+func stageCommand(action string) *cli.Command {
+	return &cli.Command{Name: action, Usage: "bounded original-epoch library operation; never retire, dispose, replay or release capacity",
+		Flags: []cli.Flag{
+			&cli.StringFlag{Name: "stage-pins", Required: true, Usage: "private canonical independently pinned invocation record"},
+			&cli.StringFlag{Name: "stage-pins-digest", Required: true, Usage: "whole-file SHA-256 from an independent trusted channel"},
+			&cli.BoolFlag{Name: "execute", Usage: "make one bounded invocation; UNKNOWN stops and retains evidence"},
+			&cli.StringFlag{Name: "ack", Usage: "required with --execute: exact action:stage-pins-digest"},
+			&cli.StringFlag{Name: "ca-file", Usage: "explicit pinned CA; required with --execute"},
+			&cli.StringFlag{Name: "credentials", Usage: "private static bearer or mTLS input; required with --execute"},
+			&cli.StringFlag{Name: "output", Usage: "new absolute private JSONL journal in an existing 0700 directory; never overwritten"},
+			&cli.DurationFlag{Name: "timeout", Value: time.Minute, Usage: "whole invocation deadline in (0,15m]"},
+		}, Action: func(c *cli.Context) error { return runRecoveryStage(c, action) }}
+}
+
+func runRecoveryStage(c *cli.Context, action string) error {
+	if c.NArg() != 0 || !stageTimeout(c.Duration("timeout")) {
+		return ErrInput
+	}
+	if c.Bool("execute") && (c.String("ack") != action+":"+c.String("stage-pins-digest") || c.String("ca-file") == "" || c.String("credentials") == "" || c.String("output") == "") {
+		return ErrInput
+	}
+	ctx, cancel := context.WithTimeout(c.Context, c.Duration("timeout"))
+	defer cancel()
+	p, err := prepareStage(ctx, c.String("stage-pins"), c.String("stage-pins-digest"), action)
+	if err != nil {
+		return err
+	}
+	p.timeout = c.Duration("timeout")
+	result := stageResult{Stage: "local-preflight-no-api", Action: action, PinsDigest: p.digest}
+	if c.Bool("execute") {
+		result, err = executeStage(ctx, p, c.String("ca-file"), c.String("credentials"), c.String("output"))
+	}
+	if outputErr := json.NewEncoder(c.App.Writer).Encode(result); outputErr != nil {
+		return errOutput
+	}
+	return err
 }
 
 func runRecoveryDisposal(c *cli.Context) error {

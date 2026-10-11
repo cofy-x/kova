@@ -613,7 +613,14 @@ func newPodTombstone(exp recoverypermit.Expectation, name string) *corev1.Pod {
 }
 
 func attemptName(exp recoverypermit.Expectation, item target) string {
-	raw, _ := json.Marshal([]string{exp.Epoch.NamespaceUID, exp.Epoch.GenesisUID, item.kind, item.name})
+	return OccupancyAttemptName(exp.Epoch, item.kind, item.name)
+}
+
+// OccupancyAttemptName exposes the existing deterministic name to a closed
+// operator transport allowlist. It does not qualify an intent or authorize a
+// Create; Drain still performs the complete permit/inventory preflight.
+func OccupancyAttemptName(epoch recoverypermit.EpochIdentity, kind, name string) string {
+	raw, _ := json.Marshal([]string{epoch.NamespaceUID, epoch.GenesisUID, kind, name})
 	sum := sha256.Sum256(raw)
 	return attemptPrefix + hex.EncodeToString(sum[:16])
 }
