@@ -40,6 +40,8 @@ MAX_JSON = 2 << 20
 MAX_METRICS = 4 << 20
 MAX_SOURCE = 512 << 20
 MAX_JOURNAL = 16 << 20
+HTTP_DEFAULT_IO_CAP_SECONDS = 15
+HTTP_POST_IO_CAP_SECONDS = 60
 SHA = re.compile(r"[0-9a-f]{64}\Z")
 DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
 UID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\Z")
@@ -811,6 +813,15 @@ def seconds_left(deadline: float, cap: float = 20) -> float:
     return min(cap, left)
 
 
+def http_seconds_left(deadline: float, *, io_cap_seconds: int) -> float:
+    need(
+        type(io_cap_seconds) is int
+        and io_cap_seconds in (HTTP_DEFAULT_IO_CAP_SECONDS, HTTP_POST_IO_CAP_SECONDS),
+        "HTTP I/O cap must be one of the bounded fixture constants",
+    )
+    return seconds_left(deadline, io_cap_seconds)
+
+
 def command(argv: list[str], deadline: float, maximum: int = MAX_JSON) -> bytes:
     stop = min(deadline, time.monotonic() + 20)
     try:
@@ -1507,7 +1518,9 @@ def fixture_preflight(
     return pods
 
 
-def open_http(request: Request, deadline: float):
+def open_http(
+    request: Request, deadline: float, *, io_cap_seconds: int = HTTP_DEFAULT_IO_CAP_SECONDS
+):
     """One exact loopback request. http.client has no redirects or proxies."""
     parsed = urlsplit(request.full_url)
     try:
@@ -1526,7 +1539,9 @@ def open_http(request: Request, deadline: float):
     path = parsed.path or "/"
     if parsed.query:
         path += "?" + parsed.query
-    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=seconds_left(deadline, 15))
+    connection = http.client.HTTPConnection(
+        "127.0.0.1", port, timeout=http_seconds_left(deadline, io_cap_seconds=io_cap_seconds)
+    )
     timer = None
     try:
         connection.connect()
@@ -1543,6 +1558,7 @@ def open_http(request: Request, deadline: float):
         timer = threading.Timer(max(0, deadline - time.monotonic()), interrupt)
         timer.daemon = True
         timer.start()
+        seconds_left(deadline)  # A zero-delay timer cannot authorize a late POST write.
         connection.request(
             request.get_method(),
             path,
@@ -1575,9 +1591,11 @@ def read_http_chunk(
     response: http.client.HTTPResponse,
     deadline: float,
     maximum: int,
+    *,
+    io_cap_seconds: int = HTTP_DEFAULT_IO_CAP_SECONDS,
 ) -> bytes:
     try:
-        wire.settimeout(seconds_left(deadline, 15))
+        wire.settimeout(http_seconds_left(deadline, io_cap_seconds=io_cap_seconds))
         block = response.read1(maximum)
         if time.monotonic() >= deadline:
             raise UnknownOutcome("absolute HTTP deadline expired")
@@ -1586,13 +1604,23 @@ def read_http_chunk(
         raise UnknownOutcome(f"HTTP body outcome unknown: {type(error).__name__}") from error
 
 
-def http_bytes(request: Request, deadline: float, maximum: int) -> tuple[int, bytes]:
-    connection, response, wire, timer = open_http(request, deadline)
+def http_bytes(
+    request: Request,
+    deadline: float,
+    maximum: int,
+    *,
+    io_cap_seconds: int = HTTP_DEFAULT_IO_CAP_SECONDS,
+) -> tuple[int, bytes]:
+    connection, response, wire, timer = open_http(request, deadline, io_cap_seconds=io_cap_seconds)
     try:
         data = bytearray()
         while True:
             block = read_http_chunk(
-                wire, response, deadline, min(64 << 10, maximum + 1 - len(data))
+                wire,
+                response,
+                deadline,
+                min(64 << 10, maximum + 1 - len(data)),
+                io_cap_seconds=io_cap_seconds,
             )
             if not block:
                 break
@@ -1604,8 +1632,10 @@ def http_bytes(request: Request, deadline: float, maximum: int) -> tuple[int, by
         close_http(connection, response, wire, timer)
 
 
-def http_json(request: Request, deadline: float) -> tuple[int, dict]:
-    code, raw = http_bytes(request, deadline, MAX_JSON)
+def http_json(
+    request: Request, deadline: float, *, io_cap_seconds: int = HTTP_DEFAULT_IO_CAP_SECONDS
+) -> tuple[int, dict]:
+    code, raw = http_bytes(request, deadline, MAX_JSON, io_cap_seconds=io_cap_seconds)
     try:
         body = json.loads(raw, object_pairs_hook=unique_pairs)
     except (ValueError, UnicodeError) as error:
@@ -2914,12 +2944,17 @@ def post_one(
         headers={"Authorization": "Bearer " + token, "Content-Type": "application/json"},
     )
     try:
-        code, body = http_json(request, deadline)
-    except BaseException:
+        post_deadline = min(deadline, started + HTTP_POST_IO_CAP_SECONDS)
+        code, body = http_json(request, post_deadline, io_cap_seconds=HTTP_POST_IO_CAP_SECONDS)
+    except BaseException as error:
         observe_uncertain_submit(kube, plan, runtime, entry, journal, deadline)
         journal.append(
             "submit_unknown", key=key, expected_id=expected_id, cause="transport_or_response"
         )
+        if isinstance(error, MeasuredFailure):
+            raise UnknownOutcome(
+                "Service POST outcome unknown at absolute HTTP deadline"
+            ) from error
         raise
     duration_ms = round((time.monotonic() - started) * 1000, 3)
     if code != 202:
