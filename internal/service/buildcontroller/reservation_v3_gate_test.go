@@ -23,10 +23,12 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/runtime/serializer"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
+	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/apiutil"
@@ -542,6 +544,283 @@ func capacityGateLedger(m capacityManifest) *corev1.ConfigMap {
 
 func capacityGatePatch() []byte {
 	return bytes.ReplaceAll([]byte(`[{"op":"test","path":"/metadata/uid","value":"original"},{"op":"test","path":"/metadata/resourceVersion","value":"1"},{"op":"test","path":"/data/state","value":"old"},{"op":"replace","path":"/data/state","value":"new"}]`), []byte("/data/state"), []byte("/data/"+admissioncontract.ActiveLedgerDataKey))
+}
+
+func capacityOfficialGeneric422(t *testing.T) []byte {
+	t.Helper()
+	status := apierrors.NewGenericServerResponse(http.StatusUnprocessableEntity, "", schema.GroupResource{}, "", "synthetic failed test, never a live response", 0, false)
+	raw, err := runtime.Encode(clientgoscheme.Codecs.LegacyCodec(corev1.SchemeGroupVersion), &status.ErrStatus)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded map[string]any
+	if !capacityDecode(raw, &decoded) || len(decoded["details"].(map[string]any)) != 0 || len(decoded["metadata"].(map[string]any)) != 0 ||
+		decoded["message"] != "the server rejected our request due to an error in our request" {
+		t.Fatal("official constructor/serializer changed its generic 422 contract")
+	}
+	return raw
+}
+
+func TestCapacityGenericLedger422OfficialConstructorAndTypedPatch(t *testing.T) {
+	for _, role := range []admissioncontract.Role{admissioncontract.Active, admissioncontract.Queue} {
+		t.Run(string(role), func(t *testing.T) {
+			m := capacityGateManifest()
+			ledger, key := capacityGateLedger(m), admissioncontract.ActiveLedgerDataKey
+			if role == admissioncontract.Queue {
+				ledger.Name, key = admissioncontract.QueueLedgerName, admissioncontract.QueueLedgerDataKey
+				ledger.Data = map[string]string{key: "old"}
+			}
+			path := "/api/v1/namespaces/" + m.Runner.Name + "/configmaps/" + ledger.Name
+			raw := capacityOfficialGeneric422(t)
+			g := newCapacityTransport(m, admissioncontract.Receipt{}, "https://127.0.0.1:6443", capacityRoundTripper(func(r *http.Request) (*http.Response, error) {
+				if r.Method != http.MethodPatch || r.URL.Path != path {
+					t.Fatal("typed PATCH escaped its declared original ledger")
+				}
+				return &http.Response{StatusCode: 422, Header: http.Header{"Content-Type": {"application/json"}}, Body: io.NopCloser(bytes.NewReader(raw))}, nil
+			}))
+			g.patches[path], g.owned[path] = "original", "original"
+			original, _ := json.Marshal(ledger)
+			g.observed[path], _ = capacityObject(original, path, "original")
+			cfg := capacityClientConfig(&rest.Config{Host: g.origin, Timeout: 10 * time.Second,
+				ContentConfig: rest.ContentConfig{ContentType: "application/json", AcceptContentTypes: "application/json"}})
+			cs, err := kubernetes.NewForConfigAndClient(cfg, &http.Client{Transport: g, Timeout: 10 * time.Second})
+			if err != nil {
+				t.Fatal(err)
+			}
+			body := bytes.ReplaceAll(capacityGatePatch(), []byte("/data/"+admissioncontract.ActiveLedgerDataKey), []byte("/data/"+key))
+			_, err = cs.CoreV1().ConfigMaps(m.Runner.Name).Patch(t.Context(), ledger.Name, types.JSONPatchType, body, metav1.PatchOptions{})
+			if !apierrors.IsInvalid(err) || apierrors.IsConflict(err) || g.unknown || g.wireCalls != 1 || g.wireMutations != 1 || g.wirePodPosts != 0 {
+				t.Fatal("official generic 422 was lost, misclassified or sent more than once")
+			}
+			if _, err := cs.CoreV1().ConfigMaps(m.Runner.Name).Patch(t.Context(), ledger.Name, types.JSONPatchType, body, metav1.PatchOptions{}); err == nil || g.wireCalls != 1 {
+				t.Fatal("the rejected original PATCH body was replayed")
+			}
+		})
+	}
+}
+
+func TestCapacityGenericLedger422RejectsForeignStatusAndStopsWire(t *testing.T) {
+	for _, scenario := range []string{"causes", "empty-causes", "retry", "zero-retry", "name", "group", "kind", "uid", "unknown-detail", "foreign-metadata", "null-metadata", "missing-metadata", "message", "code", "reason", "gvk", "success", "unknown-top", "duplicate", "non-owned", "changed-owned", "genesis", "get"} {
+		t.Run(scenario, func(t *testing.T) {
+			m := capacityGateManifest()
+			ledger := capacityGateLedger(m)
+			key := admissioncontract.ActiveLedgerDataKey
+			if scenario == "genesis" {
+				ledger.Name, key = admissioncontract.GenesisName, admissioncontract.GenesisDataKey
+				ledger.Data = map[string]string{key: "old"}
+			}
+			path := "/api/v1/namespaces/" + m.Runner.Name + "/configmaps/" + ledger.Name
+			var status map[string]any
+			if !capacityDecode(capacityOfficialGeneric422(t), &status) {
+				t.Fatal("invalid test fixture")
+			}
+			details := status["details"].(map[string]any)
+			switch scenario {
+			case "causes":
+				details["causes"] = []any{map[string]any{"reason": "FieldValueInvalid", "field": "patch", "message": "synthetic"}}
+			case "empty-causes":
+				details["causes"] = []any{}
+			case "retry":
+				details["retryAfterSeconds"] = 1
+			case "zero-retry":
+				details["retryAfterSeconds"] = 0
+			case "name", "group", "kind", "uid", "unknown-detail":
+				details[scenario] = "foreign"
+			case "foreign-metadata":
+				status["metadata"] = map[string]any{"resourceVersion": "foreign"}
+			case "null-metadata":
+				status["metadata"] = nil
+			case "missing-metadata":
+				delete(status, "metadata")
+			case "message":
+				status["message"] = "another rejection"
+			case "code":
+				status["code"] = 409
+			case "reason":
+				status["reason"] = "Conflict"
+			case "gvk":
+				status["apiVersion"] = "foreign/v1"
+			case "success":
+				status["status"] = "Success"
+			case "unknown-top":
+				status["foreign"] = true
+			}
+			raw, _ := json.Marshal(status)
+			if scenario == "duplicate" {
+				raw = bytes.Replace(raw, []byte(`"code":422`), []byte(`"code":422,"code":422`), 1)
+			}
+			g := newCapacityTransport(m, admissioncontract.Receipt{}, "https://127.0.0.1:6443", capacityRoundTripper(func(*http.Request) (*http.Response, error) {
+				return &http.Response{StatusCode: 422, Body: io.NopCloser(bytes.NewReader(raw))}, nil
+			}))
+			g.patches[path], g.owned[path] = "original", "original"
+			if scenario == "non-owned" {
+				delete(g.owned, path)
+			} else if scenario == "changed-owned" {
+				g.owned[path] = "replacement"
+			}
+			original, _ := json.Marshal(ledger)
+			g.observed[path], _ = capacityObject(original, path, "original")
+			body := bytes.ReplaceAll(capacityGatePatch(), []byte("/data/"+admissioncontract.ActiveLedgerDataKey), []byte("/data/"+key))
+			request := capacityGateRequest(http.MethodPatch, path, body)
+			request.Header.Set("Content-Type", "application/json-patch+json")
+			if scenario == "get" {
+				request = capacityGateRequest(http.MethodGet, path, nil)
+			}
+			if _, err := g.RoundTrip(request); err == nil || !g.unknown || g.wireCalls != 1 {
+				t.Fatal("foreign/non-owned generic 422 qualified")
+			}
+			if _, err := g.RoundTrip(capacityGateRequest(http.MethodGet, path, nil)); err == nil || g.wireCalls != 1 || g.wirePodPosts != 0 {
+				t.Fatal("wire continued after unknown error response")
+			}
+		})
+	}
+}
+
+func TestCapacityGenericLedger422DoesNotChangeLegacyNilOrConflictContracts(t *testing.T) {
+	m := capacityGateManifest()
+	path := "/api/v1/namespaces/" + m.Runner.Name + "/configmaps/" + admissioncontract.ActiveLedgerName
+	g := newCapacityTransport(m, admissioncontract.Receipt{}, "https://127.0.0.1:6443", nil)
+	request := capacityGateRequest(http.MethodPatch, path, capacityGatePatch())
+	request.Header.Set("Content-Type", "application/json-patch+json")
+	for _, details := range []string{"null", "missing"} {
+		var status map[string]any
+		_ = capacityDecode(capacityOfficialGeneric422(t), &status)
+		if details == "null" {
+			status["details"] = nil
+		} else {
+			delete(status, "details")
+		}
+		raw, _ := json.Marshal(status)
+		// Existing nil/absent/null acceptance remains; no owned identity is
+		// installed here, so it cannot come from the new owned-ledger branch.
+		if !g.qualifyResponse(request, 422, raw) {
+			t.Fatal("legacy nil-details error contract was silently tightened")
+		}
+	}
+	conflict := apierrors.NewConflict(schema.GroupResource{Resource: "configmaps"}, admissioncontract.ActiveLedgerName, errors.New("synthetic"))
+	raw, err := runtime.Encode(clientgoscheme.Codecs.LegacyCodec(corev1.SchemeGroupVersion), &conflict.ErrStatus)
+	if err != nil || !g.qualifyResponse(request, 409, raw) {
+		t.Fatal("original named-resource 409 contract changed")
+	}
+}
+
+func TestCapacityGenericLedger422CannotBypassClosedPatchInput(t *testing.T) {
+	for _, scenario := range []string{"foreign-uid", "null-uid", "empty-rv", "numeric-rv", "null-rv", "missing-old-data", "missing-proposed-data", "null-old-data", "null-proposed-data", "numeric-proposed-data", "malformed", "foreign-operation", "wrong-content-type", "foreign-path"} {
+		t.Run(scenario, func(t *testing.T) {
+			m := capacityGateManifest()
+			path := "/api/v1/namespaces/" + m.Runner.Name + "/configmaps/" + admissioncontract.ActiveLedgerName
+			g := newCapacityTransport(m, admissioncontract.Receipt{}, "https://127.0.0.1:6443", capacityRoundTripper(func(*http.Request) (*http.Response, error) {
+				t.Fatal("unqualified input reached the generic-422 upstream")
+				return nil, nil
+			}))
+			g.patches[path], g.owned[path] = "original", "original"
+			body := capacityGatePatch()
+			switch scenario {
+			case "foreign-uid":
+				body = bytes.Replace(body, []byte(`"value":"original"`), []byte(`"value":"foreign"`), 1)
+			case "null-uid":
+				body = bytes.Replace(body, []byte(`"value":"original"`), []byte(`"value":null`), 1)
+			case "empty-rv":
+				body = bytes.Replace(body, []byte(`"value":"1"`), []byte(`"value":""`), 1)
+			case "numeric-rv":
+				body = bytes.Replace(body, []byte(`"value":"1"`), []byte(`"value":1`), 1)
+			case "null-rv":
+				body = bytes.Replace(body, []byte(`"value":"1"`), []byte(`"value":null`), 1)
+			case "missing-old-data":
+				var operations []json.RawMessage
+				_ = json.Unmarshal(body, &operations)
+				body, _ = json.Marshal(append(operations[:2], operations[3:]...))
+			case "missing-proposed-data":
+				var operations []json.RawMessage
+				_ = json.Unmarshal(body, &operations)
+				body, _ = json.Marshal(operations[:3])
+			case "null-old-data":
+				body = bytes.Replace(body, []byte(`"value":"old"`), []byte(`"value":null`), 1)
+			case "null-proposed-data":
+				body = bytes.Replace(body, []byte(`"value":"new"`), []byte(`"value":null`), 1)
+			case "numeric-proposed-data":
+				body = bytes.Replace(body, []byte(`"value":"new"`), []byte(`"value":1`), 1)
+			case "malformed":
+				body = body[:len(body)-1]
+			case "foreign-operation":
+				body = bytes.Replace(body, []byte(`"op":"replace"`), []byte(`"op":"add"`), 1)
+			case "foreign-path":
+				path += "-foreign"
+			}
+			request := capacityGateRequest(http.MethodPatch, path, body)
+			request.Header.Set("Content-Type", "application/json-patch+json")
+			if scenario == "wrong-content-type" {
+				request.Header.Set("Content-Type", "application/merge-patch+json")
+			}
+			if _, err := g.RoundTrip(request); err == nil || g.wireCalls != 0 || g.wireMutations != 0 {
+				t.Fatal("new error compatibility bypassed existing CAS/input guards")
+			}
+		})
+	}
+}
+
+type capacity422ReadbackAPI struct {
+	admissiongenesis.CoreAPI
+	target, mode, changedData string
+	patches                   int
+	patchError                error
+}
+
+func (a *capacity422ReadbackAPI) PatchConfigMap(context.Context, string, string, []byte) (*corev1.ConfigMap, error) {
+	a.patches++
+	return nil, a.patchError
+}
+
+func (a *capacity422ReadbackAPI) GetConfigMap(ctx context.Context, ns, name string) (*corev1.ConfigMap, error) {
+	cm, err := a.CoreAPI.GetConfigMap(ctx, ns, name)
+	if err != nil || a.patches == 0 || name != a.target {
+		return cm, err
+	}
+	switch a.mode {
+	case "advanced-original":
+		cm.ResourceVersion += "-advanced"
+	case "advanced-valid-data":
+		cm.ResourceVersion += "-advanced"
+		cm.Data[admissioncontract.ActiveLedgerDataKey] = a.changedData
+	case "replacement":
+		cm.UID += "-replacement"
+	case "missing":
+		return nil, apierrors.NewNotFound(schema.GroupResource{Resource: "configmaps"}, name)
+	case "invalid-data":
+		cm.Data[admissioncontract.ActiveLedgerDataKey] = "{"
+	}
+	return cm, nil
+}
+
+func TestCapacityGenericLedger422StillRequiresAdvancedValidOriginalReadback(t *testing.T) {
+	for _, scenario := range []string{"advanced-original", "advanced-valid-data", "replacement", "missing", "invalid-data", "unchanged"} {
+		t.Run(scenario, func(t *testing.T) {
+			r, api, _ := genesisAdmissionFixtureWithConfig(t, config.Config{MaxActiveJobs: 2, MaxActiveJobsPerRequester: 2, WorkerSlots: 2, MaxQueuedJobs: 2, MaxQueuedJobsPerRequester: 2})
+			original, state, err := r.readReservations(t.Context(), r.Cfg.Namespace)
+			if err != nil {
+				t.Fatal(err)
+			}
+			state.Fence++
+			next, err := encodeReservations(state)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var status metav1.Status
+			if !capacityDecode(capacityOfficialGeneric422(t), &status) {
+				t.Fatal("invalid official fixture")
+			}
+			observed := &capacity422ReadbackAPI{CoreAPI: api, target: original.Name, mode: scenario, changedData: string(next), patchError: apierrors.FromObject(&status)}
+			r.Genesis.Bootstrap.API = observed
+			err = r.Genesis.PatchLedgerData(t.Context(), original, admissioncontract.Active, string(next))
+			wantConflict := strings.HasPrefix(scenario, "advanced-")
+			if err == nil || apierrors.IsConflict(err) != wantConflict || observed.patches != 1 {
+				t.Fatal("generic 422 bypassed original UID/body/direct-read qualification or replayed")
+			}
+			if scenario == "unchanged" && !apierrors.IsInvalid(err) {
+				t.Fatal("unchanged original rejection became a conflict or success")
+			}
+		})
+	}
 }
 
 func TestCapacityTransportNotFoundMustBeExactNamedStatus(t *testing.T) {
