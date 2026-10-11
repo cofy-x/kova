@@ -1,0 +1,2 @@
+{"record":{"Ref":"serialized-solve-ref","Exporters":[{"Type":"image","Attrs":{"name":"fixture.invalid/image:owned"}}],"CreatedAt":{"seconds":1791511200,"nanos":123456789}}}
+{"type":1,"record":{"Ref":"serialized-solve-ref","Exporters":[{"Type":"image","Attrs":{"name":"fixture.invalid/image:owned"}}],"CreatedAt":{"seconds":1791511200,"nanos":123456789},"CompletedAt":{"seconds":1791511202,"nanos":987654321},"ExporterResponse":{"containerimage.digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}}

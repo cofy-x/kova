@@ -1,0 +1,1 @@
+[{"id":"serialized-worker-1","labels":null,"platforms":null,"gcPolicy":null,"buildkitVersion":{"package":"github.com/moby/buildkit","version":"v0.31.2","revision":"e42e1bfd389af7203238cce77b1f7dad447285e9"},"cdiDevices":null}]

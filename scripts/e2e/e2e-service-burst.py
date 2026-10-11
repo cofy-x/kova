@@ -2031,6 +2031,42 @@ def check_history_retention(config: str) -> None:
         raise UnknownOutcome("BuildKit history must retain 64 records for one hour")
 
 
+def worker_identity(raw: bytes) -> tuple[str, str]:
+    """Project the pinned v0.31.2 client.WorkerInfo encoding/json schema."""
+    if len(raw) > 1 << 20:
+        raise UnknownOutcome("worker identity response exceeded its finite budget")
+    try:
+        workers = json.loads(raw, object_pairs_hook=unique_pairs)
+    except (ValueError, UnicodeError) as error:
+        raise UnknownOutcome("worker identity response is malformed") from error
+    if type(workers) is not list or len(workers) != 1:
+        raise UnknownOutcome("daemon does not expose exactly one worker")
+    worker = workers[0]
+    if type(worker) is not dict or set(worker) != {
+        "id",
+        "labels",
+        "platforms",
+        "gcPolicy",
+        "buildkitVersion",
+        "cdiDevices",
+    }:
+        raise UnknownOutcome("worker identity does not match the pinned JSON schema")
+    worker_id = worker["id"]
+    version = worker["buildkitVersion"]
+    if (
+        type(worker_id) is not str
+        or re.fullmatch(r"[A-Za-z0-9._-]{1,128}", worker_id) is None
+        or type(version) is not dict
+        or set(version) - {"package", "version", "revision", "dockerfileVersion"}
+        or version.get("package") != "github.com/moby/buildkit"
+        or version.get("version") != "v0.31.2"
+        or version.get("revision") != BUILDKIT_REVISION
+        or ("dockerfileVersion" in version and type(version["dockerfileVersion"]) is not str)
+    ):
+        raise UnknownOutcome("worker daemon is not the pinned BuildKit version")
+    return worker_id, version["revision"]
+
+
 class WorkerSolveObserver:
     """Finite, read-only worker histories on exact Pod/container incarnations."""
 
@@ -2130,28 +2166,11 @@ class WorkerSolveObserver:
             raise UnknownOutcome("worker history configuration changed")
         sampled = []
         for pin in self.runtime["worker_pods"]:
-            raw_workers = self.read(pin, "workers", deadline)
-            try:
-                workers = json.loads(raw_workers, object_pairs_hook=unique_pairs)
-            except (ValueError, UnicodeError) as error:
-                raise UnknownOutcome("worker identity response is malformed") from error
-            if type(workers) is not list or len(workers) != 1:
-                raise UnknownOutcome("daemon does not expose exactly one worker")
-            worker = workers[0]
-            worker_id = worker.get("ID")
-            version = worker.get("BuildkitVersion", {})
-            if (
-                type(worker_id) is not str
-                or re.fullmatch(r"[A-Za-z0-9._-]{1,128}", worker_id) is None
-                or version.get("package") != "github.com/moby/buildkit"
-                or version.get("version") != "v0.31.2"
-                or version.get("revision") != BUILDKIT_REVISION
-            ):
-                raise UnknownOutcome("worker daemon is not the pinned BuildKit version")
+            worker_id, revision = worker_identity(self.read(pin, "workers", deadline))
             identity = {
                 **self.pod_identity(pin, deadline),
                 "worker_id": worker_id,
-                "buildkit_revision": version["revision"],
+                "buildkit_revision": revision,
             }
             original = self.identities.get(pin["uid"])
             if original is not None and identity != original:
