@@ -360,7 +360,11 @@ func (g *capacityTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 		}
 	case http.MethodDelete:
 		var options metav1.DeleteOptions
-		if g.receiptObjects[path] == nil || !capacityDecode(raw, &options) || options.Preconditions == nil || options.Preconditions.UID == nil || string(*options.Preconditions.UID) != g.owned[path] {
+		expected := g.receiptObjects[path]
+		_, _, kind, namespace, name := capacityAddress(path)
+		if expected == nil || kind != "ConfigMap" || !capacityReceiptName(name) || expected.APIVersion != "v1" || expected.Kind != "ConfigMap" ||
+			expected.Name != name || expected.Namespace != namespace || !admissioncontract.ValidUID(g.owned[path]) || string(expected.UID) != g.owned[path] ||
+			!capacityDecode(raw, &options) || options.Preconditions == nil || options.Preconditions.UID == nil || string(*options.Preconditions.UID) != g.owned[path] {
 			return nil, errors.New("only this run's exact-UID receipts may be deleted")
 		}
 	default:
@@ -429,9 +433,15 @@ func (g *capacityTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 		var cm corev1.ConfigMap
 		expected := g.receiptObjects[path]
 		strict, decodeErr := kjson.UnmarshalStrict(observed, &status, kjson.DisallowDuplicateFields, kjson.DisallowUnknownFields)
-		success := decodeErr == nil && len(strict) == 0 && status.APIVersion == "v1" && status.Kind == "Status" && status.Status == metav1.StatusSuccess &&
-			(status.Code == 0 || status.Code == int32(response.StatusCode)) && status.Reason == "" && status.Details == nil
-		object := json.Unmarshal(observed, &cm) == nil && cm.APIVersion == "v1" && cm.Kind == "ConfigMap" && cm.Name == expected.Name && cm.Namespace == expected.Namespace && cm.UID == expected.UID &&
+		// Kubernetes ConfigMap's generic Store has ReturnDeletedObject=false.
+		// Its immediate Delete returns a Status with the original resource
+		// identity: details.kind is the plural resource, not "ConfigMap".
+		success := response.StatusCode == http.StatusOK && string(expected.UID) == g.owned[path] && decodeErr == nil && len(strict) == 0 && status.APIVersion == "v1" && status.Kind == "Status" &&
+			status.Status == metav1.StatusSuccess && status.Code == 0 && status.Reason == "" && status.Message == "" && status.ListMeta == (metav1.ListMeta{}) &&
+			reflect.DeepEqual(status.Details, &metav1.StatusDetails{Name: expected.Name, Kind: "configmaps", UID: expected.UID}) && capacityNamedDeleteStatusShape(observed, expected.Name, string(expected.UID))
+		strict, decodeErr = kjson.UnmarshalStrict(observed, &cm, kjson.DisallowDuplicateFields, kjson.DisallowUnknownFields)
+		object := response.StatusCode == http.StatusOK && decodeErr == nil && len(strict) == 0 && cm.APIVersion == "v1" && cm.Kind == "ConfigMap" && cm.Name == expected.Name && cm.Namespace == expected.Namespace &&
+			cm.UID == expected.UID && string(cm.UID) == g.owned[path] && cm.ResourceVersion != "" &&
 			reflect.DeepEqual(cm.Data, expected.Data) && reflect.DeepEqual(cm.BinaryData, expected.BinaryData) && reflect.DeepEqual(cm.Immutable, expected.Immutable)
 		if !success && !object {
 			g.unknown = true
@@ -439,6 +449,45 @@ func (g *capacityTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 		}
 	}
 	return response, nil
+}
+
+func capacityNamedDeleteStatusShape(raw []byte, name, uid string) bool {
+	var body map[string]any
+	if !capacityDecode(raw, &body) || body == nil || body["apiVersion"] != "v1" || body["kind"] != "Status" || body["status"] != metav1.StatusSuccess {
+		return false
+	}
+	for key, value := range body {
+		switch key {
+		case "apiVersion", "kind", "status", "details":
+		case "metadata":
+			meta, ok := value.(map[string]any)
+			if !ok || len(meta) != 0 {
+				return false
+			}
+		case "code":
+			if value != int64(0) {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	details, ok := body["details"].(map[string]any)
+	if !ok || details["name"] != name || details["kind"] != "configmaps" || details["uid"] != uid {
+		return false
+	}
+	for key, value := range details {
+		switch key {
+		case "name", "kind", "uid":
+		case "group":
+			if value != "" {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func capacityQueryAllowed(r *http.Request) bool {
