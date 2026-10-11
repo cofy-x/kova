@@ -13,15 +13,22 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
+type admissionDeferral uint8
+
+const admissionLocalDeferred admissionDeferral = 1
+
 type admissionDecision struct {
 	Admitted   bool
 	Allocation int
 	Message    string
+	Deferred   admissionDeferral
 }
 
 // admission commits a durable reservation before its caller may create a Pod.
 // The ConfigMap resourceVersion serializes grants across reconciles and leaders.
 func (r *KovaBuildReconciler) admission(ctx context.Context, build *kovav1.KovaBuild) (admissionDecision, error) {
+	var localPermit *freshGrantPermit
+	defer func() { localPermit.release() }()
 	var grantNonce string
 	if r.Genesis != nil {
 		var err error
@@ -47,11 +54,23 @@ func (r *KovaBuildReconciler) admission(ctx context.Context, build *kovav1.KovaB
 		// Pod scans until capacity may actually be granted. A concurrent release
 		// can only delay this build until its next reconcile, never overbook it.
 		if _, existing := reservations.Active[key]; !existing {
+			if blocked, saturated := saturatedAdmission(build, reservations.Active, r.Cfg.MaxActiveJobs, r.Cfg.MaxActiveJobsPerRequester, r.Cfg.WorkerSlots); saturated {
+				if err := r.queueStoreForNamespace(build.Namespace).VerifyForBuild(ctx, build); err != nil {
+					return admissionDecision{}, err
+				}
+				return blocked, nil
+			}
+			if r.Genesis != nil && r.AdmissionCoordinator != nil && localPermit == nil {
+				localPermit, err = r.AdmissionCoordinator.tryBegin(ctx, build.Namespace)
+				if err != nil {
+					return admissionDecision{}, err
+				}
+				if localPermit == nil {
+					return admissionDecision{Deferred: admissionLocalDeferred}, nil
+				}
+			}
 			if err := r.queueStoreForNamespace(build.Namespace).VerifyForBuild(ctx, build); err != nil {
 				return admissionDecision{}, err
-			}
-			if blocked, saturated := saturatedAdmission(build, reservations.Active, r.Cfg.MaxActiveJobs, r.Cfg.MaxActiveJobsPerRequester, r.Cfg.WorkerSlots); saturated {
-				return blocked, nil
 			}
 		}
 		var builds kovav1.KovaBuildList

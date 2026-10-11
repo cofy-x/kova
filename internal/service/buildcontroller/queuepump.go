@@ -25,12 +25,13 @@ import (
 )
 
 const (
-	admissionAuditRequestName  = "kova-service-admission-audit"
-	admissionAuditInterval     = 30 * time.Second
-	admissionAuditGrantBatch   = 32
-	admissionAuditContinuation = 4 * time.Second
-	admissionWakeTimeout       = time.Second
-	admissionHandoffRetry      = 100 * time.Millisecond
+	admissionAuditRequestName   = "kova-service-admission-audit"
+	admissionReleaseRequestName = "kova-service-admission-release"
+	admissionAuditInterval      = 30 * time.Second
+	admissionAuditGrantBatch    = 32
+	admissionAuditContinuation  = 4 * time.Second
+	admissionWakeTimeout        = time.Second
+	admissionHandoffRetry       = 100 * time.Millisecond
 )
 
 // AdmissionPump turns durable capacity changes into one targeted KovaBuild
@@ -38,16 +39,18 @@ const (
 // direct CR/Pod checks and commits its active grant and fairness cursor in one
 // resourceVersion CAS. No individual queued build needs a capacity timer.
 type AdmissionPump struct {
-	Reader  client.Reader
-	Cfg     config.Config
-	Genesis *admissiongenesis.Guard
-	wake    chan event.GenericEvent
-	kick    chan event.GenericEvent
+	Reader               client.Reader
+	Cfg                  config.Config
+	Genesis              *admissiongenesis.Guard
+	AdmissionCoordinator *AdmissionCoordinator
+	wake                 chan event.GenericEvent
+	kick                 chan event.GenericEvent
 	// Repeated CR Create/status events can all point at the same fair head.
 	// This is a leader-local traffic hint, never the source of grant truth.
-	lastWakeUID      types.UID
-	lastWakeLedgerRV string
-	lastWakeAt       time.Time
+	lastWakeUID               types.UID
+	lastWakeLedgerRV          string
+	lastWakeAt                time.Time
+	lastWakeReleaseGeneration uint64
 	// At most one bounded slice of active grants is inspected per audit. The
 	// cursor is advisory; the next leader starts from the beginning again.
 	auditCursor string
@@ -70,21 +73,29 @@ func (p *AdmissionPump) SetupWithManager(mgr ctrl.Manager) error {
 	if p.Reader == nil || p.Cfg.Namespace == "" {
 		return fmt.Errorf("admission pump requires an API reader and namespace")
 	}
+	if p.Genesis != nil && p.AdmissionCoordinator != nil {
+		if err := p.AdmissionCoordinator.validate(p.Cfg.Namespace); err != nil {
+			return err
+		}
+	}
 	requestForBuild := handler.EnqueueRequestsFromMapFunc(func(_ context.Context, obj client.Object) []ctrl.Request {
 		if obj.GetNamespace() != p.Cfg.Namespace {
 			return nil
 		}
 		return []ctrl.Request{{NamespacedName: types.NamespacedName{Namespace: p.Cfg.Namespace, Name: reservationConfigMap}}}
 	})
-	if err := ctrl.NewControllerManagedBy(mgr).
+	pumpController := ctrl.NewControllerManagedBy(mgr).
 		Named("kova_admission_pump").
 		For(&corev1.ConfigMap{}, builder.WithPredicates(predicate.NewPredicateFuncs(func(obj client.Object) bool {
 			return obj.GetNamespace() == p.Cfg.Namespace && obj.GetName() == reservationConfigMap
 		}))).
 		Watches(&kovav1.KovaBuild{}, requestForBuild, builder.WithPredicates(admissionBuildEvents(p.Cfg.Namespace))).
 		WatchesRawSource(source.Channel(p.kick, &handler.EnqueueRequestForObject{})).
-		WithOptions(controllerOptions.Options{MaxConcurrentReconciles: 1}).
-		Complete(p); err != nil {
+		WithOptions(controllerOptions.Options{MaxConcurrentReconciles: 1})
+	if p.Genesis != nil && p.AdmissionCoordinator != nil {
+		pumpController = pumpController.WatchesRawSource(source.Channel(p.AdmissionCoordinator.ReleaseEvents(), &handler.EnqueueRequestForObject{}))
+	}
+	if err := pumpController.Complete(p); err != nil {
 		return err
 	}
 	return mgr.Add(&admissionAuditTicker{namespace: p.Cfg.Namespace, kick: p.kick})
@@ -114,7 +125,7 @@ func admissionBuildEvents(namespace string) predicate.Predicate {
 }
 
 func (p *AdmissionPump) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	if req.Namespace != p.Cfg.Namespace || (req.Name != reservationConfigMap && req.Name != admissionAuditRequestName) {
+	if req.Namespace != p.Cfg.Namespace || (req.Name != reservationConfigMap && req.Name != admissionAuditRequestName && req.Name != admissionReleaseRequestName) {
 		return ctrl.Result{}, nil
 	}
 	// A missing or changed ledger is not an invitation to reconstruct it from
@@ -147,6 +158,19 @@ func (p *AdmissionPump) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 		// every new CR/status event. HTTP admission and /readyz still check it;
 		// the pump validates it before any possible grant.
 		return result, nil
+	}
+	var releaseGeneration uint64
+	if p.Genesis != nil && p.AdmissionCoordinator != nil {
+		busy, generation, err := p.AdmissionCoordinator.deferIfBusy(p.Cfg.Namespace)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if busy {
+			// Audit above still wakes unfinished grants/cleanup. Only fresh
+			// candidate selection waits for this nonblocking local interval.
+			return result, nil
+		}
+		releaseGeneration = generation
 	}
 	queue := queueadmission.Store{Reader: p.Reader, Genesis: p.Genesis, Namespace: p.Cfg.Namespace,
 		GlobalLimit: p.Cfg.MaxQueuedJobs, RequesterLimit: p.Cfg.MaxQueuedJobsPerRequester}
@@ -200,13 +224,14 @@ func (p *AdmissionPump) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 		}
 		return ctrl.Result{}, err
 	}
-	if p.lastWakeUID == current.UID && p.lastWakeLedgerRV == ledger.ResourceVersion && time.Since(p.lastWakeAt) < admissionAuditInterval {
+	if p.lastWakeUID == current.UID && p.lastWakeLedgerRV == ledger.ResourceVersion && p.lastWakeReleaseGeneration == releaseGeneration && time.Since(p.lastWakeAt) < admissionAuditInterval {
 		return result, nil
 	}
 	if err := p.wakeBuild(ctx, &current); err != nil {
 		return ctrl.Result{}, err
 	}
 	p.lastWakeUID, p.lastWakeLedgerRV, p.lastWakeAt = current.UID, ledger.ResourceVersion, time.Now()
+	p.lastWakeReleaseGeneration = releaseGeneration
 	return result, nil
 }
 

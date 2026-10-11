@@ -42,6 +42,9 @@ type KovaBuildReconciler struct {
 	Cfg      config.Config
 	Recorder record.EventRecorder
 	Genesis  *admissiongenesis.Guard
+	// AdmissionCoordinator is shared with the Pump, never with Pod/runtime
+	// operations. It bounds only this process's fresh Genesis grant traffic.
+	AdmissionCoordinator *AdmissionCoordinator
 	// RecoveryReceipts is a direct typed client scoped to the immutable
 	// dedicated receipt Namespace; it is not the manager's cached client.
 	RecoveryReceipts ReceiptConfigMaps
@@ -142,6 +145,11 @@ func contractTargets(values []kovav1.KovaBuildTargetSpec) []buildcontract.Target
 }
 
 func (r *KovaBuildReconciler) SetupWithManager(mgr ctrl.Manager, admissionWake <-chan event.GenericEvent) error {
+	if r.Genesis != nil && r.AdmissionCoordinator != nil {
+		if err := r.AdmissionCoordinator.validate(r.Cfg.Namespace); err != nil {
+			return err
+		}
+	}
 	concurrency := r.Cfg.ControllerConcurrency
 	if concurrency <= 0 {
 		concurrency = buildcontract.DefaultControllerConcurrency

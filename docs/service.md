@@ -383,6 +383,9 @@ The separate verification window starts when a completed runner is durably obser
 Keep `controllerConcurrency` at 2 or more: one reconciler may wait for a bounded registry verification attempt while another must remain available for cancellation and terminal Pod cleanup. Older one-worker configurations must be raised before upgrading.
 `kubeClientQPS` and `kubeClientBurst` set independent build-controller and HTTP-admission Kubernetes REST budgets; each class defaults to 20 QPS/40 burst in each Service Pod. This prevents a deep queued-reconcile backlog from consuming the HTTP submission budget, while clients within each class share one limiter instead of multiplying an implicit client-go 5 QPS/10 burst limit.
 Leader-election leases and direct `/readyz` checks each keep a separate 5 QPS/10 burst budget so a full build queue cannot starve leadership renewal or health probes. These are traffic-class budgets, not a hard aggregate API-server cap; sum them across all Service replicas, including follower HTTP traffic.
+Genesis fresh active grants use a shared, nonblocking process-local coordinator to avoid competing receipt/CAS chains consuming all controller workers.
+Busy fresh contenders return immediately; existing grants, durable-capacity waits, Pod/runtime work and cancellation/cleanup bypass it.
+Read-only qualification scopes reduce repeated full-pair checks without caching ledger state or removing effect-edge checks; see the [admission design](service-admission-design.md) for the wakeup and safety boundaries.
 Runner exec streams do not use the REST token bucket; active-job and runner concurrency limits bound those connections separately.
 Tune them only after measuring queue convergence and API-server 429/5xx rates on the target cluster, and budget across all Service replicas rather than treating the values as cluster-wide limits.
 
