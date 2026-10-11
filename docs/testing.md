@@ -125,6 +125,47 @@ It rechecks source, manifest, cluster, namespace, ServiceAccount and Secret iden
 All API objects remain on success and failure; the receipt file cannot be overwritten or reused.
 Source safety tests and a compiled executable are not a live PASS, and this narrow gate never qualifies the complete committed-loss disposal path.
 
+## Source-Bound Genesis v3 Capacity Gate (PLAN)
+
+The older `TestRealAPIActiveFullTable` and `TestRealAPIQueuedLedgerFullTable` deliberately retain their legacy schema-1 coverage; they do not certify the current Genesis v3/schema-2 ledgers.
+Normal CI now also runs `TestGenesisV3FullTableLifecycle` and raw-byte/Unicode boundary tests.
+These check both mutually exclusive 128-entry maximum active states (one in-flight issue versus cleanup-ready), maximum 1000-entry queue receipt/cleanup state, the 65,535-slot sum, JSON escaping, exact 768 KiB raw data and one-byte-over refusal.
+Worst-case synthetic identity strings are **storage probes**, not fabricated API-assigned CR or receipt UIDs or claims that 128/1000 real jobs ran.
+
+`TestRealAPIGenesisV3FullTableLifecycle` is a separate, source-bound opt-in gate.
+An external, separately approved installer supplies one new single-node `kind-kova-v3-capacity-*` cluster with the current KovaBuild CRD, three distinct fresh `kova-v3-capacity-*` namespaces, an original unstarted Initializing v3 Genesis and its immutable installation receipt Secret in the control namespace.
+Pin the immutable Kind node reference in the external plan and the actual full control-plane Docker ID in the manifest.
+The receipt must select active/queue schema 2, active/requester limits 128/128, worker slots 65535, queue/requester limits 1000/1000, an explicit worker-pool identity and an exact runner manifest/index reference.
+No Service, worker, runner, registry, workload controller or Pod is started; an old-work List is a veto, never initialization authority.
+The installer must attest that no old or competing writer can use these fresh identities.
+
+Both `KOVA_V3_CAPACITY_REAL_API_MANIFEST=/absolute/private/manifest.json` and `KOVA_V3_CAPACITY_REAL_API_MANIFEST_SHA256=<sha256>` are required; partial opt-in fails before networking.
+The private strict manifest requires `schemaVersion: 1`, absolute `sourceDirectory`, clean full `sourceCommit`, `testBinarySHA256`, absolute private `kubeconfig`, `kubeconfigSHA256`, exact `context`, `kubeSystemUID`, `controlPlaneID`, RFC3339 `preparedAfter` and `expiresAt` (a fresh window of at most one hour), a new absolute `receiptPath`, `runner`, `control`, `receipts`, absolute `originalReceipt`, `originalSHA256`, `secretName`, `secretUID`, `buildName`, `oldWritersStopped: true` and `retainOnSuccess: true`.
+Each namespace object has only its original `name` and `uid`; names, UIDs and paths must not be borrowed from a prior epoch.
+The kubeconfig has only the exact dedicated current context and embedded CA/client certificates, verified direct `https://127.0.0.1:<port>`, and no proxy, executable credential helper or redirect.
+Source, binary, manifest, Kind identity and immutable receipt pins are checked before use and rechecked at fixed lifecycle checkpoints; namespace/receipt authority is rechecked at product write edges.
+
+Compile a clean reviewed `./internal/service/buildcontroller` test executable, stamping `github.com/cofy-x/kova/internal/version.Commit` to that same full source SHA, and record its build command and SHA256 outside Git.
+Only **after separate fixture/operation approval**, run that executable with `-test.run=^TestRealAPIGenesisV3FullTableLifecycle$ -test.timeout=5m -test.v` and the two manifest variables.
+Its context is three minutes, individual HTTP calls are ten seconds, and the transport caps 1500 calls and 64 mutations, six-MiB request bodies and two-MiB responses.
+Only the two fresh ledger ConfigMaps, one actual API-assigned-UID CR and at most three queue/grant/Pod-intent receipt ConfigMaps can be created.
+Genesis and ledger patches require original UID/resourceVersion tests and exact data-only operations; each mutation body has at most one wire attempt, with unknown, redirect, throttle or server-error outcomes stopping this gate.
+The dedicated verified HTTP/1 transport disables proxies, keep-alive reuse, HTTP/2 and redirects so an upstream call cannot hide a transport retry.
+Duplicate JSON and unqualified responses stop all later wire calls: named absence needs an exact NotFound Status, and successful mutations must acknowledge the original UID and proposed body; a collection 404 is never an empty List.
+Every Pod POST is forbidden, including an unschedulable one.
+
+The gate round-trips maximum v3 ledger bytes, replaces one synthetic storage probe with that one real CR, records genuine queue/grant/Pod-intent receipt UIDs, persists the spent nonce and in-flight issue, proves stale CAS refusal and fence wrap, and holds capacity while the issue is unresolved.
+It then settles only the **definitively locally never-sent** Pod issue, performs the product's ordered exact-UID receipt cleanup, verifies active/queue release and idempotent settled reads, and reserves the freed queue slot again.
+The direct terminal `Cancelled` status is a test fixture: this is **not** runtime cancellation, Pod admission/defaulting, successful builds, HTTP 429/admission/FIFO, leader handoff, unknown Pod-Create recovery, or loaded Service/client-budget evidence.
+The final queue reserve has no CR/effect and is retained as a charged intent.
+All namespaces, Genesis, ledgers and the terminal CR remain on success and failure; only ordinary effect receipts may be UID-deleted by the tested product protocol.
+An ambiguous deletion acknowledgement stops further writes; unresolved state and append-only private JSONL checkpoints remain for inspection.
+Each successful Create's original API-assigned UID and each effect receipt's canonical data digest are fsynced before any subsequent API call; a failed assignment journal stops the transport.
+The bounded final journal records measured maximum-state and post-release ledger bytes, the original CR/ledger UIDs, single-attempt upstream call/mutation counts and zero permitted Pod POSTs (not inferred worker/runtime activity).
+The call count is also the HTTP wire-attempt upper bound, not proof every request was sent: a dial/TLS failure can send no HTTP request.
+Never rerun the same fixture as fresh, and never report source/mock PASS or an absent final pass checkpoint as live API qualification.
+This narrow gate supplies capacity evidence only; it does not by itself settle the separate deep-queue or worker/client-budget acceptance requirements.
+
 ## Network Overrides
 
 Kova defaults to the official Ubuntu image, upstream GitHub release URLs,
