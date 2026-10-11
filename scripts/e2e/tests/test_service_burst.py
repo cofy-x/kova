@@ -14,6 +14,7 @@ import threading
 import time
 import unittest
 import zipfile
+from contextlib import ExitStack
 from pathlib import Path
 from types import FunctionType, TracebackType
 from unittest.mock import MagicMock, patch
@@ -1541,6 +1542,95 @@ class BurstContractTests(unittest.TestCase):
                 else:
                     replacements["exact_cleanup"].assert_called_once()
 
+    def test_expired_retirement_wait_quarantines_before_next_wave_post(self) -> None:
+        journal = MemoryJournal()
+        clock = {"now": 0.0}
+
+        def submit_first(*_args):
+            clock["now"] = self.plan["budget_seconds"]["injection"] - 2
+            return [
+                {
+                    "id": "original",
+                    "entry": self.entries[0],
+                    "uid": UUIDS[15],
+                    "terminal": True,
+                }
+            ]
+
+        submitted = MagicMock(side_effect=submit_first)
+
+        def fixture_gate(*_args, empty, **_kwargs):
+            if submitted.call_count and not empty:
+                raise burst.ReceiptRetirementPending("original terminal receipts remain")
+            return []
+
+        def tick(seconds):
+            clock["now"] += seconds
+
+        with tempfile.TemporaryDirectory() as tmp:
+            token = Path(tmp) / "token"
+            token.write_text("private-test-bearer-123456789", encoding="utf-8")
+            token.chmod(0o600)
+            args = argparse.Namespace(
+                ack=(
+                    f"{RUN}/{self.plan['fixture']['control_namespace']}/"
+                    f"{self.plan['fixture']['runner_namespace']}/{'0' * 12}"
+                ),
+                token_file=token,
+                out_dir=Path(tmp),
+                kubeconfig=Path(tmp) / "kubeconfig",
+            )
+            patches = (
+                patch.object(burst.sys, "platform", "linux"),
+                patch.object(burst, "Journal", return_value=journal),
+                patch.object(burst, "Kube"),
+                patch.object(burst, "prepare_outputs"),
+                patch.object(burst, "check_registry_container"),
+                patch.object(burst, "fixture_preflight", side_effect=fixture_gate),
+                patch.object(burst, "campaign_objects_preflight", return_value={}),
+                patch.object(burst, "WorkerSolveObserver"),
+                patch.object(burst, "check_registry_catalog"),
+                patch.object(burst, "verify_source", return_value={}),
+                patch.object(burst, "Forward", side_effect=lambda *_args: FakeForward()),
+                patch.object(
+                    burst,
+                    "http_json",
+                    return_value=(200, {"api_version": "v1", "commit": "a" * 40}),
+                ),
+                patch.object(burst, "Sampler"),
+                patch.object(burst.time, "monotonic", side_effect=lambda: clock["now"]),
+                patch.object(burst.time, "sleep", side_effect=tick),
+                patch.object(burst, "verify_source_tag"),
+                patch.object(burst, "snapshot_metrics"),
+                patch.object(burst, "submit_wave", submitted),
+                patch.object(burst, "poll_wave"),
+                patch.object(burst, "summarize_wave", return_value={}),
+                patch.object(burst, "metric_deltas", return_value={"missing": []}),
+            )
+            with ExitStack() as stack:
+                for replacement in patches:
+                    stack.enter_context(replacement)
+                cleanup = stack.enter_context(patch.object(burst, "exact_cleanup"))
+                result = burst.run_campaign(
+                    args,
+                    self.plan,
+                    self.runtime,
+                    self.entries,
+                    "0" * 64,
+                    "1" * 64,
+                    "2" * 64,
+                )
+        self.assertEqual(result, 3)
+        self.assertEqual(clock["now"], self.plan["budget_seconds"]["injection"])
+        submitted.assert_called_once()
+        cleanup.assert_not_called()
+        self.assertIn("terminal_receipt_retirement_wait", [event for event, _ in journal.events])
+        interrupted = next(fields for event, fields in journal.events if event == "run_interrupted")
+        self.assertEqual(interrupted["classification"], "UNKNOWN")
+        self.assertTrue(interrupted["post_attempted"])
+        self.assertEqual(interrupted["known_uids"], 1)
+        self.assertEqual(journal.events[-1][0], "quarantined")
+
     def test_cleanup_refuses_replacement_uid_before_delete(self) -> None:
         entry = self.entries[0]
         job_id = burst.expected_job_id(self.runtime["requester"], entry["key"])
@@ -2099,17 +2189,33 @@ class TerminalReceiptRetirementTests(unittest.TestCase):
                 self.call(self.known)
             fixture.assert_not_called()
 
-    def test_wait_has_fixed_thirty_second_cap_inside_original_deadline(self):
+    def test_known_terminal_receipts_can_retire_after_thirty_seconds_inside_original_deadline(self):
+        clock = {"now": 0.0}
+
+        def tick(seconds):
+            clock["now"] += seconds
+
         with (
-            patch.object(burst, "campaign_objects_preflight"),
+            patch.object(burst, "campaign_objects_preflight") as objects,
             patch.object(
-                burst, "fixture_preflight", side_effect=burst.ReceiptRetirementPending("pending")
-            ),
-            patch.object(burst.time, "sleep"),
-            patch.object(burst.time, "monotonic", side_effect=[0, 0, 0, 31]),
+                burst,
+                "fixture_preflight",
+                side_effect=[burst.ReceiptRetirementPending("pending") for _ in range(35)] + [[]],
+            ) as fixture,
+            patch.object(burst.time, "sleep", side_effect=tick) as sleep,
+            patch.object(burst.time, "monotonic", side_effect=lambda: clock["now"]),
         ):
-            with self.assertRaises(burst.UnknownOutcome):
-                self.call(self.known, 1000)
+            self.call(self.known, 100)
+        self.assertEqual(clock["now"], 35)
+        self.assertEqual(objects.call_count, 36)
+        self.assertEqual(fixture.call_count, 36)
+        self.assertTrue(all(call.args[-1] == 100 for call in objects.call_args_list))
+        self.assertTrue(all(call.args[3] == 100 for call in fixture.call_args_list))
+        self.assertEqual(sleep.call_count, 35)
+        self.assertTrue(all(call.args == (1,) for call in sleep.call_args_list))
+        self.assertEqual(
+            self.journal.append.call_args_list[0].kwargs["remaining_injection_seconds"], 100
+        )
 
     def test_original_shared_budget_cannot_be_extended(self):
         with (

@@ -3236,7 +3236,7 @@ def wait_between_waves(
     # Do not accept or delete any receipt based on its prefix/self-description.
     # Every observation keeps the complete original CR/Pod/epoch guard, and
     # the next POST still requires the strict rootCA-only namespace gate.
-    end = min(deadline, time.monotonic() + 30)
+    end = deadline
     waiting = False
     while time.monotonic() < end:
         originals = campaign_objects_preflight(kube, plan, runtime, known, end)
@@ -3247,7 +3247,9 @@ def wait_between_waves(
                 raise UnknownOutcome("receipts before a fully known successful campaign") from None
             if not waiting:
                 journal.append(
-                    "terminal_receipt_retirement_wait", known_uids=len(known), max_seconds=30
+                    "terminal_receipt_retirement_wait",
+                    known_uids=len(known),
+                    remaining_injection_seconds=round(max(0, end - time.monotonic()), 3),
                 )
                 waiting = True
             time.sleep(min(1, max(0, end - time.monotonic())))
