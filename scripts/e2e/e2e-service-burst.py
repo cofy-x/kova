@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import dis
 import hashlib
 import http.client
 import ipaddress
@@ -30,6 +31,7 @@ import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
+from types import CodeType, FunctionType
 from urllib.parse import quote, urlsplit
 from urllib.request import Request
 
@@ -82,9 +84,133 @@ class ContractError(ValueError):
 class UnknownOutcome(RuntimeError):
     """A write or live identity may have changed; scripted cleanup is unsafe."""
 
+    def __init__(self, message: str, *, diagnostic: dict | None = None):
+        super().__init__(message)
+        self.diagnostic = diagnostic
+
 
 class MeasuredFailure(RuntimeError):
     """A fully identified workload failed; exact-UID cleanup is still safe."""
+
+
+DIAGNOSTIC_CHECKPOINTS = frozenset(
+    {"resource_read", "resource_journal", "worker_observation", "campaign"}
+)
+DIAGNOSTIC_ERRORS = {
+    UnknownOutcome: "UNKNOWN_OUTCOME",
+    MeasuredFailure: "MEASURED_FAILURE",
+    ContractError: "CONTRACT_ERROR",
+    OSError: "OS_ERROR",
+    FileNotFoundError: "FILE_NOT_FOUND",
+    PermissionError: "PERMISSION_DENIED",
+    TimeoutError: "TIMEOUT",
+    ValueError: "VALUE_ERROR",
+    TypeError: "TYPE_ERROR",
+    RuntimeError: "RUNTIME_ERROR",
+    json.JSONDecodeError: "JSON_DECODE_ERROR",
+    subprocess.TimeoutExpired: "COMMAND_TIMEOUT",
+    KeyboardInterrupt: "INTERRUPTED",
+}
+MAX_DIAGNOSTIC_FRAMES = 8
+
+
+def diagnostic_codes() -> dict:
+    """Freeze only this loaded canonical source's code identities and lines."""
+    result = {}
+
+    def register(code: CodeType, label: str) -> None:
+        if code.co_filename != __file__:
+            return
+        result[id(code)] = (
+            code,
+            label,
+            frozenset(line for _, line in dis.findlinestarts(code)),
+        )
+        for constant in code.co_consts:
+            if type(constant) is CodeType:
+                register(constant, label + "." + constant.co_name)
+
+    for name, value in tuple(globals().items()):
+        if type(value) is FunctionType and value.__module__ == __name__:
+            register(value.__code__, name)
+        elif type(value) is type and value.__module__ == __name__:
+            for method, function in vars(value).items():
+                if type(function) is FunctionType:
+                    register(function.__code__, name + "." + method)
+    return result
+
+
+def valid_diagnostic(value: object) -> bool:
+    if (
+        type(value) is not dict
+        or any(type(key) is not str for key in value)
+        or set(value) != {"checkpoint", "error", "frames"}
+        or type(value["checkpoint"]) is not str
+        or value["checkpoint"] not in DIAGNOSTIC_CHECKPOINTS
+        or type(value["error"]) is not str
+        or value["error"] not in {*DIAGNOSTIC_ERRORS.values(), "OTHER_EXCEPTION"}
+        or type(value["frames"]) is not list
+        or len(value["frames"]) > MAX_DIAGNOSTIC_FRAMES
+    ):
+        return False
+    return all(
+        type(frame) is dict
+        and all(type(key) is str for key in frame)
+        and set(frame) == {"function", "line"}
+        and type(frame["function"]) is str
+        and type(frame["line"]) is int
+        and (frame["function"], frame["line"]) in _DIAGNOSTIC_LINES
+        for frame in value["frames"]
+    )
+
+
+def safe_diagnostic(error: BaseException, checkpoint: str) -> dict:
+    """Never inspect messages, locals, paths, argv, stderr or class names."""
+    if type(checkpoint) is not str or checkpoint not in DIAGNOSTIC_CHECKPOINTS:
+        raise ValueError("unknown diagnostic checkpoint")
+    if type(error) is UnknownOutcome and valid_diagnostic(error.diagnostic):
+        return {
+            **error.diagnostic,
+            "frames": [dict(frame) for frame in error.diagnostic["frames"]],
+        }
+    frames = []
+    trace = BaseException.__getattribute__(error, "__traceback__")
+    while trace is not None:
+        code = trace.tb_frame.f_code
+        registered = _DIAGNOSTIC_CODES.get(id(code))
+        if registered is not None and registered[0] is code:
+            _, label, lines = registered
+            if trace.tb_lineno in lines:
+                frames.append({"function": label, "line": trace.tb_lineno})
+                frames = frames[-MAX_DIAGNOSTIC_FRAMES:]
+        trace = trace.tb_next
+    return {
+        "checkpoint": checkpoint,
+        "error": next(
+            (label for kind, label in DIAGNOSTIC_ERRORS.items() if type(error) is kind),
+            "OTHER_EXCEPTION",
+        ),
+        "frames": frames,
+    }
+
+
+def append_diagnostic(journal: Journal, event: str, diagnostic: dict | None, **fields) -> None:
+    qualified = (
+        {**diagnostic, "frames": [dict(frame) for frame in diagnostic["frames"]]}
+        if valid_diagnostic(diagnostic)
+        else None
+    )
+    try:
+        journal.append(event, diagnostic=qualified, **fields)
+    except Exception as journal_error:
+        # One attempt only. Keep the original bounded failure in memory;
+        # without one, qualify only the new journal error's safe positions.
+        raise UnknownOutcome(
+            "diagnostic journal unavailable",
+            diagnostic=(
+                qualified if qualified is not None else safe_diagnostic(journal_error, "campaign")
+            ),
+        ) from journal_error
 
 
 def need(condition: bool, message: str) -> None:
@@ -2412,7 +2538,7 @@ class Sampler:
         )
         self.stop = threading.Event()
         self.worker_observer = worker_observer
-        self.failure: str | None = None
+        self.failure: dict | None = None
         self.thread = threading.Thread(target=self._run, daemon=True)
 
     def start(self) -> None:
@@ -2420,22 +2546,27 @@ class Sampler:
 
     def _run(self) -> None:
         while not self.stop.is_set() and time.monotonic() < self.deadline:
+            checkpoint = "resource_read"
             try:
                 sample = sample_resources(self.kube, self.plan, self.runtime, self.deadline)
+                checkpoint = "resource_journal"
                 self.journal.append("resource_sample", **sample)
                 if self.worker_observer is not None:
+                    checkpoint = "worker_observation"
                     self.worker_observer.sample(self.deadline)
             except Exception as error:
                 # A malformed response must not silently kill this background
                 # thread and leave the foreground campaign apparently healthy.
-                self.failure = type(error).__name__
+                self.failure = safe_diagnostic(error, checkpoint)
                 self.stop.set()
                 return
             self.stop.wait(10)
 
     def check(self) -> None:
         if self.failure:
-            raise UnknownOutcome("bounded resource sampler produced UNKNOWN")
+            raise UnknownOutcome(
+                "bounded resource sampler produced UNKNOWN", diagnostic=self.failure
+            )
 
     def close(self) -> None:
         self.stop.set()
@@ -3181,6 +3312,7 @@ def run_campaign(
     # It does not require or manufacture pure CPU/transport Session metrics.
     attribution_complete = True
     outcome = "UNKNOWN"
+    diagnostic = None
     started_at = now()
     start = time.monotonic()
     injection_deadline = start + plan["budget_seconds"]["injection"]
@@ -3323,10 +3455,13 @@ def run_campaign(
         outcome = "COMPLETE" if attribution_complete else "INCOMPLETE"
     except (Exception, KeyboardInterrupt) as error:
         outcome = "FAILED" if isinstance(error, MeasuredFailure) else "UNKNOWN"
-        journal.append(
+        diagnostic = safe_diagnostic(error, "campaign")
+        append_diagnostic(
+            journal,
             "run_interrupted",
+            diagnostic,
             classification=outcome,
-            reason=type(error).__name__,
+            reason=diagnostic["error"],
             post_attempted=post_attempted,
             known_uids=len(known),
         )
@@ -3334,8 +3469,9 @@ def run_campaign(
         if sampler is not None:
             try:
                 sampler.close()
-            except UnknownOutcome:
+            except UnknownOutcome as error:
                 outcome = "UNKNOWN"
+                diagnostic = safe_diagnostic(error, "campaign")
         for forward in api + metrics:
             forward.close()
     # Qualify the last read-only measurements before authorizing any CR delete.
@@ -3355,7 +3491,13 @@ def run_campaign(
                 outcome = "INCOMPLETE"
         except (UnknownOutcome, MeasuredFailure, OSError, ValueError) as error:
             outcome = "UNKNOWN"
-            journal.append("timing_diagnostics_unknown", reason=type(error).__name__)
+            diagnostic = safe_diagnostic(error, "campaign")
+            append_diagnostic(
+                journal,
+                "timing_diagnostics_unknown",
+                diagnostic,
+                reason=diagnostic["error"],
+            )
     if may_cleanup(outcome, post_attempted):
         cleanup_deadline = time.monotonic() + plan["budget_seconds"]["cleanup"]
         try:
@@ -3369,10 +3511,19 @@ def run_campaign(
             )
         except (UnknownOutcome, MeasuredFailure, OSError, ValueError) as error:
             outcome = "UNKNOWN"
-            journal.append("cleanup_unknown", reason=type(error).__name__, known_uids=len(known))
+            diagnostic = safe_diagnostic(error, "campaign")
+            append_diagnostic(
+                journal,
+                "cleanup_unknown",
+                diagnostic,
+                reason=diagnostic["error"],
+                known_uids=len(known),
+            )
     if outcome == "UNKNOWN":
-        journal.append(
+        append_diagnostic(
+            journal,
             "quarantined",
+            diagnostic,
             run_id=plan["run_id"],
             reason="manual exact-identity review required",
             no_auto_retry=True,
@@ -3439,9 +3590,24 @@ def main() -> int:
             "run requires token file and private new output directory",
         )
         return run_campaign(args, plan, runtime, sources, plan_sha, sources_sha, runtime_sha)
-    except (OSError, ValueError, ContractError, UnknownOutcome, MeasuredFailure) as error:
-        print(f"service-burst: {type(error).__name__}", file=sys.stderr)
+    except (
+        OSError,
+        ValueError,
+        ContractError,
+        UnknownOutcome,
+        MeasuredFailure,
+    ) as error:
+        print(
+            "service-burst: " + canonical(safe_diagnostic(error, "campaign")).decode(),
+            file=sys.stderr,
+        )
         return 2
+
+
+_DIAGNOSTIC_CODES = diagnostic_codes()
+_DIAGNOSTIC_LINES = frozenset(
+    (label, line) for _, label, lines in _DIAGNOSTIC_CODES.values() for line in lines
+)
 
 
 if __name__ == "__main__":

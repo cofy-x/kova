@@ -105,6 +105,11 @@ An empty, malformed or foreign success response quarantines immediately, before 
 The coordinator then requires two empty runner/build/ledger reads and a final identity preflight.
 It never deletes Namespaces, registry/source/output tags, ledgers, unknown CRs or the Kind cluster.
 Unknown outcomes retain the private receipts and fixture for manual exact-identity review.
+An interrupted run retains a bounded safe diagnostic: a fixed checkpoint/error enum and at most eight function/line positions from this loaded canonical coordinator source.
+Resource reads, resource-journal writes and worker observations have distinct checkpoints, and a background failure remains available in memory even if its journal cannot be written.
+Interruption, timing, cleanup and quarantine diagnostic events each have one write attempt; a failed journal preserves the original qualified diagnostic in the raised UNKNOWN, or a safe journal-error diagnostic when no original exists.
+Messages, locals, argv, stderr, full paths, foreign code frames and arbitrary exception class names are never part of that diagnostic; unregistered exception types become `OTHER_EXCEPTION`.
+This diagnostic does not reconstruct an older UNKNOWN cause or change stop, identity, cleanup, history, workload or deadline qualification.
 Do not reuse an incomplete or quarantined fixture as a fresh install.
 
 Pure-local safety regression (no Kubernetes, registry or build workload):
