@@ -4,7 +4,9 @@
 Check mode is read-only. Run mode requires an exact cluster acknowledgement and
 keeps all receipts. It never creates a cluster, changes a ledger, or contacts a
 registry. One test-owned unschedulable Pending runner holds the active slot;
-the 100/500/1000 queued builds must have no runner Pods.
+the genuinely queued builds must have no runner Pods. Genesis v3 retains the
+active request's queue charge: supported totals 100/500/1000 mean 99/499/999
+waiting builds. The explicitly named short profile uses a fresh cap of 100.
 """
 
 from __future__ import annotations
@@ -14,6 +16,7 @@ import binascii
 import fcntl
 import hashlib
 import hmac
+import importlib.util
 import json
 import math
 import os
@@ -22,6 +25,7 @@ import secrets
 import shutil
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import tarfile
@@ -35,8 +39,22 @@ from urllib.parse import quote
 from urllib.request import ProxyHandler, Request, build_opener
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.dont_write_bytecode = True
+_V3_SPEC = importlib.util.spec_from_file_location(
+    "deep_queue_v3", Path(__file__).with_name("deep_queue_v3.py")
+)
+V3 = importlib.util.module_from_spec(_V3_SPEC)
+_V3_SPEC.loader.exec_module(V3)
+_BURST_SPEC = importlib.util.spec_from_file_location(
+    "deep_queue_burst", Path(__file__).with_name("e2e-service-burst.py")
+)
+BURST = importlib.util.module_from_spec(_BURST_SPEC)
+sys.modules[_BURST_SPEC.name] = BURST
+_BURST_SPEC.loader.exec_module(BURST)
 CLUSTER = "kova-deep-queue"
 NAMESPACE = "kova"
+CONTROL_NAMESPACE = "kova"
+RECEIPT_NAMESPACE = ""
 RELEASE = "kova"
 KUBECONFIG = ROOT / ".kind" / f"{CLUSTER}.kubeconfig"
 STAGES = (100, 500, 1000)
@@ -58,12 +76,166 @@ API_QPS_MAX = 1200
 HTTP_BODY_MAX = 1024 * 1024
 OCI_METADATA_BLOB_MAX = 2 * 1024 * 1024
 OCI_METADATA_TOTAL_MAX = 16 * 1024 * 1024
-SETTLE_DEADLINE_SECONDS = 300
-CLEANUP_DEADLINE_SECONDS = 900
-RUN_DEADLINE_SECONDS = 3600
+SETTLE_DEADLINE_SECONDS = 120
+CLEANUP_DEADLINE_SECONDS = 300
+RUN_DEADLINE_SECONDS = 900
 EMERGENCY_STOP_DEADLINE_SECONDS = 120
 SOURCE_DIGEST = "sha256:" + "a" * 64
 OPENER = build_opener(ProxyHandler({}))
+FIXTURE: dict = {}
+CONTRACT: dict = {}
+FIXTURE_SHA = ""
+EXECUTION_DEADLINE: float | None = None
+
+
+def configure_fixture() -> dict:
+    global \
+        FIXTURE, \
+        FIXTURE_SHA, \
+        CLUSTER, \
+        NAMESPACE, \
+        CONTROL_NAMESPACE, \
+        RECEIPT_NAMESPACE
+    global RELEASE, KUBECONFIG, STAGES, PORT, API_PROXY_PORT, RUN_DEADLINE_SECONDS
+    raw = os.environ.get("DEEP_QUEUE_E2E_FIXTURE", "")
+    if not raw:
+        fail("DEEP_QUEUE_E2E_FIXTURE must name the original private fresh-v3 fixture")
+    FIXTURE, FIXTURE_SHA = V3.load_fixture(Path(raw))
+    CLUSTER, RELEASE = FIXTURE["cluster"], FIXTURE["release"]
+    NAMESPACE, CONTROL_NAMESPACE = (
+        FIXTURE["runner_namespace"],
+        FIXTURE["control_namespace"],
+    )
+    RECEIPT_NAMESPACE = FIXTURE["receipt_namespace"]
+    KUBECONFIG = Path(FIXTURE["kubeconfig"])
+    STAGES = (
+        (100,) if FIXTURE["profile"] == "representative-short" else (100, 500, 1000)
+    )
+    RUN_DEADLINE_SECONDS = 900 if len(STAGES) == 1 else 1800
+    PORT, API_PROXY_PORT = FIXTURE["ports"]["service"], FIXTURE["ports"]["api_proxy"]
+    return FIXTURE
+
+
+def quota_limit() -> int:
+    return V3.limits(FIXTURE)["maxQueuedJobs"] if FIXTURE else 1000
+
+
+def source_uri() -> str:
+    # No runner can schedule, so this directed admission probe must never
+    # inspect/publish source or contact any real/shared registry.
+    return f"oci://unused.invalid/deep-queue/{FIXTURE['run_id']}@{SOURCE_DIGEST}"
+
+
+def kova_fixture_changed() -> bool:
+    path = Path(os.environ.get("DEEP_QUEUE_E2E_FIXTURE", ""))
+    return (
+        not path.is_file()
+        or path.is_symlink()
+        or hashlib.sha256(path.read_bytes()).hexdigest() != FIXTURE_SHA
+    )
+
+
+def receipt_objects() -> dict[str, dict]:
+    inventory = kjson("-n", RECEIPT_NAMESPACE, "get", "configmaps", "-o", "json")
+    if inventory.get("metadata", {}).get("continue") or inventory.get(
+        "metadata", {}
+    ).get("remainingItemCount", 0):
+        fail("receipt inventory is incomplete")
+    items = inventory.get("items", [])
+    if type(items) is not list or len(items) > quota_limit() + 3:
+        fail("receipt inventory is malformed or exceeds bounded capacity")
+    result = {item["metadata"]["name"]: item for item in items}
+    if len(result) != len(items):
+        fail("duplicate receipt object names")
+    result.pop("kube-root-ca.crt", None)
+    return result
+
+
+def empty_receipts() -> None:
+    if receipt_objects():
+        fail("fresh receipt namespace contains prior effect receipts")
+
+
+def qualify_build_receipts(
+    builds: dict[str, dict], blocker_id: str, blocker_uid: str
+) -> dict:
+    grants, intents = queue_ledgers(len(builds) - 1, blocker_id, blocker_uid)
+    objects = receipt_objects()
+    expected_names = {
+        "kova-admission-intent-" + intent["nonce"] for intent in intents.values()
+    }
+    entry = grants[blocker_uid]
+    expected_names |= {
+        "kova-grant-intent-" + entry["grantNonce"],
+        "kova-pod-create-intent-" + entry["podAttemptNonce"],
+    }
+    if set(intents) != set(builds) or set(objects) != expected_names:
+        fail("v3 receipt inventory differs from the exact charged build set")
+    for name, build in builds.items():
+        intent = intents[name]
+        V3.qualify_queue_receipt(
+            objects["kova-admission-intent-" + intent["nonce"]],
+            build,
+            intent,
+            FIXTURE,
+            CONTRACT,
+        )
+    V3.qualify_active_receipts(
+        builds[blocker_id],
+        check_runner(blocker_id, blocker_uid),
+        entry,
+        intents[blocker_id],
+        objects,
+        FIXTURE,
+        CONTRACT,
+        canonical_pod_digest,
+    )
+    return objects
+
+
+def qualify_epoch() -> None:
+    if not FIXTURE:
+        fail("no original v3 fixture pins")
+    if kova_fixture_changed():
+        fail("original fixture bytes changed")
+    if (
+        hashlib.sha256(KUBECONFIG.read_bytes()).hexdigest()
+        != FIXTURE["kubeconfig_sha256"]
+    ):
+        fail("original kubeconfig bytes changed")
+    if (
+        Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+        != FIXTURE["host_boot_id"]
+    ):
+        fail("host boot identity changed")
+    for role in ("control", "runner", "receipt"):
+        obj = kjson("get", "namespace", FIXTURE[role + "_namespace"], "-o", "json")
+        V3.identity(
+            obj, FIXTURE[role + "_namespace"], None, FIXTURE[role + "_namespace_uid"]
+        )
+        if obj.get("status", {}).get("phase") != "Active":
+            fail("original namespace is not Active")
+    genesis = kjson("-n", NAMESPACE, "get", "configmap", V3.GENESIS, "-o", "json")
+    V3.identity(genesis, V3.GENESIS, NAMESPACE, FIXTURE["genesis"]["genesis_uid"])
+    data = V3.decode(
+        V3.keys(genesis.get("data"), {"genesis.json"}, "Genesis data differs")[
+            "genesis.json"
+        ]
+    )
+    V3.keys(
+        data,
+        {"contract", "phase", "activeLedgerUID", "queueLedgerUID"},
+        "Genesis fields differ",
+    )
+    if (
+        genesis.get("immutable") is not True
+        or genesis.get("binaryData")
+        or data["phase"] != "Committed"
+        or data["contract"] != CONTRACT
+        or data["activeLedgerUID"] != FIXTURE["genesis"]["active_ledger_uid"]
+        or data["queueLedgerUID"] != FIXTURE["genesis"]["queue_ledger_uid"]
+    ):
+        fail("original committed Genesis changed")
 
 
 class BenchError(RuntimeError):
@@ -94,27 +266,156 @@ def quiet_seconds() -> int:
     return seconds
 
 
-def command(argv: list[str], *, input_text: str | None = None, timeout: int = 20) -> str:
+def start_execution_budget() -> float:
+    """Start one budget before preflight; live must not renew it."""
+    global EXECUTION_DEADLINE
+    EXECUTION_DEADLINE = time.monotonic() + RUN_DEADLINE_SECONDS
+    return EXECUTION_DEADLINE
+
+
+def budget_timeout(maximum: float) -> float:
+    # Pure helper regressions can run without a live execution scope. The
+    # authoritative check/run entrypoints always start the shared budget.
+    if EXECUTION_DEADLINE is None:
+        return maximum
+    remaining = EXECUTION_DEADLINE - time.monotonic()
+    if remaining <= 0:
+        fail("end-to-end preflight/live execution budget expired")
+    return min(maximum, remaining)
+
+
+def live_deadline() -> float:
+    if EXECUTION_DEADLINE is None:
+        fail("live has no original preflight execution budget")
+    budget_timeout(RUN_DEADLINE_SECONDS)
+    return EXECUTION_DEADLINE
+
+
+def pause(seconds: float) -> None:
+    time.sleep(budget_timeout(seconds))
+
+
+def command(
+    argv: list[str], *, input_text: str | None = None, timeout: int = 20,
+    environment: dict[str, str] | None = None,
+) -> str:
+    bounded_timeout = budget_timeout(timeout)
     try:
         result = subprocess.run(
-            argv, input=input_text, text=True, capture_output=True, timeout=timeout, check=False
+            argv,
+            input=input_text,
+            text=True,
+            capture_output=True,
+            timeout=bounded_timeout,
+            check=False,
+            env=environment,
         )
     except (OSError, subprocess.TimeoutExpired) as error:
         fail(f"{argv[0]} did not complete: {type(error).__name__}")
     if result.returncode != 0:
-        fail(f"{argv[0]} returned {result.returncode}: {result.stderr[-300:].strip()}")
+        fail(f"{Path(argv[0]).name} returned nonzero status")
+    budget_timeout(timeout)
     return result.stdout
+
+
+def qualify_template_binary() -> Path:
+    path = Path(FIXTURE["pod_template_binary"])
+    if not path.is_absolute() or path.resolve() != path or path.is_symlink():
+        fail("Pod-template binary path is not canonical")
+    def stable(info: os.stat_result) -> tuple:
+        # Hashing a newly built file may update atime under Linux relatime.
+        return (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid,
+                info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+    before = path.stat()
+    if (
+        not stat.S_ISREG(before.st_mode)
+        or before.st_uid != os.getuid()
+        or before.st_mode & 0o022
+        or not before.st_mode & 0o100
+        or not 0 < before.st_size <= 512 * 1024 * 1024
+    ):
+        fail("Pod-template binary is not an owned bounded executable")
+    digest = hashlib.sha256()
+    with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW), "rb") as source:
+        if stable(os.fstat(source.fileno())) != stable(before):
+            fail("Pod-template binary was replaced before its verification read")
+        while block := source.read(1024 * 1024):
+            budget_timeout(5)
+            digest.update(block)
+        if stable(os.fstat(source.fileno())) != stable(before):
+            fail("Pod-template binary changed during its verification read")
+    if stable(path.stat()) != stable(before) or digest.hexdigest() != FIXTURE["pod_template_binary_sha256"]:
+        fail("original candidate Pod-template binary changed")
+    return path
+
+
+def native_template_result(mode: str, raw: bytes, fields: set[str]) -> dict:
+    if mode not in ("1", "identity"):
+        fail("unsupported native Pod-template operation")
+    binary = qualify_template_binary()
+    output = command(
+        [
+            str(binary),
+            "-test.run=^TestE2EPodTemplateDigestStdin$",
+            "-test.count=1",
+            "-test.timeout=5s",
+            "-test.v=false",
+        ],
+        input_text=raw.decode(),
+        timeout=5,
+        environment={"KOVA_E2E_POD_TEMPLATE_STDIN": mode},
+    )
+    qualify_template_binary()
+    lines = output.splitlines()
+    prefix = "KOVA_E2E_POD_TEMPLATE " if mode == "1" else "KOVA_E2E_POD_TEMPLATE_IDENTITY "
+    if len(lines) != 2 or not lines[0].startswith(prefix) or lines[1] != "PASS":
+        fail("native Pod-template result framing differs")
+    result = V3.keys(
+        V3.decode(lines[0][len(prefix):]),
+        fields,
+        "native Pod-template result fields differ",
+    )
+    if result["candidate_commit"] != FIXTURE["candidate_commit"]:
+        fail("native Pod-template binary candidate differs")
+    return result
+
+
+def canonical_pod_digest(pod: dict) -> str:
+    """Direct Pod bytes -> pinned native product projection, never stamp trust."""
+    raw = V3.encoded(pod)
+    if len(raw) > 128 * 1024:
+        fail("direct Pod exceeds the native template input bound")
+    result = native_template_result(
+        "1", raw, {"candidate_commit", "input_sha256", "pod_uid", "pod_template_digest"}
+    )
+    if (
+        result["input_sha256"] != hashlib.sha256(raw).hexdigest()
+        or result["pod_uid"] != pod["metadata"]["uid"]
+        or type(result["pod_template_digest"]) is not str
+        or V3.DIGEST.fullmatch(result["pod_template_digest"]) is None
+    ):
+        fail("native Pod-template result does not bind this source and direct Pod")
+    return result["pod_template_digest"]
 
 
 def kctl(*args: str, timeout: int = 20) -> str:
     return command(
-        ["kubectl", "--kubeconfig", str(KUBECONFIG), "--request-timeout=15s", *args],
+        [
+            "kubectl",
+            "--kubeconfig",
+            str(KUBECONFIG),
+            "--context",
+            f"kind-{CLUSTER}",
+            "--request-timeout=15s",
+            *args,
+        ],
         timeout=timeout,
     )
 
 
 def kjson(*args: str) -> dict:
-    result = json.loads(kctl(*args))
+    result = V3.decode(kctl(*args))
     if not isinstance(result, dict):
         fail(f"kubectl returned non-object JSON for {args[:3]}")
     return result
@@ -129,8 +430,13 @@ def save_json(path: Path, value: object) -> None:
 
 
 def safe_error(error: BaseException, token: str) -> str:
-    message = f"{type(error).__name__}: {error}"
-    return message.replace(token, "[REDACTED]") if token else message
+    # Do not persist command stderr, arbitrary exception text or API bodies.
+    return (
+        type(error).__name__
+        if type(error)
+        in (BenchError, V3.QualificationError, ValueError, OSError, KeyboardInterrupt)
+        else "Exception"
+    )
 
 
 def save_without_token(path: Path, value: object, token: str) -> None:
@@ -175,8 +481,9 @@ def load_kubeconfig_identity(config: dict) -> tuple[str, str]:
 def exact_kind_identity() -> str:
     if not KUBECONFIG.is_file() or KUBECONFIG.is_symlink():
         fail(f"missing regular dedicated kubeconfig: {KUBECONFIG}")
-    if command(["kind", "get", "clusters"]).splitlines() != [CLUSTER]:
-        fail(f"the host must have exactly one Kind cluster named {CLUSTER}")
+    clusters = command(["kind", "get", "clusters"]).splitlines()
+    if clusters.count(CLUSTER) != 1:
+        fail(f"the exact dedicated Kind cluster {CLUSTER} is unavailable")
     actual = json.loads(
         command(
             [
@@ -223,6 +530,12 @@ def good_nodes(nodes: dict) -> list[dict]:
     expected = {f"{CLUSTER}-control-plane", f"{CLUSTER}-worker"}
     if {item.get("metadata", {}).get("name") for item in items} != expected:
         fail("Kind node names/count differ from the dedicated one-worker cluster")
+    if (
+        FIXTURE
+        and {item["metadata"]["name"]: item["metadata"]["uid"] for item in items}
+        != FIXTURE["node_uids"]
+    ):
+        fail("original Kind node UIDs changed")
     for item in items:
         conditions = {c["type"]: c["status"] for c in item.get("status", {}).get("conditions", [])}
         if conditions.get("Ready") != "True" or any(
@@ -258,12 +571,12 @@ def single_service_args(deployment: dict) -> tuple[str, str]:
         )
     args = containers[0].get("args", [])
     required = {
-        "--namespace=kova",
+        f"--namespace={NAMESPACE}",
         "--max-active-jobs=1",
         "--max-active-jobs-per-requester=1",
         "--worker-slots=1",
-        "--max-queued-jobs=1000",
-        "--max-queued-jobs-per-requester=1000",
+        f"--max-queued-jobs={quota_limit()}",
+        f"--max-queued-jobs-per-requester={quota_limit()}",
         "--kube-client-qps=20",
         "--kube-client-burst=40",
         "--runner-node-selector=never=true",
@@ -271,17 +584,62 @@ def single_service_args(deployment: dict) -> tuple[str, str]:
         "--auth-static-principal=kova:e2e",
         "--leader-elect=true",
         "--poll-interval=5s",
-        "--leader-election-namespace=kova",
+        f"--leader-election-namespace={CONTROL_NAMESPACE}",
         "--wait=2h",
         "--max-build-duration=2h",
         "--runner-image-pull-policy=Never",
     }
+    if FIXTURE:
+        required |= {
+            f"--worker-pool-id={FIXTURE['genesis']['worker_pool_id']}",
+            f"--runner-image={FIXTURE['role_images']['runner']}",
+            f"--admission-genesis-receipt-secret-namespace={CONTROL_NAMESPACE}",
+            f"--admission-genesis-receipt-secret-name={FIXTURE['genesis']['secret_name']}",
+            f"--admission-genesis-receipt-secret-uid={FIXTURE['genesis']['secret_uid']}",
+            "--admission-genesis-receipt-file=/etc/kova/admission-genesis/receipt.json",
+            f"--metrics-bind-address=127.0.0.1:{FIXTURE['ports']['metrics_remote']}",
+        }
     if not required.issubset(set(args)):
         fail("Service arguments differ from the exact deep-queue benchmark contract")
+    flags = [arg.split("=", 1)[0] for arg in args if arg.startswith("--")]
+    if len(flags) != len(set(flags)):
+        fail("Service arguments contain duplicate flags")
+    if FIXTURE:
+        mounts = [
+            mount
+            for mount in containers[0].get("volumeMounts", [])
+            if mount.get("mountPath") == "/etc/kova/admission-genesis"
+        ]
+        volumes = [
+            volume
+            for volume in spec["template"]["spec"].get("volumes", [])
+            if volume.get("name") == "admission-genesis-receipt"
+        ]
+        if (
+            mounts
+            != [
+                {
+                    "name": "admission-genesis-receipt",
+                    "mountPath": "/etc/kova/admission-genesis",
+                    "readOnly": True,
+                }
+            ]
+            or len(volumes) != 1
+            or volumes[0].get("secret")
+            != {
+                "secretName": FIXTURE["genesis"]["secret_name"],
+                "optional": False,
+                "items": [{"key": "receipt.json", "path": "receipt.json"}],
+                "defaultMode": 420,
+            }
+        ):
+            fail(
+                "Service receipt file is not the exact original immutable Secret mount"
+            )
     platforms = [
         arg.split("=", 2)[1] for arg in args if arg.startswith("--buildkit-platform-addr=")
     ]
-    if len(platforms) != 1 or platforms[0] not in ("linux/amd64", "linux/arm64"):
+    if len(platforms) != 1 or platforms[0] != "linux/amd64":
         fail("Service has no single supported test platform")
     return "kova:e2e", platforms[0]
 
@@ -289,7 +647,7 @@ def single_service_args(deployment: dict) -> tuple[str, str]:
 def service_pods() -> list[dict]:
     pods = kjson(
         "-n",
-        NAMESPACE,
+        CONTROL_NAMESPACE,
         "get",
         "pods",
         "-l",
@@ -327,8 +685,8 @@ def queue_ledgers(
     active = kjson("-n", NAMESPACE, "get", "configmap", "kova-service-admission", "-o", "json")
     queue = kjson("-n", NAMESPACE, "get", "configmap", "kova-service-queue-admission", "-o", "json")
     try:
-        active_data = json.loads(active["data"]["reservations.json"])
-        queue_data = json.loads(queue["data"]["queue.json"])
+        active_data = V3.qualify_ledger(active, "active", FIXTURE, CONTRACT)
+        queue_data = V3.qualify_ledger(queue, "queue", FIXTURE, CONTRACT)
     except (KeyError, TypeError, ValueError) as error:
         fail(f"admission ledger is unreadable: {type(error).__name__}")
     if (
@@ -336,25 +694,50 @@ def queue_ledgers(
         active_data.get("maxJobs"),
         active_data.get("maxPerRequester"),
         active_data.get("workerSlots"),
-    ) != (1, 1, 1, 1):
+    ) != (2, 1, 1, 1):
         fail("active ledger limits differ from the benchmark contract")
     if (
         queue_data.get("version"),
         queue_data.get("globalLimit"),
         queue_data.get("requesterLimit"),
-    ) != (1, 1000, 1000):
+    ) != (2, quota_limit(), quota_limit()):
         fail("queue ledger limits differ from the benchmark contract")
     grants = active_data.get("active")
     intents = queue_data.get("intents")
     if not isinstance(grants, dict) or not isinstance(intents, dict):
         fail("admission ledger entries are not objects")
-    if len(intents) > expected_queued:
+    if len(intents) > expected_queued + (1 if blocker_id is not None else 0):
         fail("queue ledger has more intents than this stage submitted")
     if blocker_id is None:
         if grants or intents:
             fail("admission ledgers are not empty before the benchmark")
-    elif grants != {blocker_uid: {"buildName": blocker_id, "requester": "kova:e2e", "slots": 1}}:
-        fail("active ledger is not exactly the test-owned blocker grant")
+    else:
+        entry = grants.get(blocker_uid, {})
+        if (
+            set(grants) != {blocker_uid}
+            or entry.get("buildName") != blocker_id
+            or entry.get("requester") != "kova:e2e"
+            or entry.get("slots") != 1
+            or entry.get("closing", False) is not False
+            or entry.get("inFlight", []) != []
+            or any(
+                type(entry.get(key)) is not str or not V3.DIGEST.fullmatch(entry[key])
+                for key in (
+                    "grantReceiptDigest",
+                    "podReceiptDigest",
+                    "podTemplateDigest",
+                )
+            )
+            or any(
+                type(entry.get(key)) is not str or not V3.UID.fullmatch(entry[key])
+                for key in ("grantReceiptUID", "podReceiptUID")
+            )
+            or any(
+                type(entry.get(key)) is not str or not V3.NONCE.fullmatch(entry[key])
+                for key in ("grantNonce", "podAttemptNonce")
+            )
+        ):
+            fail("active ledger is not exactly the qualified v3 blocker grant")
     return grants, intents
 
 
@@ -491,12 +874,13 @@ def parse_oci_saved_image(
 
 
 def saved_image_fact(reference: str, manifest_digest: str, revision: str) -> dict:
+    save_timeout = budget_timeout(90)
     try:
         process = subprocess.Popen(
             [
                 "timeout",
                 "--kill-after=5s",
-                "90s",
+                f"{save_timeout:.6f}s",
                 "docker",
                 "image",
                 "save",
@@ -511,7 +895,9 @@ def saved_image_fact(reference: str, manifest_digest: str, revision: str) -> dic
         fail(f"Docker OCI image save could not start: {type(error).__name__}")
     try:
         assert process.stdout is not None
-        result = parse_oci_saved_image(process.stdout, reference, manifest_digest, revision)
+        result = parse_oci_saved_image(
+            process.stdout, reference, manifest_digest, revision
+        )
     except BaseException as error:
         if process.poll() is None:
             process.kill()
@@ -530,6 +916,7 @@ def saved_image_fact(reference: str, manifest_digest: str, revision: str) -> dic
         fail("Docker OCI image save did not exit after streaming")
     if exit_code != 0:
         fail(f"Docker OCI image save returned {exit_code}")
+    budget_timeout(90)
     return result
 
 
@@ -541,7 +928,9 @@ def local_image_fact(reference: str) -> dict:
     revision = (image.get("Config", {}).get("Labels") or {}).get(
         "org.opencontainers.image.revision"
     )
-    if not isinstance(revision, str) or not re.fullmatch(r"[0-9a-f]{12}", revision):
+    if not isinstance(revision, str) or not re.fullmatch(
+        r"[0-9a-f]{12}|[0-9a-f]{40}", revision
+    ):
         fail(f"local Docker image {reference} has no exact Kova revision label")
     image_id = image.get("Id")
     if not isinstance(image_id, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", image_id):
@@ -590,8 +979,8 @@ def kind_runtime_image_fact(node: str, reference: str) -> dict:
     ):
         fail(f"Kind node {node} returned malformed CRI repo digests for {reference}")
     repo_tags = status.get("repoTags") or []
-    if repo_tags != [reference]:
-        fail(f"Kind node {node} has an ambiguous or mismatched CRI tag for {reference}")
+    if reference not in repo_tags and reference not in repo_digests:
+        fail(f"Kind node {node} has no exact CRI reference for {reference}")
     return {"image_id": image_id, "repo_tags": repo_tags, "repo_digests": repo_digests}
 
 
@@ -646,7 +1035,9 @@ def host_memory_available() -> int:
     fail("Linux MemAvailable metric is absent")
 
 
-def resource_sample(expected_pods: list[dict], stage_dir: Path | None, docker_root: Path) -> dict:
+def resource_sample(
+    expected_pods: list[dict], stage_dir: Path | None, docker_root: Path
+) -> dict:
     nodes = good_nodes(kjson("get", "nodes", "-o", "json"))
     current_pods = service_pods()
     original_pods = {pod["metadata"]["name"]: pod["metadata"]["uid"] for pod in expected_pods}
@@ -674,11 +1065,15 @@ def resource_sample(expected_pods: list[dict], stage_dir: Path | None, docker_ro
     node_samples = []
     for node in nodes:
         name = node["metadata"]["name"]
-        summary = kjson("get", "--raw", f"/api/v1/nodes/{quote(name)}/proxy/stats/summary")
+        summary = kjson(
+            "get", "--raw", f"/api/v1/nodes/{quote(name)}/proxy/stats/summary"
+        )
         cpu = summary.get("node", {}).get("cpu", {}).get("usageNanoCores")
         memory = summary.get("node", {}).get("memory", {}).get("workingSetBytes")
         available = summary.get("node", {}).get("memory", {}).get("availableBytes")
-        if not all(isinstance(value, int) and value >= 0 for value in (cpu, memory, available)):
+        if not all(
+            isinstance(value, int) and value >= 0 for value in (cpu, memory, available)
+        ):
             fail(f"Kind node {name} has incomplete kubelet CPU/memory metrics")
         capacity = cpu_quantity_nano(node["status"]["allocatable"]["cpu"])
         node_samples.append(
@@ -692,12 +1087,19 @@ def resource_sample(expected_pods: list[dict], stage_dir: Path | None, docker_ro
         )
         for pod in summary.get("pods", []):
             ref = pod.get("podRef", {})
-            if ref.get("namespace") != NAMESPACE or ref.get("name") not in original_pods:
+            if (
+                ref.get("namespace") != CONTROL_NAMESPACE
+                or ref.get("name") not in original_pods
+            ):
                 continue
             pod_cpu = pod.get("cpu", {}).get("usageNanoCores")
             pod_memory = pod.get("memory", {}).get("workingSetBytes")
-            if not all(isinstance(value, int) and value >= 0 for value in (pod_cpu, pod_memory)):
-                fail(f"Service Pod {ref.get('name')} has incomplete kubelet CPU/memory metrics")
+            if not all(
+                isinstance(value, int) and value >= 0 for value in (pod_cpu, pod_memory)
+            ):
+                fail(
+                    f"Service Pod {ref.get('name')} has incomplete kubelet CPU/memory metrics"
+                )
             services.append(
                 {
                     "pod": ref["name"],
@@ -754,14 +1156,17 @@ def resource_sample(expected_pods: list[dict], stage_dir: Path | None, docker_ro
 def request_json(
     port: int, method: str, path: str, token: str = "", payload: dict | None = None
 ) -> tuple[int, dict, float, dict]:
+    bounded_timeout = budget_timeout(15)
     data = json.dumps(payload).encode() if payload is not None else None
     headers = {"Content-Type": "application/json"}
     if token:
         headers["Authorization"] = f"Bearer {token}"
-    req = Request(f"http://127.0.0.1:{port}{path}", data=data, headers=headers, method=method)
+    req = Request(
+        f"http://127.0.0.1:{port}{path}", data=data, headers=headers, method=method
+    )
     started = time.monotonic()
     try:
-        with OPENER.open(req, timeout=15) as response:
+        with OPENER.open(req, timeout=bounded_timeout) as response:
             status, raw, response_headers = (
                 response.status,
                 response.read(HTTP_BODY_MAX + 1),
@@ -775,15 +1180,26 @@ def request_json(
         )
     except (OSError, URLError) as error:
         fail(f"{method} {path} transport outcome is unknown: {type(error).__name__}")
+    budget_timeout(15)
     if len(raw) > HTTP_BODY_MAX:
-        fail(f"{method} {path} response exceeds {HTTP_BODY_MAX} bytes; outcome needs review")
+        fail(
+            f"{method} {path} response exceeds {HTTP_BODY_MAX} bytes; outcome needs review"
+        )
     if token and (
         token.encode() in raw
-        or any(token in key or token in value for key, value in response_headers.items())
+        or any(
+            token in key or token in value for key, value in response_headers.items()
+        )
     ):
-        fail(f"{method} {path} response reflected the request credential; receipt withheld")
+        fail(
+            f"{method} {path} response reflected the request credential; receipt withheld"
+        )
     response_headers = {key.lower(): value for key, value in response_headers.items()}
     elapsed = time.monotonic() - started
+    try:
+        public = V3.decode(raw)
+    except (ValueError, UnicodeError):
+        public = {}
     return (
         status,
         response_headers,
@@ -791,6 +1207,15 @@ def request_json(
         {
             "body_length_bytes": len(raw),
             "body_sha256": hashlib.sha256(raw).hexdigest(),
+            "queue_capacity_full": (
+                status == 429
+                and public
+                == {
+                    "code": "queue_capacity_exceeded",
+                    "message": "queue limit is reached",
+                    "retryable": True,
+                }
+            ),
         },
     )
 
@@ -806,10 +1231,16 @@ def build_api_path(name: str) -> str:
 
 
 def delete_build_with_uid(name: str, uid: str, kubeconfig_sha256: str) -> dict:
-    if not isinstance(uid, str) or not re.fullmatch(r"[0-9a-f-]{36}", uid):
+    if not isinstance(uid, str) or not V3.UID.fullmatch(uid):
         fail("refusing KovaBuild deletion without its exact recorded UID")
     if hashlib.sha256(KUBECONFIG.read_bytes()).hexdigest() != kubeconfig_sha256:
         fail("dedicated kubeconfig bytes changed before UID-precondition deletion")
+    if FIXTURE:
+        qualify_epoch()
+        current = kjson("-n", NAMESPACE, "get", "kovabuild", name, "-o", "json")
+        V3.identity(current, name, NAMESPACE, uid)
+        if current["spec"]["source"] != {"uri": source_uri(), "digest": SOURCE_DIGEST}:
+            fail("exact build source changed before UID deletion")
     status, _, elapsed, body_fingerprint = request_json(
         API_PROXY_PORT,
         "DELETE",
@@ -834,20 +1265,39 @@ def delete_build_with_uid(name: str, uid: str, kubeconfig_sha256: str) -> dict:
 
 
 def check_runner(blocker_id: str, blocker_uid: str) -> dict:
-    runners = kjson(
-        "-n", NAMESPACE, "get", "pods", "-l", "app.kubernetes.io/name=kova-runner", "-o", "json"
-    )["items"]
+    listing = kjson(
+        "-n",
+        NAMESPACE,
+        "get",
+        "pods",
+        "-l",
+        "app.kubernetes.io/name=kova-runner",
+        "-o",
+        "json",
+    )
+    # kubectl's generic JSON printer wraps selector results in v1/List.
+    if listing.get("apiVersion") != "v1" or listing.get("kind") != "List":
+        fail("runner inventory is not the typed kubectl List")
+    runners = listing["items"]
     if len(runners) != 1 or runners[0]["metadata"]["name"] != f"kova-job-{blocker_id}":
         fail("queued builds gained a runner Pod or blocker Pod is absent")
-    pod = runners[0]
+    # Hash a fresh named GET, not an inferred/defaulted List item TypeMeta.
+    original_uid = runners[0]["metadata"].get("uid")
+    pod = kjson("-n", NAMESPACE, "get", "pod", f"kova-job-{blocker_id}", "-o", "json")
+    if pod.get("apiVersion") != "v1" or pod.get("kind") != "Pod":
+        fail("direct runner observation is not a typed Pod")
+    V3.identity(pod, f"kova-job-{blocker_id}", NAMESPACE, original_uid)
     if (
-        pod["spec"].get("nodeSelector", {}).get("never") != "true"
+        pod["metadata"].get("deletionTimestamp") is not None
+        or pod["spec"].get("nodeSelector", {}).get("never") != "true"
         or pod["spec"].get("nodeName")
         or pod["status"].get("phase") != "Pending"
     ):
         fail("blocker runner is not unscheduled and Pending")
     owners = [
-        owner for owner in pod["metadata"].get("ownerReferences", []) if owner.get("controller")
+        owner
+        for owner in pod["metadata"].get("ownerReferences", [])
+        if owner.get("controller")
     ]
     if (
         len(owners) != 1
@@ -857,6 +1307,442 @@ def check_runner(blocker_id: str, blocker_uid: str) -> dict:
     ):
         fail("blocker runner owner UID does not match the test-owned KovaBuild")
     return pod
+
+
+def metrics_forwards(pre: dict, deadline: float) -> list:
+    kube = BURST.Kube(KUBECONFIG, f"kind-{CLUSTER}")
+    forwards = []
+    try:
+        for name in sorted(pre["service_pods"]):
+            forwards.append(
+                BURST.Forward(
+                    kube,
+                    CONTROL_NAMESPACE,
+                    name,
+                    FIXTURE["ports"]["metrics_remote"],
+                    deadline,
+                )
+            )
+        return forwards
+    except BaseException:
+        close_local_processes(forwards, None, None, deadline)
+        raise
+
+
+def close_local_processes(metrics: list, forward: object, proxy: object,
+                          deadline: float | None = None) -> None:
+    """Stop only our own local children, with one shared ten-second bound."""
+    until = time.monotonic() + 10
+    if deadline is not None:
+        until = min(until, deadline)
+    children = [item.process for item in metrics]
+    children += [item for item in (forward, proxy) if item is not None]
+    for child in children:
+        if child.poll() is None:
+            child.terminate()
+    unresolved = False
+    for child in children:
+        if child.poll() is None:
+            try:
+                child.wait(timeout=max(0, until - time.monotonic()))
+            except subprocess.TimeoutExpired:
+                child.kill()
+                try:
+                    child.wait(timeout=max(0, until - time.monotonic()))
+                except subprocess.TimeoutExpired:
+                    unresolved = True
+    for item in metrics:
+        if item.process.stdout is not None:
+            item.process.stdout.close()
+    if unresolved:
+        fail("owned local child shutdown did not resolve within its shared bound")
+
+
+def normal_receipt_absence(objects: dict[str, dict], deadline: float) -> None:
+    # Absence is checked only after the qualified original CR's one resolved
+    # UID-delete. Never use this helper to release uncertain Create capacity.
+    for name in objects:
+        if time.monotonic() >= deadline:
+            fail("normal receipt retirement deadline expired")
+        path = f"/api/v1/namespaces/{RECEIPT_NAMESPACE}/configmaps/{name}"
+        if request_json(API_PROXY_PORT, "GET", path)[0] != 404:
+            fail("original ordinary receipt was not directly confirmed absent")
+
+
+def full_capacity_recovery(
+    pre: dict,
+    run_dir: Path,
+    expected_ids: dict[str, str],
+    expected_uids: dict[str, str],
+    blocker_id: str,
+    blocker_uid: str,
+    token: str,
+    deadline: float,
+) -> dict:
+    directory = run_dir / "full-capacity-recovery"
+    directory.mkdir()
+    before = wait_queue_state(
+        expected_ids,
+        blocker_id,
+        blocker_uid,
+        directory,
+        min(deadline, time.monotonic() + 5),
+        expected_uids=expected_uids,
+    )
+    if len(expected_ids) + 1 != quota_limit():
+        fail("full-capacity test is not actually full")
+    key = run_dir.name + "-over-cap"
+    ident = build_id(key)
+    payload = {
+        "source_uri": source_uri(),
+        "source_digest": SOURCE_DIGEST,
+        "targets": [
+            {
+                "target": f"unused.invalid/deep-queue/{FIXTURE['run_id']}:over-cap",
+                "platform": pre["platform"],
+            }
+        ],
+        "format": "oci",
+        "concurrency": 1,
+        "idempotency_key": key,
+    }
+    append_jsonl(
+        directory / "attempts.jsonl",
+        {"id": ident, "key": key, "event": "reject_attempt"},
+    )
+    qualify_epoch()
+    status, _, elapsed, body = request_json(
+        PORT, "POST", "/v1/builds", token=token, payload=payload
+    )
+    append_jsonl(
+        directory / "responses.jsonl",
+        {"id": ident, "status": status, "elapsed_seconds": elapsed, **body},
+    )
+    if status != 429 or body.get("queue_capacity_full") is not True:
+        fail("full supported quota did not return the exact capacity rejection")
+    if request_json(API_PROXY_PORT, "GET", build_api_path(ident))[0] != 404:
+        fail("rejected extra request has a CR")
+    after = wait_queue_state(
+        expected_ids,
+        blocker_id,
+        blocker_uid,
+        directory,
+        min(deadline, time.monotonic() + 5),
+        expected_uids=expected_uids,
+    )
+    if {item["metadata"]["uid"] for item in before["items"]} != {
+        item["metadata"]["uid"] for item in after["items"]
+    }:
+        fail("accepted build identity changed during full rejection")
+    # Free one ordinary queued request, not the active blocker or any ledger.
+    victim = next(reversed(expected_ids))
+    victim_build = next(
+        item for item in after["items"] if item["metadata"]["name"] == victim
+    )
+    _, intents = queue_ledgers(len(expected_ids), blocker_id, blocker_uid)
+    original_receipt_name = "kova-admission-intent-" + intents[victim]["nonce"]
+    original_receipt = kjson(
+        "-n", RECEIPT_NAMESPACE, "get", "configmap", original_receipt_name, "-o", "json"
+    )
+    V3.qualify_queue_receipt(
+        original_receipt, victim_build, intents[victim], FIXTURE, CONTRACT
+    )
+    deletion = delete_build_with_uid(
+        victim, expected_uids[victim], pre["kubeconfig_sha256"]
+    )
+    append_jsonl(
+        directory / "responses.jsonl", {"event": "original_uid_release", **deletion}
+    )
+    if not deletion["accepted"]:
+        fail("original queued UID deletion acknowledgement is unknown")
+    release_deadline = min(deadline, time.monotonic() + 120)
+    while time.monotonic() < release_deadline:
+        _, current_intents = queue_ledgers(len(expected_ids), blocker_id, blocker_uid)
+        if (
+            request_json(API_PROXY_PORT, "GET", build_api_path(victim))[0] == 404
+            and victim not in current_intents
+        ):
+            normal_receipt_absence(
+                {original_receipt_name: original_receipt}, release_deadline
+            )
+            break
+        pause(1)
+    else:
+        fail("original queued UID/receipt did not release within bounded deadline")
+    del expected_ids[victim]
+    del expected_uids[victim]
+    key = run_dir.name + "-replacement"
+    ident = build_id(key)
+    payload["idempotency_key"] = key
+    payload["targets"][0]["target"] = (
+        f"unused.invalid/deep-queue/{FIXTURE['run_id']}:replacement"
+    )
+    append_jsonl(
+        directory / "attempts.jsonl",
+        {"id": ident, "key": key, "event": "readmission_attempt"},
+    )
+    qualify_epoch()
+    status, headers, elapsed, body = request_json(
+        PORT, "POST", "/v1/builds", token=token, payload=payload
+    )
+    append_jsonl(
+        directory / "responses.jsonl",
+        {
+            "id": ident,
+            "event": "readmission",
+            "status": status,
+            "elapsed_seconds": elapsed,
+            **body,
+        },
+    )
+    if status != 202 or headers.get("x-kova-build-id") != ident:
+        fail("exact released capacity did not accept one fresh replacement")
+    expected_ids[ident] = key
+    builds = wait_queue_state(
+        expected_ids,
+        blocker_id,
+        blocker_uid,
+        directory,
+        min(deadline, time.monotonic() + SETTLE_DEADLINE_SECONDS),
+        expected_uids=expected_uids,
+    )
+    replacement = next(
+        item for item in builds["items"] if item["metadata"]["name"] == ident
+    )
+    expected_uids[ident] = replacement["metadata"]["uid"]
+    result = {
+        "status": "passed",
+        "charged_total": len(expected_ids) + 1,
+        "active": 1,
+        "queued": len(expected_ids),
+        "rejected_id": build_id(run_dir.name + "-over-cap"),
+        "released_id": victim,
+        "released_uid": victim_build["metadata"]["uid"],
+        "replacement_id": ident,
+        "replacement_uid": expected_uids[ident],
+    }
+    save_json(directory / "summary.json", result)
+    return result
+
+
+def leader_observation() -> tuple[dict, str]:
+    lease = kjson(
+        "-n",
+        CONTROL_NAMESPACE,
+        "get",
+        "lease",
+        "kova-service.kova.cofy.dev",
+        "-o",
+        "json",
+    )
+    holder = lease.get("spec", {}).get("holderIdentity", "")
+    leader = holder.split("_", 1)[0] if type(holder) is str else ""
+    pods = service_pods()
+    if leader not in {pod["metadata"]["name"] for pod in pods}:
+        fail("Lease holder is not one of the exact ready Service Pods")
+    return lease, leader
+
+
+def qualify_service_owner(pod: dict, pre: dict) -> None:
+    owners = [
+        owner
+        for owner in pod["metadata"].get("ownerReferences", [])
+        if owner.get("controller") is True
+    ]
+    if len(owners) != 1 or owners[0].get("kind") != "ReplicaSet":
+        fail("Service Pod has no exact controller ReplicaSet")
+    rs = kjson(
+        "-n", CONTROL_NAMESPACE, "get", "replicaset", owners[0]["name"], "-o", "json"
+    )
+    V3.identity(rs, owners[0]["name"], CONTROL_NAMESPACE, owners[0]["uid"])
+    owners = [
+        owner
+        for owner in rs["metadata"].get("ownerReferences", [])
+        if owner.get("controller") is True
+    ]
+    if (
+        len(owners) != 1
+        or owners[0].get("kind") != "Deployment"
+        or owners[0].get("name") != f"{RELEASE}-service"
+        or owners[0].get("uid") != pre["service_deployment"]["uid"]
+    ):
+        fail("Service Pod is not owned by the original Deployment")
+    deployed_image_fact(
+        pod,
+        "kova-service",
+        pre["local_role_images"]["controller"]["reference"],
+        pre["local_role_images"]["controller"]["config_digest"],
+    )
+
+
+def leader_handoff(
+    pre: dict,
+    run_dir: Path,
+    expected_ids: dict[str, str],
+    expected_uids: dict[str, str],
+    blocker_id: str,
+    blocker_uid: str,
+    deadline: float,
+) -> dict:
+    directory = run_dir / "leader-handoff"
+    directory.mkdir()
+    qualify_epoch()
+    wait_queue_state(
+        expected_ids,
+        blocker_id,
+        blocker_uid,
+        directory,
+        min(deadline, time.monotonic() + 5),
+        expected_uids=expected_uids,
+    )
+    lease, leader = leader_observation()
+    if lease["metadata"]["uid"] != pre["leader_lease_uid"]:
+        fail("original Lease UID changed")
+    if (
+        leader != pre["initial_leader"]
+        or lease["spec"]["holderIdentity"] != pre["leader_holder"]
+    ):
+        fail("leader naturally changed before the planned original leader UID deletion")
+    pod = kjson("-n", CONTROL_NAMESPACE, "get", "pod", leader, "-o", "json")
+    V3.identity(pod, leader, CONTROL_NAMESPACE, pre["service_pods"][leader])
+    qualify_service_owner(pod, pre)
+    deployment = kjson(
+        "-n", CONTROL_NAMESPACE, "get", "deployment", f"{RELEASE}-service", "-o", "json"
+    )
+    if (
+        deployment["metadata"]["uid"] != pre["service_deployment"]["uid"]
+        or object_sha256(
+            {
+                key: value
+                for key, value in deployment["spec"].items()
+                if key != "replicas"
+            }
+        )
+        != pre["service_deployment"]["spec_except_replicas_sha256"]
+    ):
+        fail("original Service Deployment changed before handoff")
+    latest, latest_leader = leader_observation()
+    if (
+        latest["metadata"]["uid"] != lease["metadata"]["uid"]
+        or latest["spec"]["holderIdentity"] != lease["spec"]["holderIdentity"]
+        or latest_leader != leader
+    ):
+        fail("leader changed before the sole planned UID deletion")
+    uid = pod["metadata"]["uid"]
+    path = f"/api/v1/namespaces/{CONTROL_NAMESPACE}/pods/{leader}"
+    effect = {
+        "qualified_original_leader_uid": uid,
+        "qualified_original_leader_name": leader,
+        "delete_wire_attempted": False,
+        "http_ack_code": None,
+        "original_leader_direct_absent": False,
+        "other_original_uids_last_verified": None,
+    }
+    pre["leader_handoff_effect"] = effect
+    append_jsonl(
+        directory / "events.jsonl",
+        {
+            "event": "leader_delete_attempt",
+            "pod": leader,
+            "uid": uid,
+            "lease_uid": lease["metadata"]["uid"],
+        },
+    )
+    effect["delete_wire_attempted"] = True
+    status, _, elapsed, body = request_json(
+        API_PROXY_PORT,
+        "DELETE",
+        path,
+        payload={
+            "apiVersion": "meta.k8s.io/v1",
+            "kind": "DeleteOptions",
+            "preconditions": {"uid": uid},
+            "propagationPolicy": "Background",
+        },
+    )
+    effect["http_ack_code"] = status
+    append_jsonl(
+        directory / "events.jsonl",
+        {
+            "event": "leader_delete_response",
+            "http_status": status,
+            "elapsed_seconds": elapsed,
+            **body,
+        },
+    )
+    if status not in (200, 202):
+        fail("leader deletion outcome is unknown")
+    started = time.monotonic()
+    handoff_deadline = min(deadline, started + 120)
+    survivors = {
+        name: original
+        for name, original in pre["service_pods"].items()
+        if name != leader
+    }
+    while time.monotonic() < handoff_deadline:
+        qualify_epoch()
+        try:
+            current_lease, elected = leader_observation()
+            pods = service_pods()
+        except BenchError:
+            pause(1)
+            continue
+        if current_lease["metadata"]["uid"] != lease["metadata"]["uid"]:
+            fail("Lease UID changed during handoff")
+        if current_lease["spec"]["holderIdentity"] == lease["spec"]["holderIdentity"]:
+            pause(1)
+            continue
+        current = {item["metadata"]["name"]: item["metadata"]["uid"] for item in pods}
+        if (
+            elected == leader
+            or leader in current
+            or any(
+                current.get(name) != original for name, original in survivors.items()
+            )
+        ):
+            fail("planned replacement also changed an unrelated original Service Pod")
+        for item in pods:
+            qualify_service_owner(item, pre)
+        if request_json(API_PROXY_PORT, "GET", path)[0] != 404:
+            pause(1)
+            continue
+        effect["original_leader_direct_absent"] = True
+        effect["other_original_uids_last_verified"] = dict(survivors)
+        pre["pods"] = pods
+        pre["service_pods"] = current
+        pre["service_pod_image_ids"] = {
+            item["metadata"]["name"]: next(
+                c["imageID"]
+                for c in item["status"]["containerStatuses"]
+                if c["name"] == "kova-service"
+            )
+            for item in pods
+        }
+        wait_queue_state(
+            expected_ids,
+            blocker_id,
+            blocker_uid,
+            directory,
+            min(deadline, time.monotonic() + SETTLE_DEADLINE_SECONDS),
+            expected_uids=expected_uids,
+        )
+        result = {
+            "status": "passed",
+            "deleted_leader": leader,
+            "deleted_uid": uid,
+            "lease_uid": lease["metadata"]["uid"],
+            "new_holder": current_lease["spec"]["holderIdentity"],
+            "new_service_pods": current,
+            "handoff_seconds": time.monotonic() - started,
+            "active": 1,
+            "queued": len(expected_ids),
+            "original_blocker_uid": blocker_uid,
+        }
+        save_json(directory / "summary.json", result)
+        return result
+    fail(
+        "distinct leader/two same-image ready replicas did not converge within 120 seconds"
+    )
 
 
 def wait_queue_state(
@@ -877,7 +1763,8 @@ def wait_queue_state(
         if set(by_name) != expected | {blocker_id}:
             fail("KovaBuild set differs from the exact accepted benchmark IDs")
         if expected_uids and any(
-            by_name[name]["metadata"]["uid"] != uid for name, uid in expected_uids.items()
+            by_name[name]["metadata"]["uid"] != uid
+            for name, uid in expected_uids.items()
         ):
             fail("an accepted KovaBuild UID changed during the benchmark")
         blocker = by_name[blocker_id]
@@ -888,19 +1775,25 @@ def wait_queue_state(
             fail("active blocker phase or UID changed")
         if any(
             by_name[name]["spec"]["idempotencyKey"] != expected_ids[name]
-            or by_name[name]["spec"]["source"]["uri"]
-            != f"oci://kind-registry:5000/kova-sources/deep-queue@{SOURCE_DIGEST}"
+            or by_name[name]["spec"]["source"]["uri"] != source_uri()
             for name in expected
         ):
             fail("a queued KovaBuild differs from its exact immutable request")
-        phases = {name: by_name[name].get("status", {}).get("phase", "") for name in expected}
+        phases = {
+            name: by_name[name].get("status", {}).get("phase", "") for name in expected
+        }
         if any(phase not in ("", "Queued") for phase in phases.values()):
             fail("a queued KovaBuild entered an unexpected phase")
         check_runner(blocker_id, blocker_uid)
         _, intents = queue_ledgers(len(expected), blocker_id, blocker_uid)
-        if set(intents) - expected:
+        charged = expected | {blocker_id}
+        if set(intents) - charged:
             fail("queue ledger contains an unrecorded intent")
-        if all(phase == "Queued" for phase in phases.values()) and set(intents) == expected:
+        if (
+            all(phase == "Queued" for phase in phases.values())
+            and set(intents) == charged
+        ):
+            qualify_build_receipts(by_name, blocker_id, blocker_uid)
             for name in expected:
                 nonce = (
                     by_name[name]["metadata"]
@@ -921,7 +1814,9 @@ def wait_queue_state(
                             "name": name,
                             "uid": by_name[name]["metadata"]["uid"],
                             "phase": by_name[name].get("status", {}).get("phase"),
-                            "created_at": by_name[name]["metadata"].get("creationTimestamp"),
+                            "created_at": by_name[name]["metadata"].get(
+                                "creationTimestamp"
+                            ),
                             "queue_intent_nonce": by_name[name]["metadata"]
                             .get("annotations", {})
                             .get("kova.cofy.dev/queue-intent"),
@@ -931,7 +1826,7 @@ def wait_queue_state(
                 },
             )
             return builds
-        time.sleep(2)
+        pause(2)
     fail("queued CR status/ledger did not converge before the bounded deadline")
 
 
@@ -1020,6 +1915,7 @@ def observe_blocked_runtime(
     stage_dir: Path,
     docker_root: Path,
 ) -> None:
+    qualify_epoch()
     resource_sample(expected_pods, stage_dir, docker_root)
     if request_json(PORT, "GET", "/readyz")[0] != 200:
         fail("Service readiness failed during the benchmark")
@@ -1031,7 +1927,7 @@ def observe_blocked_runtime(
         fail("active blocker UID or Starting phase changed during the benchmark")
     check_runner(blocker_id, blocker_uid)
     _, intents = queue_ledgers(len(expected_ids), blocker_id, blocker_uid)
-    if set(intents) - set(expected_ids):
+    if set(intents) - (set(expected_ids) | {blocker_id}):
         fail("queue ledger contains an unrecorded intent during the benchmark")
 
 
@@ -1059,35 +1955,85 @@ def guard_api(
 
 
 def preflight() -> dict:
+    global CONTRACT
+    if EXECUTION_DEADLINE is None:
+        start_execution_budget()
+    budget_timeout(RUN_DEADLINE_SECONDS)
     if sys.platform != "linux":
         fail("deep-queue acceptance runs only on an isolated Linux Kind host")
-    if (
-        os.environ.get("KIND_CLUSTER", CLUSTER) != CLUSTER
-        or os.environ.get("KIND_KUBECONFIG", f".kind/{CLUSTER}.kubeconfig")
-        != f".kind/{CLUSTER}.kubeconfig"
-    ):
-        fail("KIND_CLUSTER/KIND_KUBECONFIG must name the fixed disposable deep-queue Kind cluster")
-    if (
-        os.environ.get("NAMESPACE", NAMESPACE) != NAMESPACE
-        or os.environ.get("RELEASE_NAME", RELEASE) != RELEASE
-    ):
-        fail("namespace/release overrides do not match the dedicated benchmark")
+    if os.environ.get("KIND_CLUSTER", CLUSTER) != CLUSTER or os.environ.get(
+        "KIND_KUBECONFIG", str(KUBECONFIG)
+    ) != str(KUBECONFIG):
+        fail(
+            "KIND_CLUSTER/KIND_KUBECONFIG must name the fixed disposable deep-queue Kind cluster"
+        )
+    if not FIXTURE or kova_fixture_changed():
+        fail("original v3 fixture file is unavailable or changed")
+    native_identity = native_template_result("identity", b"", {"candidate_commit", "os", "architecture"})
+    if native_identity["os"] != "linux" or native_identity["architecture"] != "amd64":
+        fail("native Pod-template binary platform differs")
     for binary in ("kind", "kubectl", "docker", "helm", "git", "timeout"):
         if shutil.which(binary) is None:
             fail(f"missing required command {binary}")
     kova_commit = command(["git", "-C", str(ROOT), "rev-parse", "HEAD"]).strip()
     if not re.fullmatch(r"[0-9a-f]{40}", kova_commit):
         fail("Kova checkout HEAD is not an exact commit")
+    if kova_commit != FIXTURE["candidate_commit"]:
+        fail("checkout differs from the original candidate commit")
     if command(
         ["git", "-C", str(ROOT), "status", "--porcelain", "--untracked-files=normal"]
     ).strip():
         fail("Kova checkout is dirty; benchmark candidate must be a clean commit")
     fingerprint = exact_kind_identity()
+    system = kjson("get", "namespace", "kube-system", "-o", "json")
+    V3.identity(system, "kube-system", None, FIXTURE["kube_system_namespace_uid"])
     nodes = good_nodes(kjson("get", "nodes", "-o", "json"))
-    deployment = kjson("-n", NAMESPACE, "get", "deployment", f"{RELEASE}-service", "-o", "json")
+    deployment = kjson(
+        "-n", CONTROL_NAMESPACE, "get", "deployment", f"{RELEASE}-service", "-o", "json"
+    )
+    V3.identity(
+        deployment,
+        f"{RELEASE}-service",
+        CONTROL_NAMESPACE,
+        FIXTURE["service_deployment_uid"],
+    )
     quiet_duration = quiet_seconds()
     principal, platform = single_service_args(deployment)
     pods = service_pods()
+    if {pod["metadata"]["name"]: pod["metadata"]["uid"] for pod in pods} != FIXTURE[
+        "service_pods"
+    ]:
+        fail("original Service Pod UIDs differ")
+    secret = kjson(
+        "-n",
+        CONTROL_NAMESPACE,
+        "get",
+        "secret",
+        FIXTURE["genesis"]["secret_name"],
+        "-o",
+        "json",
+    )
+    V3.identity(
+        secret,
+        FIXTURE["genesis"]["secret_name"],
+        CONTROL_NAMESPACE,
+        FIXTURE["genesis"]["secret_uid"],
+    )
+    if (
+        secret.get("immutable") is not True
+        or secret.get("type") != "Opaque"
+        or set(secret.get("data", {})) != {"receipt.json"}
+    ):
+        fail("original installation receipt Secret shape differs")
+    raw_receipt = base64.b64decode(secret["data"]["receipt.json"], validate=True)
+    if (
+        len(raw_receipt) > 8192
+        or hashlib.sha256(raw_receipt).hexdigest()
+        != FIXTURE["genesis"]["receipt_sha256"]
+    ):
+        fail("original installation receipt bytes changed")
+    CONTRACT = V3.qualify_contract(V3.decode(raw_receipt), FIXTURE)
+    qualify_epoch()
     helm_status = json.loads(
         command(
             [
@@ -1095,7 +2041,7 @@ def preflight() -> dict:
                 "status",
                 RELEASE,
                 "-n",
-                NAMESPACE,
+                CONTROL_NAMESPACE,
                 "--kubeconfig",
                 str(KUBECONFIG),
                 "-o",
@@ -1105,7 +2051,8 @@ def preflight() -> dict:
     )
     if helm_status.get("info", {}).get("status") != "deployed":
         fail("the dedicated Kova Helm release is not deployed")
-    worker = kjson("-n", NAMESPACE, "get", "deployment", RELEASE, "-o", "json")
+    worker = kjson("-n", CONTROL_NAMESPACE, "get", "deployment", RELEASE, "-o", "json")
+    V3.identity(worker, RELEASE, CONTROL_NAMESPACE, FIXTURE["worker_deployment_uid"])
     if (
         worker.get("spec", {}).get("replicas") != 1
         or worker.get("status", {}).get("readyReplicas") != 1
@@ -1117,7 +2064,9 @@ def preflight() -> dict:
         for container in deployment["spec"]["template"]["spec"]["containers"]
         if container["name"] == "kova-service"
     )
-    runner_arg = next(arg for arg in service_container["args"] if arg.startswith("--runner-image="))
+    runner_arg = next(
+        arg for arg in service_container["args"] if arg.startswith("--runner-image=")
+    )
     token_env = [
         item
         for item in service_container.get("env", [])
@@ -1128,7 +2077,10 @@ def preflight() -> dict:
         "key": "token",
     }:
         fail("Service static token source differs from the dedicated test Secret")
-    if len(worker_containers) != 1 or worker_containers[0].get("imagePullPolicy") != "Never":
+    if (
+        len(worker_containers) != 1
+        or worker_containers[0].get("imagePullPolicy") != "Never"
+    ):
         fail("worker image must be preloaded with imagePullPolicy Never")
     image_facts = {
         "controller": local_image_fact(service_container["image"]),
@@ -1137,8 +2089,15 @@ def preflight() -> dict:
     }
     if len({fact["revision"] for fact in image_facts.values()}) != 1:
         fail("controller, runner, and worker local image revision labels differ")
-    if any(fact["revision"] != kova_commit[:12] for fact in image_facts.values()):
+    if any(
+        fact["revision"] not in (kova_commit, kova_commit[:12])
+        for fact in image_facts.values()
+    ):
         fail("local role image revisions differ from the clean Kova checkout HEAD")
+    if {role: fact["reference"] for role, fact in image_facts.items()} != FIXTURE[
+        "role_images"
+    ]:
+        fail("role images differ from the original manifest references")
     runtime_role_images = {}
     for node in nodes:
         node_name = node["metadata"]["name"]
@@ -1156,7 +2115,7 @@ def preflight() -> dict:
         fail("worker Deployment selector differs from the dedicated Helm release")
     worker_pods = kjson(
         "-n",
-        NAMESPACE,
+        CONTROL_NAMESPACE,
         "get",
         "pods",
         "-l",
@@ -1169,6 +2128,10 @@ def preflight() -> dict:
         for condition in worker_pods[0].get("status", {}).get("conditions", [])
     ):
         fail("worker Pod is not exactly one Ready Pod")
+    if {
+        pod["metadata"]["name"]: pod["metadata"]["uid"] for pod in worker_pods
+    } != FIXTURE["worker_pods"]:
+        fail("original worker Pod UIDs differ")
     deployed_images = {
         "service": [
             deployed_image_fact(
@@ -1189,11 +2152,22 @@ def preflight() -> dict:
     if kjson("get", "kovabuilds", "--all-namespaces", "-o", "json")["items"]:
         fail("another KovaBuild exists in the dedicated Kind cluster")
     if kjson(
-        "get", "pods", "--all-namespaces", "-l", "app.kubernetes.io/name=kova-runner", "-o", "json"
+        "get",
+        "pods",
+        "--all-namespaces",
+        "-l",
+        "app.kubernetes.io/name=kova-runner",
+        "-o",
+        "json",
     )["items"]:
         fail("another runner Pod exists in the dedicated Kind cluster")
     queue_ledgers(0)
-    docker_root = Path(command(["docker", "info", "--format", "{{.DockerRootDir}}"]).strip())
+    if kjson("-n", NAMESPACE, "get", "pods", "-o", "json")["items"]:
+        fail("fresh runner namespace contains pre-existing Pods")
+    empty_receipts()
+    docker_root = Path(
+        command(["docker", "info", "--format", "{{.DockerRootDir}}"]).strip()
+    )
     if not docker_root.is_dir():
         fail("Docker data root is unavailable")
     api_metrics()
@@ -1203,25 +2177,42 @@ def preflight() -> dict:
     # Check the dedicated Secret before a detached launcher reports success;
     # keep the credential in process memory, never in the preflight receipt.
     load_static_token()
+    lease, leader = leader_observation()
     return {
         "cluster": CLUSTER,
         "namespace": NAMESPACE,
+        "control_namespace": CONTROL_NAMESPACE,
+        "receipt_namespace": RECEIPT_NAMESPACE,
+        "profile": FIXTURE["profile"],
+        "fixture_sha256": FIXTURE_SHA,
+        "v3_contract": CONTRACT,
+        "leader_lease_uid": lease["metadata"]["uid"],
+        "leader_holder": lease["spec"]["holderIdentity"],
+        "initial_leader": leader,
         "kubeconfig_fingerprint": fingerprint,
         "kubeconfig_sha256": hashlib.sha256(KUBECONFIG.read_bytes()).hexdigest(),
-        "node_uids": {node["metadata"]["name"]: node["metadata"]["uid"] for node in nodes},
+        "node_uids": {
+            node["metadata"]["name"]: node["metadata"]["uid"] for node in nodes
+        },
         "service_deployment": {
             "uid": deployment["metadata"]["uid"],
             "resource_version": deployment["metadata"]["resourceVersion"],
             "labels_sha256": object_sha256(deployment["metadata"].get("labels", {})),
             "spec_except_replicas_sha256": object_sha256(
-                {key: value for key, value in deployment["spec"].items() if key != "replicas"}
+                {
+                    key: value
+                    for key, value in deployment["spec"].items()
+                    if key != "replicas"
+                }
             ),
             "image": service_container["image"],
-            "image_container_index": deployment["spec"]["template"]["spec"]["containers"].index(
-                service_container
-            ),
+            "image_container_index": deployment["spec"]["template"]["spec"][
+                "containers"
+            ].index(service_container),
         },
-        "service_pods": {pod["metadata"]["name"]: pod["metadata"]["uid"] for pod in pods},
+        "service_pods": {
+            pod["metadata"]["name"]: pod["metadata"]["uid"] for pod in pods
+        },
         "service_pod_image_ids": {
             pod["metadata"]["name"]: next(
                 container["imageID"]
@@ -1244,13 +2235,19 @@ def preflight() -> dict:
 
 
 def load_static_token() -> str:
-    secret = kjson("-n", NAMESPACE, "get", "secret", "kova-e2e-token", "-o", "json")
+    secret = kjson(
+        "-n", CONTROL_NAMESPACE, "get", "secret", "kova-e2e-token", "-o", "json"
+    )
     if (
         secret.get("metadata", {}).get("name") != "kova-e2e-token"
-        or secret.get("metadata", {}).get("namespace") != NAMESPACE
+        or secret.get("metadata", {}).get("namespace") != CONTROL_NAMESPACE
         or secret.get("type") != "Opaque"
     ):
         fail("dedicated static authentication Secret identity changed")
+    if FIXTURE:
+        V3.identity(
+            secret, "kova-e2e-token", CONTROL_NAMESPACE, FIXTURE["auth_secret_uid"]
+        )
     encoded = secret.get("data", {}).get("token")
     if not isinstance(encoded, str):
         fail("dedicated static authentication Secret has no token key")
@@ -1345,7 +2342,11 @@ def service_owned_pod_projection(deployment_uid: str) -> list[dict]:
 
 def emergency_stop(pre: dict, run_dir: Path, token: str) -> dict:
     """Stop only this exact Deployment; preserve all builds, ledgers and receipts."""
-    outcome = {"status": "unconfirmed", "started_at": now(), "original_service_pods_deleted": False}
+    outcome = {
+        "status": "unconfirmed",
+        "started_at": now(),
+        "original_service_pods_deleted": False,
+    }
     snapshots = run_dir / "failure-snapshots"
     snapshots.mkdir(exist_ok=True)
     os.chmod(snapshots, 0o700)
@@ -1361,7 +2362,9 @@ def emergency_stop(pre: dict, run_dir: Path, token: str) -> dict:
             outcome["node_uid_observation"] = f"unavailable: {safe_error(error, token)}"
         try:
             before_pods = service_owned_pod_projection(pre["service_deployment"]["uid"])
-            save_without_token(snapshots / "pre-stop-service-pods.json", before_pods, token)
+            save_without_token(
+                snapshots / "pre-stop-service-pods.json", before_pods, token
+            )
             outcome["original_service_pods_changed"] = any(
                 item["uid"] != pre["service_pods"].get(item["name"])
                 or item["image_ids"].get("kova-service")
@@ -1369,7 +2372,9 @@ def emergency_stop(pre: dict, run_dir: Path, token: str) -> dict:
                 for item in before_pods
             )
         except Exception as error:
-            outcome["pre_stop_pods_snapshot"] = f"unavailable: {safe_error(error, token)}"
+            outcome["pre_stop_pods_snapshot"] = (
+                f"unavailable: {safe_error(error, token)}"
+            )
         for attempt in range(3):
             deployment = kjson(
                 "-n", NAMESPACE, "get", "deployment", f"{RELEASE}-service", "-o", "json"
@@ -1383,7 +2388,9 @@ def emergency_stop(pre: dict, run_dir: Path, token: str) -> dict:
                 or metadata.get("deletionTimestamp")
                 or object_sha256(metadata.get("labels", {}))
                 != pre["service_deployment"]["labels_sha256"]
-                or object_sha256({key: value for key, value in spec.items() if key != "replicas"})
+                or object_sha256(
+                    {key: value for key, value in spec.items() if key != "replicas"}
+                )
                 != pre["service_deployment"]["spec_except_replicas_sha256"]
             ):
                 fail(
@@ -1411,7 +2418,9 @@ def emergency_stop(pre: dict, run_dir: Path, token: str) -> dict:
                     token,
                 )
             except Exception as error:
-                outcome["pre_stop_deployment_snapshot"] = f"unavailable: {safe_error(error, token)}"
+                outcome["pre_stop_deployment_snapshot"] = (
+                    f"unavailable: {safe_error(error, token)}"
+                )
             image_index = pre["service_deployment"]["image_container_index"]
             patch = [
                 {"op": "test", "path": "/metadata/uid", "value": metadata["uid"]},
@@ -1444,7 +2453,7 @@ def emergency_stop(pre: dict, run_dir: Path, token: str) -> dict:
             except BenchError:
                 if attempt == 2:
                     raise
-                time.sleep(1)
+                pause(1)
         deadline = time.monotonic() + EMERGENCY_STOP_DEADLINE_SECONDS
         while time.monotonic() < deadline:
             if exact_kind_identity() != pre["kubeconfig_fingerprint"]:
@@ -1452,8 +2461,13 @@ def emergency_stop(pre: dict, run_dir: Path, token: str) -> dict:
             current = kjson(
                 "-n", NAMESPACE, "get", "deployment", f"{RELEASE}-service", "-o", "json"
             )
-            current_pods = service_owned_pod_projection(pre["service_deployment"]["uid"])
-            if current.get("metadata", {}).get("uid") != pre["service_deployment"]["uid"]:
+            current_pods = service_owned_pod_projection(
+                pre["service_deployment"]["uid"]
+            )
+            if (
+                current.get("metadata", {}).get("uid")
+                != pre["service_deployment"]["uid"]
+            ):
                 fail("Service Deployment UID changed after emergency stop")
             if current.get("spec", {}).get("replicas") != 0:
                 fail("Service Deployment did not retain zero replicas")
@@ -1490,9 +2504,11 @@ def emergency_stop(pre: dict, run_dir: Path, token: str) -> dict:
                         token,
                     )
                 except Exception as error:
-                    outcome["post_stop_snapshot"] = f"unavailable: {safe_error(error, token)}"
+                    outcome["post_stop_snapshot"] = (
+                        f"unavailable: {safe_error(error, token)}"
+                    )
                 return outcome
-            time.sleep(2)
+            pause(2)
         fail("Service Pods did not disappear before the emergency-stop deadline")
     except Exception as error:
         outcome["error"] = safe_error(error, token)
@@ -1588,7 +2604,7 @@ def observe_long_quiet(
         def guard() -> None:
             nonlocal api_guard_before, api_guard_at, samples
             if time.monotonic() >= overall_deadline:
-                fail("long quiet observation exceeded the one-hour run deadline")
+                fail("long quiet observation exceeded the shared execution deadline")
             observe_blocked_runtime(
                 expected_ids,
                 blocker_id,
@@ -1607,7 +2623,7 @@ def observe_long_quiet(
         save_json(window_dir / "api-before.json", before_api)
         measured_start = time.monotonic()
         for _ in range(window_seconds // QUIET_SAMPLE_SECONDS):
-            time.sleep(QUIET_SAMPLE_SECONDS)
+            pause(QUIET_SAMPLE_SECONDS)
             guard()
         after_api = api_metrics()
         measured_seconds = time.monotonic() - measured_start
@@ -1626,7 +2642,9 @@ def observe_long_quiet(
             "planned_seconds": window_seconds,
             "measured_seconds": measured_seconds,
             "api": metric_delta(before_api, after_api, measured_seconds),
-            "reconcile": {"availability": "unavailable: not collected by this benchmark"},
+            "reconcile": {
+                "availability": "unavailable: not collected by this benchmark"
+            },
             "resource_peaks": resource_peaks(window_dir),
             "observer": {
                 "guard_samples": samples,
@@ -1657,6 +2675,7 @@ def observe_long_quiet(
 
 
 def live(pre: dict, token: str) -> Path:
+    overall_deadline = live_deadline()
     run_id = (
         "deep-queue-"
         + datetime.now(timezone.utc).strftime("%Y%m%dt%H%M%S")  # noqa: UP017 (Python 3.10)
@@ -1692,10 +2711,11 @@ def live(pre: dict, token: str) -> Path:
     expected_uids: dict[str, str] = {}
     forward = None
     proxy = None
-    overall_deadline = time.monotonic() + RUN_DEADLINE_SECONDS
+    metrics = []
     success = False
     cleanup_started = False
     admission_attempted = False
+    checkpoint = "port-forward"
     handled_signals = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
     previous_handlers = {signum: signal.getsignal(signum) for signum in handled_signals}
 
@@ -1707,15 +2727,20 @@ def live(pre: dict, token: str) -> Path:
     try:
         with socket.socket() as probe:
             probe.bind(("127.0.0.1", PORT))
-        pod_name = sorted(pre["service_pods"])[0]
+        pod_name = next(
+            name
+            for name in sorted(pre["service_pods"])
+            if name != pre["initial_leader"]
+        )
         with (run_dir / "port-forward.log").open("w", encoding="utf-8") as log:
+            budget_timeout(15)
             forward = subprocess.Popen(
                 [
                     "kubectl",
                     "--kubeconfig",
                     str(KUBECONFIG),
                     "-n",
-                    NAMESPACE,
+                    CONTROL_NAMESPACE,
                     "port-forward",
                     "--address",
                     "127.0.0.1",
@@ -1726,6 +2751,7 @@ def live(pre: dict, token: str) -> Path:
                 stderr=subprocess.STDOUT,
             )
         for _ in range(30):
+            budget_timeout(15)
             if forward.poll() is not None:
                 fail("Service Pod port-forward exited")
             try:
@@ -1733,25 +2759,34 @@ def live(pre: dict, token: str) -> Path:
                     break
             except BenchError:
                 pass
-            time.sleep(1)
+            pause(1)
         else:
             fail("Service Pod did not become ready through the local port-forward")
 
-        source_uri = f"oci://kind-registry:5000/kova-sources/deep-queue@{SOURCE_DIGEST}"
-        target_prefix = f"kind-registry:5000/kova-deep-queue/{run_id}"
+        metrics = metrics_forwards(pre, overall_deadline)
+        source_uri = (
+            f"oci://unused.invalid/deep-queue/{FIXTURE['run_id']}@{SOURCE_DIGEST}"
+        )
+        target_prefix = f"unused.invalid/deep-queue/{FIXTURE['run_id']}"
         blocker_key = run_id + "-blocker"
         blocker_id = build_id(blocker_key)
         blocker_dir = run_dir / "blocker"
         blocker_dir.mkdir()
-        append_jsonl(blocker_dir / "candidates.jsonl", {"key": blocker_key, "id": blocker_id})
+        append_jsonl(
+            blocker_dir / "candidates.jsonl", {"key": blocker_key, "id": blocker_id}
+        )
         blocker_payload = {
             "source_uri": source_uri,
             "source_digest": SOURCE_DIGEST,
-            "targets": [{"target": f"{target_prefix}:blocker", "platform": pre["platform"]}],
+            "targets": [
+                {"target": f"{target_prefix}:blocker", "platform": pre["platform"]}
+            ],
             "format": "oci",
             "concurrency": 1,
             "idempotency_key": blocker_key,
         }
+        checkpoint = "blocker"
+        qualify_epoch()
         admission_attempted = True
         status, headers, elapsed, body_fingerprint = request_json(
             PORT, "POST", "/v1/builds", token, blocker_payload
@@ -1765,7 +2800,9 @@ def live(pre: dict, token: str) -> Path:
                 "body_fingerprint": body_fingerprint,
                 "build_id_header_matches_expected": observed_id == blocker_id,
                 "build_id_header_length": len(observed_id),
-                "build_id_header_sha256": hashlib.sha256(observed_id.encode()).hexdigest(),
+                "build_id_header_sha256": hashlib.sha256(
+                    observed_id.encode()
+                ).hexdigest(),
                 "elapsed_seconds": elapsed,
             },
         )
@@ -1774,7 +2811,9 @@ def live(pre: dict, token: str) -> Path:
         blocker_uid = ""
         for _ in range(60):
             builds = kjson("-n", NAMESPACE, "get", "kovabuilds", "-o", "json")["items"]
-            if len(builds) > 1 or (builds and builds[0]["metadata"]["name"] != blocker_id):
+            if len(builds) > 1 or (
+                builds and builds[0]["metadata"]["name"] != blocker_id
+            ):
                 fail("an unexpected KovaBuild appeared while waiting for the blocker")
             if builds:
                 blocker = builds[0]
@@ -1800,23 +2839,37 @@ def live(pre: dict, token: str) -> Path:
                         _, intents = queue_ledgers(1, blocker_id, blocker_uid)
                     else:
                         intents = {"pending": True}
-                    if not intents and runners:
+                    if (
+                        set(intents) == {blocker_id}
+                        and runners
+                        and blocker.get("status", {}).get("admissionGenesisWitness")
+                    ):
+                        qualify_build_receipts(
+                            {blocker_id: blocker}, blocker_id, blocker_uid
+                        )
                         save_without_token(blocker_dir / "build.json", blocker, token)
                         save_without_token(blocker_dir / "runner.json", pod, token)
                         break
-            time.sleep(1)
+            pause(1)
         else:
-            fail("blocker did not acquire exactly one active grant and Pending owned runner")
+            fail(
+                "blocker did not acquire exactly one active grant and Pending owned runner"
+            )
 
-        previous = 0
+        previous = 1
         for target in STAGES:
+            checkpoint = f"total-charge-{target}"
             if time.monotonic() >= overall_deadline:
                 fail("overall benchmark duration exceeded one hour")
             stage_dir = run_dir / f"stage-{target:04d}"
             stage_dir.mkdir()
-            note(f"stage {target}: adding {target - previous} queued builds")
+            note(
+                f"stage {target} total charges: adding {target - previous} genuinely queued builds"
+            )
             guard_metrics = api_metrics()
             guard_at = time.monotonic()
+            service_metrics_before = BURST.metric_snapshot(metrics, overall_deadline)
+            save_json(stage_dir / "service-metrics-before.json", service_metrics_before)
 
             def stage_guard(force_api: bool = False) -> None:
                 nonlocal guard_metrics, guard_at
@@ -1837,7 +2890,7 @@ def live(pre: dict, token: str) -> Path:
             stage_guard()
             submission_started = time.monotonic()
             latencies = []
-            for index in range(previous + 1, target + 1):
+            for index in range(previous, target):
                 if (
                     time.monotonic() >= overall_deadline
                     or time.monotonic() - submission_started > 600
@@ -1846,7 +2899,8 @@ def live(pre: dict, token: str) -> Path:
                 key = f"{run_id}-queued-{index:04d}"
                 ident = build_id(key)
                 append_jsonl(
-                    stage_dir / "candidates.jsonl", {"index": index, "key": key, "id": ident}
+                    stage_dir / "candidates.jsonl",
+                    {"index": index, "key": key, "id": ident},
                 )
                 payload = {
                     "source_uri": source_uri,
@@ -1861,6 +2915,7 @@ def live(pre: dict, token: str) -> Path:
                     "concurrency": 1,
                     "idempotency_key": key,
                 }
+                qualify_epoch()
                 status, headers, elapsed, body_fingerprint = request_json(
                     PORT, "POST", "/v1/builds", token, payload
                 )
@@ -1874,12 +2929,16 @@ def live(pre: dict, token: str) -> Path:
                         "body_fingerprint": body_fingerprint,
                         "build_id_header_matches_expected": observed_id == ident,
                         "build_id_header_length": len(observed_id),
-                        "build_id_header_sha256": hashlib.sha256(observed_id.encode()).hexdigest(),
+                        "build_id_header_sha256": hashlib.sha256(
+                            observed_id.encode()
+                        ).hexdigest(),
                         "elapsed_seconds": elapsed,
                     },
                 )
                 if status != 202 or observed_id != ident:
-                    fail(f"stage {target} request {index} returned HTTP {status} or wrong ID")
+                    fail(
+                        f"stage {target} request {index} returned HTTP {status} or wrong ID"
+                    )
                 expected_ids[ident] = key
                 latencies.append(elapsed)
                 if index % 10 == 0 or elapsed > 1:
@@ -1911,12 +2970,37 @@ def live(pre: dict, token: str) -> Path:
             save_json(stage_dir / "api-before.json", before)
             measured_start = time.monotonic()
             for _ in range(STEADY_SECONDS // POLL_SECONDS):
-                time.sleep(POLL_SECONDS)
+                pause(POLL_SECONDS)
                 stage_guard(force_api=True)
             measured_seconds = time.monotonic() - measured_start
             after = api_metrics()
             save_json(stage_dir / "api-after.json", after)
             api = metric_delta(before, after, measured_seconds)
+            service_metrics_after = BURST.metric_snapshot(metrics, overall_deadline)
+            save_json(stage_dir / "service-metrics-after.json", service_metrics_after)
+            service_deltas = BURST.metric_deltas(
+                service_metrics_before, service_metrics_after
+            )
+            if service_deltas["missing"]:
+                fail("required bounded Service client metrics are unavailable")
+            reconcile_family = "controller_runtime_reconcile_time_seconds"
+            limiter_family = "kova_service_kube_limiter_wait_seconds"
+            reconcile = V3.histogram_summary(
+                V3.histogram_deltas(
+                    service_metrics_before, service_metrics_after, reconcile_family
+                ),
+                reconcile_family,
+            )
+            limiter = V3.histogram_summary(
+                V3.histogram_deltas(
+                    service_metrics_before, service_metrics_after, limiter_family
+                ),
+                limiter_family,
+            )
+            if reconcile["samples"] == 0 or limiter["waits_over_10ms"] <= 0:
+                fail(
+                    "stage did not observe reconcile samples and bounded client limiter waits >10ms"
+                )
             wait_queue_state(
                 expected_ids,
                 blocker_id,
@@ -1930,6 +3014,9 @@ def live(pre: dict, token: str) -> Path:
                 "timestamp": now(),
                 "accepted_this_stage": target - previous,
                 "accepted_total": target,
+                "total_charged_non_terminal": target,
+                "active": 1,
+                "genuinely_queued": target - 1,
                 "submission_seconds": submitted_at - submission_started,
                 "submit_throughput_per_second": (target - previous)
                 / (submitted_at - submission_started),
@@ -1939,10 +3026,10 @@ def live(pre: dict, token: str) -> Path:
                 "post_p99_seconds": percentile(latencies, 0.99),
                 "api": api,
                 "resource_peaks": resource_peaks(stage_dir),
-                "reconcile_duration_p95_p99": None,
-                "reconcile_duration_note": (
-                    "Not exposed by controller; POST/queue-settle is not reconcile latency."
-                ),
+                "reconcile_histogram": reconcile,
+                "client_limiter_histogram": limiter,
+                "service_metric_deltas": service_deltas,
+                "metric_note": "histogram percentile bucket upper bounds; API totals include observer/system traffic",
             }
             save_json(stage_dir / "summary.json", summary)
             note(
@@ -1976,13 +3063,19 @@ def live(pre: dict, token: str) -> Path:
             expected_uids=expected_uids,
         )
         if time.monotonic() >= overall_deadline - 120:
-            fail("insufficient one-hour budget remains for exact cleanup")
-        if hashlib.sha256(KUBECONFIG.read_bytes()).hexdigest() != pre["kubeconfig_sha256"]:
+            fail("insufficient shared preflight/live budget remains for exact cleanup")
+        if (
+            hashlib.sha256(KUBECONFIG.read_bytes()).hexdigest()
+            != pre["kubeconfig_sha256"]
+        ):
             fail("dedicated kubeconfig bytes changed before API proxy launch")
-        cleanup_deadline = min(time.monotonic() + CLEANUP_DEADLINE_SECONDS, overall_deadline)
+        cleanup_deadline = min(
+            time.monotonic() + CLEANUP_DEADLINE_SECONDS, overall_deadline
+        )
         with socket.socket() as proxy_probe:
             proxy_probe.bind(("127.0.0.1", API_PROXY_PORT))
         with (run_dir / "kubectl-proxy.log").open("w", encoding="utf-8") as log:
+            budget_timeout(15)
             proxy = subprocess.Popen(
                 [
                     "kubectl",
@@ -2000,35 +3093,77 @@ def live(pre: dict, token: str) -> Path:
             if proxy.poll() is not None:
                 fail("UID-precondition Kubernetes API proxy exited")
             try:
-                if request_json(API_PROXY_PORT, "GET", build_api_path(blocker_id))[0] == 200:
+                if (
+                    request_json(API_PROXY_PORT, "GET", build_api_path(blocker_id))[0]
+                    == 200
+                ):
                     break
             except BenchError:
                 pass
-            time.sleep(1)
+            pause(1)
         else:
             fail("UID-precondition Kubernetes API proxy did not become ready")
         cleanup_started = True
+        checkpoint = "full-capacity-recovery"
+        recovery_result = full_capacity_recovery(
+            pre,
+            run_dir,
+            expected_ids,
+            expected_uids,
+            blocker_id,
+            blocker_uid,
+            token,
+            cleanup_deadline,
+        )
+        close_local_processes(metrics, None, None, overall_deadline)
+        metrics = []
+        checkpoint = "leader-handoff"
+        handoff_result = leader_handoff(
+            pre,
+            run_dir,
+            expected_ids,
+            expected_uids,
+            blocker_id,
+            blocker_uid,
+            cleanup_deadline,
+        )
+        if handoff_result["deleted_leader"] == pod_name:
+            fail(
+                "planned leader changed onto the HTTP-forward survivor; stop without another POST"
+            )
         cleanup_metrics = api_metrics()
         cleanup_at = time.monotonic()
-        for start in range(0, len(expected_ids), 20):
-            names = list(expected_ids)[start : start + 20]
+        checkpoint = "queued-cleanup"
+        challenger_id = next(iter(expected_ids))
+        challenger_uid = expected_uids[challenger_id]
+        cleanup_ids = [name for name in expected_ids if name != challenger_id]
+        for start in range(0, len(cleanup_ids), 20):
+            names = cleanup_ids[start : start + 20]
             if time.monotonic() >= cleanup_deadline:
                 fail("exact cleanup exceeded its total bounded deadline")
             if exact_kind_identity() != pre["kubeconfig_fingerprint"]:
                 fail("dedicated Kind identity changed before a cleanup batch")
-            current_builds = kjson("-n", NAMESPACE, "get", "kovabuilds", "-o", "json")["items"]
+            current_builds = kjson("-n", NAMESPACE, "get", "kovabuilds", "-o", "json")[
+                "items"
+            ]
             current_uids = {
-                item["metadata"]["name"]: item["metadata"]["uid"] for item in current_builds
+                item["metadata"]["name"]: item["metadata"]["uid"]
+                for item in current_builds
             }
             if set(current_uids) - (set(expected_ids) | {blocker_id}):
                 fail("an unrecorded KovaBuild appeared during exact cleanup")
             if any(current_uids.get(name) != expected_uids[name] for name in names):
                 fail("a queued KovaBuild UID changed before UID-precondition deletion")
-            append_jsonl(cleanup_dir / "delete-batches.jsonl", {"ids": names, "started_at": now()})
+            append_jsonl(
+                cleanup_dir / "delete-batches.jsonl",
+                {"ids": names, "started_at": now()},
+            )
             for name in names:
                 if time.monotonic() >= cleanup_deadline:
                     fail("exact cleanup exceeded its total bounded deadline")
-                receipt = delete_build_with_uid(name, expected_uids[name], pre["kubeconfig_sha256"])
+                receipt = delete_build_with_uid(
+                    name, expected_uids[name], pre["kubeconfig_sha256"]
+                )
                 append_jsonl(
                     cleanup_dir / "delete-responses.jsonl",
                     receipt,
@@ -2046,20 +3181,26 @@ def live(pre: dict, token: str) -> Path:
                 cleanup_dir,
                 Path(pre["docker_root"]),
             )
-            cleanup_metrics, cleanup_at = guard_api(cleanup_dir, cleanup_metrics, cleanup_at)
+            cleanup_metrics, cleanup_at = guard_api(
+                cleanup_dir, cleanup_metrics, cleanup_at
+            )
         while time.monotonic() < cleanup_deadline:
             builds = kjson("-n", NAMESPACE, "get", "kovabuilds", "-o", "json")["items"]
-            current_uids = {item["metadata"]["name"]: item["metadata"]["uid"] for item in builds}
+            current_uids = {
+                item["metadata"]["name"]: item["metadata"]["uid"] for item in builds
+            }
             names = set(current_uids)
             if names - (set(expected_ids) | {blocker_id}):
                 fail("an unrecorded KovaBuild appeared during exact cleanup")
             if any(
-                current_uids[name] != expected_uids[name] for name in names if name in expected_uids
+                current_uids[name] != expected_uids[name]
+                for name in names
+                if name in expected_uids
             ):
                 fail("a queued KovaBuild UID changed during exact cleanup")
             _, intents = queue_ledgers(len(expected_ids), blocker_id, blocker_uid)
             check_runner(blocker_id, blocker_uid)
-            if names == {blocker_id} and not intents:
+            if names == {blocker_id, challenger_id} and set(intents) == names:
                 break
             observe_blocked_runtime(
                 expected_ids,
@@ -2069,11 +3210,33 @@ def live(pre: dict, token: str) -> Path:
                 cleanup_dir,
                 Path(pre["docker_root"]),
             )
-            cleanup_metrics, cleanup_at = guard_api(cleanup_dir, cleanup_metrics, cleanup_at)
-            time.sleep(3)
+            cleanup_metrics, cleanup_at = guard_api(
+                cleanup_dir, cleanup_metrics, cleanup_at
+            )
+            pause(3)
         else:
             fail("queued CR cleanup did not drain within its bounded deadline")
-        blocker = kjson("-n", NAMESPACE, "get", "kovabuild", blocker_id, "-o", "json")
+        remaining = wait_queue_state(
+            {challenger_id: expected_ids[challenger_id]},
+            blocker_id,
+            blocker_uid,
+            cleanup_dir,
+            min(cleanup_deadline, time.monotonic() + 5),
+            expected_uids={challenger_id: challenger_uid},
+        )
+        by_name = {item["metadata"]["name"]: item for item in remaining["items"]}
+        original_receipts = qualify_build_receipts(by_name, blocker_id, blocker_uid)
+        _, remaining_intents = queue_ledgers(1, blocker_id, blocker_uid)
+        challenger_receipt = (
+            "kova-admission-intent-" + remaining_intents[challenger_id]["nonce"]
+        )
+        blocker_receipts = {
+            name: obj
+            for name, obj in original_receipts.items()
+            if name != challenger_receipt
+        }
+        original_runner = check_runner(blocker_id, blocker_uid)
+        blocker = by_name[blocker_id]
         if blocker["metadata"]["uid"] != blocker_uid:
             fail("blocker UID changed before exact deletion")
         if time.monotonic() >= cleanup_deadline:
@@ -2081,15 +3244,81 @@ def live(pre: dict, token: str) -> Path:
         if exact_kind_identity() != pre["kubeconfig_fingerprint"]:
             fail("dedicated Kind identity changed before blocker deletion")
         append_jsonl(
-            cleanup_dir / "delete-batches.jsonl", {"ids": [blocker_id], "started_at": now()}
+            cleanup_dir / "delete-batches.jsonl",
+            {"ids": [blocker_id], "started_at": now()},
         )
-        receipt = delete_build_with_uid(blocker_id, blocker_uid, pre["kubeconfig_sha256"])
+        receipt = delete_build_with_uid(
+            blocker_id, blocker_uid, pre["kubeconfig_sha256"]
+        )
         append_jsonl(cleanup_dir / "delete-responses.jsonl", receipt)
         if not receipt["accepted"]:
             fail(
                 f"UID-precondition DELETE for blocker returned HTTP "
                 f"{receipt['http_status']}; outcome needs review"
             )
+        checkpoint = "original-challenger-promotion"
+        promotion_started = time.monotonic()
+        promotion_deadline = min(cleanup_deadline, promotion_started + 120)
+        while time.monotonic() < promotion_deadline:
+            builds = kjson("-n", NAMESPACE, "get", "kovabuilds", "-o", "json")["items"]
+            if any(
+                item["metadata"]["name"] not in {blocker_id, challenger_id}
+                for item in builds
+            ):
+                fail("foreign build appeared during exact capacity promotion")
+            current = next(
+                (item for item in builds if item["metadata"]["name"] == challenger_id),
+                None,
+            )
+            if current is None or current["metadata"]["uid"] != challenger_uid:
+                fail("original challenger disappeared or changed UID")
+            if (
+                len(builds) == 1
+                and current.get("status", {}).get("phase") == "Starting"
+                and current.get("status", {}).get("admissionGenesisWitness")
+            ):
+                qualify_build_receipts(
+                    {challenger_id: current}, challenger_id, challenger_uid
+                )
+                if (
+                    request_json(API_PROXY_PORT, "GET", build_api_path(blocker_id))[0]
+                    != 404
+                ):
+                    fail(
+                        "original blocker was not directly confirmed absent after promotion"
+                    )
+                old_pod_path = f"/api/v1/namespaces/{NAMESPACE}/pods/{original_runner['metadata']['name']}"
+                if request_json(API_PROXY_PORT, "GET", old_pod_path)[0] != 404:
+                    fail("original blocker runner was not directly confirmed absent")
+                normal_receipt_absence(blocker_receipts, promotion_deadline)
+                break
+            resource_sample(pre["pods"], cleanup_dir, Path(pre["docker_root"]))
+            cleanup_metrics, cleanup_at = guard_api(
+                cleanup_dir, cleanup_metrics, cleanup_at
+            )
+            pause(1)
+        else:
+            fail(
+                "original challenger did not acquire the released active slot within 120 seconds"
+            )
+        promotion = {
+            "status": "passed",
+            "original_challenger_id": challenger_id,
+            "original_challenger_uid": challenger_uid,
+            "released_blocker_uid": blocker_uid,
+            "seconds": time.monotonic() - promotion_started,
+        }
+        save_json(cleanup_dir / "promotion.json", promotion)
+        final_receipts = qualify_build_receipts(
+            {challenger_id: current}, challenger_id, challenger_uid
+        )
+        checkpoint = "final-original-uid-cleanup"
+        receipt = delete_build_with_uid(
+            challenger_id, challenger_uid, pre["kubeconfig_sha256"]
+        )
+        append_jsonl(cleanup_dir / "delete-responses.jsonl", receipt)
+        if not receipt["accepted"]:
+            fail("final challenger UID deletion outcome is unknown")
         while time.monotonic() < cleanup_deadline:
             if (
                 not kjson("-n", NAMESPACE, "get", "kovabuilds", "-o", "json")["items"]
@@ -2105,16 +3334,33 @@ def live(pre: dict, token: str) -> Path:
                 )["items"]
             ):
                 queue_ledgers(0)
+                empty_receipts()
+                normal_receipt_absence(final_receipts, cleanup_deadline)
                 break
             resource_sample(pre["pods"], cleanup_dir, Path(pre["docker_root"]))
-            cleanup_metrics, cleanup_at = guard_api(cleanup_dir, cleanup_metrics, cleanup_at)
-            time.sleep(3)
+            cleanup_metrics, cleanup_at = guard_api(
+                cleanup_dir, cleanup_metrics, cleanup_at
+            )
+            pause(3)
         else:
-            fail("blocker Pod/ledger cleanup did not finish within its bounded deadline")
+            fail(
+                "blocker Pod/ledger cleanup did not finish within its bounded deadline"
+            )
+        checkpoint = "local-child-shutdown"
+        close_local_processes(metrics, forward, proxy, overall_deadline)
+        metrics, forward, proxy = [], None, None
+        budget_timeout(RUN_DEADLINE_SECONDS)
         save_json(
             run_dir / "result.json",
             {
                 "status": "passed",
+                "profile": FIXTURE["profile"],
+                "scope": "representative_short_api_admission"
+                if len(STAGES) == 1
+                else "supported_capacity_api_admission",
+                "unmeasured": ["500/1000 outstanding HTTP throughput"]
+                if len(STAGES) == 1
+                else [],
                 "completed_at": now(),
                 "stages": STAGES,
                 "long_quiet": {
@@ -2123,8 +3369,11 @@ def live(pre: dict, token: str) -> Path:
                     "measured_seconds": quiet_result.get("measured_seconds"),
                 },
                 "exact_cr_cleanup": True,
+                "full_capacity_recovery": recovery_result,
+                "leader_handoff": handoff_result,
+                "original_uid_capacity_promotion": promotion,
                 "emergency_stop": "not-needed",
-                "original_service_pods_deleted": False,
+                "planned_original_leader_uid_delete": pre.get("leader_handoff_effect"),
                 "cluster_deleted": False,
                 "registry_touched": False,
             },
@@ -2136,7 +3385,8 @@ def live(pre: dict, token: str) -> Path:
             signal.signal(signum, signal.SIG_IGN)
         error_text = safe_error(error, token)
         base_result = {
-            "status": "failed",
+            "status": "unknown",
+            "checkpoint": checkpoint,
             "completed_at": now(),
             "error": error_text,
             "known_accepted_ids": list(expected_ids),
@@ -2144,20 +3394,22 @@ def live(pre: dict, token: str) -> Path:
             "unknown_outcome_candidates": "see blocker and stage candidate receipts",
             "cleanup_started": cleanup_started,
             "cleanup_may_be_partial": cleanup_started,
+            "http_admission_attempted": admission_attempted,
             "cluster_deleted": False,
             "registry_touched": False,
-            "emergency_stop": "unconfirmed" if admission_attempted else "not-needed",
-            "original_service_pods_deleted": False,
+            "emergency_stop": "not-attempted-retained",
+            "planned_original_leader_uid_delete": pre.get("leader_handoff_effect"),
         }
         try:
             save_json(run_dir / "result.json", base_result)
         except Exception:
             pass
-        stop = (
-            emergency_stop(pre, run_dir, token)
-            if admission_attempted
-            else {"status": "not-needed", "original_service_pods_deleted": False}
-        )
+        # Unknown means stop this driver and retain the dedicated fixture.
+        # Never infer new cleanup authority or automatically scale a workload.
+        stop = {
+            "status": "not-attempted-retained",
+            "automatic_scale_or_delete_attempted": False,
+        }
         try:
             failure_snapshots = capture_failure_objects(
                 run_dir, token, set(expected_ids) | {build_id(run_id + "-blocker")}
@@ -2168,70 +3420,88 @@ def live(pre: dict, token: str) -> Path:
             {
                 "emergency_stop": stop["status"],
                 "emergency_stop_detail": stop,
-                "original_service_pods_deleted": stop["original_service_pods_deleted"],
                 "failure_snapshots": failure_snapshots,
             }
         )
-        if stop["status"] != "confirmed" and admission_attempted:
-            note(
-                "EMERGENCY STOP UNCONFIRMED; use exact manual stop before leaving this Kind cluster"
-            )
+        note(
+            "UNKNOWN: no automatic cleanup/scale; dedicated fixture retained for owner review"
+        )
         save_json(run_dir / "result.json", base_result)
         raise BenchError(error_text) from None
     finally:
         for signum, previous_handler in previous_handlers.items():
             signal.signal(signum, previous_handler)
-        if forward is not None:
-            forward.terminate()
-            try:
-                forward.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                forward.kill()
-                forward.wait(timeout=5)
-        if proxy is not None:
-            proxy.terminate()
-            try:
-                proxy.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                proxy.kill()
-                proxy.wait(timeout=5)
+        close_local_processes(metrics, forward, proxy)
         if success:
             note(f"PASS; receipts preserved at {run_dir}")
         else:
-            note(f"FAILED; receipts and test-owned CRs retained at {run_dir}; inspect first")
+            note(
+                f"FAILED; receipts and test-owned CRs retained at {run_dir}; inspect first"
+            )
 
 
 def main() -> None:
-    if sys.platform != "linux" or socket.gethostname().split(".", 1)[0] != "wayne-hk-kvm":
-        fail("deep-queue benchmark only manages the assigned wayne-hk-kvm host")
-    mode = os.environ.get("DEEP_QUEUE_E2E_MODE", "check")
-    if mode not in ("check", "run", "status", "stop"):
-        fail("DEEP_QUEUE_E2E_MODE must be check, run, status, or stop")
-    if (
-        mode in ("run", "stop")
-        and os.environ.get("DEEP_QUEUE_E2E_ACK") != f"{CLUSTER}/{NAMESPACE}/{RELEASE}-service"
-    ):
-        fail(f"{mode} mode requires DEEP_QUEUE_E2E_ACK={CLUSTER}/{NAMESPACE}/{RELEASE}-service")
-    if mode in ("status", "stop"):
-        run_dir, identity = load_run_identity()
-        if mode == "status":
-            run_status(run_dir, identity)
-            return
-        stop = emergency_stop(identity, run_dir, "")
-        save_json(run_dir / "manual-stop.json", stop)
-        if stop["status"] != "confirmed":
-            fail("manual emergency stop is unconfirmed; inspect manual-stop.json")
-        note(
-            f"manual emergency stop confirmed; Service Pods absent; receipts preserved at {run_dir}"
+    mode = os.environ.get("DEEP_QUEUE_E2E_MODE", "plan")
+    if mode not in ("plan", "check", "run"):
+        fail(
+            "DEEP_QUEUE_E2E_MODE must be plan, check, or run; legacy stop/status are not v3 authority"
+        )
+    if mode == "plan" and not os.environ.get("DEEP_QUEUE_E2E_FIXTURE"):
+        print(
+            json.dumps(
+                {
+                    "classification": "unprepared_v3_plan",
+                    "live_ready": False,
+                    "required_input": "DEEP_QUEUE_E2E_FIXTURE",
+                    "external_commands": 0,
+                    "default_profile": "representative-short",
+                    "total_charged": 100,
+                    "active": 1,
+                    "genuinely_queued": 99,
+                    "budget_seconds": 900,
+                },
+                sort_keys=True,
+            )
         )
         return
+    configure_fixture()
+    if mode == "plan":
+        print(
+            json.dumps(
+                {
+                    "classification": "local_contract_only",
+                    "live_ready": False,
+                    "fixture_sha256": FIXTURE_SHA,
+                    "profile": FIXTURE["profile"],
+                    "stages_total_charged": STAGES,
+                    "active": 1,
+                    "genuinely_queued": [stage - 1 for stage in STAGES],
+                    "budget_seconds": RUN_DEADLINE_SECONDS,
+                    "external_commands": 0,
+                    "api_writes": 0,
+                },
+                sort_keys=True,
+            )
+        )
+        return
+    if (
+        mode == "run"
+        and os.environ.get("DEEP_QUEUE_E2E_ACK") != f"{FIXTURE['run_id']}:{FIXTURE_SHA}"
+    ):
+        fail(
+            f"{mode} mode requires DEEP_QUEUE_E2E_ACK={FIXTURE['run_id']}:{FIXTURE_SHA}"
+        )
     if mode == "check":
+        start_execution_budget()
         preflight()
-        note(f"read-only preflight passed: {CLUSTER}; 2/2 nodes; two Service Pods; empty ledgers")
+        note(
+            f"read-only preflight passed: {CLUSTER}; 2/2 nodes; two Service Pods; empty ledgers"
+        )
         note("no writes performed; explicit run mode needs DEEP_QUEUE_E2E_ACK")
         return
     if sys.platform != "linux":
         fail("run mode requires an isolated Linux Kind host")
+    start_execution_budget()
     if not HOST_LOCK.parent.is_dir():
         fail("managed host lock directory is unavailable")
     lock_fd = os.open(HOST_LOCK, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
@@ -2242,7 +3512,9 @@ def main() -> None:
         except BlockingIOError:
             fail("another deep-queue run holds the host lock")
         pre = preflight()
-        note(f"locked preflight passed: {CLUSTER}; 2/2 nodes; two Service Pods; empty ledgers")
+        note(
+            f"locked preflight passed: {CLUSTER}; 2/2 nodes; two Service Pods; empty ledgers"
+        )
         token = load_static_token()
         live(pre, token)
     finally:
@@ -2252,6 +3524,14 @@ def main() -> None:
 if __name__ == "__main__":
     try:
         main()
-    except (BenchError, KeyboardInterrupt) as error:
-        note(f"error: {error}")
+    except (
+        BenchError,
+        V3.QualificationError,
+        BURST.UnknownOutcome,
+        BURST.ContractError,
+        OSError,
+        ValueError,
+        KeyboardInterrupt,
+    ) as error:
+        note(f"error: {safe_error(error, '')}")
         sys.exit(1)

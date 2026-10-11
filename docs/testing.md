@@ -203,7 +203,7 @@ and environment policy in the consuming workspace rather than this repository.
 | `make e2e-service-auth-read-probe` | Read-only preflight by default; opt-in bounded two-principal empty-list GET probe records TokenReview/SAR API counters, per-request latency, and Kind health without creating a KovaBuild. | Existing idle `kova-admission-fairness` Kind on `wayne-hk-kvm`; private JSON receipts under `/data/forge-artifacts/kova-admission-fairness/auth-read-*/`. |
 | `make e2e-service-auth-owner-probe` | Read-only fresh-fixture preflight by default; opt-in bounded owner and denied non-owner GET probe creates one unschedulable build, compares exact TokenReview/SAR counter deltas, and uses UID-preconditioned cleanup. | Newly created, sole `kova-admission-fairness` TokenReview Kind on `wayne-hk-kvm`; private JSON receipts under `/data/forge-artifacts/kova-admission-fairness/owner-get-*/`. |
 | `make e2e-service-admission-ledger-loss` | Read-only preflight by default; live mode deliberately deletes only the exact active admission ConfigMap in a disposable dedicated Kind cluster, then proves both Service replicas return 503 for readiness and new submissions without creating a CR. Optional exact follower Pod replacement proves startup does not silently recreate the ledger. Preserves receipts and never repairs the fault. | Same empty, dedicated two-replica Kind admission cluster and caps as above; retire cluster after live mode |
-| `make e2e-service-admission-deep-queue` | Read-only preflight by default; live mode holds one unschedulable blocker, grows a real API-server-backed queue through 100, 500, and 1000 CRs, records independent HTTP/API/resource receipts, and performs exact-ID cleanup only after every stage passes. | The only Kind cluster must be `kova-deep-queue`, with two ready Service replicas, empty ledgers/workloads, active=1, queued global/requester=1000, and `never=true` runner selector. |
+| `make e2e-service-admission-deep-queue` | Zero-command local PLAN by default; explicit check is read-only. The fresh Genesis-v3 short profile tests 100 total charges (1 active + 99 Queued), full rejection, original-UID release/readmission, leader handoff and normal receipt retirement. | An owner-pinned fresh two-node Kind, three distinct namespaces, two same-image Service replicas, one worker, original v3 Genesis/ledger/receipt identities and permanently unschedulable runner. The optional supported-capacity profile measures total charges 100/500/1000, not that many Queued CRs. |
 | `make e2e-service-partial-output` | Read-only preflight by default; live mode executes a real two-target OCI+Nydus runner build whose later target fails in BuildKit, then checks final `Failed` and the first target's exact digest-pinned partial receipts. | Existing empty `kova-partial-output-41` Kind on `wayne-hk-kvm`; run-scoped source/output tags and private receipts under `.work/partial-output/`. |
 | `make e2e-service-digest-collision` | Read-only preflight by default; live mode holds A's two pushed OCI/Nydus digests in verification while B overwrites the same two tags, then verifies A's partial-failure and B's successful immutable receipts. | Dedicated `kova-digest-collision-41` Kind and loopback-only `kind-registry-digest-41` on port 5004; private receipts under `.work/digest-collision/`. |
 | `make e2e-source-capacity` | Read-only preflight by default; live mode publishes one 128 MiB incompressible immutable source, builds one OCI output, verifies its digest and host pull, and samples Kind node/runner state. Preserves run-scoped receipts and tags; never deletes the cluster or registry content. | Existing empty, dedicated `kova-source-capacity` Kind quickstart cluster and localhost registry |
@@ -427,101 +427,38 @@ Pure-local safety checks run with `python3 -m unittest scripts.e2e.tests.test_ad
 
 ## Deep-Queue Admission Benchmark
 
-Use only a disposable, otherwise idle Linux Kind cluster named `kova-deep-queue` with a single worker and its exact `.kind/kova-deep-queue.kubeconfig`.
-Prepare the candidate chart and two same-image Service replicas before this test, with `serviceDaemon.maxActiveJobs=1`, `maxActiveJobsPerRequester=1`, `workerSlots=1`, `maxQueuedJobs=1000`, `maxQueuedJobsPerRequester=1000`, `kubeClientQPS=20`, `kubeClientBurst=40`, `pollInterval=5s`, `wait=2h`, `maxBuildDuration=2h`, static principal `kova:e2e`, leader election, and `runnerNodeSelector.never=true`.
-The two-hour `wait` is essential: the default three-minute wait would fail the Pending blocker and could allow a queued build to acquire a runner during a later stage.
-These caps are a stress fixture, not recommended production defaults.
-Do not use quickstart's build/tag setup for this benchmark if preserving the existing local registry is required; the benchmark itself neither contacts the registry nor creates source/output tags.
-The following one-time setup runs on the isolated Linux host only after all other Kind clusters have been removed and the intended candidate role images have been built locally from one reviewed Kova revision.
-It uses the pinned two-node Kind config, loads local image objects directly into Kind, and sets `imagePullPolicy=Never`; do not run `make kind-load` here because that target pushes the images to the local registry.
-Before setup, record the clean checkout commit, `sha256sum deploy/quickstart-kind-cluster.yaml`, the pinned Kind node image digest, and each role's `docker image inspect ... --format '{{.Id}} {{index .Config.Labels "org.opencontainers.image.revision"}}'`.
-All three 12-character revision labels must equal the clean checkout's HEAD prefix; matching one another is insufficient.
-If an image is stale, run `make image` at that final clean HEAD and inspect the new image IDs before `kind load docker-image`.
-`make image` builds local Docker objects only; do not run `make kind-load`, which pushes to the local registry.
+Use a new, otherwise idle Linux Kind fixture; never resume an UNKNOWN fixture or borrow its identities. The probe does not prepare Kind, bootstrap Genesis, push/pull images, create registry tags, or mutate any ledger directly. Existing unrelated Kind clusters may remain, but the owner must qualify host headroom and isolation before preparing the new fixture. Do not delete old clusters to satisfy this test.
 
-```bash
-kind create cluster --name kova-deep-queue \
-  --image kindest/node:v1.36.1@sha256:3489c7674813ba5d8b1a9977baea8a6e553784dab7b84759d1014dbd78f7ebd5 \
-  --config deploy/quickstart-kind-cluster.yaml \
-  --kubeconfig .kind/kova-deep-queue.kubeconfig
-kind load docker-image localhost:5002/kova:controller-dev localhost:5002/kova:runner-dev localhost:5002/kova:worker-dev \
-  --name kova-deep-queue
-kubectl --kubeconfig .kind/kova-deep-queue.kubeconfig create namespace kova
-printf '%s' "$SERVICE_AUTH_TOKEN" | kubectl --kubeconfig .kind/kova-deep-queue.kubeconfig -n kova \
-  create secret generic kova-e2e-token --from-file=token=/dev/stdin
-helm install kova charts/kova --kubeconfig .kind/kova-deep-queue.kubeconfig -n kova \
-  -f deploy/quickstart-kind-values.yaml --wait --timeout 10m \
-  --set images.controller.pullPolicy=Never --set images.runner.pullPolicy=Never --set images.worker.pullPolicy=Never \
-  --set serviceDaemon.enabled=true --set serviceDaemon.replicas=2 \
-  --set serviceDaemon.authentication.mode=static \
-  --set serviceDaemon.authentication.staticTokenSecret.name=kova-e2e-token \
-  --set-string serviceDaemon.authentication.staticPrincipal=kova:e2e \
-  --set serviceDaemon.maxActiveJobs=1 --set serviceDaemon.maxActiveJobsPerRequester=1 \
-  --set serviceDaemon.workerSlots=1 --set serviceDaemon.maxQueuedJobs=1000 \
-  --set serviceDaemon.maxQueuedJobsPerRequester=1000 \
-  --set serviceDaemon.kubeClientQPS=20 --set serviceDaemon.kubeClientBurst=40 \
-  --set serviceDaemon.pollInterval=5s \
-  --set serviceDaemon.wait=2h --set serviceDaemon.maxBuildDuration=2h \
-  --set-string serviceDaemon.runnerNodeSelector.never=true
-kubectl --kubeconfig .kind/kova-deep-queue.kubeconfig -n kova \
-  create rolebinding kova-e2e-submitter --role=kova-service-submitter --user=kova:e2e
-```
+The owner supplies a canonical absolute, owner-owned `0600` JSON file (at most 32 KiB), with the exact schema enforced by `scripts/e2e/deep_queue_v3.py`. Its fields are `schema_version=1`, `run_id=v3-YYYYMMDD-<fresh suffix>`, `profile`, exact 40-character `candidate_commit`, `pod_template_binary` and `pod_template_binary_sha256`, `host_boot_id`, `cluster=kova-deep-queue-<run_id>`, private `kubeconfig` and its `kubeconfig_sha256`, `kube_system_namespace_uid`, three distinct run-suffixed `control_namespace` / `runner_namespace` / `receipt_namespace` names and their `_uid` fields, `release`, `auth_secret_uid`, `service_deployment_uid`, `worker_deployment_uid`, original `node_uids` (two nodes), `service_pods` (two), `worker_pods` (one), `role_images` (controller/runner/worker immutable manifest references), `genesis`, and `ports`. No credential value belongs in this file.
 
-Provision a strong, test-only `SERVICE_AUTH_TOKEN` in the setup shell's environment for the one-time Secret creation, then unset it; do not paste its value into commands, Helm values, receipts, or Git.
-The live benchmark reads `kova-e2e-token/token` from this same verified Kind cluster directly into process memory after locked preflight, so the long-running launcher needs no token file or command-line argument.
-The setup should record the exact Helm install values above, Kind config SHA-256 and pinned node image digest, Kind node UIDs, and deployed Pod image IDs alongside the Docker image IDs.
-The benchmark's `identity.json` records the clean checkout commit, each role's Docker object/index digest, Linux/amd64 manifest/config digest chain and revision, the image IDs preloaded on both Kind nodes, actual Service/worker Pod image IDs, and exact Kind kubeconfig fingerprint.
-Preflight streams a platform-filtered local Docker OCI export with bounded metadata, verifies index→manifest→config digests, and compares its config digest with each node's CRI image ID; the OCI index/object ID alone is not comparable with a CRI config ID.
-For each Pod it queries CRI by the exact deployed tag (some Kind CRI builds cannot look up the import repoDigest shown in Pod status), requires that tag to resolve only to the verified config digest, and requires the Pod imageID to equal that config digest or one of the image's exact CRI repoDigests.
-It also checks the runner image is preloaded on both nodes despite never creating a runner container.
-If the runtime does not expose comparable CRI IDs/digests, preflight stops instead of assuming the cached image is current.
-No setup command above pushes to the local or cloud registry, and no HK ACK context is used.
+`pod_template_binary` is a canonical absolute path to the same clean candidate's Linux/amd64 `go test -c ./internal/service/buildcontroller` binary, linked with the full `internal/version.Commit`; the owner pins its whole-file SHA before running the probe. The bounded, owned executable must not be writable by group or others. The harness first checks its candidate/platform identity in read-only preflight, then sends each directly observed Pod's JSON to the explicitly opt-in, offline `TestE2EPodTemplateDigestStdin` entrypoint. This entrypoint strictly decodes a typed Kubernetes Pod and calls the product's `recoveryreceipt.CanonicalPodTemplateDigest`, without a Kubernetes client or any API operation. Its result binds the exact input bytes, original Pod UID and candidate, and the recomputed template digest must equal the original pre-Create receipt and witness; an unchanged annotation cannot certify changed labels or Spec. The test entrypoint skips by default, and a terminating Pending Pod cannot qualify as the active blocker.
 
-The default entrypoint reads the cluster, kubeconfig identity, ledgers, readiness, dedicated test Secret format, API-server request counters, and kubelet summary metrics without writing Kubernetes objects or local receipts. It rejects a Secret token with a trailing newline before a detached run can start, and never prints or persists the token:
+`genesis` contains exactly `secret_name`, `secret_uid`, `receipt_sha256` (original canonical installation-receipt bytes), `genesis_uid`, `active_ledger_uid`, `queue_ledger_uid` and a run-scoped `worker_pool_id`. `ports` contains distinct `service`, `api_proxy` and `metrics_remote` ports. Preparation must install the current Genesis-v3 contract using the normal CLI and chart, not infer original identities from a later probe. The receipt Secret resides in the control namespace, is immutable, contains only `receipt.json`, and is mounted read-only at `/etc/kova/admission-genesis`; the receipt namespace is separate from the runner namespace. Both original schema2 ledgers must be empty and carry the exact v3 installation stamps.
+
+For `representative-short`, the v3 limits are active=1, active-per-requester=1, worker-slots=1, total queued-admission charges=100 and per-requester charges=100. The active blocker retains a charge, so 100 total means **1 active + 99 genuinely Queued**. This profile has one shared 900-second deadline, starting before read-only preflight, and one 30-second steady window. Preflight image-save subprocesses (at most 90 seconds each), other commands, HTTP calls, polling and the live lifecycle all consume that same budget; starting live never renews it. `supported-capacity` instead uses limits 1000/1000 and stages 100/500/1000 total (99/499/999 Queued), with the same end-to-end accounting within 1800 seconds. Neither profile is a production default or SLO certification; short-profile receipts explicitly mark 500/1000-request HTTP performance unmeasured. Unit/fake-client capacity matrices and real storage-lifecycle evidence remain separate evidence, not invented HTTP measurements.
+
+Both Service replicas must use one pinned candidate image and static principal `kova:e2e`, `kubeClientQPS=20`, `kubeClientBurst=40`, `pollInterval=5s`, `wait=2h`, `maxBuildDuration=2h`, leader election in the control namespace, a loopback-only metrics listener, `runnerNodeSelector.never=true`, and `imagePullPolicy=Never` for every role. The worker is one ready local/preloaded candidate replica. The dummy source and targets use `unused.invalid`; no runner may acquire a node or execute. A real pending runner Pod is created for each admitted active build, but the queued builds remain runner-less. The test therefore measures API admission and queue behavior, not build throughput or registry behavior.
+
+Default PLAN performs no external commands or writes. Explicit check validates the original candidate, fixture bytes, kubeconfig/context, original UIDs, local Docker manifest→config chain, both nodes' CRI identities, unschedulability, readiness, empty ledgers/receipt inventory and metrics. It reads the dedicated `kova-e2e-token/token` into memory only, rejects malformed credentials and never prints or persists them.
 
 ```bash
 make e2e-service-admission-deep-queue
+DEEP_QUEUE_E2E_FIXTURE=/canonical/private/fresh-fixture.json \
+  DEEP_QUEUE_E2E_MODE=check make e2e-service-admission-deep-queue
+DEEP_QUEUE_E2E_FIXTURE=/canonical/private/fresh-fixture.json \
+  DEEP_QUEUE_E2E_MODE=run DEEP_QUEUE_E2E_ACK='<run_id>:<exact fixture file SHA256>' \
+  timeout --kill-after=5s 920s python3 scripts/e2e/e2e-service-admission-deep-queue.py
 ```
 
-For an SSH-disconnect-safe live run on `wayne-hk-kvm`, use the dedicated launcher after the read-only check passes; `start` creates a private `0700` control directory, `0600` PID/log/launch receipts, and a detached controller that holds the host lock for preflight and the full run.
-The launcher records the exact clean candidate commit, Kind config SHA-256, and pinned tool binary SHA-256 values.
-It does not accept or log a token.
+Use the shown outer bound for the short profile: 920 seconds for the entire foreground process, including read-only preflight and local port-forward shutdown, followed by at most five seconds before a forced kill. It is not 920 seconds added after preflight. The optional supported-capacity profile needs a separately approved outer bound of 1820 seconds with the same accounting. An outer timeout is UNKNOWN and retains the fixture; a prior result file alone cannot turn it into PASS. Do not use the legacy fixed-cluster detached launcher's `start`, `status` or emergency `stop` as authority for this v3 fixture. The owner controls the one foreground run and its private receipt directory; the entrypoint rejects legacy status/stop modes. There is no automatic Deployment scaling or uncertain-create cleanup on failure.
 
-```bash
-python3 scripts/e2e/deep-queue-launcher.py start
-python3 scripts/e2e/deep-queue-launcher.py status /data/forge-artifacts/kova-deep-queue/control-<exact-id>
-python3 scripts/e2e/deep-queue-launcher.py stop /data/forge-artifacts/kova-deep-queue/control-<exact-id>
-```
+Each accepted request is checked against its original CR UID, immutable spec, queue intent and immutable queue receipt; the blocker additionally requires the grant and Pod-create pre-effect receipts, original Genesis/ledger UIDs, durable CR runner witness, exact runner image and Downward-API UID fence. The original ledger identities and contract are checked throughout. Reconcile and client-rate-limiter histogram receipts report sample counts and percentile **bucket upper bounds**, never exact per-reconcile latency. At least one actual client-limiter wait over 10 ms must be observed. The Service's bounded wire/client counters are separate from API-server request counts, which include the observer and system traffic and must not be attributed wholly to Kova.
 
-For the opt-in 1000-item long quiet measurement, first run `DEEP_QUEUE_E2E_QUIET_SECONDS=300 make e2e-service-admission-deep-queue` as a read-only check, then launch with `DEEP_QUEUE_E2E_QUIET_SECONDS=300 python3 scripts/e2e/deep-queue-launcher.py start`. The parameter is either unset/`0` for the unchanged 30-second-per-stage default or a 30-second multiple from 300 through 600; it adds three equal early/middle/late windows only after stage 1000 has fully reached `Queued` and completed its original 30-second measurement. The original one-hour total deadline and all API, CPU, memory, disk, node-pressure, identity, and exact-UID cleanup guards remain in force. Use `status` and `stop` with the exact control directory printed by `start`; neither command needs the duration variable.
+After the steady window, the live flow submits one fresh request at the real configured cap and requires the exact nonretrying 429 capacity response, no extra CR, and unchanged original accepted UIDs. It then deletes one originally qualified queued CR with its exact UID precondition, directly confirms that CR and its ordinary queue receipt absent after normal product cleanup, and admits exactly one fresh replacement. A single planned deletion of the original leader Pod is also UID-bound, owner-qualified and same-image; the original Lease UID must survive with a distinct holder, two ready same-image replicas, all unrelated original Pod UIDs preserved and every original queued/blocker UID unchanged. A naturally changed leader before this operation stops the test before deletion rather than adopting it.
 
-The `start` JSON prints the exact control directory, PID, and private log path. `status` shows the PID's original process start time, run receipt directory, build counts/phases, Service replica count, and any final result; the log remains on the KVM host for `tail -f`.
-`stop` sends SIGTERM to only that PID and waits for the benchmark to confirm a stop. If the controller already died or its automatic stop was unconfirmed, it invokes the run-receipt-bound manual stop; it never sends SIGKILL or deletes CRs.
-For independent read-only inspection or exact manual stop when the launcher is unavailable:
+Finally it normally UID-deletes all other qualified queued CRs, releases the original blocker, proves an original queued challenger acquires the released slot with a new qualified pending runner and all three receipts, then normally retires that challenger's receipts. PASS requires direct absence of the retired original CRs/receipts/runner, zero CRs/runners, both original empty ledgers and no leftover effect receipts. It never deletes a namespace, Genesis, ledger, Secret, Kind cluster, worker, registry, or image. Every uncertain mutation stops immediately without replay or repair; UNKNOWN is not a product-defect diagnosis or PASS.
 
-```bash
-DEEP_QUEUE_E2E_MODE=status DEEP_QUEUE_E2E_RUN_DIR=/data/forge-workspace/kova/.work/deep-queue/<exact-run-id> \
-  python3 scripts/e2e/e2e-service-admission-deep-queue.py
-DEEP_QUEUE_E2E_MODE=stop DEEP_QUEUE_E2E_ACK=kova-deep-queue/kova/kova-service \
-  DEEP_QUEUE_E2E_RUN_DIR=/data/forge-workspace/kova/.work/deep-queue/<exact-run-id> \
-  python3 scripts/e2e/e2e-service-admission-deep-queue.py
-```
-
-Only the first, test-owned blocker may have a runner Pod object; its owner UID, `never=true` selector, `Pending` phase, absent node assignment, and single active grant are checked throughout.
-Every queued CR must remain runner-less, with a matching queue-intent nonce.
-Each stage waits for all CRs to reach `Queued`, then measures 30 seconds of API request rates by verb/resource (including the benchmark's own read-only probes), Service Pod and Kind node CPU/memory, readiness, and HTTP POST throughput/p50/p95/p99.
-The optional long quiet receipt adds `stage-1000-quiet/{early,middle,late}/summary.json` with API request counts and QPS by verb/resource and the original five-second resource/identity guards and peaks. All stage and quiet `api` receipts retain `by_verb_group_resource` as counts and add `by_verb_group_resource_qps` as those counts divided by that receipt's measured `seconds`; do not read the count map as a rate. Every quiet window marks reconcile counts `unavailable: not collected by this benchmark`; the script does not enable or scrape Service metrics, and POST/queue-settle latency is not substituted for reconcile cost. API request totals include the benchmark's readiness, ledger, kubelet, and API-server probes plus unrelated Kubernetes system traffic; the script does not subtract or attribute that noise to Kova. It preserves raw API boundary counters for independent review.
-The host must retain 8 GiB available memory and 20 GiB free workspace/Docker disk; each Kind node must remain Ready without pressure, below 80% allocatable CPU, and above 2 GiB available memory; each Service Pod must remain below 2 vCPU and 2 GiB working memory; measured API traffic must stay below 1200 requests/s with no 429 or 5xx.
-Missing metrics, transport errors, limits, identity drift, unrecorded CRs, ledger disagreement, or incomplete cleanup stop the benchmark immediately and preserve the cluster for inspection.
-After any attempted POST, a failure or SIGINT/SIGTERM/SIGHUP triggers an exact-identity, UID/resourceVersion-tested JSON Patch scaling only the dedicated Service Deployment from two replicas to zero; the result distinguishes `confirmed` from `unconfirmed` and records whether all Service Pods disappeared.
-If API access or identity checks make that stop unconfirmed, do not leave the cluster unattended or start another Kind test; use the exact manual stop and inspect the run evidence.
-
-Receipts are kept separately for the blocker, each 100/500/1000 stage, and exact-ID cleanup under `.work/deep-queue/<run-id>/`.
-On success, only the recorded queued CRs and blocker CR are deleted through a loopback Kubernetes API proxy with each exact CR UID as an atomic DeleteOptions precondition; the Kind cluster, local registry, and all registry tags remain untouched.
-If a submission or measurement fails before exact cleanup starts, no CR or ledger cleanup is attempted because an uncertain HTTP Create may still be in flight.
-If a deletion or its verification fails after exact cleanup starts, some recorded CRs may already have been deleted; the script stops and preserves the delete-batch receipts for operator inspection rather than guessing at a repair.
-The default controller does **not** expose per-reconcile latency p95/p99 to this black-box script: POST latency and queue-status convergence are separate measurements and must not be reported as reconcile latency. A separate future diagnostic may opt in to loopback-only controller-runtime metrics, but it must first verify both Pod endpoints in isolated Kind and must not expose the unauthenticated listener through a Service.
-This bounded Kind profile is a design diagnostic, not production SLO or SLA evidence.
+Receipts remain under `.work/deep-queue/<exact run directory>/`. The original host/node CPU, memory, disk, pressure and measured API-traffic bounds remain in force, including no API-server 429/5xx; the expected Service-level full-capacity 429 is a separate application response. `make lint-scripts` runs the local qualifier and directed truth-flow mocks automatically. These mocks do not qualify a live fixture or replace this real API test.
 
 ## Isolated Source-Capacity Acceptance
 
