@@ -273,7 +273,7 @@ func TestCapacityTransportNotFoundMustBeExactNamedStatus(t *testing.T) {
 			case "missing-details":
 				got.Details = nil
 			case "collection":
-				requestPath = strings.TrimSuffix(path, "/"+admissioncontract.ActiveLedgerName)
+				requestPath = strings.TrimSuffix(path, "/"+admissioncontract.ActiveLedgerName) + "?limit=1"
 			}
 			raw, _ := json.Marshal(got)
 			if scenario == "empty" {
@@ -501,5 +501,156 @@ func TestCapacityTransportRejectsImpossibleSuccessfulCAS(t *testing.T) {
 	r.Header.Set("Content-Type", "application/json-patch+json")
 	if _, err := g.RoundTrip(r); err == nil || !g.unknown {
 		t.Fatal("successful ACK accepted despite failed original data test")
+	}
+}
+
+func TestCapacityTypedClientKeepsTenSecondTimeoutAndExactQuery(t *testing.T) {
+	m := capacityGateManifest()
+	ledger := capacityGateLedger(m)
+	receipt := &corev1.ConfigMap{TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "ConfigMap"},
+		ObjectMeta: metav1.ObjectMeta{Name: "kova-grant-intent-" + strings.Repeat("a", 32), Namespace: m.Receipts.Name, UID: "receipt-original", ResourceVersion: "1"}, Data: map[string]string{"intent": "fixed"}}
+	ledgerPath := "/api/v1/namespaces/" + m.Runner.Name + "/configmaps/" + ledger.Name
+	receiptPath := "/api/v1/namespaces/" + m.Receipts.Name + "/configmaps/" + receipt.Name
+	var requests []*http.Request
+	g := newCapacityTransport(m, admissioncontract.Receipt{}, "https://127.0.0.1:6443", capacityRoundTripper(func(r *http.Request) (*http.Response, error) {
+		requests = append(requests, r.Clone(context.Background()))
+		if r.Header.Get("Accept") != "application/json" {
+			t.Fatal("typed client changed JSON negotiation")
+		}
+		var object any
+		code := http.StatusOK
+		switch {
+		case r.Method == "GET" && r.URL.Path == "/api/v1/namespaces/"+m.Runner.Name:
+			object = &corev1.Namespace{TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Namespace"},
+				ObjectMeta: metav1.ObjectMeta{Name: m.Runner.Name, UID: types.UID(m.Runner.UID), ResourceVersion: "1", CreationTimestamp: metav1.Now()}, Status: corev1.NamespaceStatus{Phase: corev1.NamespaceActive}}
+		case r.Method == "GET" && strings.HasSuffix(r.URL.Path, "/pods"):
+			object = &corev1.PodList{TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "PodList"}, ListMeta: metav1.ListMeta{ResourceVersion: "1"}, Items: []corev1.Pod{}}
+		case r.Method == "POST" && r.URL.Path == strings.TrimSuffix(ledgerPath, "/"+ledger.Name):
+			object, code = ledger, http.StatusCreated
+		case r.Method == "GET" && r.URL.Path == ledgerPath:
+			object = ledger
+		case r.Method == "PATCH" && r.URL.Path == ledgerPath:
+			ack := ledger.DeepCopy()
+			ack.ResourceVersion, ack.Data[admissioncontract.ActiveLedgerDataKey] = "2", "new"
+			object = ack
+		case r.Method == "POST" && r.URL.Path == strings.TrimSuffix(receiptPath, "/"+receipt.Name):
+			object, code = receipt, http.StatusCreated
+		case r.Method == "DELETE" && r.URL.Path == receiptPath:
+			object = &metav1.Status{TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Status"}, Status: metav1.StatusSuccess, Code: 200}
+		default:
+			t.Fatal("undeclared operation reached mock upstream")
+		}
+		raw, _ := json.Marshal(object)
+		return &http.Response{StatusCode: code, Header: http.Header{"Content-Type": {"application/json"}}, Body: io.NopCloser(bytes.NewReader(raw))}, nil
+	}))
+	httpClient := &http.Client{Transport: g, Timeout: 10 * time.Second}
+	cs, err := kubernetes.NewForConfigAndClient(&rest.Config{Host: g.origin, Timeout: 10 * time.Second,
+		ContentConfig: rest.ContentConfig{ContentType: "application/json", AcceptContentTypes: "application/json"}}, httpClient)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	ns, err := cs.CoreV1().Namespaces().Get(ctx, m.Runner.Name, metav1.GetOptions{})
+	if err != nil || capacityNamespaceReason(ns, m.Runner, m.PreparedAfter, time.Now(), err) != "" {
+		t.Fatal("real typed Namespace GET failed bounded identity qualification")
+	}
+	if _, err := cs.CoreV1().Pods(m.Runner.Name).List(ctx, metav1.ListOptions{Limit: 1}); err != nil {
+		t.Fatal(err)
+	}
+	proposal := ledger.DeepCopy()
+	proposal.UID, proposal.ResourceVersion = "", ""
+	if _, err := cs.CoreV1().ConfigMaps(m.Runner.Name).Create(ctx, proposal, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cs.CoreV1().ConfigMaps(m.Runner.Name).Get(ctx, ledger.Name, metav1.GetOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cs.CoreV1().ConfigMaps(m.Runner.Name).Patch(ctx, ledger.Name, types.JSONPatchType, capacityGatePatch(), metav1.PatchOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	proposal = receipt.DeepCopy()
+	proposal.UID, proposal.ResourceVersion = "", ""
+	if _, err := cs.CoreV1().ConfigMaps(m.Receipts.Name).Create(ctx, proposal, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	uid := receipt.UID
+	if err := cs.CoreV1().ConfigMaps(m.Receipts.Name).Delete(ctx, receipt.Name, metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &uid}}); err != nil {
+		t.Fatal(err)
+	}
+	if len(requests) != 7 || httpClient.Timeout != 10*time.Second || g.wirePodPosts != 0 {
+		t.Fatal("typed client lost timeout or expanded write scope")
+	}
+	for i, r := range requests {
+		want := "timeout=10s"
+		if i == 1 {
+			// Generated List explicitly calls Request.Timeout(0) when
+			// TimeoutSeconds is nil; http.Client still enforces 10s.
+			want = "limit=1"
+		}
+		if r.URL.RawQuery != want {
+			t.Fatalf("typed request %d has noncanonical query", i)
+		}
+	}
+	if _, err := cs.CoreV1().Namespaces().List(ctx, metav1.ListOptions{Limit: 1}); err == nil || len(requests) != 7 {
+		t.Fatal("cluster-wide Namespace list expanded declared fixture")
+	}
+}
+
+func TestCapacityTransportQueryClosedSetRejectsAmbiguityBeforeWire(t *testing.T) {
+	m := capacityGateManifest()
+	named := "/api/v1/namespaces/" + m.Runner.Name
+	collection := named + "/pods"
+	for _, target := range []struct{ method, path string }{{"GET", named}, {"GET", collection}, {"POST", collection}, {"PATCH", named}, {"PUT", named}, {"DELETE", named}} {
+		for _, query := range []string{"watch=true", "labelSelector=x", "limit=2", "timeout=11s", "timeout=10000ms", "timeout=10s&timeout=10s", "%74imeout=10s", "timeout=10%73", "timeout=10s&", "timeout=10s&limit=1", "limit=1&limit=1", "limit=1&timeout=10s&watch=false"} {
+			g := newCapacityTransport(m, admissioncontract.Receipt{}, "https://127.0.0.1:6443", capacityRoundTripper(func(*http.Request) (*http.Response, error) { t.Fatal("ambiguous query forwarded"); return nil, nil }))
+			r := capacityGateRequest(target.method, target.path, []byte(`{}`))
+			r.URL.RawQuery = query
+			if _, err := g.RoundTrip(r); err == nil || g.wireCalls != 0 || g.mutations != 0 {
+				t.Fatal("query expanded upstream authority")
+			}
+		}
+	}
+	for _, query := range []string{"limit=1", "limit=1&timeout=10s"} {
+		if capacityQueryAllowed(capacityGateRequest("GET", named+"?"+query, nil)) {
+			t.Fatal("named read accepted collection limit")
+		}
+	}
+	if capacityQueryAllowed(capacityGateRequest("GET", collection, nil)) {
+		t.Fatal("unbounded collection read accepted")
+	}
+	for _, query := range []string{"limit=1", "limit=1&timeout=10s"} {
+		if !capacityQueryAllowed(capacityGateRequest("GET", collection+"?"+query, nil)) {
+			t.Fatal("exact bounded collection query rejected")
+		}
+	}
+}
+
+func TestCapacityNamespaceFailureReasonsAreFixedAndKeepIdentityGates(t *testing.T) {
+	m := capacityGateManifest()
+	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{UID: types.UID(m.Runner.UID), CreationTimestamp: metav1.Now()}, Status: corev1.NamespaceStatus{Phase: corev1.NamespaceActive}}
+	for _, scenario := range []string{"exact", "read", "nil", "uid", "deleting", "phase", "old", "future"} {
+		copy := ns.DeepCopy()
+		var readErr error
+		want := ""
+		switch scenario {
+		case "read":
+			readErr, want = errors.New("secret/raw API payload"), "NAMESPACE_READ_UNKNOWN"
+		case "nil":
+			copy, want = nil, "NAMESPACE_READ_UNKNOWN"
+		case "uid":
+			copy.UID, want = "replacement", "NAMESPACE_UID_CHANGED"
+		case "deleting":
+			now := metav1.Now()
+			copy.DeletionTimestamp, want = &now, "NAMESPACE_DELETING"
+		case "phase":
+			copy.Status.Phase, want = corev1.NamespaceTerminating, "NAMESPACE_NOT_ACTIVE"
+		case "old":
+			copy.CreationTimestamp, want = metav1.NewTime(m.PreparedAfter.Add(-time.Second)), "NAMESPACE_FRESHNESS_CHANGED"
+		case "future":
+			copy.CreationTimestamp, want = metav1.NewTime(time.Now().Add(time.Minute)), "NAMESPACE_FRESHNESS_CHANGED"
+		}
+		if got := capacityNamespaceReason(copy, m.Runner, m.PreparedAfter, time.Now(), readErr); got != want {
+			t.Fatalf("namespace failure reason for %s changed", scenario)
+		}
 	}
 }

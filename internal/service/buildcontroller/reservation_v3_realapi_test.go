@@ -206,7 +206,7 @@ func (g *capacityTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if g.unknown || r.URL.Scheme+"://"+r.URL.Host != g.origin || r.URL.User != nil || r.URL.RawPath != "" || r.URL.Fragment != "" ||
-		(r.URL.RawQuery != "" && (r.Method != http.MethodGet || r.URL.RawQuery != "limit=1")) || g.calls >= 1500 {
+		!capacityQueryAllowed(r) || g.calls >= 1500 {
 		return nil, errors.New("capacity API request escaped origin/path/read budget")
 	}
 	g.calls++
@@ -217,7 +217,7 @@ func (g *capacityTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 		}
 		return g.forward(r)
 	}
-	if r.Body == nil || g.mutations >= 64 || r.URL.RawQuery != "" {
+	if r.Body == nil || g.mutations >= 64 {
 		return nil, errors.New("capacity mutation body/budget is invalid")
 	}
 	raw, err := io.ReadAll(io.LimitReader(r.Body, 6*1024*1024+1))
@@ -399,6 +399,41 @@ func (g *capacityTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 		}
 	}
 	return response, nil
+}
+
+func capacityQueryAllowed(r *http.Request) bool {
+	// client-go copies http.Client.Timeout into Request.timeout and sends the
+	// canonical timeout=10s query. Keep the actual 10s client deadline intact.
+	// Compare raw bytes, not decoded values: duplicates, escaping, selectors,
+	// watches, alternative durations and noncanonical ordering stay forbidden.
+	if r.Method == http.MethodGet {
+		_, _, kind, _, name := capacityAddress(r.URL.Path)
+		if name == "" {
+			return kind != "" && (r.URL.RawQuery == "limit=1" || r.URL.RawQuery == "limit=1&timeout=10s")
+		}
+		return r.URL.RawQuery == "" || r.URL.RawQuery == "timeout=10s"
+	}
+	switch r.Method {
+	case http.MethodPost, http.MethodPatch, http.MethodPut, http.MethodDelete:
+		return r.URL.RawQuery == "" || r.URL.RawQuery == "timeout=10s"
+	}
+	return false
+}
+
+func capacityNamespaceReason(ns *corev1.Namespace, pin capacityNamespace, prepared, now time.Time, readErr error) string {
+	switch {
+	case readErr != nil || ns == nil:
+		return "NAMESPACE_READ_UNKNOWN"
+	case string(ns.UID) != pin.UID:
+		return "NAMESPACE_UID_CHANGED"
+	case ns.DeletionTimestamp != nil:
+		return "NAMESPACE_DELETING"
+	case ns.Status.Phase != corev1.NamespaceActive:
+		return "NAMESPACE_NOT_ACTIVE"
+	case pin.Name != "kube-system" && (ns.CreationTimestamp.Time.Before(prepared) || ns.CreationTimestamp.Time.After(now)):
+		return "NAMESPACE_FRESHNESS_CHANGED"
+	}
+	return ""
 }
 
 func (g *capacityTransport) forward(r *http.Request) (*http.Response, error) {
@@ -754,10 +789,10 @@ func TestRealAPIGenesisV3FullTableLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal("fresh private output receipt cannot be created")
 	}
-	complete := false
+	complete, unknownReason := false, "UNCLASSIFIED"
 	defer func() {
 		if !complete {
-			_ = json.NewEncoder(file).Encode(map[string]any{"stage": "unknown-retained", "podPostsPermitted": false, "runtimeCancellationProved": false})
+			_ = json.NewEncoder(file).Encode(map[string]any{"stage": "unknown-retained", "reason": unknownReason, "podPostsPermitted": false, "runtimeCancellationProved": false})
 			_ = file.Sync()
 		}
 		_ = file.Close()
@@ -832,9 +867,9 @@ func TestRealAPIGenesisV3FullTableLifecycle(t *testing.T) {
 		}
 		for _, n := range []capacityNamespace{m.Runner, m.Control, m.Receipts, {Name: "kube-system", UID: m.KubeSystemUID}} {
 			ns, err := clientset.CoreV1().Namespaces().Get(ctx, n.Name, metav1.GetOptions{})
-			if err != nil || string(ns.UID) != n.UID || ns.DeletionTimestamp != nil || ns.Status.Phase != corev1.NamespaceActive ||
-				(n.Name != "kube-system" && (ns.CreationTimestamp.Time.Before(m.PreparedAfter) || ns.CreationTimestamp.Time.After(time.Now()))) {
-				return errors.New("original fresh Namespace identity/phase changed")
+			if reason := capacityNamespaceReason(ns, n, m.PreparedAfter, time.Now(), err); reason != "" {
+				unknownReason = reason
+				return errors.New("original fresh Namespace preflight: " + reason)
 			}
 		}
 		secret, err := clientset.CoreV1().Secrets(m.Control.Name).Get(ctx, m.SecretName, metav1.GetOptions{})
