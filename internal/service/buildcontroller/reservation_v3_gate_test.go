@@ -415,7 +415,7 @@ func TestCapacityTransportUnknownIsSpentAndStopsAllFurtherWire(t *testing.T) {
 }
 
 func TestCapacityTransportUsesAssignedReceiptUIDAndQualifiesDelete(t *testing.T) {
-	for _, ack := range []string{"status", "object", "empty", "foreign"} {
+	for _, ack := range []string{"status", "object", "empty", "foreign", "unbound-status"} {
 		t.Run(ack, func(t *testing.T) {
 			m := capacityGateManifest()
 			name := "kova-grant-intent-" + strings.Repeat("a", 32)
@@ -428,13 +428,15 @@ func TestCapacityTransportUsesAssignedReceiptUIDAndQualifiesDelete(t *testing.T)
 				if r.Method == "DELETE" {
 					switch ack {
 					case "status":
-						raw = []byte(`{"apiVersion":"v1","kind":"Status","status":"Success"}`)
+						raw = capacityOfficialDeleteStatus(t, original)
 					case "empty":
 						raw = nil
 					case "foreign":
 						copy := original.DeepCopy()
 						copy.UID = "replacement"
 						raw, _ = json.Marshal(copy)
+					case "unbound-status":
+						raw = []byte(`{"apiVersion":"v1","kind":"Status","status":"Success"}`)
 					}
 				}
 				code := http.StatusOK
@@ -463,6 +465,118 @@ func TestCapacityTransportUsesAssignedReceiptUIDAndQualifiesDelete(t *testing.T)
 			_, err := g.RoundTrip(capacityGateRequest("DELETE", collection+"/"+name, raw))
 			if (err == nil) != (ack == "status" || ack == "object") {
 				t.Fatalf("DELETE %s qualification=%v", ack, err)
+			}
+		})
+	}
+}
+
+func TestCapacityTransportDeleteACKClosedShapes(t *testing.T) {
+	m := capacityGateManifest()
+	cm := &corev1.ConfigMap{TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "ConfigMap"},
+		ObjectMeta: metav1.ObjectMeta{Name: "kova-pod-create-intent-" + strings.Repeat("b", 32), Namespace: m.Receipts.Name, UID: "receipt-original", ResourceVersion: "74"},
+		Data:       map[string]string{"intent": "fixed"}}
+	path := "/api/v1/namespaces/" + cm.Namespace + "/configmaps/" + cm.Name
+	status := capacityOfficialDeleteStatus(t, cm)
+	object, _ := json.Marshal(cm)
+	change := func(raw []byte, edit func(map[string]any)) []byte {
+		t.Helper()
+		var body map[string]any
+		if !capacityDecode(raw, &body) {
+			t.Fatal("invalid test body")
+		}
+		edit(body)
+		out, err := json.Marshal(body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	cases := []struct {
+		name   string
+		body   []byte
+		code   int
+		accept bool
+	}{
+		{"official-status", status, 200, true},
+		{"status-explicit-zero-code", change(status, func(o map[string]any) { o["code"] = 0 }), 200, true},
+		{"status-empty-group", change(status, func(o map[string]any) { o["details"].(map[string]any)["group"] = "" }), 200, true},
+		{"status-no-details", change(status, func(o map[string]any) { delete(o, "details") }), 200, false},
+		{"status-null-details", change(status, func(o map[string]any) { o["details"] = nil }), 200, false},
+		{"status-empty-details", change(status, func(o map[string]any) { o["details"] = map[string]any{} }), 200, false},
+		{"status-wrong-name", change(status, func(o map[string]any) { o["details"].(map[string]any)["name"] = "foreign" }), 200, false},
+		{"status-wrong-uid", change(status, func(o map[string]any) { o["details"].(map[string]any)["uid"] = "foreign" }), 200, false},
+		{"status-singular-kind", change(status, func(o map[string]any) { o["details"].(map[string]any)["kind"] = "ConfigMap" }), 200, false},
+		{"status-wrong-group", change(status, func(o map[string]any) { o["details"].(map[string]any)["group"] = "foreign" }), 200, false},
+		{"status-null-group", change(status, func(o map[string]any) { o["details"].(map[string]any)["group"] = nil }), 200, false},
+		{"status-null-causes", change(status, func(o map[string]any) { o["details"].(map[string]any)["causes"] = nil }), 200, false},
+		{"status-zero-retry", change(status, func(o map[string]any) { o["details"].(map[string]any)["retryAfterSeconds"] = 0 }), 200, false},
+		{"status-null-metadata", change(status, func(o map[string]any) { o["metadata"] = nil }), 200, false},
+		{"status-nonempty-metadata", change(status, func(o map[string]any) { o["metadata"] = map[string]any{"resourceVersion": "75"} }), 200, false},
+		{"status-empty-message", change(status, func(o map[string]any) { o["message"] = "" }), 200, false},
+		{"status-empty-reason", change(status, func(o map[string]any) { o["reason"] = "" }), 200, false},
+		{"status-null-code", change(status, func(o map[string]any) { o["code"] = nil }), 200, false},
+		{"status-bool-code", change(status, func(o map[string]any) { o["code"] = false }), 200, false},
+		{"status-float-code", bytes.Replace(status, []byte(`"status":"Success"`), []byte(`"status":"Success","code":0.0`), 1), 200, false},
+		{"status-nonzero-code", change(status, func(o map[string]any) { o["code"] = 200 }), 200, false},
+		{"status-extra-key", change(status, func(o map[string]any) { o["unexpected"] = true }), 200, false},
+		{"status-duplicate-kind", bytes.Replace(status, []byte(`"kind":"Status"`), []byte(`"kind":"Status","kind":"Status"`), 1), 200, false},
+		{"status-pending-202", status, 202, false},
+		{"object-exact", object, 200, true},
+		{"object-new-opaque-rv", change(object, func(o map[string]any) { o["metadata"].(map[string]any)["resourceVersion"] = "75" }), 200, true},
+		{"object-missing-rv", change(object, func(o map[string]any) { delete(o["metadata"].(map[string]any), "resourceVersion") }), 200, false},
+		{"object-uid-drift", change(object, func(o map[string]any) { o["metadata"].(map[string]any)["uid"] = "foreign" }), 200, false},
+		{"object-data-drift", change(object, func(o map[string]any) { o["data"].(map[string]any)["intent"] = "foreign" }), 200, false},
+		{"object-extra-key", change(object, func(o map[string]any) { o["unexpected"] = true }), 200, false},
+		{"object-duplicate-kind", bytes.Replace(object, []byte(`"kind":"ConfigMap"`), []byte(`"kind":"ConfigMap","kind":"ConfigMap"`), 1), 200, false},
+		{"object-pending-202", object, 202, false},
+		{"null", []byte(`null`), 200, false},
+		{"malformed", []byte(`{"kind":`), 200, false},
+	}
+	uid := cm.UID
+	options, _ := json.Marshal(metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &uid}})
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			wires := 0
+			g := newCapacityTransport(m, admissioncontract.Receipt{}, "https://127.0.0.1:6443", capacityRoundTripper(func(*http.Request) (*http.Response, error) {
+				wires++
+				return &http.Response{StatusCode: tc.code, Body: io.NopCloser(bytes.NewReader(tc.body))}, nil
+			}))
+			g.owned[path], g.receiptObjects[path] = string(uid), cm
+			_, err := g.RoundTrip(capacityGateRequest("DELETE", path, options))
+			if (err == nil) != tc.accept || g.unknown != !tc.accept || wires != 1 {
+				t.Fatalf("accepted=%t unknown=%t wires=%d error=%v", err == nil, g.unknown, wires, err)
+			}
+			if !tc.accept {
+				_, _ = g.RoundTrip(capacityGateRequest("GET", path, nil))
+				if wires != 1 {
+					t.Fatal("unknown DELETE ACK allowed another wire")
+				}
+			}
+		})
+	}
+}
+
+func TestCapacityTransportDeletePrewireNeedsOwnedReceiptAndExactUID(t *testing.T) {
+	m := capacityGateManifest()
+	cm := &corev1.ConfigMap{TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "ConfigMap"},
+		ObjectMeta: metav1.ObjectMeta{Name: "kova-grant-intent-" + strings.Repeat("c", 32), Namespace: m.Receipts.Name, UID: "receipt-original", ResourceVersion: "74"}}
+	path := "/api/v1/namespaces/" + cm.Namespace + "/configmaps/" + cm.Name
+	for _, tc := range []struct{ name, owned, precondition string }{
+		{"no-owned-uid", "", ""},
+		{"owned-mismatch", "foreign", "foreign"},
+		{"precondition-mismatch", string(cm.UID), "foreign"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			wires := 0
+			g := newCapacityTransport(m, admissioncontract.Receipt{}, "https://127.0.0.1:6443", capacityRoundTripper(func(*http.Request) (*http.Response, error) {
+				wires++
+				return nil, errors.New("must not reach wire")
+			}))
+			g.receiptObjects[path], g.owned[path] = cm, tc.owned
+			uid := types.UID(tc.precondition)
+			options, _ := json.Marshal(metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &uid}})
+			if _, err := g.RoundTrip(capacityGateRequest("DELETE", path, options)); err == nil || wires != 0 {
+				t.Fatal("unowned or mismatched receipt DELETE reached wire")
 			}
 		})
 	}
@@ -544,6 +658,22 @@ func capacityGateLedger(m capacityManifest) *corev1.ConfigMap {
 
 func capacityGatePatch() []byte {
 	return bytes.ReplaceAll([]byte(`[{"op":"test","path":"/metadata/uid","value":"original"},{"op":"test","path":"/metadata/resourceVersion","value":"1"},{"op":"test","path":"/data/state","value":"old"},{"op":"replace","path":"/data/state","value":"new"}]`), []byte("/data/state"), []byte("/data/"+admissioncontract.ActiveLedgerDataKey))
+}
+
+func capacityOfficialDeleteStatus(t *testing.T, receipt *corev1.ConfigMap) []byte {
+	t.Helper()
+	// Mirrors generic Store.finalizeDelete for a core/v1 ConfigMap when
+	// ReturnDeletedObject is false. The API serializer supplies TypeMeta.
+	status := &metav1.Status{Status: metav1.StatusSuccess, Details: &metav1.StatusDetails{Name: receipt.Name, Kind: "configmaps", UID: receipt.UID}}
+	raw, err := runtime.Encode(clientgoscheme.Codecs.LegacyCodec(corev1.SchemeGroupVersion), status)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var object map[string]any
+	if !capacityDecode(raw, &object) || object["apiVersion"] != "v1" || object["kind"] != "Status" || object["status"] != metav1.StatusSuccess || object["code"] != nil {
+		t.Fatal("official Status serializer changed its success envelope")
+	}
+	return raw
 }
 
 func capacityOfficialGeneric422(t *testing.T) []byte {
@@ -1107,7 +1237,8 @@ func TestCapacityTypedClientKeepsTenSecondTimeoutAndExactQuery(t *testing.T) {
 		case r.Method == "POST" && r.URL.Path == strings.TrimSuffix(receiptPath, "/"+receipt.Name):
 			object, code = receipt, http.StatusCreated
 		case r.Method == "DELETE" && r.URL.Path == receiptPath:
-			object = &metav1.Status{TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Status"}, Status: metav1.StatusSuccess, Code: 200}
+			object = &metav1.Status{TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Status"}, Status: metav1.StatusSuccess,
+				Details: &metav1.StatusDetails{Name: receipt.Name, Kind: "configmaps", UID: receipt.UID}}
 		default:
 			t.Fatal("undeclared operation reached mock upstream")
 		}
