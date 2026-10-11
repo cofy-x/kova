@@ -15,6 +15,7 @@ import (
 	"github.com/cofy-x/kova/internal/admissioncontract"
 	"github.com/cofy-x/kova/internal/admissionjson"
 	kovav1 "github.com/cofy-x/kova/internal/apis/kova/v1alpha1"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -652,5 +653,174 @@ func TestCapacityNamespaceFailureReasonsAreFixedAndKeepIdentityGates(t *testing.
 		if got := capacityNamespaceReason(copy, m.Runner, m.PreparedAfter, time.Now(), readErr); got != want {
 			t.Fatalf("namespace failure reason for %s changed", scenario)
 		}
+	}
+}
+
+func capacityGateRootCAList(m capacityManifest) *corev1.ConfigMapList {
+	return &corev1.ConfigMapList{TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "ConfigMapList"},
+		ListMeta: metav1.ListMeta{ResourceVersion: "1"}, Items: []corev1.ConfigMap{{
+			ObjectMeta: metav1.ObjectMeta{Name: "kube-root-ca.crt", Namespace: m.Receipts.Name,
+				UID: "11111111-1111-4111-8111-111111111111", ResourceVersion: "1"},
+			Data: map[string]string{"ca.crt": "synthetic-root-ca"}}}}
+}
+
+func TestCapacityGoEncodedConfigMapListOmitsItemTypeMeta(t *testing.T) {
+	m := capacityGateManifest()
+	list := capacityGateRootCAList(m)
+	raw, err := json.Marshal(list)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var body map[string]any
+	if !capacityDecode(raw, &body) {
+		t.Fatal("Go list encoding cannot decode")
+	}
+	item := body["items"].([]any)[0].(map[string]any)
+	if _, present := item["apiVersion"]; present {
+		t.Fatal("fixture unexpectedly includes item apiVersion")
+	}
+	if _, present := item["kind"]; present {
+		t.Fatal("fixture unexpectedly includes item kind")
+	}
+	g := newCapacityTransport(m, admissioncontract.Receipt{}, "https://127.0.0.1:6443", nil)
+	request := capacityGateRequest("GET", "/api/v1/namespaces/"+m.Receipts.Name+"/configmaps?limit=1", nil)
+	if !g.qualifyResponse(request, http.StatusOK, raw) {
+		t.Fatal("typed List parent qualifies but its absent item TypeMeta does not")
+	}
+}
+
+func TestCapacityListItemTypeMetaInheritanceStaysStrict(t *testing.T) {
+	m := capacityGateManifest()
+	base, _ := json.Marshal(capacityGateRootCAList(m))
+	path := "/api/v1/namespaces/" + m.Receipts.Name + "/configmaps?limit=1"
+	for _, scenario := range []struct {
+		name string
+		edit func(map[string]any, map[string]any, map[string]any)
+		good bool
+	}{
+		{"absent", func(_, _, _ map[string]any) {}, true},
+		{"both-explicit-exact", func(_, item, _ map[string]any) { item["apiVersion"], item["kind"] = "v1", "ConfigMap" }, true},
+		{"version-only", func(_, item, _ map[string]any) { item["apiVersion"] = "v1" }, true},
+		{"kind-only", func(_, item, _ map[string]any) { item["kind"] = "ConfigMap" }, true},
+		{"null-version", func(_, item, _ map[string]any) { item["apiVersion"] = nil }, false},
+		{"null-kind", func(_, item, _ map[string]any) { item["kind"] = nil }, false},
+		{"empty-version", func(_, item, _ map[string]any) { item["apiVersion"] = "" }, false},
+		{"empty-kind", func(_, item, _ map[string]any) { item["kind"] = "" }, false},
+		{"foreign-version", func(_, item, _ map[string]any) { item["apiVersion"] = "apps/v1" }, false},
+		{"foreign-kind", func(_, item, _ map[string]any) { item["kind"] = "Secret" }, false},
+		{"scalar-version", func(_, item, _ map[string]any) { item["apiVersion"] = 1 }, false},
+		{"object-kind", func(_, item, _ map[string]any) { item["kind"] = map[string]any{} }, false},
+		{"parent-missing-kind", func(parent, _, _ map[string]any) { delete(parent, "kind") }, false},
+		{"parent-null-version", func(parent, _, _ map[string]any) { parent["apiVersion"] = nil }, false},
+		{"parent-foreign-kind", func(parent, _, _ map[string]any) { parent["kind"] = "SecretList" }, false},
+		{"foreign-namespace", func(_, _, meta map[string]any) { meta["namespace"] = "default" }, false},
+		{"missing-namespace", func(_, _, meta map[string]any) { delete(meta, "namespace") }, false},
+		{"empty-name", func(_, _, meta map[string]any) { meta["name"] = "" }, false},
+		{"foreign-path-name", func(_, _, meta map[string]any) { meta["name"] = "foreign/path" }, false},
+		{"missing-uid", func(_, _, meta map[string]any) { delete(meta, "uid") }, false},
+		{"null-uid", func(_, _, meta map[string]any) { meta["uid"] = nil }, false},
+		{"missing-rv", func(_, _, meta map[string]any) { delete(meta, "resourceVersion") }, false},
+		{"empty-rv", func(_, _, meta map[string]any) { meta["resourceVersion"] = "" }, false},
+		{"continue", func(parent, _, _ map[string]any) { parent["metadata"].(map[string]any)["continue"] = "next" }, false},
+		{"remaining", func(parent, _, _ map[string]any) { parent["metadata"].(map[string]any)["remainingItemCount"] = 1 }, false},
+		{"two-items", func(parent, item, _ map[string]any) { parent["items"] = []any{item, item} }, false},
+		{"nonobject-item", func(parent, _, _ map[string]any) { parent["items"] = []any{nil} }, false},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			var parent map[string]any
+			_ = json.Unmarshal(base, &parent)
+			item := parent["items"].([]any)[0].(map[string]any)
+			scenario.edit(parent, item, item["metadata"].(map[string]any))
+			raw, _ := json.Marshal(parent)
+			calls := 0
+			g := newCapacityTransport(m, admissioncontract.Receipt{}, "https://127.0.0.1:6443", capacityRoundTripper(func(*http.Request) (*http.Response, error) {
+				calls++
+				return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(bytes.NewReader(raw))}, nil
+			}))
+			response, err := g.RoundTrip(capacityGateRequest("GET", path, nil))
+			if (err == nil) != scenario.good || calls != 1 || g.unknown == scenario.good || g.wireMutations != 0 {
+				t.Fatal("List inheritance changed strict qualification or write scope")
+			}
+			if scenario.good {
+				observed, _ := io.ReadAll(response.Body)
+				if !bytes.Equal(observed, raw) {
+					t.Fatal("inherited item GVK leaked into raw API response")
+				}
+			} else if _, err := g.RoundTrip(capacityGateRequest("GET", path, nil)); err == nil || calls != 1 {
+				t.Fatal("unqualified List did not stop further wire")
+			}
+		})
+	}
+	for _, raw := range [][]byte{
+		[]byte(strings.Replace(string(base), `"kind":"ConfigMapList"`, `"kind":"ConfigMapList","kind":"ConfigMapList"`, 1)),
+		[]byte(strings.Replace(string(base), `"name":"kube-root-ca.crt"`, `"name":"kube-root-ca.crt","name":"kube-root-ca.crt"`, 1)),
+	} {
+		g := newCapacityTransport(m, admissioncontract.Receipt{}, "https://127.0.0.1:6443", nil)
+		if g.qualifyResponse(capacityGateRequest("GET", path, nil), http.StatusOK, raw) {
+			t.Fatal("duplicate List/item identity qualified")
+		}
+	}
+}
+
+func TestCapacityTypedListStillExposesOldReceiptsAndWork(t *testing.T) {
+	m := capacityGateManifest()
+	for _, objectName := range []string{"kube-root-ca.crt", "kova-grant-intent-" + strings.Repeat("a", 32)} {
+		list := capacityGateRootCAList(m)
+		list.Items[0].Name = objectName
+		raw, _ := json.Marshal(list)
+		g := newCapacityTransport(m, admissioncontract.Receipt{}, "https://127.0.0.1:6443", capacityRoundTripper(func(*http.Request) (*http.Response, error) {
+			return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {"application/json"}}, Body: io.NopCloser(bytes.NewReader(raw))}, nil
+		}))
+		cs, err := kubernetes.NewForConfigAndClient(&rest.Config{Host: g.origin, ContentConfig: rest.ContentConfig{ContentType: "application/json"}}, &http.Client{Transport: g, Timeout: 10 * time.Second})
+		if err != nil {
+			t.Fatal(err)
+		}
+		cms, err := cs.CoreV1().ConfigMaps(m.Receipts.Name).List(context.Background(), metav1.ListOptions{Limit: 1})
+		if err != nil || len(cms.Items) != 1 || cms.Items[0].UID != list.Items[0].UID || cms.Items[0].ResourceVersion != list.Items[0].ResourceVersion || cms.Items[0].Data["ca.crt"] != "synthetic-root-ca" {
+			t.Fatal("real typed List did not preserve item identity/data")
+		}
+		// Keep the actual receipt preflight rule: no old effect receipt is
+		// hidden by a successful parent/item wire qualification.
+		veto := err != nil || len(cms.Items) > 1 || cms.Continue != "" || (len(cms.Items) == 1 && cms.Items[0].Name != "kube-root-ca.crt")
+		if veto != (objectName != "kube-root-ca.crt") || g.wireMutations != 0 {
+			t.Fatal("old receipt bypassed preflight or permitted a write")
+		}
+	}
+	meta := metav1.ObjectMeta{Name: "old-work", Namespace: m.Runner.Name, UID: "22222222-2222-4222-8222-222222222222", ResourceVersion: "1"}
+	for _, workload := range []struct {
+		path   string
+		object any
+	}{
+		{"/api/v1/namespaces/" + m.Runner.Name + "/pods", &corev1.PodList{TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "PodList"}, ListMeta: metav1.ListMeta{ResourceVersion: "1"}, Items: []corev1.Pod{{ObjectMeta: meta}}}},
+		{"/api/v1/namespaces/" + m.Runner.Name + "/services", &corev1.ServiceList{TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "ServiceList"}, ListMeta: metav1.ListMeta{ResourceVersion: "1"}, Items: []corev1.Service{{ObjectMeta: meta}}}},
+		{"/apis/apps/v1/namespaces/" + m.Runner.Name + "/deployments", &appsv1.DeploymentList{TypeMeta: metav1.TypeMeta{APIVersion: "apps/v1", Kind: "DeploymentList"}, ListMeta: metav1.ListMeta{ResourceVersion: "1"}, Items: []appsv1.Deployment{{ObjectMeta: meta}}}},
+		{"/apis/" + kovav1.SchemeGroupVersion.String() + "/namespaces/" + m.Runner.Name + "/kovabuilds", &kovav1.KovaBuildList{TypeMeta: metav1.TypeMeta{APIVersion: kovav1.SchemeGroupVersion.String(), Kind: "KovaBuildList"}, ListMeta: metav1.ListMeta{ResourceVersion: "1"}, Items: []kovav1.KovaBuild{{ObjectMeta: meta}}}},
+	} {
+		t.Run(workload.path, func(t *testing.T) {
+			raw, _ := json.Marshal(workload.object)
+			g := newCapacityTransport(m, admissioncontract.Receipt{}, "https://127.0.0.1:6443", capacityRoundTripper(func(*http.Request) (*http.Response, error) {
+				return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {"application/json"}}, Body: io.NopCloser(bytes.NewReader(raw))}, nil
+			}))
+			response, err := g.RoundTrip(capacityGateRequest("GET", workload.path+"?limit=1", nil))
+			if err != nil {
+				t.Fatal("valid old-work List lost wire qualification")
+			}
+			observed, _ := io.ReadAll(response.Body)
+			var list struct {
+				Metadata metav1.ListMeta `json:"metadata"`
+				Items    []struct {
+					Metadata metav1.ObjectMeta `json:"metadata"`
+				} `json:"items"`
+			}
+			if !bytes.Equal(raw, observed) || json.Unmarshal(observed, &list) != nil || len(list.Items) != 1 || list.Items[0].Metadata.UID != meta.UID {
+				t.Fatal("old workload was dropped or its identity changed")
+			}
+			// Each original workload preflight vetoes any nonempty List;
+			// inheriting missing item tags must not synthesize an empty List.
+			veto := err != nil || len(list.Items) != 0 || list.Metadata.Continue != ""
+			if !veto || g.wireMutations != 0 || g.wirePodPosts != 0 {
+				t.Fatal("nonempty old workload bypassed preflight or permitted a write")
+			}
+		})
 	}
 }

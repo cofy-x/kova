@@ -559,6 +559,19 @@ func (g *capacityTransport) qualifyResponse(r *http.Request, code int, raw []byt
 			if !ok {
 				return false
 			}
+			// Typed Kubernetes Lists carry the GVK on the qualified parent;
+			// their items may omit TypeMeta. Inherit only absent fields in this
+			// local qualification projection, never explicit null/empty/conflict
+			// or the raw response returned to the client.
+			for field, expected := range map[string]string{"apiVersion": apiVersion, "kind": kind} {
+				if value, present := itemMap[field]; present {
+					if value != expected {
+						return false
+					}
+				} else {
+					itemMap[field] = expected
+				}
+			}
 			im, ok := itemMap["metadata"].(map[string]any)
 			if !ok {
 				return false
@@ -905,6 +918,7 @@ func TestRealAPIGenesisV3FullTableLifecycle(t *testing.T) {
 		}
 		cms, err := clientset.CoreV1().ConfigMaps(m.Receipts.Name).List(ctx, metav1.ListOptions{Limit: 1})
 		if err != nil || len(cms.Items) > 1 || cms.Continue != "" || (len(cms.Items) == 1 && cms.Items[0].Name != "kube-root-ca.crt") {
+			unknownReason = "RECEIPT_LIST_PREFLIGHT_UNKNOWN"
 			return errors.New("receipt Namespace must contain no old receipts")
 		}
 		return nil
