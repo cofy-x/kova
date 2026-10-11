@@ -15,6 +15,7 @@ import time
 import unittest
 import zipfile
 from pathlib import Path
+from types import FunctionType, TracebackType
 from unittest.mock import MagicMock, patch
 from urllib.request import Request
 
@@ -303,12 +304,201 @@ def history(target: str, ref: str = "actual-server-ref", *, completed: bool = Tr
     record = {
         "Ref": ref,
         "CreatedAt": {"seconds": 1791511200, "nanos": 123456789},
-        "Exporters": [{"Type": "image", "Attrs": {"name": target}}],
+        "Exporters": [{"Type": "image", "Attrs": {"name": target, "push": "true"}}],
     }
     if completed:
         record["CompletedAt"] = {"seconds": 1791511202, "nanos": 987654321}
-        record["ExporterResponse"] = {"containerimage.digest": DIGEST}
+        descriptor = {
+            "digest": DIGEST,
+            "media_type": "application/vnd.oci.image.manifest.v1+json",
+            "size": 512,
+        }
+        record["ExporterResponse"] = {"containerimage.config": '{"architecture":"amd64"}'}
+        record["Result"] = {"Results": {"0": descriptor}, "ResultDeprecated": descriptor}
     return {"type": 1, "record": record} if completed else {"record": record}
+
+
+class SafeDiagnosticTests(unittest.TestCase):
+    secret = "private-bearer-message-locals-argv-stderr"
+
+    def canonical_error(self):
+        try:
+            burst.need(False, self.secret)
+        except burst.ContractError as error:
+            return error
+        self.fail("expected the canonical source to raise")
+
+    def test_diagnostic_uses_only_canonical_positions_not_messages_or_locals(self):
+        sensitive_local = {"argv": self.secret, "stderr": self.secret}
+        diagnostic = burst.safe_diagnostic(self.canonical_error(), "resource_read")
+        self.assertEqual(diagnostic["error"], "CONTRACT_ERROR")
+        self.assertEqual([frame["function"] for frame in diagnostic["frames"]], ["need"])
+        self.assertTrue(burst.valid_diagnostic(diagnostic))
+        encoded = burst.canonical(diagnostic).decode()
+        for forbidden in (
+            self.secret,
+            str(SCRIPT),
+            "SafeDiagnosticTests",
+            "argv",
+            "stderr",
+        ):
+            self.assertNotIn(forbidden, encoded)
+        self.assertEqual(sensitive_local["argv"], self.secret)
+
+    def test_foreign_identical_code_and_custom_exception_names_are_not_trusted(self):
+        # CodeType equality is structural; a dict keyed by code rather than
+        # identity would accidentally admit this same-filename copy.
+        copy = FunctionType(burst.need.__code__.replace(), burst.need.__globals__)
+        self.assertEqual(copy.__code__, burst.need.__code__)
+        self.assertIsNot(copy.__code__, burst.need.__code__)
+        try:
+            copy(False, self.secret)
+        except burst.ContractError as error:
+            self.assertEqual(burst.safe_diagnostic(error, "resource_read")["frames"], [])
+        custom = type(self.secret, (RuntimeError,), {})
+        diagnostic = burst.safe_diagnostic(custom(self.secret), "worker_observation")
+        self.assertEqual(diagnostic["error"], "OTHER_EXCEPTION")
+        self.assertNotIn(self.secret, burst.canonical(diagnostic).decode())
+
+    def test_diagnostic_frames_have_a_fixed_eight_frame_ceiling(self):
+        error = self.canonical_error()
+        trace = error.__traceback__
+        while trace.tb_next is not None:
+            trace = trace.tb_next
+        repeated = None
+        for _ in range(12):
+            repeated = TracebackType(repeated, trace.tb_frame, trace.tb_lasti, trace.tb_lineno)
+        error.__traceback__ = repeated
+        diagnostic = burst.safe_diagnostic(error, "resource_read")
+        self.assertEqual(len(diagnostic["frames"]), 8)
+        self.assertTrue(all(frame["function"] == "need" for frame in diagnostic["frames"]))
+
+    def test_propagated_diagnostic_rejects_payload_fields_and_custom_types(self):
+        original = burst.safe_diagnostic(self.canonical_error(), "resource_read")
+        malformed = []
+        for field, value in (
+            ("message", self.secret),
+            ("checkpoint", self.secret),
+            ("error", self.secret),
+            ("frames", [{"function": self.secret, "line": 1}]),
+            ("frames", [{"function": "need", "line": True}]),
+            ("frames", [{**original["frames"][0], "path": str(SCRIPT)}]),
+            ("frames", original["frames"] * 9),
+            ("checkpoint", type("CustomString", (str,), {})("resource_read")),
+        ):
+            malformed.append({**original, field: value})
+        malformed.append(
+            {
+                type("CustomKey", (str,), {})("checkpoint"): "resource_read",
+                "error": "CONTRACT_ERROR",
+                "frames": [],
+            }
+        )
+        for value in malformed:
+            with self.subTest(value=value):
+                self.assertFalse(burst.valid_diagnostic(value))
+                diagnostic = burst.safe_diagnostic(
+                    burst.UnknownOutcome(self.secret, diagnostic=value), "campaign"
+                )
+                self.assertEqual(diagnostic["checkpoint"], "campaign")
+                self.assertEqual(diagnostic["error"], "UNKNOWN_OUTCOME")
+                self.assertNotIn(self.secret, burst.canonical(diagnostic).decode())
+        propagated = burst.safe_diagnostic(
+            burst.UnknownOutcome(self.secret, diagnostic=original), "campaign"
+        )
+        self.assertEqual(propagated, original)
+        self.assertIsNot(propagated["frames"], original["frames"])
+
+    def test_sampler_three_checkpoints_preserve_safe_failure_in_memory(self):
+        custom = type(self.secret, (Exception,), {})
+        for checkpoint, error, expected in (
+            ("resource_read", self.canonical_error(), "CONTRACT_ERROR"),
+            ("resource_journal", OSError(self.secret), "OS_ERROR"),
+            ("worker_observation", custom(self.secret), "OTHER_EXCEPTION"),
+        ):
+            with self.subTest(checkpoint=checkpoint):
+                journal, observer = MemoryJournal(), MagicMock()
+                sampler = burst.Sampler(None, {}, {}, journal, time.monotonic() + 1, observer)
+                read = MagicMock(return_value={"at": "synthetic"})
+                if checkpoint == "resource_read":
+                    read.side_effect = error
+                elif checkpoint == "resource_journal":
+                    journal.append = MagicMock(side_effect=error)
+                else:
+                    observer.sample.side_effect = error
+                with patch.object(burst, "sample_resources", read):
+                    sampler._run()
+                self.assertTrue(sampler.stop.is_set())
+                self.assertEqual(sampler.failure["checkpoint"], checkpoint)
+                self.assertEqual(sampler.failure["error"], expected)
+                with self.assertRaises(burst.UnknownOutcome) as raised:
+                    sampler.check()
+                self.assertEqual(
+                    burst.safe_diagnostic(raised.exception, "campaign"), sampler.failure
+                )
+                self.assertNotIn(self.secret, burst.canonical(sampler.failure).decode())
+                if checkpoint == "resource_read":
+                    self.assertEqual(journal.events, [])
+                    observer.sample.assert_not_called()
+                if checkpoint == "resource_journal":
+                    journal.append.assert_called_once()
+                    observer.sample.assert_not_called()
+
+    def test_sampler_normal_sample_adds_no_failure_or_diagnostic(self):
+        journal, observer = MemoryJournal(), MagicMock()
+        sampler = burst.Sampler(None, {}, {}, journal, time.monotonic() + 1, observer)
+
+        def read(*_args):
+            sampler.stop.set()
+            return {"at": "synthetic"}
+
+        with patch.object(burst, "sample_resources", side_effect=read):
+            sampler._run()
+        sampler.check()
+        self.assertIsNone(sampler.failure)
+        self.assertEqual(journal.events, [("resource_sample", {"at": "synthetic"})])
+        observer.sample.assert_called_once()
+
+    def test_main_never_prints_custom_exception_names_or_messages(self):
+        custom = type(self.secret, (ValueError,), {})
+        original = burst.safe_diagnostic(self.canonical_error(), "worker_observation")
+        for error, expected in (
+            (custom(self.secret), None),
+            (burst.UnknownOutcome(self.secret, diagnostic=original), original),
+        ):
+            output = io.StringIO()
+            with (
+                self.subTest(expected=expected),
+                patch.object(
+                    argparse.ArgumentParser,
+                    "parse_args",
+                    return_value=argparse.Namespace(plan=Path("unused")),
+                ),
+                patch.object(burst, "load_json", side_effect=error),
+                patch.object(burst.sys, "stderr", output),
+            ):
+                self.assertEqual(burst.main(), 2)
+            observed = json.loads(output.getvalue().removeprefix("service-burst: "))
+            if expected is None:
+                self.assertEqual(observed["error"], "OTHER_EXCEPTION")
+            else:
+                self.assertEqual(observed, original)
+            self.assertNotIn(self.secret, output.getvalue())
+            self.assertNotIn(str(SCRIPT), output.getvalue())
+
+    def test_journal_failure_without_original_uses_only_new_safe_error(self):
+        for original in (None, {"message": self.secret}):
+            with self.subTest(original=original):
+                journal = MagicMock()
+                journal.append.side_effect = OSError(self.secret)
+                with self.assertRaises(burst.UnknownOutcome) as raised:
+                    burst.append_diagnostic(journal, "quarantined", original)
+                journal.append.assert_called_once_with("quarantined", diagnostic=None)
+                diagnostic = burst.safe_diagnostic(raised.exception, "campaign")
+                self.assertEqual(diagnostic["checkpoint"], "campaign")
+                self.assertEqual(diagnostic["error"], "OS_ERROR")
+                self.assertTrue(burst.valid_diagnostic(diagnostic))
+                self.assertNotIn(self.secret, burst.canonical(diagnostic).decode())
 
 
 class BuildkitJSONSchemaTests(unittest.TestCase):
@@ -409,6 +599,17 @@ class BuildkitJSONSchemaTests(unittest.TestCase):
         active, complete = raw.splitlines()
         self.assertNotIn("type", json.loads(active))
         self.assertIsNone(burst.project_history(active, {target})[0]["completed_ns"])
+        completed_record = json.loads(complete)["record"]
+        self.assertNotIn("containerimage.digest", completed_record["ExporterResponse"])
+        self.assertEqual(set(completed_record["Result"]["Results"]), {"0"})
+        self.assertEqual(
+            completed_record["Result"]["ResultDeprecated"],
+            completed_record["Result"]["Results"]["0"],
+        )
+        self.assertNotEqual(
+            completed_record["Result"]["Attestations"][0]["digest"],
+            completed_record["Result"]["Results"]["0"]["digest"],
+        )
         rows = burst.project_history(raw, {target})
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["solve_ref"], "serialized-solve-ref")
@@ -515,6 +716,140 @@ class BurstObservationTests(unittest.TestCase):
         self.assertEqual(rows[0]["completed_ns"], 1791511202987654321)
         self.assertEqual(burst.peak_solve_occupancy(rows), 1)
 
+    def test_frontend_response_is_not_output_proof_or_sample_payload(self):
+        for completed in (False, True):
+            for payload in (
+                "synthetic-sensitive-metadata",
+                {"containerimage.digest": "sha256:" + "b" * 64},
+                {"containerimage.digest": {"secret": "synthetic-sensitive-metadata"}},
+            ):
+                with self.subTest(completed=completed, payload_type=type(payload).__name__):
+                    event = history(self.target, completed=completed)
+                    event["record"]["ExporterResponse"] = payload
+                    projected = burst.project_history(burst.canonical(event), {self.target})[0]
+                    self.assertEqual(projected["pushed_digest"], DIGEST if completed else None)
+                    self.assertNotIn("synthetic-sensitive-metadata", json.dumps(projected))
+        event = history(self.target)
+        event["record"].pop("Result")
+        event["record"]["ExporterResponse"] = {"containerimage.digest": DIGEST}
+        with self.assertRaises(burst.UnknownOutcome):
+            burst.project_history(burst.canonical(event), {self.target})
+
+    def test_completed_descriptor_accepts_only_actual_image_roots(self):
+        for media_type in (
+            "application/vnd.oci.image.manifest.v1+json",
+            "application/vnd.oci.image.index.v1+json",
+            "application/vnd.docker.distribution.manifest.v2+json",
+            "application/vnd.docker.distribution.manifest.list.v2+json",
+        ):
+            with self.subTest(media_type=media_type):
+                event = history(self.target)
+                descriptor = event["record"]["Result"]["Results"]["0"]
+                descriptor["media_type"] = media_type
+                descriptor["annotations"] = {"synthetic": "not-retained"}
+                row = burst.project_history(burst.canonical(event), {self.target})[0]
+                self.assertEqual(row["pushed_digest"], DIGEST)
+                self.assertNotIn("not-retained", json.dumps(row))
+        event = history(self.target)
+        event["record"]["Result"].pop("ResultDeprecated")
+        self.assertEqual(
+            burst.project_history(burst.canonical(event), {self.target})[0]["pushed_digest"],
+            DIGEST,
+        )
+
+    def test_missing_foreign_extra_and_conflicting_descriptor_is_unknown(self):
+        for mutation in (
+            lambda record: record.pop("Result"),
+            lambda record: record.update(Result=None),
+            lambda record: record.update(Result=[]),
+            lambda record: record.update(Result={"results": {"0": {}}}),
+            lambda record: record.update(Result={"Results": {}}),
+            lambda record: record.update(Result={"Results": {"1": {}}}),
+            lambda record: record["Result"]["Results"].update({"1": {}}),
+            lambda record: record["Result"].update(unknown=True),
+            lambda record: record["Result"].update(ResultDeprecated=None),
+            lambda record: record["Result"].update(
+                ResultDeprecated={
+                    **record["Result"]["Results"]["0"],
+                    "digest": "sha256:" + "b" * 64,
+                }
+            ),
+            lambda record: record["Exporters"][0]["Attrs"].update(push="false"),
+            lambda record: record["Exporters"].append(record["Exporters"][0]),
+        ):
+            event = history(self.target)
+            mutation(event["record"])
+            with self.subTest(mutation=mutation), self.assertRaises(burst.UnknownOutcome):
+                burst.project_history(burst.canonical(event), {self.target})
+        for descriptor in (
+            None,
+            [],
+            {},
+            {
+                "Digest": DIGEST,
+                "media_type": "application/vnd.oci.image.manifest.v1+json",
+                "size": 512,
+            },
+            {"digest": DIGEST, "media_type": "application/vnd.in-toto+json", "size": 512},
+            {"digest": DIGEST, "media_type": {}, "size": 512},
+            {
+                "digest": None,
+                "media_type": "application/vnd.oci.image.manifest.v1+json",
+                "size": 512,
+            },
+            {
+                "digest": "sha256:" + "A" * 64,
+                "media_type": "application/vnd.oci.image.manifest.v1+json",
+                "size": 512,
+            },
+        ):
+            event = history(self.target)
+            event["record"]["Result"] = {"Results": {"0": descriptor}}
+            with (
+                self.subTest(descriptor_type=type(descriptor).__name__),
+                self.assertRaises(burst.UnknownOutcome),
+            ):
+                burst.project_history(burst.canonical(event), {self.target})
+        for field, invalid in (
+            ("size", 0),
+            ("size", -1),
+            ("size", True),
+            ("size", 1.5),
+            ("size", burst.MAX_JSON + 1),
+            ("annotations", []),
+            ("annotations", {"key": True}),
+            ("unexpected", "payload"),
+        ):
+            event = history(self.target)
+            event["record"]["Result"]["Results"]["0"][field] = invalid
+            with (
+                self.subTest(field=field, invalid=invalid),
+                self.assertRaises(burst.UnknownOutcome),
+            ):
+                burst.project_history(burst.canonical(event), {self.target})
+
+    def test_descriptor_duplicate_json_keys_and_changed_completed_digest_are_unknown(self):
+        raw = burst.canonical(history(self.target))
+        with self.assertRaises(burst.UnknownOutcome):
+            burst.project_history(
+                raw.replace(b'"Results":{"0":', b'"Results":{"0":{},"0":'), {self.target}
+            )
+        changed = history(self.target)
+        changed["record"]["Result"]["Results"]["0"]["digest"] = "sha256:" + "b" * 64
+        with self.assertRaises(burst.UnknownOutcome):
+            burst.project_history(raw + b"\n" + burst.canonical(changed), {self.target})
+
+    def test_deprecated_descriptor_requires_identical_scalar_types(self):
+        for size in (True, 1.0):
+            with self.subTest(size_type=type(size).__name__):
+                event = history(self.target)
+                descriptor = event["record"]["Result"]["Results"]["0"]
+                descriptor["size"] = 1
+                event["record"]["Result"]["ResultDeprecated"] = {**descriptor, "size": size}
+                self.assertEqual(event["record"]["Result"]["ResultDeprecated"], descriptor)
+                with self.assertRaises(burst.UnknownOutcome):
+                    burst.project_history(burst.canonical(event), {self.target})
+
     def test_history_fail_closed_on_foreign_malformed_changed_and_limit(self):
         for changed in (
             history("foreign"),
@@ -524,7 +859,7 @@ class BurstObservationTests(unittest.TestCase):
                 "type": 1,
                 "record": {**history(self.target)["record"], "CreatedAt": {"seconds": True}},
             },
-            {"type": 1, "record": {**history(self.target)["record"], "ExporterResponse": {}}},
+            {"type": 1, "record": {**history(self.target)["record"], "Result": {}}},
         ):
             with self.subTest(changed=changed), self.assertRaises(burst.UnknownOutcome):
                 burst.project_history(burst.canonical(changed), {self.target})
@@ -581,6 +916,37 @@ class BurstObservationTests(unittest.TestCase):
         observer.records[(uid, "1")]["pushed_digest"] = "sha256:" + "b" * 64
         with self.assertRaises(burst.UnknownOutcome):
             observer.summary(known)
+
+    def test_completed_join_without_verified_output_digest_is_unknown(self):
+        observer = burst.WorkerSolveObserver(None, self.plan, self.runtime, MemoryJournal())
+        uid = UUIDS[8]
+        observer.identities[uid] = {"worker_id": "actual-worker", "pod_uid": uid}
+        row = burst.project_history(burst.canonical(history(self.target)), {self.target})[0]
+        observer.records[(uid, row["solve_ref"])] = row
+        job = {"uid": UUIDS[15], "entry": self.jobs[0]}
+        for output_digest in (None, True, "", "sha256:" + "A" * 64):
+            with self.subTest(output_digest=output_digest), self.assertRaises(burst.UnknownOutcome):
+                observer.summary({"job": {**job, "output_manifest_digest": output_digest}})
+        observer.records[(uid, row["solve_ref"])]["pushed_digest"] = None
+        with self.assertRaises(burst.UnknownOutcome):
+            observer.summary({"job": {**job, "output_manifest_digest": None}})
+
+    def test_started_record_cannot_join_as_completed_output(self):
+        observer = burst.WorkerSolveObserver(None, self.plan, self.runtime, MemoryJournal())
+        uid = UUIDS[8]
+        observer.identities[uid] = {"worker_id": "actual-worker", "pod_uid": uid}
+        event = history(self.target, completed=False)
+        event["record"]["Result"] = {"Results": {"0": {"digest": "synthetic-sensitive-active"}}}
+        row = burst.project_history(burst.canonical(event), {self.target})[0]
+        self.assertIsNone(row["pushed_digest"])
+        self.assertNotIn("synthetic-sensitive-active", json.dumps(row))
+        observer.records[(uid, row["solve_ref"])] = row
+        result = observer.summary(
+            {"job": {"uid": UUIDS[15], "entry": self.jobs[0], "output_manifest_digest": DIGEST}}
+        )
+        self.assertFalse(result["complete_for_attribution"])
+        self.assertEqual(result["joined_builds"], [])
+        self.assertEqual(result["missing_or_ambiguous_builds"], ["job"])
 
     def test_two_real_solves_for_one_output_are_ambiguous_not_one_command(self):
         observer = burst.WorkerSolveObserver(None, self.plan, self.runtime, MemoryJournal())
@@ -1080,6 +1446,16 @@ class BurstContractTests(unittest.TestCase):
             (burst.UnknownOutcome("identity changed"), 3, "quarantined", "identified failure"),
             ({"complete_for_attribution": False}, 1, "run_finished", "identified failure"),
         ]
+        secret = "private-secondary-diagnostic-message"
+        try:
+            burst.need(False, secret)
+        except burst.ContractError as error:
+            original = burst.safe_diagnostic(error, "worker_observation")
+        secondary = burst.UnknownOutcome(secret, diagnostic=original)
+        cases = [(*case, None, None) for case in cases] + [
+            (secondary, 3, None, None, "timing_diagnostics_unknown", None),
+            ({"complete_for_attribution": True}, 3, None, None, "cleanup_unknown", secondary),
+        ]
         with tempfile.TemporaryDirectory() as tmp:
             token = Path(tmp) / "token"
             token.write_text("private-test-bearer-123456789", encoding="utf-8")
@@ -1093,26 +1469,44 @@ class BurstContractTests(unittest.TestCase):
                 out_dir=Path(tmp),
                 kubeconfig=Path(tmp) / "kubeconfig",
             )
-            for diagnostic, expected_exit, final_event, build_failure in cases:
+            for (
+                diagnostic,
+                expected_exit,
+                final_event,
+                build_failure,
+                failed_event,
+                cleanup_error,
+            ) in cases:
                 replacements["exact_cleanup"].reset_mock()
+                replacements["exact_cleanup"].side_effect = cleanup_error
                 replacements["poll_wave"].side_effect = (
                     burst.MeasuredFailure(build_failure) if build_failure else None
                 )
                 journal = MemoryJournal()
+                if failed_event is not None:
+                    append = journal.append
+
+                    def append_once(event, **fields):
+                        if event == failed_event:
+                            raise OSError(secret)
+                        append(event, **fields)
+
+                    journal.append = MagicMock(side_effect=append_once)
                 timing = (
                     MagicMock(side_effect=diagnostic)
                     if isinstance(diagnostic, Exception)
                     else MagicMock(return_value=diagnostic)
                 )
                 with (
-                    self.subTest(diagnostic=diagnostic),
+                    self.subTest(diagnostic=diagnostic, failed_event=failed_event),
                     patch.object(burst.sys, "platform", "linux"),
                     patch.multiple(burst, **replacements),
                     patch.object(burst, "Journal", return_value=journal),
                     patch.object(burst, "timing_diagnostics", timing),
                 ):
-                    self.assertEqual(
-                        burst.run_campaign(
+
+                    def campaign():
+                        return burst.run_campaign(
                             args,
                             self.plan,
                             self.runtime,
@@ -1120,9 +1514,26 @@ class BurstContractTests(unittest.TestCase):
                             "0" * 64,
                             "1" * 64,
                             "2" * 64,
-                        ),
-                        expected_exit,
+                        )
+
+                    if failed_event is None:
+                        self.assertEqual(campaign(), expected_exit)
+                    else:
+                        with self.assertRaises(burst.UnknownOutcome) as raised:
+                            campaign()
+                        preserved = burst.safe_diagnostic(raised.exception, "campaign")
+                        self.assertEqual(preserved, original)
+                        self.assertNotIn(secret, burst.canonical(preserved).decode())
+                if failed_event is not None:
+                    self.assertEqual(
+                        sum(call.args[0] == failed_event for call in journal.append.call_args_list),
+                        1,
                     )
+                    self.assertEqual(
+                        replacements["exact_cleanup"].call_count, int(cleanup_error is not None)
+                    )
+                    self.assertNotIn("cleanup_complete", [event for event, _ in journal.events])
+                    continue
                 self.assertEqual(journal.events[-1][0], final_event)
                 if expected_exit == 3:
                     replacements["exact_cleanup"].assert_not_called()
@@ -1351,6 +1762,94 @@ class BurstContractTests(unittest.TestCase):
             sampler.thread.join(timeout=1)
         with self.assertRaises(burst.UnknownOutcome):
             sampler.check()
+
+    def test_campaign_safe_diagnostic_survives_custom_error_and_unwritable_journal(
+        self,
+    ):
+        secret = "private-foreground-message-class-locals"
+        custom = type(secret, (Exception,), {})
+        sampler = burst.Sampler(None, {}, {}, MemoryJournal(), time.monotonic() + 1)
+        with patch.object(burst, "sample_resources", side_effect=ValueError(secret)):
+            sampler._run()
+        with self.assertRaises(burst.UnknownOutcome) as sampled:
+            sampler.check()
+        failures = [(custom(secret), "OTHER_EXCEPTION"), (sampled.exception, "VALUE_ERROR")]
+        with tempfile.TemporaryDirectory() as tmp:
+            token = Path(tmp) / "token"
+            token.write_text("private-test-bearer-123456789", encoding="utf-8")
+            token.chmod(0o600)
+            args = argparse.Namespace(
+                ack=(
+                    f"{RUN}/{self.plan['fixture']['control_namespace']}/"
+                    f"{self.plan['fixture']['runner_namespace']}/{'0' * 12}"
+                ),
+                token_file=token,
+                out_dir=Path(tmp),
+                kubeconfig=Path(tmp) / "kubeconfig",
+            )
+            for failure, expected, failed_event in (
+                (failure, expected, failed_event)
+                for failure, expected in failures
+                for failed_event in (None, "run_interrupted", "quarantined")
+            ):
+                journal = MemoryJournal()
+                if failed_event is not None:
+                    append = journal.append
+
+                    def append_once(event, **fields):
+                        if event == failed_event:
+                            raise OSError(secret)
+                        append(event, **fields)
+
+                    journal.append = MagicMock(side_effect=append_once)
+                with (
+                    self.subTest(failed_event=failed_event, expected=expected),
+                    patch.object(burst.sys, "platform", "linux"),
+                    patch.object(burst, "Journal", return_value=journal),
+                    patch.object(burst, "Kube"),
+                    patch.object(burst, "prepare_outputs", side_effect=failure),
+                    patch.object(burst, "exact_cleanup") as cleanup,
+                ):
+                    if failed_event is None:
+                        self.assertEqual(
+                            burst.run_campaign(
+                                args,
+                                self.plan,
+                                self.runtime,
+                                self.entries,
+                                "0" * 64,
+                                "1" * 64,
+                                "2" * 64,
+                            ),
+                            3,
+                        )
+                        interrupted = journal.events[0][1]
+                        diagnostic = interrupted["diagnostic"]
+                        self.assertEqual(interrupted["reason"], expected)
+                        self.assertEqual(journal.events[-1][0], "quarantined")
+                        self.assertEqual(journal.events[-1][1]["diagnostic"], diagnostic)
+                    else:
+                        with self.assertRaises(burst.UnknownOutcome) as raised:
+                            burst.run_campaign(
+                                args,
+                                self.plan,
+                                self.runtime,
+                                self.entries,
+                                "0" * 64,
+                                "1" * 64,
+                                "2" * 64,
+                            )
+                        diagnostic = burst.safe_diagnostic(raised.exception, "campaign")
+                        self.assertEqual(
+                            journal.append.call_count,
+                            1 if failed_event == "run_interrupted" else 2,
+                        )
+                    cleanup.assert_not_called()
+                    self.assertEqual(diagnostic["error"], expected)
+                    if expected == "VALUE_ERROR":
+                        self.assertEqual(diagnostic, sampler.failure)
+                    self.assertTrue(burst.valid_diagnostic(diagnostic))
+                    self.assertNotIn(secret, burst.canonical(diagnostic).decode())
 
     def test_registry_rejects_extra_port_or_shared_storage_source(self) -> None:
         frozen = json.loads(json.dumps(self.plan))

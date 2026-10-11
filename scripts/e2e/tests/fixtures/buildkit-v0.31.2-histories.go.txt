@@ -1,0 +1,64 @@
+// Offline synthetic fixture, not a live build or acceptance receipt.
+// The official v0.31.2 producer copies frontend res.Metadata to
+// record.ExporterResponse and image exporter descriptors to Result.Results.
+// MarshalVT/UnmarshalVT reproduce the queue's actual persistence serialization.
+package main
+
+import (
+	"encoding/json"
+	"os"
+	"time"
+
+	controlapi "github.com/moby/buildkit/api/services/control"
+	"google.golang.org/protobuf/types/known/timestamppb"
+)
+
+func main() {
+	record := &controlapi.BuildHistoryRecord{
+		Ref: "serialized-solve-ref",
+		Exporters: []*controlapi.Exporter{{
+			Type: "image", Attrs: map[string]string{
+				"name": "fixture.invalid/image:owned", "push": "true",
+			},
+		}},
+		CreatedAt: timestamppb.New(time.Unix(1791511200, 123456789)),
+	}
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(&controlapi.BuildHistoryEvent{Record: record.CloneVT()}); err != nil {
+		panic(err)
+	}
+	record.CompletedAt = timestamppb.New(time.Unix(1791511202, 987654321))
+	metadata := map[string][]byte{
+		"containerimage.config": []byte(`{"architecture":"amd64"}`),
+	}
+	record.ExporterResponse = map[string]string{}
+	for key, value := range metadata {
+		record.ExporterResponse[key] = string(value)
+	}
+	descriptor := &controlapi.Descriptor{
+		Digest:    "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		MediaType: "application/vnd.oci.image.manifest.v1+json", Size: 512,
+	}
+	record.Result = &controlapi.BuildResultInfo{
+		ResultDeprecated: descriptor,
+		Results:          map[int64]*controlapi.Descriptor{0: descriptor},
+		Attestations: []*controlapi.Descriptor{{
+			Digest:    "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+			MediaType: "application/vnd.in-toto+json", Size: 128,
+		}},
+	}
+	raw, err := record.MarshalVT()
+	if err != nil {
+		panic(err)
+	}
+	var persisted controlapi.BuildHistoryRecord
+	if err := persisted.UnmarshalVT(raw); err != nil {
+		panic(err)
+	}
+	if err := enc.Encode(&controlapi.BuildHistoryEvent{
+		Type: controlapi.BuildHistoryEventType_COMPLETE, Record: &persisted,
+	}); err != nil {
+		panic(err)
+	}
+}
