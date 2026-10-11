@@ -14,6 +14,7 @@ import types
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+from urllib.error import HTTPError
 
 SCRIPT = Path(__file__).resolve().parents[1] / "e2e-service-admission-deep-queue.py"
 SPEC = importlib.util.spec_from_file_location("deep_queue_v3_test_bench", SCRIPT)
@@ -803,6 +804,320 @@ class V3QualificationTest(unittest.TestCase):
             V3.histogram_deltas(before, bad, family)
         with self.assertRaises(V3.QualificationError):
             V3.histogram_deltas(after, before, family)
+
+
+class RetainedProfileTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.fix = fixture()
+        self.fix["profile"] = "supported-capacity-retained"
+        self.fix["ports"]["service_second"] = 18089
+
+    def test_full_profile_closed_four_ports_and_original_capacity(self) -> None:
+        V3.validate_fixture(self.fix)
+        self.assertEqual(V3.limits(self.fix)["maxQueuedJobs"], 1000)
+        for change in (
+            {"service_second": self.fix["ports"]["service"]},
+            {"arbitrary_frontdoor": 18090},
+            {"service_second": True},
+        ):
+            bad = copy.deepcopy(self.fix)
+            bad["ports"].update(change)
+            with self.subTest(change=change), self.assertRaises(V3.QualificationError):
+                V3.validate_fixture(bad)
+        bad = copy.deepcopy(self.fix)
+        del bad["ports"]["service_second"]
+        with self.assertRaises(V3.QualificationError):
+            V3.validate_fixture(bad)
+
+    def test_fixed_1500_budget_and_quiet_zero_before_commands(self) -> None:
+        with (
+            patch.object(BENCH.V3, "load_fixture", return_value=(self.fix, "a" * 64)),
+            patch.dict(os.environ, {"DEEP_QUEUE_E2E_FIXTURE": "/private/mock", "DEEP_QUEUE_E2E_QUIET_SECONDS": "0"}, clear=True),
+            patch.multiple(BENCH, **{key: getattr(BENCH, key) for key in (
+                "FIXTURE", "FIXTURE_SHA", "CLUSTER", "NAMESPACE", "CONTROL_NAMESPACE",
+                "RECEIPT_NAMESPACE", "RELEASE", "KUBECONFIG", "STAGES", "PORT", "API_PROXY_PORT", "RUN_DEADLINE_SECONDS"
+            )}),
+            patch.object(BENCH, "command") as commands,
+            patch.object(BENCH, "request_json") as requests,
+        ):
+            BENCH.configure_fixture()
+            self.assertEqual(BENCH.STAGES, (100, 500, 1000))
+            self.assertEqual(BENCH.RUN_DEADLINE_SECONDS, 1500)
+            os.environ["DEEP_QUEUE_E2E_QUIET_SECONDS"] = "300"
+            with self.assertRaises(BENCH.BenchError):
+                BENCH.configure_fixture()
+            commands.assert_not_called()
+            requests.assert_not_called()
+
+    def test_serial_original_frontdoors_and_spent_unknown_attempt(self) -> None:
+        first = types.SimpleNamespace(poll=lambda: None)
+        second = types.SimpleNamespace(poll=lambda: None)
+        with (
+            patch.object(BENCH, "FIXTURE", self.fix),
+            patch.object(BENCH, "HTTP_FRONTDOORS", [(18086, first), (18089, second)]),
+            patch.object(BENCH, "POST_SEQUENCE", 0),
+        ):
+            self.assertEqual([BENCH.admission_port() for _ in range(5)], [18086, 18089, 18086, 18089, 18086])
+            second.poll = lambda: 1
+            with self.assertRaises(BENCH.BenchError):
+                BENCH.admission_port()
+            self.assertEqual(BENCH.POST_SEQUENCE, 5)
+
+    def test_limiter_selection_cannot_use_readiness_errors_or_capacity_429(self) -> None:
+        family = "kova_service_kube_limiter_wait_seconds"
+        deltas = {}
+        for traffic, outcome, slow in (("readiness", "ok", 10), ("http", "error", 10), ("http", "ok", 0)):
+            label = f'traffic_class="{traffic}",outcome="{outcome}"'
+            for suffix, amount in ((f'_bucket{{{label},le="0.01"}}', 10 - slow),
+                                   (f'_bucket{{{label},le="+Inf"}}', 10),
+                                   (f'_count{{{label}}}', 10), (f'_sum{{{label}}}', 1)):
+                deltas["original::" + family + suffix] = amount
+        selected = V3.histogram_summary(deltas, family, {"traffic_class": "http", "outcome": "ok"})
+        self.assertEqual(selected["samples"], 10)
+        self.assertEqual(selected["waits_over_10ms"], 0)
+        self.assertEqual(V3.histogram_summary(deltas, family)["waits_over_10ms"], 20)
+        key = 'original::' + family + '_bucket{traffic_class="http",outcome="ok",le="0.01"}'
+        deltas[key] = 9
+        self.assertEqual(V3.histogram_summary(deltas, family, {"traffic_class": "http", "outcome": "ok"})["waits_over_10ms"], 1)
+        with self.assertRaises(V3.QualificationError):
+            V3.histogram_summary(deltas, family, {"traffic_class": "readiness", "outcome": "ok"})
+
+    def test_epoch_proxy_is_closed_bounded_strict_and_no_subprocess(self) -> None:
+        class Response:
+            status = 200
+            def __enter__(self):
+                return self
+            def __exit__(self, *_args):
+                return False
+            def read(self, maximum):
+                self.maximum = maximum
+                return b'{"apiVersion":"v1","kind":"Namespace"}'
+
+        response = Response()
+        with (
+            patch.object(BENCH, "FIXTURE", self.fix),
+            patch.object(BENCH, "API_READ_PROXY_ENABLED", True),
+            patch.object(BENCH, "NAMESPACE", self.fix["runner_namespace"]),
+            patch.object(BENCH, "EXECUTION_DEADLINE", time.monotonic() + 1),
+            patch.object(BENCH.OPENER, "open", return_value=response) as wire,
+            patch.object(BENCH, "kjson") as subprocess_read,
+        ):
+            got = BENCH.epoch_named_get("namespace", self.fix["runner_namespace"])
+            self.assertEqual(got["kind"], "Namespace")
+            self.assertEqual(response.maximum, BENCH.HTTP_BODY_MAX + 1)
+            self.assertGreater(wire.call_args.kwargs["timeout"], 0)
+            self.assertLessEqual(wire.call_args.kwargs["timeout"], 1)
+            self.assertEqual(wire.call_args.args[0].method, "GET")
+            subprocess_read.assert_not_called()
+            for kind, name in (("namespace", "old"), ("configmap", "unqualified"), ("secret", "token")):
+                with self.subTest(kind=kind), self.assertRaises(BENCH.BenchError):
+                    BENCH.epoch_named_get(kind, name)
+            wire.assert_called_once()
+            wire.side_effect = HTTPError("mock", 404, "not found", {}, io.BytesIO(b"{}"))
+            with self.assertRaises(BENCH.BenchError):
+                BENCH.epoch_named_get("configmap", V3.GENESIS)
+            self.assertEqual(wire.call_count, 2)  # No GET replay or adopted absence.
+            wire.side_effect = None
+            response.read = lambda maximum: b'{"kind":"Namespace","kind":"Pod"}'
+            with self.assertRaises(BENCH.BenchError):
+                BENCH.epoch_named_get("configmap", V3.ACTIVE)
+            response.read = lambda maximum: b"x" * (BENCH.HTTP_BODY_MAX + 1)
+            with self.assertRaises(BENCH.BenchError):
+                BENCH.epoch_named_get("configmap", V3.QUEUE)
+            with patch.object(BENCH, "EXECUTION_DEADLINE", time.monotonic() - 1):
+                calls = wire.call_count
+                with self.assertRaises(BENCH.BenchError):
+                    BENCH.epoch_named_get("configmap", V3.ACTIVE)
+                self.assertEqual(wire.call_count, calls)
+
+    def stop_inputs(self):
+        deployment = {
+            "apiVersion": "apps/v1", "kind": "Deployment",
+            "metadata": dict(metadata("kova-service", self.fix["control_namespace"], uid(7)), generation=1),
+            "spec": {"replicas": 2, "template": {"same_original_spec": True}},
+        }
+        pre = {
+            "service_deployment": {
+                "uid": uid(7), "labels_sha256": BENCH.object_sha256({}),
+                "spec_except_replicas_sha256": BENCH.object_sha256({"template": deployment["spec"]["template"]}),
+            },
+            "service_pods": {"kova-service-two": uid(12), "kova-service-replacement": uid(119)},
+        }
+        after = copy.deepcopy(deployment)
+        after["spec"]["replicas"] = 0
+        after["metadata"].update(generation=2, resourceVersion="23")
+        after["status"] = {"observedGeneration": 2}
+        pods = [{"metadata": metadata(name, self.fix["control_namespace"], identity)}
+                for name, identity in pre["service_pods"].items()]
+        return deployment, after, pods, pre
+
+    def test_one_uid_rv_scale_zero_cas_and_all_three_pod_uid_absences(self) -> None:
+        before, after, pods, pre = self.stop_inputs()
+        calls = []
+        def request(port, method, path, **kwargs):
+            calls.append((method, path, kwargs))
+            return (200 if method == "PATCH" else 404), {}, 0.01, {"body_sha256": "a" * 64}
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.object(BENCH, "FIXTURE", self.fix),
+            patch.object(BENCH, "CONTROL_NAMESPACE", self.fix["control_namespace"]),
+            patch.object(BENCH, "qualify_epoch"),
+            patch.object(BENCH, "kjson", side_effect=[before, after]),
+            patch.object(BENCH, "service_pods", return_value=pods),
+            patch.object(BENCH, "qualify_service_owner"),
+            patch.object(BENCH, "service_owned_pod_projection", return_value=[]) as inventory,
+            patch.object(BENCH, "request_json", side_effect=request),
+        ):
+            effect = BENCH.retained_service_stop(pre, Path(directory), time.monotonic() + 2)
+            self.assertTrue(effect["service_pod_set_empty"])
+            self.assertEqual(len(effect["direct_absent_original_or_planned_uids"]), 3)
+            self.assertEqual([c[0] for c in calls], ["PATCH", "GET", "GET", "GET"])
+            patch_body = calls[0][2]["payload"]
+            self.assertEqual([op["op"] for op in patch_body], ["test", "test", "test", "replace"])
+            self.assertEqual(patch_body[0]["value"], uid(7))
+            self.assertEqual(patch_body[1]["value"], "22")
+            self.assertEqual(patch_body[2]["value"], 2)
+            self.assertEqual(patch_body[3]["value"], 0)
+            self.assertTrue(all("/namespaces/" + self.fix["control_namespace"] + "/" in c[1] for c in calls))
+            inventory.assert_called_once_with(uid(7))
+            with self.assertRaises(BENCH.BenchError):
+                BENCH.retained_service_stop(pre, Path(directory), time.monotonic() + 2)
+            self.assertEqual(len(calls), 4)
+
+    def test_unknown_patch_never_retries_or_infers_pod_absence(self) -> None:
+        for response in (None, (409, {}, 0.1, {}), (202, {}, 0.1, {})):
+            before, _, pods, pre = self.stop_inputs()
+            with (
+                tempfile.TemporaryDirectory() as directory,
+                patch.object(BENCH, "FIXTURE", self.fix),
+                patch.object(BENCH, "CONTROL_NAMESPACE", self.fix["control_namespace"]),
+                patch.object(BENCH, "qualify_epoch"),
+                patch.object(BENCH, "kjson", return_value=before),
+                patch.object(BENCH, "service_pods", return_value=pods),
+                patch.object(BENCH, "qualify_service_owner"),
+                patch.object(BENCH, "service_owned_pod_projection") as inventory,
+                patch.object(BENCH, "request_json", return_value=response,
+                             side_effect=BENCH.BenchError("unknown") if response is None else None) as request,
+            ):
+                with self.subTest(response=response), self.assertRaises(BENCH.BenchError):
+                    BENCH.retained_service_stop(pre, Path(directory), time.monotonic() + 2)
+                request.assert_called_once()
+                inventory.assert_not_called()
+                self.assertFalse(pre["retained_stop_effect"]["service_pod_set_empty"])
+
+    def test_foreign_or_drifted_deployment_stop_has_zero_wire(self) -> None:
+        for field, value in (("uid", uid(222)), ("resourceVersion", ""), ("deletionTimestamp", "now")):
+            before, _, pods, pre = self.stop_inputs()
+            before["metadata"][field] = value
+            with (
+                tempfile.TemporaryDirectory() as directory,
+                patch.object(BENCH, "FIXTURE", self.fix),
+                patch.object(BENCH, "CONTROL_NAMESPACE", self.fix["control_namespace"]),
+                patch.object(BENCH, "qualify_epoch"), patch.object(BENCH, "kjson", return_value=before),
+                patch.object(BENCH, "service_pods", return_value=pods), patch.object(BENCH, "request_json") as request,
+            ):
+                with self.subTest(field=field), self.assertRaises((BENCH.BenchError, V3.QualificationError)):
+                    BENCH.retained_service_stop(pre, Path(directory), time.monotonic() + 2)
+                request.assert_not_called()
+                self.assertNotIn("retained_stop_effect", pre)
+
+    def test_control_namespace_zero_owner_inventory_not_two_uid_guesses(self) -> None:
+        selected = {
+            "metadata": dict(metadata("service-replacement", self.fix["control_namespace"], uid(113)),
+                             labels={"app.kubernetes.io/instance": "kova", "app.kubernetes.io/component": "service"})
+        }
+        empty = {"apiVersion": "v1", "kind": "List", "metadata": {}, "items": []}
+        pods = dict(empty, items=[selected])
+        with (
+            patch.object(BENCH, "CONTROL_NAMESPACE", self.fix["control_namespace"]),
+            patch.object(BENCH, "NAMESPACE", self.fix["runner_namespace"]),
+            patch.object(BENCH, "kjson", side_effect=[empty, pods]) as get,
+        ):
+            self.assertEqual(BENCH.service_owned_pod_projection(uid(7))[0]["uid"], uid(113))
+            self.assertTrue(all(call.args[1] == self.fix["control_namespace"] for call in get.call_args_list))
+        for bad in (dict(empty, metadata={"continue": "next"}), dict(empty, kind="PodList"),
+                    dict(empty, metadata={"remainingItemCount": 1}), dict(empty, items=[selected, selected])):
+            with (
+                patch.object(BENCH, "CONTROL_NAMESPACE", self.fix["control_namespace"]),
+                patch.object(BENCH, "kjson", return_value=bad),
+                self.subTest(bad=bad), self.assertRaises(BENCH.BenchError),
+            ):
+                BENCH.service_owned_pod_projection(uid(7))
+
+    def retained_records(self):
+        con = contract(self.fix)
+        blocker, runner, grant, intent, objects = active(self.fix, con)
+        records = [queued(self.fix, con, f"queue-{index}", index + 1000) for index in range(999)]
+        expected = {b["metadata"]["name"]: b["spec"]["idempotencyKey"] for b, _, _ in records}
+        uids = {b["metadata"]["name"]: b["metadata"]["uid"] for b, _, _ in records}
+        intents = {b["metadata"]["name"]: q for b, q, _ in records}
+        intents[blocker["metadata"]["name"]] = intent
+        objects = dict(objects, **{r["metadata"]["name"]: r for _, _, r in records})
+        before = {"items": [blocker] + [b for b, _, _ in records]}
+        after = copy.deepcopy({"items": [b for b, _, _ in records]})
+        after["items"][0]["status"] = {"phase": "Starting"}
+        retired_names = {"kova-admission-intent-" + intent["nonce"],
+                         "kova-grant-intent-" + grant["grantNonce"],
+                         "kova-pod-create-intent-" + grant["podAttemptNonce"]}
+        final_objects = {name: obj for name, obj in objects.items() if name not in retired_names}
+        for index, prefix in enumerate(("kova-grant-intent-", "kova-pod-create-intent-")):
+            name = prefix + f"{9000 + index:032x}"
+            final_objects[name] = {"metadata": metadata(name, self.fix["receipt_namespace"], uid(9000 + index))}
+        return blocker, runner, grant, intents, objects, before, after, final_objects, expected, uids
+
+    def test_full_retained_trace_999_charges_one_promotion_no_bulk_cleanup(self) -> None:
+        blocker, runner, grant, intents, objects, before, after, final_objects, expected, uids = self.retained_records()
+        pre = {"kubeconfig_sha256": "b" * 64}
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.object(BENCH, "FIXTURE", self.fix),
+            patch.object(BENCH, "wait_queue_state", side_effect=[before, after]) as wait,
+            patch.object(BENCH, "qualify_build_receipts", side_effect=[objects, final_objects, final_objects]),
+            patch.object(BENCH, "queue_ledgers", return_value=({blocker["metadata"]["uid"]: grant}, intents)),
+            patch.object(BENCH, "check_runner", return_value=runner),
+            patch.object(BENCH, "delete_build_with_uid", return_value={"accepted": True}) as deletion,
+            patch.object(BENCH, "kjson", return_value=after),
+            patch.object(BENCH, "request_json", return_value=(404, {}, 0.01, {})) as reads,
+            patch.object(BENCH, "normal_receipt_absence") as absence,
+            patch.object(BENCH, "retained_service_stop", return_value={"service_pod_set_empty": True}) as stop,
+        ):
+            result = BENCH.retained_finish(pre, Path(directory), expected, uids,
+                                          blocker["metadata"]["name"], blocker["metadata"]["uid"], time.monotonic() + 5)
+            self.assertEqual((result["remaining_charges"], result["active"], result["genuinely_queued"], result["free_charge_slots"]),
+                             (999, 1, 998, 1))
+            self.assertFalse(result["all_capacity_released"])
+            self.assertFalse(result["idle_baseline_claimed"])
+            self.assertFalse(result["bulk_retirement_performed"])
+            deletion.assert_called_once_with(blocker["metadata"]["name"], blocker["metadata"]["uid"], "b" * 64)
+            self.assertEqual([call.args[1] for call in reads.call_args_list], ["GET", "GET"])
+            self.assertEqual(len(absence.call_args.args[0]), 3)
+            self.assertEqual(len(result["retained_receipt_uids"]), 1001)
+            stop.assert_called_once()
+            self.assertEqual(len(wait.call_args_list[-1].args[0]), 998)
+            self.assertEqual(wait.call_args_list[-1].args[1], next(iter(expected)))
+
+    def test_unknown_active_release_never_scales_or_bulk_deletes(self) -> None:
+        blocker, runner, grant, intents, objects, before, _, _, expected, uids = self.retained_records()
+        for response in (False, None):
+            with (
+                tempfile.TemporaryDirectory() as directory,
+                patch.object(BENCH, "FIXTURE", self.fix),
+                patch.object(BENCH, "wait_queue_state", return_value=before),
+                patch.object(BENCH, "qualify_build_receipts", return_value=objects),
+                patch.object(BENCH, "queue_ledgers", return_value=({blocker["metadata"]["uid"]: grant}, intents)),
+                patch.object(BENCH, "check_runner", return_value=runner),
+                patch.object(BENCH, "delete_build_with_uid", return_value={"accepted": response},
+                             side_effect=BENCH.BenchError("unknown") if response is None else None) as deletion,
+                patch.object(BENCH, "retained_service_stop") as stop,
+                patch.object(BENCH, "kjson") as current_reads,
+            ):
+                with self.subTest(response=response), self.assertRaises(BENCH.BenchError):
+                    BENCH.retained_finish({"kubeconfig_sha256": "b" * 64}, Path(directory), expected, uids,
+                                         blocker["metadata"]["name"], blocker["metadata"]["uid"], time.monotonic() + 5)
+                deletion.assert_called_once()
+                stop.assert_not_called()
+                current_reads.assert_not_called()
+                self.assertEqual(len(expected), 999)
 
 
 class DirectedFlowTest(unittest.TestCase):

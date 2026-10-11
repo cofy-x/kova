@@ -161,7 +161,9 @@ def validate_fixture(value: dict) -> None:
     )
     need(
         type(value["profile"]) is str
-        and value["profile"] in {"representative-short", "supported-capacity"},
+        and value["profile"] in {
+            "representative-short", "supported-capacity", "supported-capacity-retained"
+        },
         "unknown profile",
     )
     need(
@@ -288,12 +290,13 @@ def validate_fixture(value: dict) -> None:
         and pins["worker_pool_id"].endswith(run_id),
         "worker pool is not fresh/pinned",
     )
-    ports = keys(
-        value["ports"], {"service", "api_proxy", "metrics_remote"}, "port fields differ"
-    )
+    port_fields = {"service", "api_proxy", "metrics_remote"}
+    if value["profile"] == "supported-capacity-retained":
+        port_fields.add("service_second")
+    ports = keys(value["ports"], port_fields, "port fields differ")
     need(
         all(type(port) is int and 1024 <= port <= 65535 for port in ports.values())
-        and len(set(ports.values())) == 3,
+        and len(set(ports.values())) == len(port_fields),
         "ports are not distinct/bounded",
     )
     original_uids = [
@@ -855,13 +858,23 @@ def histogram_deltas(before: list[dict], after: list[dict], family: str) -> dict
     return result
 
 
-def histogram_summary(deltas: dict, family: str) -> dict:
+def histogram_summary(deltas: dict, family: str, labels: dict | None = None) -> dict:
     """Report bucket upper bounds, not exact sampled percentile latencies."""
     buckets = {}
     count = 0.0
     total = 0.0
     for series, amount in deltas.items():
         name = series.split("::", 1)[-1]
+        if labels is not None:
+            # These bounded product labels contain no Prometheus escapes. Do
+            # not let leader/readiness waits certify the HTTP traffic class.
+            need(labels == {"traffic_class": "http", "outcome": "ok"},
+                 "unsupported histogram selection")
+            if not all(
+                re.search(r'(?:\{|,)' + re.escape(key) + '="' + value + r'"(?:,|\})', name)
+                for key, value in labels.items()
+            ):
+                continue
         if name.startswith(family + "_bucket{"):
             found = re.search(r'(?:\{|,)le="([^"]+)"', name)
             need(found is not None, "histogram lacks bucket boundary")

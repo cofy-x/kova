@@ -86,6 +86,13 @@ FIXTURE: dict = {}
 CONTRACT: dict = {}
 FIXTURE_SHA = ""
 EXECUTION_DEADLINE: float | None = None
+API_READ_PROXY_ENABLED = False
+HTTP_FRONTDOORS: list = []
+POST_SEQUENCE = 0
+
+
+def retained_profile() -> bool:
+    return FIXTURE.get("profile") == "supported-capacity-retained"
 
 
 def configure_fixture() -> dict:
@@ -111,8 +118,9 @@ def configure_fixture() -> dict:
     STAGES = (
         (100,) if FIXTURE["profile"] == "representative-short" else (100, 500, 1000)
     )
-    RUN_DEADLINE_SECONDS = 900 if len(STAGES) == 1 else 1800
+    RUN_DEADLINE_SECONDS = 1500 if retained_profile() else (900 if len(STAGES) == 1 else 1800)
     PORT, API_PROXY_PORT = FIXTURE["ports"]["service"], FIXTURE["ports"]["api_proxy"]
+    quiet_seconds()  # Reject incompatible duration before any host operation.
     return FIXTURE
 
 
@@ -209,13 +217,13 @@ def qualify_epoch() -> None:
     ):
         fail("host boot identity changed")
     for role in ("control", "runner", "receipt"):
-        obj = kjson("get", "namespace", FIXTURE[role + "_namespace"], "-o", "json")
+        obj = epoch_named_get("namespace", FIXTURE[role + "_namespace"])
         V3.identity(
             obj, FIXTURE[role + "_namespace"], None, FIXTURE[role + "_namespace_uid"]
         )
         if obj.get("status", {}).get("phase") != "Active":
             fail("original namespace is not Active")
-    genesis = kjson("-n", NAMESPACE, "get", "configmap", V3.GENESIS, "-o", "json")
+    genesis = epoch_named_get("configmap", V3.GENESIS)
     V3.identity(genesis, V3.GENESIS, NAMESPACE, FIXTURE["genesis"]["genesis_uid"])
     data = V3.decode(
         V3.keys(genesis.get("data"), {"genesis.json"}, "Genesis data differs")[
@@ -259,6 +267,8 @@ def quiet_seconds() -> int:
     if re.fullmatch(r"0|[1-9][0-9]*", raw) is None:
         fail("DEEP_QUEUE_E2E_QUIET_SECONDS must be 0 or a decimal duration")
     seconds = int(raw)
+    if retained_profile() and seconds != 0:
+        fail("retained full profile fixes quiet_seconds=0 within its original 1500s budget")
     if seconds != 0 and not (
         QUIET_MIN_SECONDS <= seconds <= QUIET_MAX_SECONDS and seconds % 30 == 0
     ):
@@ -577,8 +587,8 @@ def single_service_args(deployment: dict) -> tuple[str, str]:
         "--worker-slots=1",
         f"--max-queued-jobs={quota_limit()}",
         f"--max-queued-jobs-per-requester={quota_limit()}",
-        "--kube-client-qps=20",
-        "--kube-client-burst=40",
+        f"--kube-client-qps={100 if retained_profile() else 20}",
+        f"--kube-client-burst={200 if retained_profile() else 40}",
         "--runner-node-selector=never=true",
         "--auth-mode=static",
         "--auth-static-principal=kova:e2e",
@@ -682,8 +692,8 @@ def service_pods() -> list[dict]:
 def queue_ledgers(
     expected_queued: int, blocker_id: str | None = None, blocker_uid: str | None = None
 ) -> tuple[dict, dict]:
-    active = kjson("-n", NAMESPACE, "get", "configmap", "kova-service-admission", "-o", "json")
-    queue = kjson("-n", NAMESPACE, "get", "configmap", "kova-service-queue-admission", "-o", "json")
+    active = epoch_named_get("configmap", V3.ACTIVE)
+    queue = epoch_named_get("configmap", V3.QUEUE)
     try:
         active_data = V3.qualify_ledger(active, "active", FIXTURE, CONTRACT)
         queue_data = V3.qualify_ledger(queue, "queue", FIXTURE, CONTRACT)
@@ -1154,11 +1164,12 @@ def resource_sample(
 
 
 def request_json(
-    port: int, method: str, path: str, token: str = "", payload: dict | None = None
+    port: int, method: str, path: str, token: str = "", payload: dict | list | None = None
 ) -> tuple[int, dict, float, dict]:
     bounded_timeout = budget_timeout(15)
     data = json.dumps(payload).encode() if payload is not None else None
-    headers = {"Content-Type": "application/json"}
+    headers = {"Content-Type": "application/json-patch+json"
+               if method == "PATCH" and type(payload) is list else "application/json"}
     if token:
         headers["Authorization"] = f"Bearer {token}"
     req = Request(
@@ -1218,6 +1229,83 @@ def request_json(
             ),
         },
     )
+
+
+def epoch_named_get(kind: str, name: str) -> dict:
+    """Only the six existing epoch reads; no generic API client or caching."""
+    if kind == "namespace" and name in {
+        FIXTURE.get(role + "_namespace") for role in ("control", "runner", "receipt")
+    }:
+        path = f"/api/v1/namespaces/{name}"
+        args = ("get", "namespace", name, "-o", "json")
+    elif kind == "configmap" and name in {V3.GENESIS, V3.ACTIVE, V3.QUEUE}:
+        path = f"/api/v1/namespaces/{NAMESPACE}/configmaps/{name}"
+        args = ("-n", NAMESPACE, "get", "configmap", name, "-o", "json")
+    else:
+        fail("epoch GET is outside the closed original identity paths")
+    if not API_READ_PROXY_ENABLED:
+        return kjson(*args)
+    request = Request(f"http://127.0.0.1:{API_PROXY_PORT}{path}", method="GET")
+    try:
+        with OPENER.open(request, timeout=budget_timeout(15)) as response:
+            if response.status != 200:
+                fail("original epoch named GET did not return HTTP 200")
+            raw = response.read(HTTP_BODY_MAX + 1)
+    except (HTTPError, OSError, URLError):
+        fail("original epoch named GET is UNKNOWN; no replay or absence inference")
+    budget_timeout(15)
+    if len(raw) > HTTP_BODY_MAX:
+        fail("original epoch named GET exceeds its byte bound")
+    try:
+        return V3.decode(raw)
+    except (ValueError, UnicodeError):
+        fail("original epoch named GET JSON is invalid")
+
+
+def admission_port() -> int:
+    """One serial request, alternating the two original independent frontdoors."""
+    global POST_SEQUENCE
+    if not retained_profile() or not HTTP_FRONTDOORS:
+        return PORT
+    if len(HTTP_FRONTDOORS) != 2 or any(child.poll() is not None for _, child in HTTP_FRONTDOORS):
+        fail("an original HTTP frontdoor exited; do not replay an admission")
+    port, _ = HTTP_FRONTDOORS[POST_SEQUENCE % 2]
+    POST_SEQUENCE += 1  # An uncertain attempt is spent, never retried elsewhere.
+    return port
+
+
+def start_api_proxy(run_dir: Path) -> object:
+    if hashlib.sha256(KUBECONFIG.read_bytes()).hexdigest() != FIXTURE["kubeconfig_sha256"]:
+        fail("original kubeconfig changed before API proxy")
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", API_PROXY_PORT))
+    with (run_dir / "kubectl-proxy.log").open("w", encoding="utf-8") as log:
+        budget_timeout(15)
+        child = subprocess.Popen(
+            ["kubectl", "--kubeconfig", str(KUBECONFIG), "proxy", "--address=127.0.0.1",
+             f"--port={API_PROXY_PORT}", "--api-prefix=/"],
+            stdout=log, stderr=subprocess.STDOUT,
+        )
+    return child
+
+
+def qualify_api_proxy(child: object) -> None:
+    global API_READ_PROXY_ENABLED
+    path = f"/api/v1/namespaces/{FIXTURE['runner_namespace']}"
+    for _ in range(30):
+        if child.poll() is not None:
+            fail("original Kubernetes API proxy exited")
+        try:
+            status = request_json(API_PROXY_PORT, "GET", path)[0]
+        except BenchError:
+            pause(1)
+            continue  # Only pre-ready read transport, never a mutation replay.
+        if status != 200:
+            fail("original namespace readiness read is UNKNOWN, not absence")
+        API_READ_PROXY_ENABLED = True
+        qualify_epoch()  # Identity/readback failures are not retried.
+        return
+    fail("original Kubernetes API proxy did not become ready")
 
 
 def build_id(key: str) -> str:
@@ -1336,7 +1424,8 @@ def close_local_processes(metrics: list, forward: object, proxy: object,
     if deadline is not None:
         until = min(until, deadline)
     children = [item.process for item in metrics]
-    children += [item for item in (forward, proxy) if item is not None]
+    forwards = forward if type(forward) is list else [forward]
+    children += [item for item in [*forwards, proxy] if item is not None]
     for child in children:
         if child.poll() is None:
             child.terminate()
@@ -1412,7 +1501,7 @@ def full_capacity_recovery(
     )
     qualify_epoch()
     status, _, elapsed, body = request_json(
-        PORT, "POST", "/v1/builds", token=token, payload=payload
+        admission_port(), "POST", "/v1/builds", token=token, payload=payload
     )
     append_jsonl(
         directory / "responses.jsonl",
@@ -1483,7 +1572,7 @@ def full_capacity_recovery(
     )
     qualify_epoch()
     status, headers, elapsed, body = request_json(
-        PORT, "POST", "/v1/builds", token=token, payload=payload
+        admission_port(), "POST", "/v1/builds", token=token, payload=payload
     )
     append_jsonl(
         directory / "responses.jsonl",
@@ -2306,7 +2395,22 @@ def capture_failure_objects(run_dir: Path, token: str, known_ids: set[str]) -> d
 
 
 def service_owned_pod_projection(deployment_uid: str) -> list[dict]:
-    replicasets = kjson("-n", NAMESPACE, "get", "replicasets", "-o", "json")["items"]
+    def complete_items(kind: str) -> list:
+        inventory = kjson("-n", CONTROL_NAMESPACE, "get", kind, "-o", "json")
+        metadata = inventory.get("metadata", {})
+        items = inventory.get("items")
+        if (
+            inventory.get("apiVersion") != "v1" or inventory.get("kind") != "List"
+            or type(metadata) is not dict or metadata.get("continue")
+            or metadata.get("remainingItemCount", 0) != 0 or type(items) is not list
+            or len(items) > 32
+            or len({(p["metadata"]["name"], p["metadata"]["uid"]) for p in items}) != len(items)
+            or any(p["metadata"].get("namespace") != CONTROL_NAMESPACE for p in items)
+        ):
+            fail("Service owner inventory is malformed, paginated or exceeds its bound")
+        return items
+
+    replicasets = complete_items("replicasets")
     owned_rs_uids = {
         item["metadata"]["uid"]
         for item in replicasets
@@ -2315,7 +2419,7 @@ def service_owned_pod_projection(deployment_uid: str) -> list[dict]:
             for owner in item["metadata"].get("ownerReferences", [])
         )
     }
-    pods = kjson("-n", NAMESPACE, "get", "pods", "-o", "json")["items"]
+    pods = complete_items("pods")
     selected = []
     for pod in pods:
         metadata = pod["metadata"]
@@ -2338,6 +2442,187 @@ def service_owned_pod_projection(deployment_uid: str) -> list[dict]:
             }
         )
     return sorted(selected, key=lambda item: item["name"])
+
+
+def qualify_stop_deployment(obj: dict, pre: dict, replicas: int) -> None:
+    original = pre["service_deployment"]
+    V3.identity(obj, f"{RELEASE}-service", CONTROL_NAMESPACE, original["uid"])
+    metadata, spec = obj["metadata"], obj.get("spec", {})
+    if (
+        obj.get("apiVersion") != "apps/v1" or obj.get("kind") != "Deployment"
+        or metadata.get("deletionTimestamp") is not None
+        or type(metadata.get("generation")) is not int or metadata["generation"] < 1
+        or type(metadata.get("resourceVersion")) is not str or not metadata["resourceVersion"]
+        or type(spec.get("replicas")) is not int or spec["replicas"] != replicas
+        or object_sha256(metadata.get("labels", {})) != original["labels_sha256"]
+        or object_sha256({key: value for key, value in spec.items() if key != "replicas"})
+        != original["spec_except_replicas_sha256"]
+    ):
+        fail("original Deployment identity/spec differs before/after one planned stop")
+
+
+def retained_service_stop(pre: dict, directory: Path, deadline: float) -> dict:
+    """A predeclared successful-run stop, never UNKNOWN cleanup or a retry."""
+    if not retained_profile() or pre.get("retained_stop_effect") is not None:
+        fail("retained stop is not predeclared or its sole attempt was spent")
+    qualify_epoch()
+    deployment = kjson("-n", CONTROL_NAMESPACE, "get", "deployment", f"{RELEASE}-service", "-o", "json")
+    qualify_stop_deployment(deployment, pre, 2)
+    current_pods = service_pods()
+    if {p["metadata"]["name"]: p["metadata"]["uid"] for p in current_pods} != pre["service_pods"]:
+        fail("post-handoff original/replacement Service Pod identities changed before stop")
+    for pod in current_pods:
+        qualify_service_owner(pod, pre)
+    observed = deployment["metadata"]
+    # Original UID/spec were fixed before the run. This fresh opaque RV is
+    # fixed in the intent before one wire attempt; no CAS conflict replay.
+    effect = {
+        "deployment_uid": observed["uid"], "resource_version": observed["resourceVersion"],
+        "from_replicas": 2, "to_replicas": 0, "patch_attempted": True,
+        "acknowledged": False, "deployment_zero_observed": False,
+        "service_pod_set_empty": False, "direct_absent_original_or_planned_uids": {},
+    }
+    pre["retained_stop_effect"] = effect
+    save_json(directory / "service-stop-intent.json", effect)
+    payload = [
+        {"op": "test", "path": "/metadata/uid", "value": observed["uid"]},
+        {"op": "test", "path": "/metadata/resourceVersion", "value": observed["resourceVersion"]},
+        {"op": "test", "path": "/spec/replicas", "value": 2},
+        {"op": "replace", "path": "/spec/replicas", "value": 0},
+    ]
+    path = f"/apis/apps/v1/namespaces/{CONTROL_NAMESPACE}/deployments/{RELEASE}-service"
+    status, _, _, body = request_json(API_PROXY_PORT, "PATCH", path, payload=payload)
+    effect.update(http_status=status, response_fingerprint=body)
+    save_json(directory / "service-stop-effect.json", effect)
+    if status != 200:
+        fail("one planned UID/RV Deployment stop acknowledgement is UNKNOWN")
+    effect["acknowledged"] = True
+    known_pods = dict(FIXTURE["service_pods"])
+    for name, identity in pre["service_pods"].items():
+        if name in known_pods and known_pods[name] != identity:
+            fail("planned replacement reused an original Service Pod name")
+        known_pods[name] = identity
+    while time.monotonic() < deadline:
+        qualify_epoch()
+        current = kjson("-n", CONTROL_NAMESPACE, "get", "deployment", f"{RELEASE}-service", "-o", "json")
+        qualify_stop_deployment(current, pre, 0)
+        state = current.get("status", {})
+        if (
+            state.get("observedGeneration") == current["metadata"].get("generation")
+            and all(type(state.get(key, 0)) is int and state.get(key, 0) == 0
+                    for key in ("replicas", "readyReplicas", "updatedReplicas", "availableReplicas", "unavailableReplicas"))
+            and not service_owned_pod_projection(observed["uid"])
+        ):
+            effect["deployment_zero_observed"] = True
+            effect["service_pod_set_empty"] = True
+            for name, identity in known_pods.items():
+                path = f"/api/v1/namespaces/{CONTROL_NAMESPACE}/pods/{name}"
+                if request_json(API_PROXY_PORT, "GET", path)[0] != 404:
+                    fail("an original/planned replacement Service Pod was not directly absent")
+                effect["direct_absent_original_or_planned_uids"][name] = identity
+            save_json(directory / "service-stop-effect.json", effect)
+            return effect
+        pause(1)
+    fail("planned Service stop did not converge within the original bounded deadline")
+
+
+def retained_finish(
+    pre: dict, run_dir: Path, expected_ids: dict[str, str], expected_uids: dict[str, str],
+    blocker_id: str, blocker_uid: str, deadline: float,
+) -> dict:
+    """Retire only the active blocker, promote one original waiter, retain the rest."""
+    directory = run_dir / "retained-success"
+    directory.mkdir()
+    before = wait_queue_state(expected_ids, blocker_id, blocker_uid, directory,
+                              min(deadline, time.monotonic() + 5), expected_uids=expected_uids)
+    by_name = {item["metadata"]["name"]: item for item in before["items"]}
+    objects = qualify_build_receipts(by_name, blocker_id, blocker_uid)
+    grants, intents = queue_ledgers(len(expected_ids), blocker_id, blocker_uid)
+    grant = grants[blocker_uid]
+    retired_names = {
+        "kova-admission-intent-" + intents[blocker_id]["nonce"],
+        "kova-grant-intent-" + grant["grantNonce"],
+        "kova-pod-create-intent-" + grant["podAttemptNonce"],
+    }
+    blocker_receipts = {name: objects[name] for name in retired_names}
+    retained_queue_receipts = {
+        name: obj["metadata"]["uid"] for name, obj in objects.items() if name not in retired_names
+    }
+    original_runner = check_runner(blocker_id, blocker_uid)
+    challenger_id = next(iter(expected_ids))
+    challenger_uid = expected_uids[challenger_id]
+    # Named immutable CR/spec/receipt qualification precedes the sole DELETE.
+    pre["retained_promotion_effect"] = {
+        "blocker_id": blocker_id, "blocker_uid": blocker_uid, "delete_attempted": True,
+        "original_challenger_id": challenger_id, "original_challenger_uid": challenger_uid,
+    }
+    save_json(directory / "promotion-intent.json", pre["retained_promotion_effect"])
+    deletion = delete_build_with_uid(blocker_id, blocker_uid, pre["kubeconfig_sha256"])
+    pre["retained_promotion_effect"]["delete_response"] = deletion
+    save_json(directory / "promotion-effect.json", pre["retained_promotion_effect"])
+    if not deletion["accepted"]:
+        fail("original active blocker UID release acknowledgement is UNKNOWN")
+    promotion_started = time.monotonic()
+    promotion_deadline = min(deadline, promotion_started + 120)
+    while time.monotonic() < promotion_deadline:
+        inventory = kjson("-n", NAMESPACE, "get", "kovabuilds", "-o", "json")
+        current = {item["metadata"]["name"]: item for item in inventory["items"]}
+        if len(current) != len(inventory["items"]) or set(current) - (set(expected_ids) | {blocker_id}):
+            fail("unrecorded/duplicate build appeared during retained promotion")
+        if not set(expected_ids) <= set(current) or any(
+            current[name]["metadata"]["uid"] != expected_uids[name]
+            or current[name]["spec"] != by_name[name]["spec"] for name in expected_ids
+        ):
+            fail("original waiting CR UID/spec changed during retained promotion")
+        challenger = current[challenger_id]
+        if any(current[name].get("status", {}).get("phase") != "Queued"
+               for name in expected_ids if name != challenger_id):
+            fail("a nonchallenger queued request changed phase during retained promotion")
+        if challenger.get("status", {}).get("phase") not in ("Queued", "Starting"):
+            fail("original challenger entered an unexpected phase")
+        if blocker_id not in current and challenger.get("status", {}).get("phase") == "Starting":
+            current_objects = qualify_build_receipts(current, challenger_id, challenger_uid)
+            if any(current_objects.get(name, {}).get("metadata", {}).get("uid") != identity
+                   for name, identity in retained_queue_receipts.items()):
+                fail("an originally retained queue receipt changed UID")
+            if request_json(API_PROXY_PORT, "GET", build_api_path(blocker_id))[0] != 404:
+                fail("original released blocker CR was not directly absent")
+            old_pod_path = f"/api/v1/namespaces/{NAMESPACE}/pods/{original_runner['metadata']['name']}"
+            if request_json(API_PROXY_PORT, "GET", old_pod_path)[0] != 404:
+                fail("original released blocker runner was not directly absent")
+            normal_receipt_absence(blocker_receipts, promotion_deadline)
+            break
+        pause(1)
+    else:
+        fail("original challenger did not promote before the fixed 120s subdeadline")
+    promotion = {
+        "status": "passed", **pre["retained_promotion_effect"],
+        "seconds": time.monotonic() - promotion_started,
+        "retired_original_receipt_uids": {name: obj["metadata"]["uid"] for name, obj in blocker_receipts.items()},
+    }
+    save_json(directory / "promotion.json", promotion)
+    # This is success-only disposition. Any prior UNKNOWN exits before scale0.
+    stop = retained_service_stop(pre, directory, min(deadline, time.monotonic() + 120))
+    final = wait_queue_state(
+        {name: key for name, key in expected_ids.items() if name != challenger_id},
+        challenger_id, challenger_uid, directory, min(deadline, time.monotonic() + 5),
+        expected_uids=expected_uids,
+    )
+    final_objects = qualify_build_receipts(
+        {item["metadata"]["name"]: item for item in final["items"]}, challenger_id, challenger_uid
+    )
+    if {name: obj["metadata"]["uid"] for name, obj in final_objects.items()} != {
+        name: obj["metadata"]["uid"] for name, obj in current_objects.items()
+    }:
+        fail("retained effect receipt identities changed during planned Service stop")
+    return {
+        "status": "passed", "original_uid_capacity_promotion": promotion, "planned_service_stop": stop,
+        "remaining_charges": len(expected_ids), "active": 1, "genuinely_queued": len(expected_ids) - 1,
+        "free_charge_slots": quota_limit() - len(expected_ids), "all_capacity_released": False,
+        "bulk_retirement_performed": False, "idle_baseline_claimed": False,
+        "frontdoor_service_pods": 0, "runner_execution": False,
+        "retained_receipt_uids": {name: obj["metadata"]["uid"] for name, obj in final_objects.items()},
+    }
 
 
 def emergency_stop(pre: dict, run_dir: Path, token: str) -> dict:
@@ -2675,6 +2960,8 @@ def observe_long_quiet(
 
 
 def live(pre: dict, token: str) -> Path:
+    global API_READ_PROXY_ENABLED, HTTP_FRONTDOORS, POST_SEQUENCE
+    API_READ_PROXY_ENABLED, HTTP_FRONTDOORS, POST_SEQUENCE = False, [], 0
     overall_deadline = live_deadline()
     run_id = (
         "deep-queue-"
@@ -2763,6 +3050,43 @@ def live(pre: dict, token: str) -> Path:
         else:
             fail("Service Pod did not become ready through the local port-forward")
 
+        if retained_profile():
+            # Two original HTTP servers, one serial stream. No retries,
+            # concurrent ledger mutation, service selectors or Pod adoption.
+            primary = forward
+            forward = [primary]
+            second_name = pre["initial_leader"]
+            second_port = FIXTURE["ports"]["service_second"]
+            with socket.socket() as probe:
+                probe.bind(("127.0.0.1", second_port))
+            with (run_dir / "port-forward-second.log").open("w", encoding="utf-8") as log:
+                budget_timeout(15)
+                secondary = subprocess.Popen(
+                    ["kubectl", "--kubeconfig", str(KUBECONFIG), "-n", CONTROL_NAMESPACE,
+                     "port-forward", "--address", "127.0.0.1", f"pod/{second_name}", f"{second_port}:8080"],
+                    stdout=log, stderr=subprocess.STDOUT,
+                )
+            forward.append(secondary)
+            for _ in range(30):
+                if secondary.poll() is not None:
+                    fail("original second HTTP Pod port-forward exited")
+                try:
+                    if request_json(second_port, "GET", "/readyz")[0] == 200:
+                        break
+                except BenchError:
+                    pass
+                pause(1)
+            else:
+                fail("original second HTTP Pod did not become ready")
+            HTTP_FRONTDOORS = [(PORT, primary), (second_port, secondary)]
+            pre["original_http_frontdoors"] = {
+                pod_name: {"uid": pre["service_pods"][pod_name], "port": PORT},
+                second_name: {"uid": pre["service_pods"][second_name], "port": second_port},
+            }
+            save_json(run_dir / "original-http-frontdoors.json", pre["original_http_frontdoors"])
+            proxy = start_api_proxy(run_dir)
+            qualify_api_proxy(proxy)
+
         metrics = metrics_forwards(pre, overall_deadline)
         source_uri = (
             f"oci://unused.invalid/deep-queue/{FIXTURE['run_id']}@{SOURCE_DIGEST}"
@@ -2789,7 +3113,7 @@ def live(pre: dict, token: str) -> Path:
         qualify_epoch()
         admission_attempted = True
         status, headers, elapsed, body_fingerprint = request_json(
-            PORT, "POST", "/v1/builds", token, blocker_payload
+            admission_port(), "POST", "/v1/builds", token, blocker_payload
         )
         observed_id = headers.get("x-kova-build-id", "")
         append_jsonl(
@@ -2917,7 +3241,7 @@ def live(pre: dict, token: str) -> Path:
                 }
                 qualify_epoch()
                 status, headers, elapsed, body_fingerprint = request_json(
-                    PORT, "POST", "/v1/builds", token, payload
+                    admission_port(), "POST", "/v1/builds", token, payload
                 )
                 observed_id = headers.get("x-kova-build-id", "")
                 append_jsonl(
@@ -2996,10 +3320,11 @@ def live(pre: dict, token: str) -> Path:
                     service_metrics_before, service_metrics_after, limiter_family
                 ),
                 limiter_family,
+                {"traffic_class": "http", "outcome": "ok"} if retained_profile() else None,
             )
             if reconcile["samples"] == 0 or limiter["waits_over_10ms"] <= 0:
                 fail(
-                    "stage did not observe reconcile samples and bounded client limiter waits >10ms"
+                    "stage did not observe reconcile samples and qualified client limiter waits >10ms"
                 )
             wait_queue_state(
                 expected_ids,
@@ -3028,6 +3353,8 @@ def live(pre: dict, token: str) -> Path:
                 "resource_peaks": resource_peaks(stage_dir),
                 "reconcile_histogram": reconcile,
                 "client_limiter_histogram": limiter,
+                "client_limiter_selection": {"traffic_class": "http", "outcome": "ok"}
+                if retained_profile() else "all_classes_legacy_profile",
                 "service_metric_deltas": service_deltas,
                 "metric_note": "histogram percentile bucket upper bounds; API totals include observer/system traffic",
             }
@@ -3072,37 +3399,9 @@ def live(pre: dict, token: str) -> Path:
         cleanup_deadline = min(
             time.monotonic() + CLEANUP_DEADLINE_SECONDS, overall_deadline
         )
-        with socket.socket() as proxy_probe:
-            proxy_probe.bind(("127.0.0.1", API_PROXY_PORT))
-        with (run_dir / "kubectl-proxy.log").open("w", encoding="utf-8") as log:
-            budget_timeout(15)
-            proxy = subprocess.Popen(
-                [
-                    "kubectl",
-                    "--kubeconfig",
-                    str(KUBECONFIG),
-                    "proxy",
-                    "--address=127.0.0.1",
-                    f"--port={API_PROXY_PORT}",
-                    "--api-prefix=/",
-                ],
-                stdout=log,
-                stderr=subprocess.STDOUT,
-            )
-        for _ in range(30):
-            if proxy.poll() is not None:
-                fail("UID-precondition Kubernetes API proxy exited")
-            try:
-                if (
-                    request_json(API_PROXY_PORT, "GET", build_api_path(blocker_id))[0]
-                    == 200
-                ):
-                    break
-            except BenchError:
-                pass
-            pause(1)
-        else:
-            fail("UID-precondition Kubernetes API proxy did not become ready")
+        if proxy is None:
+            proxy = start_api_proxy(run_dir)
+            qualify_api_proxy(proxy)
         cleanup_started = True
         checkpoint = "full-capacity-recovery"
         recovery_result = full_capacity_recovery(
@@ -3131,6 +3430,32 @@ def live(pre: dict, token: str) -> Path:
             fail(
                 "planned leader changed onto the HTTP-forward survivor; stop without another POST"
             )
+        if retained_profile():
+            checkpoint = "retained-original-uid-promotion-and-planned-stop"
+            retained = retained_finish(
+                pre, run_dir, expected_ids, expected_uids, blocker_id, blocker_uid,
+                overall_deadline,
+            )
+            checkpoint = "local-child-shutdown"
+            close_local_processes(metrics, forward, proxy, overall_deadline)
+            metrics, forward, proxy = [], None, None
+            budget_timeout(RUN_DEADLINE_SECONDS)
+            save_json(run_dir / "result.json", {
+                "status": "passed", "profile": FIXTURE["profile"],
+                "scope": "supported_capacity_api_admission_retained_success",
+                "completed_at": now(), "stages": STAGES, "quiet_seconds": 0,
+                "operator_kube_client_qps_per_pod": 100, "operator_kube_client_burst_per_pod": 200,
+                "original_http_frontdoors": pre["original_http_frontdoors"],
+                "post_attempts_serial": POST_SEQUENCE,
+                "full_capacity_recovery": recovery_result, "leader_handoff": handoff_result,
+                "planned_original_leader_uid_delete": pre.get("leader_handoff_effect"),
+                "retained_success": retained, "exact_bulk_cr_cleanup": False,
+                "unmeasured": ["default 20/40 HTTP performance", "API-server 429 fault injection",
+                               "all-Service simultaneous restart", "long quiet/soak", "bulk retirement and idle baseline"],
+                "cluster_deleted": False, "registry_touched": False,
+            })
+            success = True
+            return run_dir
         cleanup_metrics = api_metrics()
         cleanup_at = time.monotonic()
         checkpoint = "queued-cleanup"
@@ -3399,6 +3724,8 @@ def live(pre: dict, token: str) -> Path:
             "registry_touched": False,
             "emergency_stop": "not-attempted-retained",
             "planned_original_leader_uid_delete": pre.get("leader_handoff_effect"),
+            "planned_service_stop_effect": pre.get("retained_stop_effect"),
+            "retained_promotion_effect": pre.get("retained_promotion_effect"),
         }
         try:
             save_json(run_dir / "result.json", base_result)
@@ -3432,6 +3759,7 @@ def live(pre: dict, token: str) -> Path:
         for signum, previous_handler in previous_handlers.items():
             signal.signal(signum, previous_handler)
         close_local_processes(metrics, forward, proxy)
+        API_READ_PROXY_ENABLED, HTTP_FRONTDOORS = False, []
         if success:
             note(f"PASS; receipts preserved at {run_dir}")
         else:
