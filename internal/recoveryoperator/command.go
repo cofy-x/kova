@@ -25,7 +25,8 @@ func NewCLIApp() *cli.App {
 				&cli.StringFlag{Name: "ca-file", Usage: "explicit CA bytes matching the independent connection record; required only with --execute"},
 				&cli.StringFlag{Name: "credentials", Usage: "private canonical static bearer token or mTLS credential file; required only with --execute"},
 				&cli.DurationFlag{Name: "timeout", Value: time.Minute, Usage: "whole-invocation deadline, greater than zero and at most 15m; grant expiry is also enforced"},
-			}, Action: runRecoveryDisposal}, stageCommand("collect-exact"), stageCommand("drain-exact")}}
+			}, Action: runRecoveryDisposal}, stageCommand("collect-exact"), stageCommand("drain-exact"),
+			verificationCommand("verify-authorization"), verificationCommand("verify-closure")}}
 }
 
 func stageCommand(action string) *cli.Command {
