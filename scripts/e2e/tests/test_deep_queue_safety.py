@@ -26,18 +26,24 @@ UID = "12345678-1234-1234-1234-123456789abc"
 
 
 def oci_archive(
-    *, extra_platform: bool = False, omit_config: bool = False, corrupt_config: bool = False
+    *,
+    extra_platform: bool = False,
+    omit_config: bool = False,
+    corrupt_config: bool = False,
+    config_size_delta: int = 0,
+    config_fields: dict | None = None,
+    descriptor_fields: dict | None = None,
+    remove_descriptor_fields: tuple[str, ...] = (),
 ) -> tuple[bytes, str, str]:
     reference = "localhost:5002/kova:controller-dev"
     revision = "824f697f0456"
-    config = json.dumps(
-        {
-            "architecture": "amd64",
-            "os": "linux",
-            "config": {"Labels": {"org.opencontainers.image.revision": revision}},
-        },
-        separators=(",", ":"),
-    ).encode()
+    config_value = {
+        "architecture": "amd64",
+        "os": "linux",
+        "config": {"Labels": {"org.opencontainers.image.revision": revision}},
+    }
+    config_value.update(config_fields or {})
+    config = json.dumps(config_value, separators=(",", ":")).encode()
     config_digest = "sha256:" + hashlib.sha256(config).hexdigest()
     manifest = json.dumps(
         {
@@ -46,7 +52,7 @@ def oci_archive(
             "config": {
                 "mediaType": "application/vnd.oci.image.config.v1+json",
                 "digest": config_digest,
-                "size": len(config),
+                "size": len(config) + config_size_delta,
             },
             "layers": [],
         },
@@ -60,6 +66,9 @@ def oci_archive(
         "annotations": {"io.containerd.image.name": reference},
         "platform": {"architecture": "amd64", "os": "linux"},
     }
+    descriptor.update(descriptor_fields or {})
+    for field in remove_descriptor_fields:
+        descriptor.pop(field)
     index = json.dumps(
         {
             "schemaVersion": 2,
@@ -276,6 +285,8 @@ class DeepQueueSafetyTest(unittest.TestCase):
             {"extra_platform": True},
             {"omit_config": True},
             {"corrupt_config": True},
+            {"config_size_delta": 1},
+            {"descriptor_fields": {"size": 1}},
         ):
             archive, manifest_digest, _ = oci_archive(**options)
             with self.assertRaises(BENCH.BenchError):
@@ -285,6 +296,120 @@ class DeepQueueSafetyTest(unittest.TestCase):
                     manifest_digest,
                     "824f697f0456",
                 )
+
+    def test_digest_pull_archive_can_omit_only_index_platform_and_name_hints(self) -> None:
+        source_hint = {
+            "containerd.io/distribution.source.127.0.0.1": "localhost:5002/kova"
+        }
+        archive, manifest_digest, config_digest = oci_archive(
+            descriptor_fields={"annotations": source_hint},
+            remove_descriptor_fields=("platform",),
+        )
+        reference = f"localhost:5002/kova@{manifest_digest}"
+        fact = BENCH.parse_oci_saved_image(
+            io.BytesIO(archive), reference, manifest_digest, "824f697f0456"
+        )
+        self.assertEqual(fact["platform_manifest_digest"], manifest_digest)
+        self.assertEqual(fact["config_digest"], config_digest)
+
+        # Optional hints are accepted when present and exactly consistent.
+        annotated, annotated_digest, _ = oci_archive(
+            descriptor_fields={
+                "annotations": {"io.containerd.image.name": reference, **source_hint}
+            }
+        )
+        self.assertEqual(annotated_digest, manifest_digest)
+        BENCH.parse_oci_saved_image(
+            io.BytesIO(annotated), reference, manifest_digest, "824f697f0456"
+        )
+
+    def test_digest_pull_recomputed_manifest_config_cannot_change_platform_or_revision(self) -> None:
+        for config_fields in (
+            {"architecture": "arm64"},
+            {"os": "windows"},
+            {"config": {"Labels": {"org.opencontainers.image.revision": "different"}}},
+        ):
+            with self.subTest(config_fields=config_fields):
+                archive, manifest_digest, _ = oci_archive(
+                    config_fields=config_fields,
+                    descriptor_fields={"annotations": {}},
+                    remove_descriptor_fields=("platform",),
+                )
+                reference = f"localhost:5002/kova@{manifest_digest}"
+                with self.assertRaises(BENCH.BenchError):
+                    BENCH.parse_oci_saved_image(
+                        io.BytesIO(archive), reference, manifest_digest, "824f697f0456"
+                    )
+
+    def test_tag_export_still_requires_exact_index_platform_and_name(self) -> None:
+        tag_reference = "localhost:5002/kova:controller-dev"
+        cases = (
+            {"remove_descriptor_fields": ("platform",)},
+            {"descriptor_fields": {"annotations": {}}},
+            {
+                "remove_descriptor_fields": ("platform",),
+                "descriptor_fields": {"annotations": {}},
+            },
+        )
+        for options in cases:
+            with self.subTest(options=options):
+                archive, manifest_digest, _ = oci_archive(**options)
+                with self.assertRaises(BENCH.BenchError):
+                    BENCH.parse_oci_saved_image(
+                        io.BytesIO(archive), tag_reference, manifest_digest, "824f697f0456"
+                    )
+
+    def test_digest_pull_requires_exact_reference_suffix_not_just_missing_hints(self) -> None:
+        archive, manifest_digest, _ = oci_archive(
+            descriptor_fields={"annotations": {}},
+            remove_descriptor_fields=("platform",),
+        )
+        for reference in (
+            "localhost:5002/kova@sha256:" + "0" * 64,
+            "localhost:5002/kova@@" + manifest_digest,
+            "@" + manifest_digest,
+            "!invalid@" + manifest_digest,
+            "localhost:5002/kova/@" + manifest_digest,
+            "localhost:5002//kova@" + manifest_digest,
+            "localhost:5002/../kova@" + manifest_digest,
+            "localhost:5002/kova@sha256:short",
+        ):
+            with self.subTest(reference=reference), self.assertRaises(BENCH.BenchError):
+                BENCH.parse_oci_saved_image(
+                    io.BytesIO(archive), reference, manifest_digest, "824f697f0456"
+                )
+
+    def test_digest_pull_rejects_present_conflicting_or_malformed_index_hints(self) -> None:
+        _, manifest_digest, _ = oci_archive()
+        reference = f"localhost:5002/kova@{manifest_digest}"
+        bad_descriptors = (
+            {"platform": None, "annotations": {}},
+            {"platform": {}, "annotations": {}},
+            {"platform": {"architecture": "arm64", "os": "linux"}, "annotations": {}},
+            {"platform": [], "annotations": {}},
+            {"annotations": None},
+            {"annotations": []},
+            {"annotations": {"io.containerd.image.name": None}},
+            {"annotations": {"io.containerd.image.name": ""}},
+            {"annotations": {"io.containerd.image.name": [reference]}},
+            {
+                "annotations": {
+                    "io.containerd.image.name": f"localhost:5003/other@{manifest_digest}"
+                }
+            },
+            {"annotations": {"containerd.io/distribution.source.127.0.0.1": []}},
+        )
+        for fields in bad_descriptors:
+            with self.subTest(fields=fields):
+                archive, actual_digest, _ = oci_archive(
+                    descriptor_fields=fields,
+                    remove_descriptor_fields=() if "platform" in fields else ("platform",),
+                )
+                self.assertEqual(actual_digest, manifest_digest)
+                with self.assertRaises(BENCH.BenchError):
+                    BENCH.parse_oci_saved_image(
+                        io.BytesIO(archive), reference, manifest_digest, "824f697f0456"
+                    )
 
     def test_default_plan_has_no_external_commands_on_any_host(self) -> None:
         with (

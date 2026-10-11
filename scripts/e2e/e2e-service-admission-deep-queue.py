@@ -792,6 +792,22 @@ def parse_oci_saved_image(
     stream: IO[bytes], reference: str, manifest_digest: str, revision: str
 ) -> dict:
     """Verify a platform-filtered Docker save without buffering image layers."""
+    if not isinstance(reference, str) or not reference:
+        fail("Docker OCI archive reference is malformed")
+    digest_reference = "@" in reference
+    if digest_reference and (
+        re.fullmatch(
+            r"[a-z0-9](?:[a-zA-Z0-9._:/-]*[a-zA-Z0-9])?@sha256:[0-9a-f]{64}",
+            reference,
+        )
+        is None
+        or any(
+            component in ("", ".", "..")
+            for component in reference.split("@", 1)[0].split("/")
+        )
+        or reference.rsplit("@", 1)[1] != manifest_digest
+    ):
+        fail("Docker OCI archive digest reference differs from inspected manifest")
     blobs: dict[str, bytes] = {}
     index_bytes: bytes | None = None
     metadata_bytes = 0
@@ -845,10 +861,23 @@ def parse_oci_saved_image(
         if (
             descriptor.get("mediaType") != "application/vnd.oci.image.manifest.v1+json"
             or descriptor.get("digest") != manifest_digest
-            or descriptor.get("platform") != {"architecture": "amd64", "os": "linux"}
-            or descriptor.get("annotations", {}).get("io.containerd.image.name") != reference
         ):
-            fail("Docker OCI archive index differs from the inspected image/platform")
+            fail("Docker OCI archive index differs from the inspected manifest")
+        # A Docker save of a digest-pulled image can omit these optional index
+        # hints. A tagged export must retain both; supplied hints must agree.
+        if (not digest_reference or "platform" in descriptor) and descriptor.get(
+            "platform"
+        ) != {"architecture": "amd64", "os": "linux"}:
+            fail("Docker OCI archive index differs from the inspected platform")
+        annotations = descriptor.get("annotations", {})
+        if not isinstance(annotations, dict) or any(
+            not isinstance(key, str) or not isinstance(value, str)
+            for key, value in annotations.items()
+        ):
+            fail("Docker OCI archive index annotations are malformed")
+        name = "io.containerd.image.name"
+        if (not digest_reference or name in annotations) and annotations.get(name) != reference:
+            fail("Docker OCI archive index name differs from the inspected image")
         manifest_bytes = blobs[manifest_digest]
         if descriptor.get("size") != len(manifest_bytes):
             fail("Docker OCI archive manifest size differs from its index descriptor")
