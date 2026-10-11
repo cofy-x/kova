@@ -38,11 +38,10 @@ const (
 	maxOpaqueIDBytes  = 256
 	maxWorkerIDBytes  = 128
 	maxIncidentIDSize = 128
+	signatureDomain   = "KOVA-RECOVERY-DRAIN-PERMIT-V1\x00"
 )
 
 var ErrUnqualified = errors.New("unqualified external drain permit")
-
-var signatureDomain = []byte("KOVA-RECOVERY-DRAIN-PERMIT-V1\x00")
 
 // EpochIdentity is the original, incident-pinned namespace and Genesis
 // selection, not a lookup of whatever namespace or ledger exists now.
@@ -412,9 +411,10 @@ func VerifyDrainPermit(raw []byte, expected Expectation, roots TrustRoots) (Drai
 	if err != nil {
 		return DrainEvidence{}, ErrUnqualified
 	}
-	message := make([]byte, 0, len(signatureDomain)+len(payloadRaw))
-	message = append(message, signatureDomain...)
-	message = append(message, payloadRaw...)
+	message, err := signatureMessage(payloadRaw)
+	if err != nil {
+		return DrainEvidence{}, err
+	}
 	if !ed25519.Verify(publicKey, message, signature) {
 		return DrainEvidence{}, ErrUnqualified
 	}
@@ -423,6 +423,19 @@ func VerifyDrainPermit(raw []byte, expected Expectation, roots TrustRoots) (Drai
 		ReceiptSetDigest: setDigest, ReceiptCount: p.ReceiptCount,
 		WorkerPoolID: p.WorkerRetirement.PoolID, Disposition: p.WorkerRetirement.Disposition,
 	}, nil
+}
+
+func signatureMessage(payloadRaw []byte) ([]byte, error) {
+	// Keep the serialized payload bound local to the allocation. The outer
+	// canonical envelope already has this ceiling, but allocation safety must
+	// not depend on inferring it through JSON decoding and re-encoding.
+	if len(payloadRaw) == 0 || len(payloadRaw) > maxPermitBytes {
+		return nil, ErrUnqualified
+	}
+	message := make([]byte, 0, len(signatureDomain)+len(payloadRaw))
+	message = append(message, signatureDomain...)
+	message = append(message, payloadRaw...)
+	return message, nil
 }
 
 func digestSHA256(value string) bool {
