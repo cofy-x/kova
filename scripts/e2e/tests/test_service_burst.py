@@ -2021,5 +2021,110 @@ class BurstContractTests(unittest.TestCase):
             process.stdout.close()
 
 
+class TerminalReceiptRetirementTests(unittest.TestCase):
+    def call(self, known, deadline=None):
+        if deadline is None:
+            deadline = burst.time.monotonic() + 1000
+        burst.wait_between_waves(MagicMock(), plan(), {}, known, self.journal, deadline)
+
+    def setUp(self):
+        self.journal = MagicMock()
+        self.known = {"original": {"terminal": True}}
+
+    def test_success_waits_read_only_then_requires_the_strict_empty_gate(self):
+        with (
+            patch.object(burst, "campaign_objects_preflight") as objects,
+            patch.object(
+                burst,
+                "fixture_preflight",
+                side_effect=[burst.ReceiptRetirementPending("pending"), []],
+            ) as fixture,
+            patch.object(burst.time, "sleep") as sleep,
+            patch.object(burst.time, "monotonic", return_value=0),
+        ):
+            self.call(self.known)
+        self.assertEqual(objects.call_count, 2)
+        self.assertEqual(fixture.call_count, 2)
+        self.assertTrue(
+            all(
+                call.kwargs["empty"] is False and "retiring_builds" in call.kwargs
+                for call in fixture.call_args_list
+            )
+        )
+        sleep.assert_called_once_with(1)
+        self.assertEqual(
+            [call.args[0] for call in self.journal.append.call_args_list],
+            ["terminal_receipt_retirement_wait", "terminal_receipt_retirement_empty"],
+        )
+
+    def test_fresh_or_nonterminal_receipts_do_not_authorize_a_wait(self):
+        for known in ({}, {"original": {"terminal": False}}):
+            with (
+                self.subTest(known=known),
+                patch.object(burst, "campaign_objects_preflight"),
+                patch.object(
+                    burst,
+                    "fixture_preflight",
+                    side_effect=burst.ReceiptRetirementPending("pending"),
+                ),
+                patch.object(burst.time, "sleep") as sleep,
+            ):
+                with self.assertRaises(burst.UnknownOutcome):
+                    self.call(known)
+                sleep.assert_not_called()
+
+    def test_other_fixture_identity_or_wire_unknown_is_not_retried(self):
+        with (
+            patch.object(burst, "campaign_objects_preflight"),
+            patch.object(
+                burst,
+                "fixture_preflight",
+                side_effect=burst.UnknownOutcome("original epoch changed"),
+            ) as fixture,
+            patch.object(burst.time, "sleep") as sleep,
+        ):
+            with self.assertRaises(burst.UnknownOutcome):
+                self.call(self.known)
+            fixture.assert_called_once()
+            sleep.assert_not_called()
+
+    def test_original_cr_pod_identity_guard_runs_before_each_receipt_observation(self):
+        with (
+            patch.object(
+                burst, "campaign_objects_preflight", side_effect=burst.UnknownOutcome("foreign Pod")
+            ),
+            patch.object(burst, "fixture_preflight") as fixture,
+        ):
+            with self.assertRaises(burst.UnknownOutcome):
+                self.call(self.known)
+            fixture.assert_not_called()
+
+    def test_wait_has_fixed_thirty_second_cap_inside_original_deadline(self):
+        with (
+            patch.object(burst, "campaign_objects_preflight"),
+            patch.object(
+                burst, "fixture_preflight", side_effect=burst.ReceiptRetirementPending("pending")
+            ),
+            patch.object(burst.time, "sleep"),
+            patch.object(burst.time, "monotonic", side_effect=[0, 0, 0, 31]),
+        ):
+            with self.assertRaises(burst.UnknownOutcome):
+                self.call(self.known, 1000)
+
+    def test_original_shared_budget_cannot_be_extended(self):
+        with (
+            patch.object(burst, "campaign_objects_preflight") as objects,
+            patch.object(
+                burst, "fixture_preflight", side_effect=burst.ReceiptRetirementPending("pending")
+            ) as fixture,
+            patch.object(burst.time, "sleep"),
+            patch.object(burst.time, "monotonic", side_effect=[0, 0, 0, 5]),
+        ):
+            with self.assertRaises(burst.UnknownOutcome):
+                self.call(self.known, 5)
+            self.assertEqual(objects.call_args.args[-1], 5)
+            self.assertEqual(fixture.call_args.args[-1], 5)
+
+
 if __name__ == "__main__":
     unittest.main()

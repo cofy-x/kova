@@ -232,6 +232,7 @@ lint-scripts:
 	python3 -m unittest discover -s scripts/kind -p 'test_create_service_genesis.py'
 	python3 -m unittest discover -s scripts/kind -p 'test_resolve_runner_image.py'
 	python3 -m unittest discover -s scripts/e2e/tests -p 'test_service_burst.py'
+	python3 -m unittest discover -s scripts/e2e/tests -p 'test_burst_pending_receipts.py'
 	python3 -m unittest discover -s scripts/e2e/tests -p 'test_deep_queue*.py'
 	bash scripts/chart/test-image-args.sh
 	bash scripts/e2e/test-service-migration-preflight.sh
