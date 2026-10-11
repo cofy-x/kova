@@ -14,6 +14,7 @@ import threading
 import time
 import unittest
 import zipfile
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
 from pathlib import Path
 from types import FunctionType, TracebackType
@@ -1183,7 +1184,8 @@ class BurstContractTests(unittest.TestCase):
         kube = FakeKube(build(entry, self.runtime))
         calls = []
 
-        def uncertain(_request, _deadline):
+        def uncertain(_request, _deadline, *, io_cap_seconds):
+            self.assertEqual(io_cap_seconds, burst.HTTP_POST_IO_CAP_SECONDS)
             calls.append("post")
             raise burst.UnknownOutcome("timeout")
 
@@ -1205,6 +1207,118 @@ class BurstContractTests(unittest.TestCase):
         self.assertEqual(kube.gets, 1)
         self.assertIn("submit_unknown_exact_read", [event for event, _ in journal.events])
         self.assertNotIn("submit_accepted", [event for event, _ in journal.events])
+
+    def test_post_budget_clips_to_remaining_phase_and_keeps_exact_read_scope(self) -> None:
+        entry = self.entries[0]
+        journal = MemoryJournal()
+        kube = FakeKube(build(entry, self.runtime))
+        phase_deadline = time.monotonic() + 25
+        observed = []
+
+        def timed_out(_request, deadline, *, io_cap_seconds):
+            observed.append((deadline, io_cap_seconds, time.monotonic()))
+            raise burst.UnknownOutcome("HTTP outcome unknown: TimeoutError")
+
+        with patch.object(burst, "http_json", side_effect=timed_out):
+            with self.assertRaises(burst.UnknownOutcome):
+                burst.post_one(
+                    entry,
+                    0,
+                    threading.Barrier(1),
+                    [FakeForward()],
+                    "long-private-token-for-test",
+                    kube,
+                    self.plan,
+                    self.runtime,
+                    journal,
+                    phase_deadline,
+                )
+        self.assertEqual(len(observed), 1)
+        self.assertEqual(observed[0][1], 60)
+        self.assertEqual(observed[0][0], phase_deadline)
+        self.assertGreater(phase_deadline - observed[0][2], 20)
+        self.assertEqual(kube.gets, 1)
+        self.assertEqual([event for event, _ in journal.events].count("submit_attempt"), 1)
+        self.assertEqual([event for event, _ in journal.events].count("submit_unknown"), 1)
+
+    def test_expired_post_io_deadline_is_unknown_after_one_exact_read(self) -> None:
+        entry = self.entries[0]
+        journal = MemoryJournal()
+        kube = FakeKube(build(entry, self.runtime))
+        with patch.object(
+            burst, "http_json", side_effect=burst.MeasuredFailure("absolute deadline expired")
+        ) as http:
+            with self.assertRaises(burst.UnknownOutcome):
+                burst.post_one(
+                    entry,
+                    0,
+                    threading.Barrier(1),
+                    [FakeForward()],
+                    "long-private-token-for-test",
+                    kube,
+                    self.plan,
+                    self.runtime,
+                    journal,
+                    time.monotonic() + 120,
+                )
+        self.assertEqual(http.call_count, 1)
+        self.assertEqual(kube.gets, 1)
+        self.assertEqual([event for event, _ in journal.events].count("submit_unknown"), 1)
+        self.assertNotIn("submit_accepted", [event for event, _ in journal.events])
+
+    def test_concurrent_posts_have_independent_sixty_second_budgets(self) -> None:
+        entries = self.entries[:2]
+        barrier = threading.Barrier(2)
+        forwards = [FakeForward(), FakeForward()]
+
+        class DelayedProcess:
+            def __init__(self, delay):
+                self.delay = delay
+
+            def poll(self):
+                time.sleep(self.delay)
+                return None
+
+        forwards[0].process = DelayedProcess(0)
+        forwards[1].process = DelayedProcess(0.2)
+        observed = []
+        lock = threading.Lock()
+
+        def timed_out(request, deadline, *, io_cap_seconds):
+            with lock:
+                observed.append((request.data, deadline, time.monotonic(), io_cap_seconds))
+            raise burst.UnknownOutcome("HTTP outcome unknown: TimeoutError")
+
+        def one(index):
+            entry = entries[index]
+            kube = FakeKube(build(entry, self.runtime))
+            journal = MemoryJournal()
+            with self.assertRaises(burst.UnknownOutcome):
+                burst.post_one(
+                    entry,
+                    index,
+                    barrier,
+                    forwards,
+                    "long-private-token-for-test",
+                    kube,
+                    self.plan,
+                    self.runtime,
+                    journal,
+                    phase_deadline,
+                )
+            return kube.gets, [event for event, _ in journal.events]
+
+        phase_deadline = time.monotonic() + 120
+        with patch.object(burst, "http_json", side_effect=timed_out):
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                results = list(pool.map(one, range(2)))
+        self.assertEqual(len(observed), 2)
+        self.assertTrue(all(cap == 60 for _, _, _, cap in observed))
+        self.assertTrue(all(59.8 < deadline - at <= 60 for _, deadline, at, _ in observed))
+        self.assertGreater(abs(observed[0][1] - observed[1][1]), 0.15)
+        self.assertTrue(
+            all(gets == 1 and events.count("submit_attempt") == 1 for gets, events in results)
+        )
 
     def test_202_with_wrong_public_identity_reads_exact_id_once_and_quarantines(self) -> None:
         entry = self.entries[0]
@@ -2109,6 +2223,171 @@ class BurstContractTests(unittest.TestCase):
             process.wait(timeout=2)
             assert process.stdout is not None
             process.stdout.close()
+
+
+class HTTPBudgetTests(unittest.TestCase):
+    def test_post_sixty_and_default_get_fifteen_reach_connection_and_body(self) -> None:
+        made = []
+        timers = []
+
+        def connection(_host, _port, *, timeout):
+            instance = MagicMock()
+            response = MagicMock()
+            response.status = 200
+            response.read1.side_effect = [b"{}", b""]
+            instance.sock = MagicMock()
+            instance.getresponse.return_value = response
+            made.append((timeout, instance, response))
+            return instance
+
+        def timer(delay, _callback):
+            instance = MagicMock()
+            timers.append((delay, instance))
+            return instance
+
+        with (
+            patch.object(burst.http.client, "HTTPConnection", side_effect=connection),
+            patch.object(burst.threading, "Timer", side_effect=timer),
+        ):
+            get = Request("http://127.0.0.1:12345/version")
+            post = Request("http://127.0.0.1:12345/v1/builds", data=b"{}", method="POST")
+            self.assertEqual(burst.http_json(get, time.monotonic() + 90), (200, {}))
+            self.assertEqual(
+                burst.http_json(
+                    post, time.monotonic() + 90, io_cap_seconds=burst.HTTP_POST_IO_CAP_SECONDS
+                ),
+                (200, {}),
+            )
+        self.assertEqual(len(made), 2)
+        for (timeout, conn, response), cap in zip(made, (15, 60)):
+            self.assertLessEqual(timeout, cap)
+            self.assertGreater(timeout, cap - 1)
+            self.assertEqual(conn.sock.settimeout.call_count, 2)
+            for call in conn.sock.settimeout.call_args_list:
+                self.assertLessEqual(call.args[0], cap)
+                self.assertGreater(call.args[0], cap - 1)
+            conn.close.assert_called_once()
+            response.close.assert_called_once()
+            conn.sock.close.assert_called_once()
+        self.assertEqual(len(timers), 2)
+        self.assertTrue(all(89 < delay <= 90 for delay, _ in timers))
+        for _, instance in timers:
+            instance.start.assert_called_once()
+            instance.cancel.assert_called_once()
+
+    def test_remaining_budget_clamps_post_transport_and_rejects_unbounded_caps(self) -> None:
+        for invalid in (True, 0, -1, 16, 61, 60.0, "60"):
+            with self.subTest(invalid=invalid), self.assertRaises(burst.ContractError):
+                burst.http_seconds_left(time.monotonic() + 90, io_cap_seconds=invalid)
+        made = []
+
+        def connection(_host, _port, *, timeout):
+            instance = MagicMock()
+            instance.sock = MagicMock()
+            response = MagicMock()
+            response.status = 200
+            response.read1.side_effect = [b"{}", b""]
+            instance.getresponse.return_value = response
+            made.append((timeout, instance))
+            return instance
+
+        with (
+            patch.object(burst.http.client, "HTTPConnection", side_effect=connection),
+            patch.object(burst.threading, "Timer"),
+        ):
+            self.assertEqual(
+                burst.http_json(
+                    Request("http://127.0.0.1:12345/v1/builds", data=b"{}", method="POST"),
+                    time.monotonic() + 2,
+                    io_cap_seconds=60,
+                ),
+                (200, {}),
+            )
+        self.assertEqual(len(made), 1)
+        timeout, conn = made[0]
+        self.assertTrue(0 < timeout <= 2)
+        self.assertTrue(all(0 < call.args[0] <= 2 for call in conn.sock.settimeout.call_args_list))
+
+    def test_headers_and_body_share_one_absolute_deadline_and_close_timer(self) -> None:
+        clock = {"now": 0.0}
+        conn = MagicMock()
+        conn.sock = MagicMock()
+        response = MagicMock()
+        response.status = 200
+
+        def headers():
+            clock["now"] += 30
+            return response
+
+        def chunk(_maximum):
+            clock["now"] += 31
+            return b"x"
+
+        conn.getresponse.side_effect = headers
+        response.read1.side_effect = chunk
+        with (
+            patch.object(burst.time, "monotonic", side_effect=lambda: clock["now"]),
+            patch.object(burst.http.client, "HTTPConnection", return_value=conn),
+            patch.object(burst.threading, "Timer") as timer_factory,
+        ):
+            with self.assertRaises(burst.UnknownOutcome):
+                burst.http_bytes(
+                    Request("http://127.0.0.1:12345/v1/builds", data=b"{}", method="POST"),
+                    60,
+                    128,
+                    io_cap_seconds=60,
+                )
+        self.assertEqual(conn.sock.settimeout.call_args.args[0], 30)
+        self.assertEqual(response.read1.call_count, 1)
+        self.assertEqual(timer_factory.call_args.args[0], 60)
+        timer_factory.return_value.start.assert_called_once()
+        timer_factory.return_value.cancel.assert_called_once()
+        response.close.assert_called_once()
+        conn.close.assert_called_once()
+
+    def test_header_timeout_is_unknown_and_cancels_original_timer(self) -> None:
+        conn = MagicMock()
+        conn.sock = MagicMock()
+        conn.getresponse.side_effect = TimeoutError("bounded response header wait")
+        with (
+            patch.object(burst.http.client, "HTTPConnection", return_value=conn),
+            patch.object(burst.threading, "Timer") as timer_factory,
+        ):
+            with self.assertRaises(burst.UnknownOutcome):
+                burst.http_json(
+                    Request("http://127.0.0.1:12345/v1/builds", data=b"{}", method="POST"),
+                    time.monotonic() + 60,
+                    io_cap_seconds=60,
+                )
+        self.assertEqual(conn.request.call_count, 1)
+        timer_factory.return_value.start.assert_called_once()
+        timer_factory.return_value.cancel.assert_called_once()
+        conn.close.assert_called_once()
+
+    def test_expiry_during_connect_or_timer_start_cannot_send_late_post(self) -> None:
+        for stage in ("connect", "timer_start"):
+            with self.subTest(stage=stage):
+                clock = {"now": 0.0}
+                conn = MagicMock()
+                conn.sock = MagicMock()
+                if stage == "connect":
+                    conn.connect.side_effect = lambda: clock.update(now=1.0)
+                with (
+                    patch.object(burst.time, "monotonic", side_effect=lambda: clock["now"]),
+                    patch.object(burst.http.client, "HTTPConnection", return_value=conn),
+                    patch.object(burst.threading, "Timer") as timer_factory,
+                ):
+                    if stage == "timer_start":
+                        timer_factory.return_value.start.side_effect = lambda: clock.update(now=1.0)
+                    with self.assertRaises(burst.MeasuredFailure):
+                        burst.open_http(
+                            Request("http://127.0.0.1:12345/v1/builds", data=b"{}", method="POST"),
+                            1.0,
+                            io_cap_seconds=60,
+                        )
+                conn.request.assert_not_called()
+                conn.close.assert_called_once()
+                timer_factory.return_value.cancel.assert_called_once()
 
 
 class TerminalReceiptRetirementTests(unittest.TestCase):
