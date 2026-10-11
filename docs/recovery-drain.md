@@ -70,8 +70,59 @@ Even observing both old namespace UIDs absent is only an API observation: physic
 
 `go build ./cmd/kova-recovery` builds a separate CGO-free operator executable.
 It is intentionally not registered in `kova`, the controller, daemon, or Helm startup, and is not added to ordinary user-client release artifacts.
-It has one command, `dispose-exact`; without `--execute` it only qualifies local inputs and makes zero API calls.
+Its commands are `collect-exact`, `drain-exact`, and `dispose-exact`; without `--execute` they only qualify local inputs and make zero API calls or output-file writes.
 The existing execution-plan and mutation-grant schemas remain separate; a plan, a signature, or a local preflight alone never grants mutation authority.
+
+### Collection and name occupancy
+
+`collect-exact` calls the existing `recoveryinventory.Collect` library with a closed, uncached direct API adapter.
+`drain-exact` calls the existing `recoverydrain.Drain` library after verifying its original signed drain permit and independently selected public trust roots.
+Neither command signs evidence, establishes a stop barrier, retires a process, deletes any object, starts a runner, changes a ledger charge, creates a successor, or writes a route.
+Collection success is only `inventory-observed-not-retired`; drain success is only `occupied-not-drained`.
+All results retain `incidentClosed=false`, `capacityReleased=false`, and `successorCreated=false`.
+
+```bash
+kova-recovery collect-exact \
+  --stage-pins /secure/incident/collect-pins.json \
+  --stage-pins-digest sha256:<independently-pinned-whole-file-digest>
+
+kova-recovery drain-exact \
+  --stage-pins /secure/incident/drain-pins.json \
+  --stage-pins-digest sha256:<independently-pinned-whole-file-digest>
+```
+
+Each private canonical `StagePins` has exactly `version="1"`, `action` (the exact command name), `connection`, `maxApiCalls` (14–65,536), `inventory`, `drain`, and `roots`.
+For collection, `inventory` contains the existing `recoveryinventory.Input` field names, `drain` is null, and `roots` is null or an empty array.
+For drain, `inventory` is null and `drain` contains the existing `recoverydrain.Input` field names (`Permit`, `Expected`, `TrustRoots`, `MaxLiabilities`, `Queues`, `Grants`, `PodCreates`).
+`Permit` is the base64 JSON encoding of the original canonical signed envelope bytes, `Expected` retains the existing expectation field names, and `TrustRoots` must be null.
+Only the independently pinned, sorted `roots` array supplies public issuer/key IDs and lowercase Ed25519 public-key hex; no signing material is accepted.
+The input ceiling is 16 MiB, with the existing canonical JSON depth/cardinality/token limits and independent whole-file digest qualification before any connection.
+The two original namespace names and UIDs must be distinct from each other and from `kube-system`; namespace replacement is never adopted.
+
+Execution additionally requires `--execute --ack '<action>:sha256:<whole-stage-pins-digest>' --ca-file /secure/incident/ca.pem --credentials /secure/incident/credentials.json --output /secure/incident/new-invocation.jsonl`.
+The output must be a new absolute path in an already existing private directory with no group/other permission bits.
+The command reserves it with `O_EXCL` and mode 0600, writes and fsyncs intent and the directory before connecting, then appends and fsyncs a bounded record before each wire attempt.
+The intent records the actual whole-invocation deadline and explicit CLI timeout, without adding a new signed-permit expiry or increasing an existing pins budget.
+File/directory identity, mode, size, write/sync errors and final whole-file digest readback are checked; any failure stops the invocation without overwriting or deleting the evidence.
+The private JSONL ceiling is 80 MiB; it contains full sensitive collection bodies or the partial drain report, never echoed to ordinary output.
+This is caller-owned invocation evidence, not a Kova durable log, complete incident archive, automatic resume token, storage-retention policy, or proof of physical retirement.
+The environment owner remains responsible for a separately retained, read-back complete archive outside both old namespaces, including the final inventory after occupancy writes.
+
+The adapter admits only the three original namespace guard reads, collection's six unfiltered bounded Lists, and drain's exact stop/receipt/occupant/attempt reads and receipt-namespace ConfigMap List.
+Drain writes are limited to the library's immutable held occupancy-attempt ConfigMaps, same-name inert KovaBuild/Pod tombstones, and adding exactly one recovery-hold finalizer to a qualified original through UID/resourceVersion JSON Patch CAS.
+It preserves every existing finalizer and the full observed body rather than sending a full-object PUT; body drift or unsupported typed fields fail closed.
+Before each write it directly rechecks the original `kube-system` UID, while the drain library separately rechecks both old namespaces and immutable stop intent.
+Each call has the same explicit pinned TLS/static-credential transport, no redirects/proxy/discovery/replay, a 64 KiB response-header ceiling, a 16 MiB response-body ceiling, and a ten-second request bound.
+The whole-invocation API/context deadline is at most fifteen minutes and the independently pinned wire-call budget includes extra cluster guards.
+Local file I/O and fsync cannot be hard-interrupted by that context; an environment-owned outer supervisor is required for a strict wall-clock limit, and a supervisor cutoff means Unknown with retained evidence, not permission to replay.
+No default or existing pins budget is increased automatically; an insufficient call, time or byte budget stops the invocation even after a retained partial effect.
+For budget selection, collection uses fourteen calls; drain has a conservative bound of `receiptCount + 9 + 23 * distinctOccupantNames` (including a same-name original winning a tombstone conflict and requiring a hold).
+At the library's 2,048-receipt ceiling that bound is 49,161 calls, below the code's finite ceiling, but this arithmetic is not a completed maximal-capacity test or a guarantee of completion within fifteen minutes.
+A qualified exact `AlreadyExists` conflict is distinct from an unknown response; empty, malformed, foreign or oversized acknowledgments stop immediately.
+This adapter does not perform a post-unknown readback to retrospectively qualify a Create or allow another write, even where a different library caller could retain a directly observed occupant.
+An unknown or incomplete output must be preserved and reviewed, never resumed with the same file or treated as permission to retry an occupancy attempt.
+
+### Exact disposal
 
 ```bash
 kova-recovery dispose-exact \
@@ -101,7 +152,7 @@ Its whole canonical JSON digest must equal the existing plan's `cluster.apiIdent
 TLS validates that independently selected server name against only the pinned CA bytes; no system CA fallback, insecure flag, default proxy, kubeconfig discovery, exec credential plugin or redirect is used.
 Credentials have exactly `bearerToken`, `clientCertificatePem` and `clientKeyPem`, with one static token or one mTLS pair, never both.
 Fresh HTTP/1 connections disable connection reuse, HTTP/2 and automatic mutation replay; API errors are redacted rather than echoing sensitive response bodies.
-Requests have a ten-second bound, response headers a 64 KiB ceiling, response bodies at most the plan's object ceiling and 16 MiB, and the whole command at most fifteen minutes and never beyond the separately enforced grant expiry.
+Requests have a ten-second bound, response headers a 64 KiB ceiling, response bodies at most the plan's object ceiling and 16 MiB, and the whole command's API/context deadline at most fifteen minutes and never beyond the separately enforced grant expiry.
 The adapter allows direct reads of only three original namespace guards and the exact plan targets, UID/resourceVersion-conditional background Delete of those targets, and the executor's finalizer-only four-operation JSON Patch.
 No Namespace Delete/finalize, Create, List, status/spec edit, route or ledger-charge operation is exposed.
 The archived/current object comparison recognizes only Kubernetes' first deletion transition from an undeleting positive generation to exactly generation+1 with a valid deletion timestamp, including objects first marked by normal namespace GC.
@@ -113,6 +164,8 @@ Any non-deleting archived or current target carrying Kubernetes' built-in `orpha
 The environment owner supplies four independently reviewable facts, not new Kova storage or cloud APIs: old Service/runner/BuildKit/network and already admitted in-flight effects cannot resume; a complete bounded inventory/results/Unknown-discard archive has been written and read back outside both old namespaces; both old namespace names are persistently fenced against reuse; and a single successor capacity assignment plus route UID/resourceVersion CAS has been externally committed only after old liabilities are zero.
 These facts feed the existing evidence digests and signed records; Kova supplies no signer and does not infer their truth from signatures, empty Lists, `Terminating`, local daemon join, or target absence.
 The daemon's exact request retire barrier can contribute only process-local join observations, not remote BuildKit settlement or restart-persistent retirement.
+The existing Unix-socket retire client runs inside the original runner; a workstation cannot use its own local socket as proof about that Pod.
+Remote retire transport remains an explicit operator-entrypoint gap in this slice; no new SPDY transport, runner-local CLI, or physical-retirement detector is introduced here.
 No successor or route mutation belongs to `dispose-exact`.
 
 A new real-API gate must first pin a fresh dedicated cluster, candidate source/binary/images, API TLS identity, never-used runner/receipt namespace names and UIDs, and caller-owned evidence destination.
