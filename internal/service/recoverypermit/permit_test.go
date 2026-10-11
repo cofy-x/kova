@@ -229,3 +229,43 @@ func TestVerifyDrainPermitRequiresCanonicalBoundedEncoding(t *testing.T) {
 		t.Fatalf("oversized envelope qualified: %v", err)
 	}
 }
+
+func TestSignatureMessageBoundsAndDomain(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		size int
+		want bool
+	}{
+		{name: "empty", size: 0},
+		{name: "one byte", size: 1, want: true},
+		{name: "below limit", size: maxPermitBytes - 1, want: true},
+		{name: "at limit", size: maxPermitBytes, want: true},
+		{name: "above limit", size: maxPermitBytes + 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			payload := bytes.Repeat([]byte{'x'}, tc.size)
+			message, err := signatureMessage(payload)
+			if !tc.want {
+				if !errors.Is(err, ErrUnqualified) || message != nil {
+					t.Fatal("unbounded payload produced a signature message")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			// Keep the expected bytes independent of the production domain and
+			// builder: existing externally issued signatures must not change.
+			domain := []byte("KOVA-RECOVERY-DRAIN-PERMIT-V1\x00")
+			if len(message) != len(domain)+len(payload) ||
+				!bytes.Equal(message[:len(domain)], domain) ||
+				!bytes.Equal(message[len(domain):], payload) {
+				t.Fatal("signature message changed its domain or payload")
+			}
+			message[len(domain)] = 'y'
+			if payload[0] != 'x' {
+				t.Fatal("signature message aliases the supplied payload")
+			}
+		})
+	}
+}
