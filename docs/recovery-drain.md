@@ -174,3 +174,34 @@ Use bounded cases for terminal-result and explicitly approved Unknown, grant/Pod
 Each case must independently record physical writer/worker/network retirement and in-flight settlement, full outside-namespace archival readback, permanent name non-reuse and one-successor route CAS.
 Unknown halts the case and preserves every API object and outside archive; no shared registry, old fixture, live deployment, force namespace finalization, automatic cleanup, RC publication or issue closure is authorized by this plan.
 TLS mock/race tests qualify the finite entrypoint and transport behavior only; #62 remains open until the reviewed external procedure and this separately authorized runtime gate pass.
+
+### Offline authorization and closure verification
+
+The same separate `kova-recovery` executable has read-only `verify-authorization` and `verify-closure` commands for an environment owner that needs to consume the existing signed records without reimplementing Kova's schema and signature checks.
+Neither command connects to Kubernetes, signs anything, mutates a resource, observes the cited evidence, or establishes incident closure.
+`verify-closure` verifies the authorization again before verifying the closure's binding to it; it does not accept an asserted prior verification result.
+
+```bash
+kova-recovery verify-authorization \
+  --pins /secure/incident/authorization-pins.json \
+  --pins-digest sha256:<independently-pinned-whole-file-digest> \
+  --authorization /secure/incident/authorization.json
+
+kova-recovery verify-closure \
+  --pins /secure/incident/closure-pins.json \
+  --pins-digest sha256:<independently-pinned-whole-file-digest> \
+  --authorization /secure/incident/authorization.json \
+  --closure /secure/incident/closure.json
+```
+
+Each pins file is private, compact canonical JSON with exactly `version="1"`, `action` equal to the command name, `authorization`, `authorizationRoots`, `closure`, and `closureRoots`.
+`authorization` and `closure` use the existing `AuthorizationExpectation` and `ClosureExpectation` Go JSON field names (for example `EnvelopeDigest`, `PhysicalRetirement`, and `Successor`), independently selected before receiving the signed envelopes.
+The roots are separately selected sorted arrays of `{issuer,keyId,publicKeyHex}` with only lowercase Ed25519 public keys; the authorization command requires `closure:null` and `closureRoots:null` or an empty array.
+The whole pins-file SHA-256 must arrive through an independent trusted channel and cannot be learned from the file being verified.
+All input paths must be regular, non-symlink files with no group/other permission bits; pins are limited to 4 MiB and each signed envelope to 2 MiB.
+Pins and envelopes must be exact compact canonical JSON, without unknown or duplicate fields, indentation, or a trailing newline.
+
+On success, stdout is one JSON report with `stage` equal to `authorization-verified` or `closure-verified`, the verified digests and bounded identities, and `proofScope="schema-and-signature-only; external-evidence-not-observed"`.
+`externalEvidenceObserved`, `incidentClosed`, `capacityReleased`, and `successorCreated` are always false; a nonzero exit writes no successful report.
+A verified signed assertion is not direct proof of physical worker retirement, complete outside-namespace archives, old UID absence and persistent no-reuse fences, a unique successor capacity claim, or the actual route compare-and-swap.
+The environment owner must independently inspect those facts before any admission or cutover decision.
