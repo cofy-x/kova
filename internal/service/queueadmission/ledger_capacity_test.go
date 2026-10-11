@@ -87,6 +87,38 @@ func TestQueueStateRejectsInvalidIdentityAndLossyJSON(t *testing.T) {
 	}
 }
 
+func TestGenesisQueueRawByteAndCleanupBoundaries(t *testing.T) {
+	current := state{Version: 2, GlobalLimit: 1000, RequesterLimit: 1000, Intents: map[string]Intent{}}
+	for i := 0; i < 1000; i++ {
+		id := fmt.Sprintf("%04d", i) + strings.Repeat("a", 249)
+		current.Intents[id] = Intent{RequesterHash: strings.Repeat("a", 64), RequestDigest: strings.Repeat("b", 64),
+			Nonce: strings.Repeat("c", 32), CreatedAtUnix: math.MaxInt64, ReceiptUID: strings.Repeat("R", 64),
+			ReceiptDigest: "sha256:" + strings.Repeat("d", 64), CleanupKind: cleanupTerminal}
+	}
+	data, err := encodeState(current)
+	if err != nil || len(data) > maxHeaderBytes+1000*maxIntentBytes {
+		t.Fatalf("full schema-2 cleanup state exceeds reserved capacity: bytes=%d err=%v", len(data), err)
+	}
+	cm := &corev1.ConfigMap{Data: map[string]string{dataKey: string(data) + strings.Repeat(" ", maxLedgerBytes-len(data))}}
+	if err := ValidateQueueLedgerForGenesis(cm, 1000, 1000); err != nil {
+		t.Fatalf("exact 768KiB queue state was refused: %v", err)
+	}
+	cm.Data[dataKey] += " "
+	if err := ValidateQueueLedgerForGenesis(cm, 1000, 1000); err == nil {
+		t.Fatal("768KiB+1 queue state was accepted")
+	}
+	for _, bad := range []string{strings.Repeat("a", 65), "界", "\u2028", "<"} {
+		changed := current
+		changed.Intents = map[string]Intent{"build": current.Intents[strings.Repeat("0", 4)+strings.Repeat("a", 249)]}
+		entry := changed.Intents["build"]
+		entry.ReceiptUID = bad
+		changed.Intents["build"] = entry
+		if _, err := encodeState(changed); err == nil {
+			t.Fatal("noncompact or overlong receipt UID was accepted")
+		}
+	}
+}
+
 type staticReader struct{ cm *corev1.ConfigMap }
 
 func (r staticReader) Get(_ context.Context, _ client.ObjectKey, obj client.Object, _ ...client.GetOption) error {

@@ -88,15 +88,17 @@ func fullReservationState() (reservationState, string) {
 	return state, first
 }
 
-func TestGenesisFullReservationTableHasReceiptAndFuturePodHeadroom(t *testing.T) {
+// Shared by the deterministic boundary checks and the opt-in v3 API gate.
+// Synthetic UIDs are storage probes, never UIDs assigned to live API objects.
+func fullGenesisReservationState(cleanup bool) reservationState {
 	state := reservationState{Version: 2, Fence: math.MaxUint64, MaxJobs: 128, MaxPerRequester: 128, WorkerSlots: 65535,
 		LastGrantedRequesterHash: strings.Repeat("a", 64), Active: make(map[string]activeReservation, 128)}
 	for i := 0; i < 128; i++ {
 		uid := fmt.Sprintf("%04d", i) + strings.Repeat("<", 252)
 		name := fmt.Sprintf("%04d", i) + strings.Repeat("a", 249)
-		slots := 100
-		if i < 58 {
-			slots = 1000 // 58,000 + 7,000 = 65,000 slots.
+		slots := 1
+		if i == 0 {
+			slots = 65408 // Full supported slot sum: 65408 + 127 = 65535.
 		}
 		state.Active[uid] = activeReservation{
 			BuildName: name, Requester: strings.Repeat("<", 253), Slots: slots,
@@ -107,7 +109,18 @@ func TestGenesisFullReservationTableHasReceiptAndFuturePodHeadroom(t *testing.T)
 			PodReceiptUID: strings.Repeat("P", 64), PodReceiptDigest: "sha256:" + strings.Repeat("c", 64),
 			Closing: true, InFlight: []string{strings.Repeat("e", 32)},
 		}
+		if cleanup {
+			entry := state.Active[uid]
+			entry.InFlight = nil
+			entry.PodCleanupReady, entry.GrantCleanupReady = true, true
+			state.Active[uid] = entry
+		}
 	}
+	return state
+}
+
+func TestGenesisFullReservationTableHasReceiptAndFuturePodHeadroom(t *testing.T) {
+	state := fullGenesisReservationState(false)
 	withPodAttempt, err := encodeReservations(state)
 	if err != nil {
 		t.Fatal(err)
@@ -129,6 +142,48 @@ func TestGenesisFullReservationTableHasReceiptAndFuturePodHeadroom(t *testing.T)
 	}
 	t.Logf("128-entry Genesis active JSON: Pod attempt=%d cleanup=%d; reserved bound=%d; guard=%d",
 		len(withPodAttempt), len(withCleanupMarker), bound, maxReservationLedgerBytes)
+}
+
+func TestGenesisReservationRawByteAndUnicodeBoundaries(t *testing.T) {
+	for _, cleanup := range []bool{false, true} {
+		state := fullGenesisReservationState(cleanup)
+		// Preserve legal maximum UTF-8/rune boundaries, including Go's HTML
+		// and U+2028 escaping. The all-HTML factory above is the larger case.
+		for key, entry := range state.Active {
+			entry.Requester = strings.Repeat("\u2028", 252) + "界"
+			state.Active[key] = entry
+		}
+		data := mustEncodeReservation(t, state)
+		cm := &corev1.ConfigMap{Data: map[string]string{reservationDataKey: string(data)}}
+		decoded, err := decodeReservations(cm)
+		if err != nil || len(decoded.Active) != 128 {
+			t.Fatalf("legal full Unicode state was refused: %v", err)
+		}
+		for key, entry := range state.Active {
+			if decoded.Active[key].Requester != entry.Requester {
+				t.Fatal("Unicode identity changed during decode")
+			}
+		}
+		// Whitespace is legal JSON, not an extra/lossy field. This checks the
+		// exact raw guard independently of the smaller canonical state bound.
+		cm.Data[reservationDataKey] = string(data) + strings.Repeat(" ", maxReservationLedgerBytes-len(data))
+		if _, err := decodeReservations(cm); err != nil {
+			t.Fatalf("exact 768KiB legal state was refused: %v", err)
+		}
+		cm.Data[reservationDataKey] += " "
+		if _, err := decodeReservations(cm); err == nil {
+			t.Fatal("768KiB+1 raw state was accepted")
+		}
+		for key, entry := range state.Active {
+			entry.PodCleanupReady = true
+			entry.InFlight = []string{entry.PodAttemptNonce}
+			state.Active[key] = entry
+			break
+		}
+		if _, err := encodeReservations(state); err == nil {
+			t.Fatal("cleanup-ready and unresolved Pod issue were accepted together")
+		}
+	}
 }
 
 func TestFullReservationTableKeepsNonceClosingFenceAndReleaseHeadroom(t *testing.T) {

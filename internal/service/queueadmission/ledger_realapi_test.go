@@ -16,7 +16,8 @@ import (
 
 // TestRealAPIQueueFullTable is opt-in and uses its own fresh explicit
 // namespace. It exercises the actual API server's ConfigMap size and CAS
-// behavior before ReleaseRejected removes one of 1000 intents.
+// behavior before ReleaseRejected removes one of 1000 legacy schema-1 intents.
+// This nil-Genesis test is not Genesis v3 receipt/cleanup acceptance.
 func TestRealAPIQueueFullTable(t *testing.T) {
 	scheme := runtime.NewScheme()
 	if err := corev1.AddToScheme(scheme); err != nil {

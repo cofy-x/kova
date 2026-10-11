@@ -15,6 +15,7 @@ import (
 	"github.com/cofy-x/kova/internal/runner"
 	"github.com/cofy-x/kova/internal/service/admissiongenesis"
 	"github.com/cofy-x/kova/internal/service/buildresult"
+	"github.com/cofy-x/kova/internal/service/config"
 	"github.com/cofy-x/kova/internal/service/queueadmission"
 	"github.com/cofy-x/kova/internal/service/recoveryreceipt"
 	"github.com/cofy-x/kova/internal/service/runnerexec"
@@ -110,7 +111,11 @@ func (a *controllerGenesisAPI) PatchConfigMap(ctx context.Context, namespace, na
 
 func genesisAdmissionFixture(t *testing.T) (*KovaBuildReconciler, *controllerGenesisAPI, *kovav1.KovaBuild) {
 	t.Helper()
-	cfg := admissionConfig()
+	return genesisAdmissionFixtureWithConfig(t, admissionConfig())
+}
+
+func genesisAdmissionFixtureWithConfig(t *testing.T, cfg config.Config) (*KovaBuildReconciler, *controllerGenesisAPI, *kovav1.KovaBuild) {
+	t.Helper()
 	cfg.Namespace = "jobs"
 	cfg.WorkerPoolID = "test-pool"
 	cfg.RunnerImage = "example.com/kova/runner@sha256:" + strings.Repeat("a", 64)

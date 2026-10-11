@@ -16,7 +16,8 @@ import (
 
 // TestRealAPIActiveFullTable is opt-in and requires a dedicated Kind cluster
 // with the KovaBuild CRD, but no running Service/controller. It verifies the
-// API server's actual ConfigMap storage and resourceVersion CAS behavior.
+// API server's actual legacy (nil-Genesis, schema-1) ConfigMap storage and
+// resourceVersion CAS behavior. This is not Genesis v3 headroom acceptance.
 func TestRealAPIActiveFullTable(t *testing.T) {
 	g := realapitest.Open(t, testScheme(t))
 	ctx := t.Context()
