@@ -170,8 +170,6 @@ e2e-service-admission-ledger-loss:
 	./scripts/e2e/e2e-service-admission-ledger-loss.sh
 
 e2e-service-admission-deep-queue:
-	KIND_CLUSTER=kova-deep-queue \
-	KIND_KUBECONFIG=.kind/kova-deep-queue.kubeconfig \
 	python3 ./scripts/e2e/e2e-service-admission-deep-queue.py
 
 e2e-service-partial-output:
@@ -234,6 +232,7 @@ lint-scripts:
 	python3 -m unittest discover -s scripts/kind -p 'test_create_service_genesis.py'
 	python3 -m unittest discover -s scripts/kind -p 'test_resolve_runner_image.py'
 	python3 -m unittest discover -s scripts/e2e/tests -p 'test_service_burst.py'
+	python3 -m unittest discover -s scripts/e2e/tests -p 'test_deep_queue*.py'
 	bash scripts/chart/test-image-args.sh
 	bash scripts/e2e/test-service-migration-preflight.sh
 	bash scripts/e2e/test-release-artifacts.sh

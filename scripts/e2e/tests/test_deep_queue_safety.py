@@ -286,15 +286,21 @@ class DeepQueueSafetyTest(unittest.TestCase):
                     "824f697f0456",
                 )
 
-    def test_direct_invocation_rejects_another_host_before_preflight(self) -> None:
+    def test_default_plan_has_no_external_commands_on_any_host(self) -> None:
         with (
+            patch.dict(os.environ, {}, clear=True),
             patch.object(BENCH.sys, "platform", "linux"),
             patch.object(BENCH.socket, "gethostname", return_value="wayne-hk-dev"),
             patch.object(BENCH, "preflight") as preflight,
+            patch.object(BENCH, "command") as command,
+            patch.object(BENCH, "request_json") as request,
+            patch("sys.stdout", new_callable=io.StringIO) as output,
         ):
-            with self.assertRaises(BENCH.BenchError):
-                BENCH.main()
+            BENCH.main()
+            self.assertEqual(json.loads(output.getvalue())["external_commands"], 0)
             preflight.assert_not_called()
+            command.assert_not_called()
+            request.assert_not_called()
 
     def test_response_token_echo_is_never_returned(self) -> None:
         with LocalServer(("127.0.0.1", 0), Handler) as server:
