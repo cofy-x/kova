@@ -6,6 +6,7 @@ import (
 
 	kovav1 "github.com/cofy-x/kova/internal/apis/kova/v1alpha1"
 	"github.com/cofy-x/kova/internal/daemonclient"
+	"github.com/cofy-x/kova/internal/service/admissiongenesis"
 	"github.com/cofy-x/kova/internal/service/recoveryreceipt"
 	"github.com/cofy-x/kova/internal/service/runnerexec"
 
@@ -159,11 +160,29 @@ func (r *KovaBuildReconciler) directGenesisCleanupWitness(ctx context.Context, b
 }
 
 func (r *KovaBuildReconciler) directGenesisWitnessMode(ctx context.Context, build *kovav1.KovaBuild, allowDeleting, allowTerminating bool) (*kovav1.KovaBuild, *corev1.Pod, error) {
+	return r.directGenesisWitnessModeWithObservation(ctx, build, allowDeleting, allowTerminating, nil)
+}
+
+func (r *KovaBuildReconciler) directGenesisWitnessModeWithObservation(ctx context.Context, build *kovav1.KovaBuild, allowDeleting, allowTerminating bool, observation *admissiongenesis.Observation) (*kovav1.KovaBuild, *corev1.Pod, error) {
 	if r.Genesis == nil || r.APIReader == nil || build == nil || build.UID == "" {
 		return nil, nil, fmt.Errorf("Genesis witness requires an original CR and direct API reader")
 	}
+	if observation != nil {
+		if err := observation.AssertNoOrdinaryContext(r.Genesis, ctx); err != nil {
+			return nil, nil, err
+		}
+	}
 	var current kovav1.KovaBuild
-	if err := r.APIReader.Get(ctx, client.ObjectKeyFromObject(build), &current); err != nil {
+	readCR := func(readCtx context.Context) error {
+		return r.APIReader.Get(readCtx, client.ObjectKeyFromObject(build), &current)
+	}
+	var err error
+	if observation != nil {
+		err = observation.Read(r.Genesis, readCR)
+	} else {
+		err = readCR(ctx)
+	}
+	if err != nil {
 		return nil, nil, err
 	}
 	if current.UID != build.UID || (!allowDeleting && current.DeletionTimestamp != nil) ||
@@ -173,7 +192,17 @@ func (r *KovaBuildReconciler) directGenesisWitnessMode(ctx context.Context, buil
 		current.Status.RunnerPodName != buildPodName(build.Name) {
 		return nil, nil, fmt.Errorf("Genesis CR status has no matching durable runner witness")
 	}
-	pod, err := r.getOwnedPod(ctx, &current)
+	var pod *corev1.Pod
+	readPod := func(readCtx context.Context) error {
+		var readErr error
+		pod, readErr = r.getOwnedPod(readCtx, &current)
+		return readErr
+	}
+	if observation != nil {
+		err = observation.Read(r.Genesis, readPod)
+	} else {
+		err = readPod(ctx)
+	}
 	if err != nil {
 		return nil, nil, err
 	}
@@ -195,24 +224,30 @@ func (r *KovaBuildReconciler) directGenesisGrant(ctx context.Context, build *kov
 	if r.Genesis == nil {
 		return nil, nil, fmt.Errorf("Genesis guard is not enabled")
 	}
-	current, pod, err := r.directGenesisWitness(ctx, build)
+	var current *kovav1.KovaBuild
+	var pod *corev1.Pod
+	err := r.Genesis.Observe(ctx, func(observation *admissiongenesis.Observation) error {
+		var readErr error
+		current, pod, readErr = r.directGenesisWitnessModeWithObservation(nil, build, false, false, observation)
+		if readErr != nil {
+			return readErr
+		}
+		if current.Status.Phase != kovav1.PhaseStarting || cancellationRequested(current) {
+			return fmt.Errorf("Genesis runner submission requires a live Starting CR")
+		}
+		entry, readErr := r.directGenesisChargeWithObservation(nil, current, observation)
+		if readErr != nil {
+			return readErr
+		}
+		if entry.Closing || len(entry.InFlight) != 0 {
+			return fmt.Errorf("Genesis runner submission lacks an open active grant")
+		}
+		if err := r.verifyPinnedGrantWithObservation(nil, current, entry, observation); err != nil {
+			return err
+		}
+		return r.qualifyGenesisPodWithObservation(nil, current, pod, false, observation)
+	})
 	if err != nil {
-		return nil, nil, err
-	}
-	if current.Status.Phase != kovav1.PhaseStarting || cancellationRequested(current) {
-		return nil, nil, fmt.Errorf("Genesis runner submission requires a live Starting CR")
-	}
-	entry, err := r.directGenesisCharge(ctx, current)
-	if err != nil {
-		return nil, nil, err
-	}
-	if entry.Closing || len(entry.InFlight) != 0 {
-		return nil, nil, fmt.Errorf("Genesis runner submission lacks an open active grant")
-	}
-	if err := r.verifyPinnedGrant(ctx, current, entry); err != nil {
-		return nil, nil, err
-	}
-	if err := r.qualifyGenesisPod(ctx, current, pod, false); err != nil {
 		return nil, nil, err
 	}
 	return current, pod, nil
@@ -222,7 +257,11 @@ func (r *KovaBuildReconciler) directGenesisGrant(ctx context.Context, build *kov
 // entry is Closing during cancellation. Evidence-only observation after pair
 // loss instead requires the pre-loss independent Pod/CR witness.
 func (r *KovaBuildReconciler) directGenesisCharge(ctx context.Context, build *kovav1.KovaBuild) (activeReservation, error) {
-	_, state, err := r.readReservations(ctx, build.Namespace)
+	return r.directGenesisChargeWithObservation(ctx, build, nil)
+}
+
+func (r *KovaBuildReconciler) directGenesisChargeWithObservation(ctx context.Context, build *kovav1.KovaBuild, observation *admissiongenesis.Observation) (activeReservation, error) {
+	_, state, err := r.readReservationsWithObservation(ctx, build.Namespace, observation)
 	if err != nil {
 		return activeReservation{}, err
 	}

@@ -9,6 +9,7 @@ import (
 	"github.com/cofy-x/kova/internal/admissioncontract"
 	kovav1 "github.com/cofy-x/kova/internal/apis/kova/v1alpha1"
 	"github.com/cofy-x/kova/internal/runner"
+	"github.com/cofy-x/kova/internal/service/admissiongenesis"
 	"github.com/cofy-x/kova/internal/service/recoveryreceipt"
 	"github.com/cofy-x/kova/internal/service/runnerexec"
 
@@ -121,11 +122,20 @@ func (r *KovaBuildReconciler) validateGenesisPodRuntimeIdentity(build *kovav1.Ko
 // active charge. The Pod template digest is the second-CAS arm, not a value
 // reconstructed from an observed Pod or its mutable annotation.
 func (r *KovaBuildReconciler) podIntent(ctx context.Context, build *kovav1.KovaBuild, entry activeReservation) (recoveryreceipt.PodCreateIntent, error) {
+	return r.podIntentWithObservation(ctx, build, entry, nil)
+}
+
+func (r *KovaBuildReconciler) podIntentWithObservation(ctx context.Context, build *kovav1.KovaBuild, entry activeReservation, observation *admissiongenesis.Observation) (recoveryreceipt.PodCreateIntent, error) {
+	if observation != nil {
+		if err := observation.AssertNoOrdinaryContext(r.Genesis, ctx); err != nil {
+			return recoveryreceipt.PodCreateIntent{}, err
+		}
+	}
 	if !validReservationHex(entry.PodAttemptNonce, 32) || !validGrantReceiptDigest(entry.PodTemplateDigest) ||
 		!validGrantReceiptUID(entry.GrantReceiptUID) || !validGrantReceiptDigest(entry.GrantReceiptDigest) {
 		return recoveryreceipt.PodCreateIntent{}, fmt.Errorf("Genesis Pod attempt has no reconstructible pre-effect identity")
 	}
-	grant, err := r.grantIntent(ctx, build, entry)
+	grant, err := r.grantIntentWithObservation(ctx, build, entry, observation)
 	if err != nil {
 		return recoveryreceipt.PodCreateIntent{}, err
 	}
@@ -160,19 +170,28 @@ func (r *KovaBuildReconciler) armFreshPodAttempt(ctx context.Context, build *kov
 		return activeReservation{}, fmt.Errorf("invalid Pod attempt or canonical template digest")
 	}
 	for retry := 0; retry < maxReservationCASAttempts; retry++ {
-		cm, state, err := r.readReservations(ctx, build.Namespace)
-		if err != nil {
-			return activeReservation{}, err
-		}
-		entry, ok := state.Active[reservationKey(build)]
-		if !ok || entry.BuildName != build.Name || entry.PodAttemptNonce != attempt ||
-			entry.PodTemplateDigest != "" || entry.PodReceiptUID != "" || entry.Closing || len(entry.InFlight) != 0 {
-			return activeReservation{}, fmt.Errorf("fresh Pod attempt lost its unarmed active charge")
-		}
-		if err := r.ensureLiveAdmissionBuild(ctx, build); err != nil {
-			return activeReservation{}, err
-		}
-		if err := r.verifyPinnedGrant(ctx, build, entry); err != nil {
+		var cm *corev1.ConfigMap
+		var state reservationState
+		var entry activeReservation
+		if err := r.Genesis.Observe(ctx, func(observation *admissiongenesis.Observation) error {
+			var err error
+			cm, state, err = r.readReservationsWithObservation(nil, build.Namespace, observation)
+			if err != nil {
+				return err
+			}
+			var ok bool
+			entry, ok = state.Active[reservationKey(build)]
+			if !ok || entry.BuildName != build.Name || entry.PodAttemptNonce != attempt ||
+				entry.PodTemplateDigest != "" || entry.PodReceiptUID != "" || entry.Closing || len(entry.InFlight) != 0 {
+				return fmt.Errorf("fresh Pod attempt lost its unarmed active charge")
+			}
+			if err := observation.Read(r.Genesis, func(readCtx context.Context) error {
+				return r.ensureLiveAdmissionBuild(readCtx, build)
+			}); err != nil {
+				return err
+			}
+			return r.verifyPinnedGrantWithObservation(nil, build, entry, observation)
+		}); err != nil {
 			return activeReservation{}, err
 		}
 		entry.PodTemplateDigest = digest
@@ -201,34 +220,67 @@ func (r *KovaBuildReconciler) armFreshPodAttempt(ctx context.Context, build *kov
 }
 
 func (r *KovaBuildReconciler) observePodReceipt(ctx context.Context, build *kovav1.KovaBuild, entry activeReservation) (recoveryreceipt.EffectWitness, error) {
-	if err := r.checkGrantReceiptNamespace(ctx, build.Namespace); err != nil {
+	if r.Genesis == nil {
+		return recoveryreceipt.EffectWitness{}, fmt.Errorf("Genesis Pod observation requires an original guard")
+	}
+	var witness recoveryreceipt.EffectWitness
+	err := r.Genesis.Observe(ctx, func(observation *admissiongenesis.Observation) error {
+		var readErr error
+		witness, readErr = r.observePodReceiptWithObservation(nil, build, entry, observation)
+		return readErr
+	})
+	return witness, err
+}
+
+func (r *KovaBuildReconciler) observePodReceiptWithObservation(ctx context.Context, build *kovav1.KovaBuild, entry activeReservation, observation *admissiongenesis.Observation) (recoveryreceipt.EffectWitness, error) {
+	if err := observation.AssertNoOrdinaryContext(r.Genesis, ctx); err != nil {
 		return recoveryreceipt.EffectWitness{}, err
 	}
-	intent, err := r.podIntent(ctx, build, entry)
+	if err := r.checkGrantReceiptNamespaceWithObservation(nil, build.Namespace, observation); err != nil {
+		return recoveryreceipt.EffectWitness{}, err
+	}
+	intent, err := r.podIntentWithObservation(nil, build, entry, observation)
 	if err != nil {
 		return recoveryreceipt.EffectWitness{}, err
 	}
-	witness, err := recoveryreceipt.ObservePodCreate(ctx, r.RecoveryReceipts, intent)
+	var witness recoveryreceipt.EffectWitness
+	err = observation.Read(r.Genesis, func(readCtx context.Context) error {
+		var readErr error
+		witness, readErr = recoveryreceipt.ObservePodCreate(readCtx, r.RecoveryReceipts, intent)
+		return readErr
+	})
 	if err != nil {
 		return recoveryreceipt.EffectWitness{}, err
 	}
-	if err := r.checkGrantReceiptNamespace(ctx, build.Namespace); err != nil {
+	if err := r.checkGrantReceiptNamespaceWithObservation(nil, build.Namespace, observation); err != nil {
 		return recoveryreceipt.EffectWitness{}, err
 	}
-	return witness, r.Genesis.Check(ctx)
+	return witness, nil
 }
 
 func (r *KovaBuildReconciler) verifyPinnedPodReceipt(ctx context.Context, build *kovav1.KovaBuild, entry activeReservation, allowClosing bool) error {
+	if r.Genesis == nil {
+		return fmt.Errorf("Genesis Pod verification requires an original guard")
+	}
+	return r.Genesis.Observe(ctx, func(observation *admissiongenesis.Observation) error {
+		return r.verifyPinnedPodReceiptWithObservation(nil, build, entry, allowClosing, observation)
+	})
+}
+
+func (r *KovaBuildReconciler) verifyPinnedPodReceiptWithObservation(ctx context.Context, build *kovav1.KovaBuild, entry activeReservation, allowClosing bool, observation *admissiongenesis.Observation) error {
+	if err := observation.AssertNoOrdinaryContext(r.Genesis, ctx); err != nil {
+		return err
+	}
 	if !allowClosing && entry.Closing {
 		return fmt.Errorf("%w: %s/%s Pod attempt is closing", errAdmissionClosed, build.Namespace, build.Name)
 	}
 	if entry.PodReceiptUID == "" || entry.PodReceiptDigest == "" {
 		if entry.PodTemplateDigest != "" {
-			_, _ = r.observePodReceipt(ctx, build, entry)
+			_, _ = r.observePodReceiptWithObservation(nil, build, entry, observation)
 		}
 		return errPodReceiptUnpinned
 	}
-	witness, err := r.observePodReceipt(ctx, build, entry)
+	witness, err := r.observePodReceiptWithObservation(nil, build, entry, observation)
 	if err != nil {
 		return err
 	}
@@ -295,23 +347,32 @@ func (r *KovaBuildReconciler) pinPodReceipt(ctx context.Context, build *kovav1.K
 // InFlight charged until definitive rejection or exact Pod observation.
 func (r *KovaBuildReconciler) authorizeFreshPodCreate(ctx context.Context, build *kovav1.KovaBuild, pinned activeReservation) error {
 	for retry := 0; retry < maxReservationCASAttempts; retry++ {
-		cm, state, err := r.readReservations(ctx, build.Namespace)
-		if err != nil {
-			return err
-		}
-		entry, ok := state.Active[reservationKey(build)]
-		if !ok || !samePodAttempt(entry, pinned) || entry.PodTemplateDigest != pinned.PodTemplateDigest ||
-			entry.PodReceiptUID != pinned.PodReceiptUID || entry.PodReceiptDigest != pinned.PodReceiptDigest ||
-			entry.Closing || entry.PodCleanupReady || len(entry.InFlight) != 0 {
-			return fmt.Errorf("pinned Pod attempt changed before Create issue")
-		}
-		if err := r.ensureLiveAdmissionBuild(ctx, build); err != nil {
-			return err
-		}
-		if err := r.verifyPinnedGrant(ctx, build, entry); err != nil {
-			return err
-		}
-		if err := r.verifyPinnedPodReceipt(ctx, build, entry, false); err != nil {
+		var cm *corev1.ConfigMap
+		var state reservationState
+		var entry activeReservation
+		if err := r.Genesis.Observe(ctx, func(observation *admissiongenesis.Observation) error {
+			var err error
+			cm, state, err = r.readReservationsWithObservation(nil, build.Namespace, observation)
+			if err != nil {
+				return err
+			}
+			var ok bool
+			entry, ok = state.Active[reservationKey(build)]
+			if !ok || !samePodAttempt(entry, pinned) || entry.PodTemplateDigest != pinned.PodTemplateDigest ||
+				entry.PodReceiptUID != pinned.PodReceiptUID || entry.PodReceiptDigest != pinned.PodReceiptDigest ||
+				entry.Closing || entry.PodCleanupReady || len(entry.InFlight) != 0 {
+				return fmt.Errorf("pinned Pod attempt changed before Create issue")
+			}
+			if err := observation.Read(r.Genesis, func(readCtx context.Context) error {
+				return r.ensureLiveAdmissionBuild(readCtx, build)
+			}); err != nil {
+				return err
+			}
+			if err := r.verifyPinnedGrantWithObservation(nil, build, entry, observation); err != nil {
+				return err
+			}
+			return r.verifyPinnedPodReceiptWithObservation(nil, build, entry, false, observation)
+		}); err != nil {
 			return err
 		}
 		entry.InFlight = []string{pinned.PodAttemptNonce}
@@ -373,14 +434,20 @@ func (r *KovaBuildReconciler) finishFreshPodAttempt(ctx context.Context, build *
 	if err != nil {
 		return err
 	}
-	if err := r.ensureLiveAdmissionBuild(ctx, build); err != nil {
-		return err
-	}
-	if err := r.checkGrantReceiptNamespace(ctx, build.Namespace); err != nil {
-		return err
-	}
-	intent, err := r.podIntent(ctx, build, armed)
-	if err != nil {
+	var intent recoveryreceipt.PodCreateIntent
+	if err := r.Genesis.Observe(ctx, func(observation *admissiongenesis.Observation) error {
+		if err := observation.Read(r.Genesis, func(readCtx context.Context) error {
+			return r.ensureLiveAdmissionBuild(readCtx, build)
+		}); err != nil {
+			return err
+		}
+		if err := r.checkGrantReceiptNamespaceWithObservation(nil, build.Namespace, observation); err != nil {
+			return err
+		}
+		var readErr error
+		intent, readErr = r.podIntentWithObservation(nil, build, armed, observation)
+		return readErr
+	}); err != nil {
 		return err
 	}
 	witness, err := recoveryreceipt.RecordPodCreateOnce(ctx, r.RecoveryReceipts, intent)
@@ -401,6 +468,15 @@ func (r *KovaBuildReconciler) finishFreshPodAttempt(ctx context.Context, build *
 // the separately pinned immutable pre-Create receipt. Its annotation is only
 // one equality check; it cannot certify a changed image, command or volume.
 func (r *KovaBuildReconciler) qualifyGenesisPod(ctx context.Context, build *kovav1.KovaBuild, pod *corev1.Pod, allowClosing bool) error {
+	return r.qualifyGenesisPodWithObservation(ctx, build, pod, allowClosing, nil)
+}
+
+func (r *KovaBuildReconciler) qualifyGenesisPodWithObservation(ctx context.Context, build *kovav1.KovaBuild, pod *corev1.Pod, allowClosing bool, observation *admissiongenesis.Observation) error {
+	if observation != nil {
+		if err := observation.AssertNoOrdinaryContext(r.Genesis, ctx); err != nil {
+			return err
+		}
+	}
 	if pod == nil || pod.UID == "" || pod.Namespace != build.Namespace || pod.Name != buildPodName(build.Name) ||
 		!podOwnedByBuild(pod, build) {
 		return fmt.Errorf("Genesis Pod has no exact original UID and CR owner")
@@ -408,7 +484,7 @@ func (r *KovaBuildReconciler) qualifyGenesisPod(ctx context.Context, build *kova
 	if err := r.validateGenesisPodRuntimeIdentity(build, pod); err != nil {
 		return err
 	}
-	_, state, err := r.readReservations(ctx, build.Namespace)
+	_, state, err := r.readReservationsWithObservation(ctx, build.Namespace, observation)
 	if err != nil {
 		return err
 	}
@@ -421,6 +497,9 @@ func (r *KovaBuildReconciler) qualifyGenesisPod(ctx context.Context, build *kova
 	actual, err := recoveryreceipt.CanonicalPodTemplateDigest(pod)
 	if err != nil || actual != entry.PodTemplateDigest {
 		return fmt.Errorf("Genesis Pod execution template differs from immutable pre-Create receipt")
+	}
+	if observation != nil {
+		return r.verifyPinnedPodReceiptWithObservation(ctx, build, entry, allowClosing, observation)
 	}
 	return r.verifyPinnedPodReceipt(ctx, build, entry, allowClosing)
 }

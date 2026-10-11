@@ -285,18 +285,24 @@ func serviceCLICommand(loadKubeConfig func() (*rest.Config, error)) *cli.Command
 			}
 			admissionPump := buildcontroller.NewAdmissionPump(mgr.GetAPIReader(), cfg)
 			admissionPump.Genesis = controllerGuard
+			var admissionCoordinator *buildcontroller.AdmissionCoordinator
+			if controllerGuard != nil {
+				admissionCoordinator = buildcontroller.NewAdmissionCoordinator(cfg.Namespace)
+				admissionPump.AdmissionCoordinator = admissionCoordinator
+			}
 			if err := admissionPump.SetupWithManager(mgr); err != nil {
 				return err
 			}
 			if err := (&buildcontroller.KovaBuildReconciler{
-				Client:           mgr.GetClient(),
-				APIReader:        mgr.GetAPIReader(),
-				Scheme:           mgr.GetScheme(),
-				Kube:             controllerKubeClient,
-				Cfg:              cfg,
-				Genesis:          controllerGuard,
-				RecoveryReceipts: controllerClientset.CoreV1().ConfigMaps(receiptNamespace),
-				Recorder:         mgr.GetEventRecorderFor("kova-service"),
+				Client:               mgr.GetClient(),
+				APIReader:            mgr.GetAPIReader(),
+				Scheme:               mgr.GetScheme(),
+				Kube:                 controllerKubeClient,
+				Cfg:                  cfg,
+				Genesis:              controllerGuard,
+				AdmissionCoordinator: admissionCoordinator,
+				RecoveryReceipts:     controllerClientset.CoreV1().ConfigMaps(receiptNamespace),
+				Recorder:             mgr.GetEventRecorderFor("kova-service"),
 			}).SetupWithManager(mgr, admissionPump.WakeEvents()); err != nil {
 				return err
 			}

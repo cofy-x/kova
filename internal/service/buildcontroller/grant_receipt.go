@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	kovav1 "github.com/cofy-x/kova/internal/apis/kova/v1alpha1"
+	"github.com/cofy-x/kova/internal/service/admissiongenesis"
 	"github.com/cofy-x/kova/internal/service/queueadmission"
 	"github.com/cofy-x/kova/internal/service/recoveryreceipt"
 
@@ -26,22 +27,43 @@ type ReceiptConfigMaps interface {
 var errGrantUnpinned = errors.New("active grant receipt is not pinned; recovery observation only")
 
 func (r *KovaBuildReconciler) checkGrantReceiptNamespace(ctx context.Context, namespace string) error {
+	return r.checkGrantReceiptNamespaceWithObservation(ctx, namespace, nil)
+}
+
+func (r *KovaBuildReconciler) checkGrantReceiptNamespaceWithObservation(ctx context.Context, namespace string, observation *admissiongenesis.Observation) error {
 	if r.Genesis == nil || r.RecoveryReceipts == nil {
 		return fmt.Errorf("Genesis grant requires a direct receipt ConfigMap client")
 	}
-	return r.queueStoreForNamespace(namespace).CheckReceiptNamespace(ctx)
+	if observation != nil {
+		if err := observation.AssertNoOrdinaryContext(r.Genesis, ctx); err != nil {
+			return err
+		}
+	}
+	queue := r.queueStoreForNamespace(namespace)
+	if observation != nil {
+		return queue.CheckReceiptNamespaceObserved(observation)
+	}
+	return queue.CheckReceiptNamespace(ctx)
 }
 
 // grantIntent reconstructs the entire immutable payload from the original
 // Genesis, the exact KovaBuild and queue charge, and the active grant's
 // persisted nonce/fence/observed RV. A later ledger RV is never substituted.
 func (r *KovaBuildReconciler) grantIntent(ctx context.Context, build *kovav1.KovaBuild, grant activeReservation) (recoveryreceipt.GrantIntent, error) {
+	return r.grantIntentWithObservation(ctx, build, grant, nil)
+}
+
+func (r *KovaBuildReconciler) grantIntentWithObservation(ctx context.Context, build *kovav1.KovaBuild, grant activeReservation, observation *admissiongenesis.Observation) (recoveryreceipt.GrantIntent, error) {
 	if r.Genesis == nil || build == nil || build.UID == "" || grant.BuildName != build.Name ||
 		grant.Requester != requesterKey(build) || !validReservationHex(grant.GrantNonce, 32) ||
 		grant.GrantFence == 0 || !validGrantObservedRV(grant.GrantObservedRV) {
 		return recoveryreceipt.GrantIntent{}, fmt.Errorf("Genesis grant has no reconstructible pre-effect identity")
 	}
-	if err := r.Genesis.Check(ctx); err != nil {
+	if observation == nil {
+		if err := r.Genesis.Check(ctx); err != nil {
+			return recoveryreceipt.GrantIntent{}, err
+		}
+	} else if err := observation.AssertNoOrdinaryContext(r.Genesis, ctx); err != nil {
 		return recoveryreceipt.GrantIntent{}, err
 	}
 	receipt := r.Genesis.Bootstrap.Receipt
@@ -49,12 +71,29 @@ func (r *KovaBuildReconciler) grantIntent(ctx context.Context, build *kovav1.Kov
 		return recoveryreceipt.GrantIntent{}, fmt.Errorf("configured worker pool differs from immutable admission Genesis")
 	}
 	queue := r.queueStoreForNamespace(build.Namespace)
-	if err := queue.VerifyForBuild(ctx, build); err != nil {
-		return recoveryreceipt.GrantIntent{}, err
+	var err error
+	var verifiedEntry queueadmission.Intent
+	var verifiedFound bool
+	if observation == nil {
+		verifiedEntry, verifiedFound, err = queue.VerifyForBuildSnapshot(ctx, build)
+	} else {
+		verifiedEntry, verifiedFound, err = queue.VerifyForBuildObserved(build, observation)
 	}
-	queueEntry, found, err := queue.Lookup(ctx, build.Name)
 	if err != nil {
 		return recoveryreceipt.GrantIntent{}, err
+	}
+	var queueEntry queueadmission.Intent
+	var found bool
+	if observation == nil {
+		queueEntry, found, err = queue.Lookup(ctx, build.Name)
+	} else {
+		queueEntry, found, err = queue.LookupObserved(build.Name, observation)
+	}
+	if err != nil {
+		return recoveryreceipt.GrantIntent{}, err
+	}
+	if found != verifiedFound || (found && queueEntry != verifiedEntry) {
+		return recoveryreceipt.GrantIntent{}, queueadmission.ErrDrift
 	}
 	requestDigest, err := queueadmission.DigestBuild(build)
 	if err != nil {
@@ -152,24 +191,57 @@ func (r *KovaBuildReconciler) armFreshGrant(ctx context.Context, build *kovav1.K
 }
 
 func (r *KovaBuildReconciler) observeGrantReceipt(ctx context.Context, build *kovav1.KovaBuild, entry activeReservation) (recoveryreceipt.EffectWitness, error) {
-	if err := r.checkGrantReceiptNamespace(ctx, build.Namespace); err != nil {
+	if r.Genesis == nil {
+		return recoveryreceipt.EffectWitness{}, fmt.Errorf("Genesis grant observation requires an original guard")
+	}
+	var witness recoveryreceipt.EffectWitness
+	err := r.Genesis.Observe(ctx, func(observation *admissiongenesis.Observation) error {
+		var readErr error
+		witness, readErr = r.observeGrantReceiptWithObservation(nil, build, entry, observation)
+		return readErr
+	})
+	return witness, err
+}
+
+func (r *KovaBuildReconciler) observeGrantReceiptWithObservation(ctx context.Context, build *kovav1.KovaBuild, entry activeReservation, observation *admissiongenesis.Observation) (recoveryreceipt.EffectWitness, error) {
+	if err := observation.AssertNoOrdinaryContext(r.Genesis, ctx); err != nil {
 		return recoveryreceipt.EffectWitness{}, err
 	}
-	intent, err := r.grantIntent(ctx, build, entry)
+	if err := r.checkGrantReceiptNamespaceWithObservation(nil, build.Namespace, observation); err != nil {
+		return recoveryreceipt.EffectWitness{}, err
+	}
+	intent, err := r.grantIntentWithObservation(nil, build, entry, observation)
 	if err != nil {
 		return recoveryreceipt.EffectWitness{}, err
 	}
-	witness, err := recoveryreceipt.ObserveGrant(ctx, r.RecoveryReceipts, intent)
+	var witness recoveryreceipt.EffectWitness
+	err = observation.Read(r.Genesis, func(readCtx context.Context) error {
+		var readErr error
+		witness, readErr = recoveryreceipt.ObserveGrant(readCtx, r.RecoveryReceipts, intent)
+		return readErr
+	})
 	if err != nil {
 		return recoveryreceipt.EffectWitness{}, err
 	}
-	if err := r.checkGrantReceiptNamespace(ctx, build.Namespace); err != nil {
+	if err := r.checkGrantReceiptNamespaceWithObservation(nil, build.Namespace, observation); err != nil {
 		return recoveryreceipt.EffectWitness{}, err
 	}
-	return witness, r.Genesis.Check(ctx)
+	return witness, nil
 }
 
 func (r *KovaBuildReconciler) verifyPinnedGrant(ctx context.Context, build *kovav1.KovaBuild, entry activeReservation) error {
+	if r.Genesis == nil {
+		return fmt.Errorf("Genesis grant verification requires an original guard")
+	}
+	return r.Genesis.Observe(ctx, func(observation *admissiongenesis.Observation) error {
+		return r.verifyPinnedGrantWithObservation(nil, build, entry, observation)
+	})
+}
+
+func (r *KovaBuildReconciler) verifyPinnedGrantWithObservation(ctx context.Context, build *kovav1.KovaBuild, entry activeReservation, observation *admissiongenesis.Observation) error {
+	if err := observation.AssertNoOrdinaryContext(r.Genesis, ctx); err != nil {
+		return err
+	}
 	if entry.Closing {
 		return fmt.Errorf("%w: %s/%s grant is closing", errAdmissionClosed, build.Namespace, build.Name)
 	}
@@ -177,11 +249,11 @@ func (r *KovaBuildReconciler) verifyPinnedGrant(ctx context.Context, build *kova
 		// Observation may distinguish a present receipt from a missing one,
 		// but neither result gives a replacement leader Create/Pod authority.
 		if entry.GrantObservedRV != "" {
-			_, _ = r.observeGrantReceipt(ctx, build, entry)
+			_, _ = r.observeGrantReceiptWithObservation(nil, build, entry, observation)
 		}
 		return errGrantUnpinned
 	}
-	witness, err := r.observeGrantReceipt(ctx, build, entry)
+	witness, err := r.observeGrantReceiptWithObservation(nil, build, entry, observation)
 	if err != nil {
 		return err
 	}
@@ -250,14 +322,20 @@ func (r *KovaBuildReconciler) finishFreshGrant(ctx context.Context, build *kovav
 	if err != nil {
 		return err
 	}
-	if err := r.ensureLiveAdmissionBuild(ctx, build); err != nil {
-		return err
-	}
-	if err := r.checkGrantReceiptNamespace(ctx, build.Namespace); err != nil {
-		return err
-	}
-	intent, err := r.grantIntent(ctx, build, armed)
-	if err != nil {
+	var intent recoveryreceipt.GrantIntent
+	if err := r.Genesis.Observe(ctx, func(observation *admissiongenesis.Observation) error {
+		if err := observation.Read(r.Genesis, func(readCtx context.Context) error {
+			return r.ensureLiveAdmissionBuild(readCtx, build)
+		}); err != nil {
+			return err
+		}
+		if err := r.checkGrantReceiptNamespaceWithObservation(nil, build.Namespace, observation); err != nil {
+			return err
+		}
+		var readErr error
+		intent, readErr = r.grantIntentWithObservation(nil, build, armed, observation)
+		return readErr
+	}); err != nil {
 		return err
 	}
 	witness, err := recoveryreceipt.RecordGrantOnce(ctx, r.RecoveryReceipts, intent)

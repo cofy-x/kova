@@ -242,22 +242,45 @@ func allowedQueueField(path []string, key string) bool {
 }
 
 func (s Store) read(ctx context.Context) (*corev1.ConfigMap, state, error) {
+	return s.readWithObservation(ctx, nil)
+}
+
+// readWithObservation still issues a fresh direct queue GET and validates the
+// original ledger UID/schema. Only the repeated full-pair Check is delegated
+// to the enclosing read-only Observation's entry and exit.
+func (s Store) readWithObservation(ctx context.Context, observation *admissiongenesis.Observation) (*corev1.ConfigMap, state, error) {
 	if s.Genesis != nil {
 		if s.Reader == nil {
 			return nil, state{}, fmt.Errorf("Genesis queue admission requires a direct API reader")
 		}
-		if err := s.Genesis.Check(ctx); err != nil {
+		if observation == nil {
+			if err := s.Genesis.Check(ctx); err != nil {
+				return nil, state{}, err
+			}
+		} else if err := observation.AssertNoOrdinaryContext(s.Genesis, ctx); err != nil {
 			return nil, state{}, err
 		}
+	} else if observation != nil {
+		return nil, state{}, fmt.Errorf("read-only observation requires a Genesis guard")
 	}
 	var cm corev1.ConfigMap
-	if err := s.reader().Get(ctx, s.key(), &cm); err != nil {
-		return nil, state{}, err
-	}
-	if s.Genesis != nil {
-		if err := s.Genesis.CheckLedger(&cm, admissioncontract.Queue); err != nil {
-			return nil, state{}, err
+	read := func(readCtx context.Context) error {
+		if err := s.reader().Get(readCtx, s.key(), &cm); err != nil {
+			return err
 		}
+		if s.Genesis != nil {
+			return s.Genesis.CheckLedger(&cm, admissioncontract.Queue)
+		}
+		return nil
+	}
+	var readErr error
+	if observation != nil {
+		readErr = observation.Read(s.Genesis, read)
+	} else {
+		readErr = read(ctx)
+	}
+	if readErr != nil {
+		return nil, state{}, readErr
 	}
 	if len(cm.Data) != 1 || len(cm.Data[dataKey]) == 0 || len(cm.Data[dataKey]) > maxLedgerBytes || len(cm.BinaryData) != 0 {
 		return nil, state{}, fmt.Errorf("queue ledger %s has invalid data keys or size", s.key())
@@ -283,6 +306,15 @@ func (s Store) read(ctx context.Context) (*corev1.ConfigMap, state, error) {
 // request path must not silently replace it with an empty one.
 func (s Store) CheckReady(ctx context.Context) error {
 	_, _, err := s.read(ctx)
+	return err
+}
+
+// CheckReadyObserved is only for a caller-owned, effect-free Observation.
+func (s Store) CheckReadyObserved(observation *admissiongenesis.Observation) error {
+	if observation == nil {
+		return fmt.Errorf("read-only queue observation is missing")
+	}
+	_, _, err := s.readWithObservation(nil, observation)
 	return err
 }
 
@@ -469,7 +501,20 @@ func (s Store) Reserve(ctx context.Context, build *kovav1.KovaBuild) (Intent, bo
 }
 
 func (s Store) Lookup(ctx context.Context, id string) (Intent, bool, error) {
-	_, current, err := s.read(ctx)
+	return s.lookupWithObservation(ctx, id, nil)
+}
+
+// LookupObserved always performs a second, fresh queue GET. It must not reuse
+// the state returned by a preceding VerifyForBuildObserved call.
+func (s Store) LookupObserved(id string, observation *admissiongenesis.Observation) (Intent, bool, error) {
+	if observation == nil {
+		return Intent{}, false, fmt.Errorf("read-only queue observation is missing")
+	}
+	return s.lookupWithObservation(nil, id, observation)
+}
+
+func (s Store) lookupWithObservation(ctx context.Context, id string, observation *admissiongenesis.Observation) (Intent, bool, error) {
+	_, current, err := s.readWithObservation(ctx, observation)
 	if err != nil {
 		return Intent{}, false, err
 	}
@@ -529,10 +574,39 @@ func (s Store) receiptNamespace() string {
 // CheckReceiptNamespace always compares against the externally pinned UID in
 // the immutable Genesis receipt. A current same-name Namespace is not enough.
 func (s Store) CheckReceiptNamespace(ctx context.Context) error {
+	return s.checkReceiptNamespaceWithObservation(ctx, nil)
+}
+
+// CheckReceiptNamespaceObserved keeps the same pinned-UID read in a
+// caller-owned read-only interval.
+func (s Store) CheckReceiptNamespaceObserved(observation *admissiongenesis.Observation) error {
+	if observation == nil {
+		return fmt.Errorf("read-only queue observation is missing")
+	}
+	return s.checkReceiptNamespaceWithObservation(nil, observation)
+}
+
+func (s Store) checkReceiptNamespaceWithObservation(ctx context.Context, observation *admissiongenesis.Observation) error {
 	if s.Genesis == nil || s.Genesis.Bootstrap.API == nil {
 		return ErrDrift
 	}
-	ns, err := s.Genesis.Bootstrap.API.GetNamespace(ctx, s.receiptNamespace())
+	if observation != nil {
+		if err := observation.AssertNoOrdinaryContext(s.Genesis, ctx); err != nil {
+			return err
+		}
+	}
+	var ns *corev1.Namespace
+	read := func(readCtx context.Context) error {
+		var err error
+		ns, err = s.Genesis.Bootstrap.API.GetNamespace(readCtx, s.receiptNamespace())
+		return err
+	}
+	var err error
+	if observation == nil {
+		err = read(ctx)
+	} else {
+		err = observation.Read(s.Genesis, read)
+	}
 	if err != nil {
 		return err
 	}
@@ -605,7 +679,16 @@ func (s Store) PinReceipt(ctx context.Context, build *kovav1.KovaBuild, reserved
 }
 
 func (s Store) observePinnedReceipt(ctx context.Context, build *kovav1.KovaBuild, entry Intent) error {
-	if err := s.CheckReceiptNamespace(ctx); err != nil {
+	return s.observePinnedReceiptWithObservation(ctx, build, entry, nil)
+}
+
+func (s Store) observePinnedReceiptWithObservation(ctx context.Context, build *kovav1.KovaBuild, entry Intent, observation *admissiongenesis.Observation) error {
+	if observation != nil {
+		if err := observation.AssertNoOrdinaryContext(s.Genesis, ctx); err != nil {
+			return err
+		}
+	}
+	if err := s.checkReceiptNamespaceWithObservation(ctx, observation); err != nil {
 		return err
 	}
 	if entry.ReceiptUID == "" || entry.ReceiptDigest == "" || entry.CleanupKind != "" ||
@@ -622,12 +705,24 @@ func (s Store) observePinnedReceipt(ctx context.Context, build *kovav1.KovaBuild
 		return err
 	}
 	var observed corev1.ConfigMap
-	if err := s.reader().Get(ctx, client.ObjectKey{Namespace: s.receiptNamespace(), Name: expected.Name}, &observed); err != nil {
-		return fmt.Errorf("%w: pinned queue receipt is unavailable: %v", ErrDrift, err)
+	read := func(readCtx context.Context) error {
+		return s.reader().Get(readCtx, client.ObjectKey{Namespace: s.receiptNamespace(), Name: expected.Name}, &observed)
+	}
+	var readErr error
+	if observation == nil {
+		readErr = read(ctx)
+	} else {
+		readErr = observation.Read(s.Genesis, read)
+	}
+	if readErr != nil {
+		return fmt.Errorf("%w: pinned queue receipt is unavailable: %v", ErrDrift, readErr)
 	}
 	witness, err := recoveryreceipt.QualifyQueue(intent, &observed)
 	if err != nil || witness.ReceiptUID != entry.ReceiptUID || witness.DataDigest != entry.ReceiptDigest {
 		return ErrDrift
+	}
+	if observation != nil {
+		return observation.Assert(s.Genesis)
 	}
 	return s.Genesis.Check(ctx)
 }
@@ -791,38 +886,70 @@ func (s Store) markReceiptSettled(ctx context.Context, build *kovav1.KovaBuild, 
 // VerifyForBuild rejects a service-created CR whose queue intent has vanished
 // or changed before its first active reservation is committed.
 func (s Store) VerifyForBuild(ctx context.Context, build *kovav1.KovaBuild) error {
+	_, _, err := s.VerifyForBuildSnapshot(ctx, build)
+	return err
+}
+
+// VerifyForBuildSnapshot returns the exact intent whose immutable receipt
+// was qualified. A caller that performs a later, fresh Lookup must compare
+// the whole entry, including receipt link and cleanup disposition.
+func (s Store) VerifyForBuildSnapshot(ctx context.Context, build *kovav1.KovaBuild) (Intent, bool, error) {
+	return s.verifyForBuildWithObservation(ctx, build, nil)
+}
+
+// VerifyForBuildObserved is read-only and must be called only within the
+// caller's Observation closure; it preserves every direct queue/receipt read.
+func (s Store) VerifyForBuildObserved(build *kovav1.KovaBuild, observation *admissiongenesis.Observation) (Intent, bool, error) {
+	if observation == nil {
+		return Intent{}, false, fmt.Errorf("read-only queue observation is missing")
+	}
+	return s.verifyForBuildWithObservation(nil, build, observation)
+}
+
+func (s Store) verifyForBuildWithObservation(ctx context.Context, build *kovav1.KovaBuild, observation *admissiongenesis.Observation) (Intent, bool, error) {
+	if observation != nil {
+		if err := observation.AssertNoOrdinaryContext(s.Genesis, ctx); err != nil {
+			return Intent{}, false, err
+		}
+	}
 	nonce := build.Annotations[IntentAnnotation]
 	if nonce == "" {
 		if s.Genesis != nil {
 			// Direct/admin CRs do not consume HTTP quota, but they still
 			// require the original committed queue ledger before a grant.
-			return s.CheckReady(ctx)
+			if observation != nil {
+				return Intent{}, false, s.CheckReadyObserved(observation)
+			}
+			return Intent{}, false, s.CheckReady(ctx)
 		}
-		return nil // Direct/admin CRs are outside the HTTP queue quota.
+		if observation != nil {
+			return Intent{}, false, fmt.Errorf("read-only queue observation requires Genesis")
+		}
+		return Intent{}, false, nil // Direct/admin CRs are outside the HTTP queue quota.
 	}
-	entry, found, err := s.Lookup(ctx, build.Name)
+	entry, found, err := s.lookupWithObservation(ctx, build.Name, observation)
 	if apierrors.IsNotFound(err) {
-		return fmt.Errorf("%w: queue ledger %s is absent for KovaBuild %s/%s", ErrDrift, s.key(), build.Namespace, build.Name)
+		return Intent{}, false, fmt.Errorf("%w: queue ledger %s is absent for KovaBuild %s/%s", ErrDrift, s.key(), build.Namespace, build.Name)
 	}
 	if err != nil {
-		return err
+		return Intent{}, false, err
 	}
 	if !found || entry.Nonce != nonce || entry.RequesterHash != HashRequester(build.Spec.Requester.Username) {
-		return fmt.Errorf("%w: KovaBuild %s/%s has no matching queue intent", ErrDrift, build.Namespace, build.Name)
+		return Intent{}, false, fmt.Errorf("%w: KovaBuild %s/%s has no matching queue intent", ErrDrift, build.Namespace, build.Name)
 	}
 	digest, err := DigestBuild(build)
 	if err != nil {
-		return err
+		return Intent{}, false, err
 	}
 	if entry.RequestDigest != digest {
-		return fmt.Errorf("%w: KovaBuild %s/%s request digest differs from queue intent", ErrDrift, build.Namespace, build.Name)
+		return Intent{}, false, fmt.Errorf("%w: KovaBuild %s/%s request digest differs from queue intent", ErrDrift, build.Namespace, build.Name)
 	}
 	if s.Genesis != nil {
-		if err := s.observePinnedReceipt(ctx, build, entry); err != nil {
-			return err
+		if err := s.observePinnedReceiptWithObservation(ctx, build, entry, observation); err != nil {
+			return Intent{}, false, err
 		}
 	}
-	return nil
+	return entry, true, nil
 }
 
 // ReleaseForBuild runs only after active capacity has been durably committed,

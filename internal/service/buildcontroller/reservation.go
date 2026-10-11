@@ -15,6 +15,7 @@ import (
 	"github.com/cofy-x/kova/internal/admissioncontract"
 	"github.com/cofy-x/kova/internal/admissionjson"
 	kovav1 "github.com/cofy-x/kova/internal/apis/kova/v1alpha1"
+	"github.com/cofy-x/kova/internal/service/admissiongenesis"
 	"github.com/cofy-x/kova/internal/service/config"
 	"github.com/cofy-x/kova/internal/service/queueadmission"
 
@@ -116,23 +117,43 @@ func (r *KovaBuildReconciler) ensureLiveAdmissionBuild(ctx context.Context, buil
 }
 
 func (r *KovaBuildReconciler) readReservations(ctx context.Context, namespace string) (*corev1.ConfigMap, reservationState, error) {
+	return r.readReservationsWithObservation(ctx, namespace, nil)
+}
+
+func (r *KovaBuildReconciler) readReservationsWithObservation(ctx context.Context, namespace string, observation *admissiongenesis.Observation) (*corev1.ConfigMap, reservationState, error) {
 	if r.Genesis != nil {
 		if r.APIReader == nil {
 			return nil, reservationState{}, fmt.Errorf("Genesis admission requires a direct API reader")
 		}
-		if err := r.Genesis.Check(ctx); err != nil {
+		if observation == nil {
+			if err := r.Genesis.Check(ctx); err != nil {
+				return nil, reservationState{}, err
+			}
+		} else if err := observation.AssertNoOrdinaryContext(r.Genesis, ctx); err != nil {
 			return nil, reservationState{}, err
 		}
+	} else if observation != nil {
+		return nil, reservationState{}, fmt.Errorf("read-only reservation observation requires Genesis")
 	}
 	key := client.ObjectKey{Namespace: namespace, Name: reservationConfigMap}
 	var cm corev1.ConfigMap
-	if err := r.reader().Get(ctx, key, &cm); err != nil {
-		return nil, reservationState{}, err
-	}
-	if r.Genesis != nil {
-		if err := r.Genesis.CheckLedger(&cm, admissioncontract.Active); err != nil {
-			return nil, reservationState{}, err
+	read := func(readCtx context.Context) error {
+		if err := r.reader().Get(readCtx, key, &cm); err != nil {
+			return err
 		}
+		if r.Genesis != nil {
+			return r.Genesis.CheckLedger(&cm, admissioncontract.Active)
+		}
+		return nil
+	}
+	var readErr error
+	if observation != nil {
+		readErr = observation.Read(r.Genesis, read)
+	} else {
+		readErr = read(ctx)
+	}
+	if readErr != nil {
+		return nil, reservationState{}, readErr
 	}
 	state, err := decodeReservations(&cm)
 	if err == nil {

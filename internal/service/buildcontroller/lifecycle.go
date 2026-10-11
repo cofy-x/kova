@@ -55,6 +55,12 @@ func (r *KovaBuildReconciler) startBuild(ctx context.Context, build *kovav1.Kova
 		}
 		return ctrl.Result{}, err
 	}
+	if decision.Deferred == admissionLocalDeferred {
+		// Return this worker immediately. The coalesced release event (or
+		// lost-event audit) selects one fair candidate without per-CR timers,
+		// workqueue error backoff, or a synthetic capacity/status mutation.
+		return ctrl.Result{}, nil
+	}
 	if !decision.Admitted {
 		capacityWaits.Add(ctx, 1)
 		previousStatus := build.Status.DeepCopy()
