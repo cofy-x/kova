@@ -304,11 +304,17 @@ def history(target: str, ref: str = "actual-server-ref", *, completed: bool = Tr
     record = {
         "Ref": ref,
         "CreatedAt": {"seconds": 1791511200, "nanos": 123456789},
-        "Exporters": [{"Type": "image", "Attrs": {"name": target}}],
+        "Exporters": [{"Type": "image", "Attrs": {"name": target, "push": "true"}}],
     }
     if completed:
         record["CompletedAt"] = {"seconds": 1791511202, "nanos": 987654321}
-        record["ExporterResponse"] = {"containerimage.digest": DIGEST}
+        descriptor = {
+            "digest": DIGEST,
+            "media_type": "application/vnd.oci.image.manifest.v1+json",
+            "size": 512,
+        }
+        record["ExporterResponse"] = {"containerimage.config": '{"architecture":"amd64"}'}
+        record["Result"] = {"Results": {"0": descriptor}, "ResultDeprecated": descriptor}
     return {"type": 1, "record": record} if completed else {"record": record}
 
 
@@ -593,6 +599,17 @@ class BuildkitJSONSchemaTests(unittest.TestCase):
         active, complete = raw.splitlines()
         self.assertNotIn("type", json.loads(active))
         self.assertIsNone(burst.project_history(active, {target})[0]["completed_ns"])
+        completed_record = json.loads(complete)["record"]
+        self.assertNotIn("containerimage.digest", completed_record["ExporterResponse"])
+        self.assertEqual(set(completed_record["Result"]["Results"]), {"0"})
+        self.assertEqual(
+            completed_record["Result"]["ResultDeprecated"],
+            completed_record["Result"]["Results"]["0"],
+        )
+        self.assertNotEqual(
+            completed_record["Result"]["Attestations"][0]["digest"],
+            completed_record["Result"]["Results"]["0"]["digest"],
+        )
         rows = burst.project_history(raw, {target})
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["solve_ref"], "serialized-solve-ref")
@@ -699,6 +716,129 @@ class BurstObservationTests(unittest.TestCase):
         self.assertEqual(rows[0]["completed_ns"], 1791511202987654321)
         self.assertEqual(burst.peak_solve_occupancy(rows), 1)
 
+    def test_frontend_response_is_not_output_proof_or_sample_payload(self):
+        for completed in (False, True):
+            for payload in (
+                "synthetic-sensitive-metadata",
+                {"containerimage.digest": "sha256:" + "b" * 64},
+                {"containerimage.digest": {"secret": "synthetic-sensitive-metadata"}},
+            ):
+                with self.subTest(completed=completed, payload_type=type(payload).__name__):
+                    event = history(self.target, completed=completed)
+                    event["record"]["ExporterResponse"] = payload
+                    projected = burst.project_history(burst.canonical(event), {self.target})[0]
+                    self.assertEqual(projected["pushed_digest"], DIGEST if completed else None)
+                    self.assertNotIn("synthetic-sensitive-metadata", json.dumps(projected))
+        event = history(self.target)
+        event["record"].pop("Result")
+        event["record"]["ExporterResponse"] = {"containerimage.digest": DIGEST}
+        with self.assertRaises(burst.UnknownOutcome):
+            burst.project_history(burst.canonical(event), {self.target})
+
+    def test_completed_descriptor_accepts_only_actual_image_roots(self):
+        for media_type in (
+            "application/vnd.oci.image.manifest.v1+json",
+            "application/vnd.oci.image.index.v1+json",
+            "application/vnd.docker.distribution.manifest.v2+json",
+            "application/vnd.docker.distribution.manifest.list.v2+json",
+        ):
+            with self.subTest(media_type=media_type):
+                event = history(self.target)
+                descriptor = event["record"]["Result"]["Results"]["0"]
+                descriptor["media_type"] = media_type
+                descriptor["annotations"] = {"synthetic": "not-retained"}
+                row = burst.project_history(burst.canonical(event), {self.target})[0]
+                self.assertEqual(row["pushed_digest"], DIGEST)
+                self.assertNotIn("not-retained", json.dumps(row))
+        event = history(self.target)
+        event["record"]["Result"].pop("ResultDeprecated")
+        self.assertEqual(
+            burst.project_history(burst.canonical(event), {self.target})[0]["pushed_digest"],
+            DIGEST,
+        )
+
+    def test_missing_foreign_extra_and_conflicting_descriptor_is_unknown(self):
+        for mutation in (
+            lambda record: record.pop("Result"),
+            lambda record: record.update(Result=None),
+            lambda record: record.update(Result=[]),
+            lambda record: record.update(Result={"results": {"0": {}}}),
+            lambda record: record.update(Result={"Results": {}}),
+            lambda record: record.update(Result={"Results": {"1": {}}}),
+            lambda record: record["Result"]["Results"].update({"1": {}}),
+            lambda record: record["Result"].update(unknown=True),
+            lambda record: record["Result"].update(ResultDeprecated=None),
+            lambda record: record["Result"].update(
+                ResultDeprecated={
+                    **record["Result"]["Results"]["0"],
+                    "digest": "sha256:" + "b" * 64,
+                }
+            ),
+            lambda record: record["Exporters"][0]["Attrs"].update(push="false"),
+            lambda record: record["Exporters"].append(record["Exporters"][0]),
+        ):
+            event = history(self.target)
+            mutation(event["record"])
+            with self.subTest(mutation=mutation), self.assertRaises(burst.UnknownOutcome):
+                burst.project_history(burst.canonical(event), {self.target})
+        for descriptor in (
+            None,
+            [],
+            {},
+            {
+                "Digest": DIGEST,
+                "media_type": "application/vnd.oci.image.manifest.v1+json",
+                "size": 512,
+            },
+            {"digest": DIGEST, "media_type": "application/vnd.in-toto+json", "size": 512},
+            {"digest": DIGEST, "media_type": {}, "size": 512},
+            {
+                "digest": None,
+                "media_type": "application/vnd.oci.image.manifest.v1+json",
+                "size": 512,
+            },
+            {
+                "digest": "sha256:" + "A" * 64,
+                "media_type": "application/vnd.oci.image.manifest.v1+json",
+                "size": 512,
+            },
+        ):
+            event = history(self.target)
+            event["record"]["Result"] = {"Results": {"0": descriptor}}
+            with (
+                self.subTest(descriptor_type=type(descriptor).__name__),
+                self.assertRaises(burst.UnknownOutcome),
+            ):
+                burst.project_history(burst.canonical(event), {self.target})
+        for field, invalid in (
+            ("size", 0),
+            ("size", -1),
+            ("size", True),
+            ("size", 1.5),
+            ("size", burst.MAX_JSON + 1),
+            ("annotations", []),
+            ("annotations", {"key": True}),
+            ("unexpected", "payload"),
+        ):
+            event = history(self.target)
+            event["record"]["Result"]["Results"]["0"][field] = invalid
+            with (
+                self.subTest(field=field, invalid=invalid),
+                self.assertRaises(burst.UnknownOutcome),
+            ):
+                burst.project_history(burst.canonical(event), {self.target})
+
+    def test_descriptor_duplicate_json_keys_and_changed_completed_digest_are_unknown(self):
+        raw = burst.canonical(history(self.target))
+        with self.assertRaises(burst.UnknownOutcome):
+            burst.project_history(
+                raw.replace(b'"Results":{"0":', b'"Results":{"0":{},"0":'), {self.target}
+            )
+        changed = history(self.target)
+        changed["record"]["Result"]["Results"]["0"]["digest"] = "sha256:" + "b" * 64
+        with self.assertRaises(burst.UnknownOutcome):
+            burst.project_history(raw + b"\n" + burst.canonical(changed), {self.target})
+
     def test_history_fail_closed_on_foreign_malformed_changed_and_limit(self):
         for changed in (
             history("foreign"),
@@ -708,7 +848,7 @@ class BurstObservationTests(unittest.TestCase):
                 "type": 1,
                 "record": {**history(self.target)["record"], "CreatedAt": {"seconds": True}},
             },
-            {"type": 1, "record": {**history(self.target)["record"], "ExporterResponse": {}}},
+            {"type": 1, "record": {**history(self.target)["record"], "Result": {}}},
         ):
             with self.subTest(changed=changed), self.assertRaises(burst.UnknownOutcome):
                 burst.project_history(burst.canonical(changed), {self.target})
@@ -765,6 +905,37 @@ class BurstObservationTests(unittest.TestCase):
         observer.records[(uid, "1")]["pushed_digest"] = "sha256:" + "b" * 64
         with self.assertRaises(burst.UnknownOutcome):
             observer.summary(known)
+
+    def test_completed_join_without_verified_output_digest_is_unknown(self):
+        observer = burst.WorkerSolveObserver(None, self.plan, self.runtime, MemoryJournal())
+        uid = UUIDS[8]
+        observer.identities[uid] = {"worker_id": "actual-worker", "pod_uid": uid}
+        row = burst.project_history(burst.canonical(history(self.target)), {self.target})[0]
+        observer.records[(uid, row["solve_ref"])] = row
+        job = {"uid": UUIDS[15], "entry": self.jobs[0]}
+        for output_digest in (None, True, "", "sha256:" + "A" * 64):
+            with self.subTest(output_digest=output_digest), self.assertRaises(burst.UnknownOutcome):
+                observer.summary({"job": {**job, "output_manifest_digest": output_digest}})
+        observer.records[(uid, row["solve_ref"])]["pushed_digest"] = None
+        with self.assertRaises(burst.UnknownOutcome):
+            observer.summary({"job": {**job, "output_manifest_digest": None}})
+
+    def test_started_record_cannot_join_as_completed_output(self):
+        observer = burst.WorkerSolveObserver(None, self.plan, self.runtime, MemoryJournal())
+        uid = UUIDS[8]
+        observer.identities[uid] = {"worker_id": "actual-worker", "pod_uid": uid}
+        event = history(self.target, completed=False)
+        event["record"]["Result"] = {"Results": {"0": {"digest": "synthetic-sensitive-active"}}}
+        row = burst.project_history(burst.canonical(event), {self.target})[0]
+        self.assertIsNone(row["pushed_digest"])
+        self.assertNotIn("synthetic-sensitive-active", json.dumps(row))
+        observer.records[(uid, row["solve_ref"])] = row
+        result = observer.summary(
+            {"job": {"uid": UUIDS[15], "entry": self.jobs[0], "output_manifest_digest": DIGEST}}
+        )
+        self.assertFalse(result["complete_for_attribution"])
+        self.assertEqual(result["joined_builds"], [])
+        self.assertEqual(result["missing_or_ambiguous_builds"], ["job"])
 
     def test_two_real_solves_for_one_output_are_ambiguous_not_one_command(self):
         observer = burst.WorkerSolveObserver(None, self.plan, self.runtime, MemoryJournal())

@@ -25,6 +25,10 @@ The [history queue tracks those active original Solve Refs and removes them on C
 The coordinator uses the image's `buildctl debug workers` and `debug histories --format '{{json .}}'` against each exact worker Pod's loopback listener, not a load-balanced Service.
 These are ListWorkers and ListenBuildHistory calls, never Solve, Session, Prune or UpdateBuildHistory.
 It binds each record to the original worker ID, Pod UID, container ID, image ID and container start time, and joins its unique exporter target and pushed digest to the exact campaign build UID.
+For COMPLETE records, the digest comes from the single image exporter's actual `Result.Results["0"]` descriptor, never from history's frontend-metadata `ExporterResponse` map.
+The descriptor must identify a bounded positive-size OCI or Docker image manifest/index with a valid SHA-256; any present deprecated descriptor must agree exactly.
+Missing or ambiguous descriptors remain UNKNOWN, and the observed digest must equal the exact build UID's independently verified public output digest.
+STARTED records do not claim a pushed digest, and arbitrary frontend metadata is never retained in samples.
 Its finite snapshots retain only original Ref, target, timestamps and digest; arbitrary attributes, error messages, logs and trace descriptors are discarded.
 A history snapshot may legally contain both active and completed records for the same Ref because those snapshots are not atomic; matching identity is merged, not counted twice.
 Final completed histories cover solves shorter than the ten-second sampling interval.

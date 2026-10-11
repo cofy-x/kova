@@ -2084,6 +2084,7 @@ def project_history(raw: bytes, targets: set[str]) -> list[dict]:
             or type(exporters[0]) is not dict
             or exporters[0].get("Type") != "image"
             or type(exporters[0].get("Attrs")) is not dict
+            or exporters[0]["Attrs"].get("push") != "true"
         ):
             raise UnknownOutcome("worker history is not an owned finite image solve")
         target = exporters[0].get("Attrs", {}).get("name")
@@ -2097,12 +2098,10 @@ def project_history(raw: bytes, targets: set[str]) -> list[dict]:
             raise UnknownOutcome("worker history lifetime is malformed")
         if record.get("error"):
             raise MeasuredFailure("owned worker solve recorded a failed completion")
-        response = record.get("ExporterResponse", {})
-        if type(response) is not dict:
-            raise UnknownOutcome("worker exporter response is malformed")
-        digest = response.get("containerimage.digest")
-        if completed is not None and (type(digest) is not str or DIGEST.fullmatch(digest) is None):
-            raise UnknownOutcome("completed worker solve has no pushed manifest digest")
+        # v0.31.2 history ExporterResponse contains frontend metadata, not
+        # SolveResponse's exporter return map. Only the actual exporter
+        # descriptor can independently bind this completed solve's output.
+        digest = history_output_digest(record) if completed is not None else None
         row = {
             "solve_ref": ref,
             "target": target,
@@ -2123,6 +2122,48 @@ def project_history(raw: bytes, targets: set[str]) -> list[dict]:
     if len(rows) > 41:
         raise UnknownOutcome("worker history contains more than 41 owned solves")
     return sorted(rows.values(), key=lambda item: item["solve_ref"])
+
+
+def history_output_digest(record: dict) -> str:
+    result = record.get("Result")
+    if (
+        type(result) is not dict
+        or not set(result) <= {"ResultDeprecated", "Attestations", "Results"}
+        or type(result.get("Results")) is not dict
+        or set(result["Results"]) != {"0"}
+    ):
+        raise UnknownOutcome("completed worker solve has no unique image exporter descriptor")
+    descriptor = result["Results"]["0"]
+    if (
+        type(descriptor) is not dict
+        or not {"digest", "media_type", "size"} <= set(descriptor)
+        or not set(descriptor) <= {"digest", "media_type", "size", "annotations"}
+        or type(descriptor["digest"]) is not str
+        or DIGEST.fullmatch(descriptor["digest"]) is None
+        or type(descriptor["media_type"]) is not str
+        or descriptor["media_type"]
+        not in {
+            "application/vnd.oci.image.manifest.v1+json",
+            "application/vnd.oci.image.index.v1+json",
+            "application/vnd.docker.distribution.manifest.v2+json",
+            "application/vnd.docker.distribution.manifest.list.v2+json",
+        }
+        or type(descriptor["size"]) is not int
+        or not 0 < descriptor["size"] <= MAX_JSON
+        or (
+            "annotations" in descriptor
+            and (
+                type(descriptor["annotations"]) is not dict
+                or any(
+                    type(key) is not str or type(value) is not str
+                    for key, value in descriptor["annotations"].items()
+                )
+            )
+        )
+        or ("ResultDeprecated" in result and result["ResultDeprecated"] != descriptor)
+    ):
+        raise UnknownOutcome("completed worker image exporter descriptor is malformed or changed")
+    return descriptor["digest"]
 
 
 def peak_solve_occupancy(rows: list[dict]) -> int | None:
@@ -2345,7 +2386,12 @@ class WorkerSolveObserver:
                 missing.append(job_id)
                 continue
             uid, row = records[0]
-            if row["pushed_digest"] != job.get("output_manifest_digest"):
+            output_digest = job.get("output_manifest_digest")
+            if (
+                type(output_digest) is not str
+                or DIGEST.fullmatch(output_digest) is None
+                or row["pushed_digest"] != output_digest
+            ):
                 raise UnknownOutcome("worker solve digest differs from exact build output")
             joins.append({"job_id": job_id, "build_uid": job["uid"], **self.identities[uid], **row})
         extras = sorted(set(by_target) - {job["entry"]["output_tag"] for job in known.values()})
