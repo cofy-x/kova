@@ -8,6 +8,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -15,18 +16,308 @@ import (
 	"github.com/cofy-x/kova/internal/admissioncontract"
 	"github.com/cofy-x/kova/internal/admissionjson"
 	kovav1 "github.com/cofy-x/kova/internal/apis/kova/v1alpha1"
+	"github.com/cofy-x/kova/internal/service/admissiongenesis"
+	"github.com/cofy-x/kova/internal/service/config"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/runtime/serializer"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/apiutil"
 )
 
 type capacityRoundTripper func(*http.Request) (*http.Response, error)
 
 func (f capacityRoundTripper) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+type capacityCountingClient struct {
+	client.Client
+	calls, mutations int
+}
+
+type capacityCountingCoreAPI struct {
+	admissiongenesis.CoreAPI
+	calls, mutations int
+}
+
+func (a *capacityCountingCoreAPI) GetNamespace(ctx context.Context, name string) (*corev1.Namespace, error) {
+	a.calls++
+	return a.CoreAPI.GetNamespace(ctx, name)
+}
+
+func (a *capacityCountingCoreAPI) GetConfigMap(ctx context.Context, ns, name string) (*corev1.ConfigMap, error) {
+	a.calls++
+	return a.CoreAPI.GetConfigMap(ctx, ns, name)
+}
+
+func (a *capacityCountingCoreAPI) CreateConfigMap(ctx context.Context, ns string, object *corev1.ConfigMap) (*corev1.ConfigMap, error) {
+	a.calls++
+	a.mutations++
+	assigned := object.DeepCopy()
+	if assigned.UID == "" {
+		assigned.UID = types.UID("fake-created-" + assigned.Name)
+	}
+	return a.CoreAPI.CreateConfigMap(ctx, ns, assigned)
+}
+
+func (a *capacityCountingCoreAPI) PatchConfigMap(ctx context.Context, ns, name string, body []byte) (*corev1.ConfigMap, error) {
+	a.calls++
+	a.mutations++
+	return a.CoreAPI.PatchConfigMap(ctx, ns, name, body)
+}
+
+func (c *capacityCountingClient) Get(ctx context.Context, key client.ObjectKey, object client.Object, opts ...client.GetOption) error {
+	c.calls++
+	return c.Client.Get(ctx, key, object, opts...)
+}
+
+func (c *capacityCountingClient) Create(ctx context.Context, object client.Object, opts ...client.CreateOption) error {
+	c.calls++
+	c.mutations++
+	return c.Client.Create(ctx, object, opts...)
+}
+
+func (c *capacityCountingClient) Patch(ctx context.Context, object client.Object, patch client.Patch, opts ...client.PatchOption) error {
+	c.calls++
+	c.mutations++
+	return c.Client.Patch(ctx, object, patch, opts...)
+}
+
+func (c *capacityCountingClient) Update(ctx context.Context, object client.Object, opts ...client.UpdateOption) error {
+	c.calls++
+	c.mutations++
+	return c.Client.Update(ctx, object, opts...)
+}
+
+func (c *capacityCountingClient) Delete(ctx context.Context, object client.Object, opts ...client.DeleteOption) error {
+	c.calls++
+	c.mutations++
+	return c.Client.Delete(ctx, object, opts...)
+}
+
+type capacityCountingStatus struct {
+	client.SubResourceWriter
+	owner *capacityCountingClient
+}
+
+func (c *capacityCountingClient) Status() client.SubResourceWriter {
+	return capacityCountingStatus{SubResourceWriter: c.Client.Status(), owner: c}
+}
+
+func (s capacityCountingStatus) Update(ctx context.Context, object client.Object, opts ...client.SubResourceUpdateOption) error {
+	s.owner.calls++
+	s.owner.mutations++
+	return s.SubResourceWriter.Update(ctx, object, opts...)
+}
+
+func TestCapacityLifecycleRequestModel(t *testing.T) {
+	r, api, build := genesisAdmissionFixtureWithConfig(t, config.Config{MaxActiveJobs: 128, MaxActiveJobsPerRequester: 128, WorkerSlots: 65535, MaxQueuedJobs: 1000, MaxQueuedJobsPerRequester: 1000})
+	build.Finalizers = nil
+	if err := api.Update(t.Context(), build); err != nil {
+		t.Fatal(err)
+	}
+	if err := api.Delete(t.Context(), build); err != nil {
+		t.Fatal(err)
+	}
+	build.UID, build.ResourceVersion = "fake-capacity-build", ""
+	bootstrap := r.Genesis.Bootstrap
+	initial, err := api.GetConfigMap(t.Context(), r.Cfg.Namespace, bootstrap.Receipt.GenesisName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, _ := json.Marshal(admissioncontract.GenesisData{Contract: bootstrap.Receipt.Contract, Phase: admissioncontract.PhaseInitializing})
+	initial.Data = map[string]string{admissioncontract.GenesisDataKey: string(data)}
+	no := false
+	initial.Immutable = &no
+	if err := api.Update(t.Context(), initial); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{admissioncontract.ActiveLedgerName, admissioncontract.QueueLedgerName} {
+		if err := api.Delete(t.Context(), &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Namespace: r.Cfg.Namespace, Name: name}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	counted := &capacityCountingClient{Client: api.Client}
+	r.Client, r.APIReader = counted, counted
+	core := &capacityCountingCoreAPI{CoreAPI: api}
+	bootstrap.API = core
+	// Model only the five named GETs in the actual external ReceiptCheck.
+	// This is deterministic call accounting, not API or elapsed-time proof.
+	external := 5 // harness initial immutable owner/Namespace check
+	for _, name := range []string{admissioncontract.ActiveLedgerName, admissioncontract.QueueLedgerName} {
+		if _, err := core.GetConfigMap(t.Context(), r.Cfg.Namespace, name); !apierrors.IsNotFound(err) {
+			t.Fatal("model lacks fresh absent ledgers")
+		}
+	}
+	if _, err := core.GetConfigMap(t.Context(), r.Cfg.Namespace, bootstrap.Receipt.GenesisName); err != nil {
+		t.Fatal(err)
+	}
+	// Exact live preflight: five owner GETs + 3*4 old-work Lists + one
+	// receipt ConfigMap List. The fixture is empty, so no retry is modeled.
+	preflights := 0
+	bootstrap.Preflight = func(context.Context) error { preflights++; external += 18; return nil }
+	bootstrap.BeforeEffect = func(context.Context) error { external += 5; return nil }
+	binding, err := bootstrap.EnsureFresh(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.Genesis, err = admissiongenesis.NewGuard(t.Context(), bootstrap, binding)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.RecoveryReceipts = controllerReceiptConfigMaps{Client: counted, namespace: bootstrap.Receipt.Contract.ReceiptNamespace}
+	startup := core.calls + counted.calls + external
+	t.Logf("fresh startup model=%d calls (%d CoreAPI+%d direct owner/List checks), mutations=%d", startup, core.calls, external, core.mutations)
+	r.Genesis.ReceiptCheck = func(context.Context) error { external += 5; return nil }
+	exerciseV3CapacityLifecycle(t, t.Context(), r, build, false, func(stage string) {
+		external += 5
+		t.Logf("%s: typed CoreAPI=%d controller/receipt=%d external named GETs=%d total model=%d", stage, core.calls, counted.calls, external, core.calls+counted.calls+external)
+	})
+	total, mutations := core.calls+counted.calls+external, core.mutations+counted.mutations
+	if total <= 1500 || total > capacityCallLimit || mutations > 64 {
+		t.Fatal("full strict direct-read model does not fit its explicit call/write budget")
+	}
+	// The old typed CoreV1 REST client alone owns these calls. Exclude the
+	// three apps and three CR Lists per preflight, and all controller calls;
+	// default per-resource buckets cannot invalidate this lower bound.
+	oldCoreCalls := core.calls + external - 6*preflights
+	oldFloor := time.Duration(oldCoreCalls-int(rest.DefaultBurst)) * time.Second / time.Duration(rest.DefaultQPS)
+	newFloor := time.Duration(total-capacityClientBurst) * time.Second / capacityClientQPS
+	if oldFloor <= 3*time.Minute || newFloor >= 3*time.Minute {
+		t.Fatal("finite client-rate model does not explain the unchanged deadline")
+	}
+	t.Logf("complete strict model=%d calls (%d CoreAPI+%d controller/receipt+%d external checks), mutations=%d; zero-latency old CoreV1 floor (%d calls at 5QPS)=%s, shared20QPS floor=%s, not elapsed-time proof", total, core.calls, counted.calls, external, mutations, oldCoreCalls, oldFloor, newFloor)
+}
+
+func TestCapacityClientsShareFiniteLimiterAndKeepTLSDeadline(t *testing.T) {
+	m := capacityGateManifest()
+	ledger := capacityGateLedger(m)
+	calls := 0
+	g := newCapacityTransport(m, admissioncontract.Receipt{}, "https://127.0.0.1:6443", capacityRoundTripper(func(r *http.Request) (*http.Response, error) {
+		calls++
+		var object any = ledger
+		if r.URL.Path == "/api/v1/namespaces/"+m.Runner.Name {
+			object = &corev1.Namespace{TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Namespace"}, ObjectMeta: metav1.ObjectMeta{Name: m.Runner.Name, UID: types.UID(m.Runner.UID), ResourceVersion: "1"}}
+		}
+		raw, _ := json.Marshal(object)
+		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {"application/json"}}, Body: io.NopCloser(bytes.NewReader(raw))}, nil
+	}))
+	original := &rest.Config{Host: g.origin, Timeout: 10 * time.Second,
+		ContentConfig:   rest.ContentConfig{ContentType: "application/json", AcceptContentTypes: "application/json"},
+		TLSClientConfig: rest.TLSClientConfig{CAData: []byte("synthetic-ca"), CertData: []byte("synthetic-cert"), KeyData: []byte("synthetic-key"), NextProtos: []string{"http/1.1"}}}
+	cfg := capacityClientConfig(original)
+	if cfg == original || cfg.QPS != 20 || cfg.Burst != 20 || cfg.RateLimiter == nil || cfg.RateLimiter.QPS() != 20 || original.RateLimiter != nil || original.QPS != 0 ||
+		cfg.Timeout != 10*time.Second || cfg.Host != original.Host || !reflect.DeepEqual(cfg.TLSClientConfig, original.TLSClientConfig) || !reflect.DeepEqual(cfg.ContentConfig, original.ContentConfig) {
+		t.Fatal("finite test-only rate policy changed source TLS/deadline/credentials or became implicit")
+	}
+	httpClient := &http.Client{Transport: g, Timeout: 10 * time.Second}
+	cs, err := kubernetes.NewForConfigAndClient(cfg, httpClient)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cs.CoreV1().RESTClient().GetRateLimiter() != cfg.RateLimiter || cs.AppsV1().RESTClient().GetRateLimiter() != cfg.RateLimiter {
+		t.Fatal("typed resource clients minted separate limiters")
+	}
+	scheme := testScheme(t)
+	mapper := meta.NewDefaultRESTMapper([]schema.GroupVersion{corev1.SchemeGroupVersion, kovav1.SchemeGroupVersion})
+	mapper.Add(corev1.SchemeGroupVersion.WithKind("ConfigMap"), meta.RESTScopeNamespace)
+	mapper.Add(kovav1.SchemeGroupVersion.WithKind("KovaBuild"), meta.RESTScopeNamespace)
+	for _, gvk := range []schema.GroupVersionKind{corev1.SchemeGroupVersion.WithKind("ConfigMap"), kovav1.SchemeGroupVersion.WithKind("KovaBuild")} {
+		restClient, err := apiutil.RESTClientForGVK(gvk, true, false, cfg, serializer.NewCodecFactory(scheme), httpClient)
+		if err != nil || restClient.GetRateLimiter() != cfg.RateLimiter {
+			t.Fatal("controller-runtime per-GVK config lost shared limiter identity")
+		}
+	}
+	c, err := client.New(cfg, client.Options{Scheme: scheme, Mapper: mapper, HTTPClient: httpClient})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cs.CoreV1().Namespaces().Get(t.Context(), m.Runner.Name, metav1.GetOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Get(t.Context(), client.ObjectKeyFromObject(ledger), &corev1.ConfigMap{}); err != nil || calls != 2 || g.wireMutations != 0 || httpClient.Timeout != 10*time.Second {
+		t.Fatal("actual typed/controller HTTP paths lost timeout or qualification")
+	}
+	deadline, cancel := context.WithDeadline(t.Context(), time.Now().Add(-time.Second))
+	defer cancel()
+	if _, err := cs.CoreV1().Namespaces().Get(deadline, m.Runner.Name, metav1.GetOptions{}); err == nil || calls != 2 {
+		t.Fatal("expired client context reached upstream")
+	}
+	row := capacityFailureRow(deadline, "untrusted raw error", g, cfg.RateLimiter)
+	if row["reason"] != "LOCAL_CONTEXT_DEADLINE" {
+		t.Fatal("local deadline did not become a fixed safe enum")
+	}
+}
+
+func TestCapacityBudgetExactPositiveAndNegativeEdges(t *testing.T) {
+	m := capacityGateManifest()
+	ns := &corev1.Namespace{TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Namespace"}, ObjectMeta: metav1.ObjectMeta{Name: m.Runner.Name, UID: types.UID(m.Runner.UID), ResourceVersion: "1"}}
+	raw, _ := json.Marshal(ns)
+	calls := 0
+	g := newCapacityTransport(m, admissioncontract.Receipt{}, "https://127.0.0.1:6443", capacityRoundTripper(func(*http.Request) (*http.Response, error) {
+		calls++
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(bytes.NewReader(raw))}, nil
+	}))
+	g.calls = capacityCallLimit - 1
+	path := "/api/v1/namespaces/" + m.Runner.Name
+	if _, err := g.RoundTrip(capacityGateRequest("GET", path, nil)); err != nil || g.calls != 3500 || calls != 1 {
+		t.Fatal("final declared read inside the finite budget was refused")
+	}
+	if _, err := g.RoundTrip(capacityGateRequest("GET", path, nil)); err == nil || calls != 1 || g.calls != 3500 {
+		t.Fatal("over-budget read reached upstream")
+	}
+	ledger := capacityGateLedger(m)
+	ack, _ := json.Marshal(ledger)
+	proposal := ledger.DeepCopy()
+	proposal.UID, proposal.ResourceVersion = "", ""
+	raw, _ = json.Marshal(proposal)
+	g = newCapacityTransport(m, admissioncontract.Receipt{}, "https://127.0.0.1:6443", capacityRoundTripper(func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: 201, Body: io.NopCloser(bytes.NewReader(ack))}, nil
+	}))
+	g.mutations = 63
+	path = "/api/v1/namespaces/" + m.Runner.Name + "/configmaps"
+	if _, err := g.RoundTrip(capacityGateRequest("POST", path, raw)); err != nil || g.mutations != 64 || g.wireMutations != 1 {
+		t.Fatal("64th exact-qualified mutation was refused")
+	}
+	if _, err := g.RoundTrip(capacityGateRequest("POST", path, raw)); err == nil || g.wireMutations != 1 || g.mutations != 64 || g.wirePodPosts != 0 {
+		t.Fatal("mutation/zero-Pod budget expanded")
+	}
+}
+
+func TestCapacityFailureJournalHasOnlySafeOwnedFactsWithinReserve(t *testing.T) {
+	g := newCapacityTransport(capacityGateManifest(), admissioncontract.Receipt{}, "https://127.0.0.1:6443", nil)
+	g.calls, g.mutations, g.wireCalls, g.wireMutations = 3100, 36, 3099, 35
+	for i := 0; i < 6; i++ {
+		path := "/api/v1/namespaces/" + strings.Repeat("a", 63) + "/configmaps/" + strings.Repeat(string(rune('a'+i)), 63)
+		g.owned[path] = strings.Repeat("u", 256)
+		if i < 3 {
+			g.receiptDigests[path] = "sha256:" + strings.Repeat("d", 64)
+		}
+	}
+	row := capacityFailureRow(t.Context(), "token/Secret raw exception must not leak", g, nil)
+	raw, _ := json.Marshal(row)
+	if row["reason"] != "UNCLASSIFIED" || bytes.Contains(raw, []byte("must not leak")) || len(raw)+1 > capacityFailureReserve || row["apiUpstreamCalls"] != 3099 || row["apiUpstreamMutations"] != 35 || row["apiWireAttemptsUpperBound"] != 3099 {
+		t.Fatal("failure record leaked raw data, lost counters or exceeded its reserved byte bound")
+	}
+	for key := range g.owned {
+		delete(g.owned, key)
+	}
+	if len(row["ownedUIDs"].(map[string]string)) != 6 || len(row["receiptDataDigests"].(map[string]string)) != 3 {
+		t.Fatal("failure record did not snapshot original owned facts")
+	}
+	limited := capacityClientConfig(&rest.Config{}).RateLimiter.(*capacityRateLimiter)
+	cancelled, cancel := context.WithCancel(t.Context())
+	cancel()
+	if limited.Wait(cancelled) == nil || limited.Wait(t.Context()) == nil || capacityFailureRow(t.Context(), "UNCLASSIFIED", g, limited)["reason"] != "LOCAL_RATE_LIMIT_WAIT_REFUSED" || capacityFailureRow(cancelled, "UNCLASSIFIED", g, limited)["reason"] != "LOCAL_CONTEXT_CANCELLED" {
+		t.Fatal("local limiter/cancellation failures lost safe classification")
+	}
+}
 
 func capacityGateManifest() capacityManifest {
 	now := time.Now().UTC()
@@ -185,7 +476,7 @@ func TestCapacityTransportRejectsOversizeRedirectThrottleAndBudget(t *testing.T)
 		}
 	}
 	g := newCapacityTransport(capacityGateManifest(), admissioncontract.Receipt{}, "https://127.0.0.1:6443", capacityRoundTripper(func(*http.Request) (*http.Response, error) { t.Fatal("exhausted budget forwarded"); return nil, nil }))
-	g.calls = 1500
+	g.calls = capacityCallLimit
 	if _, err := g.RoundTrip(capacityGateRequest("GET", "/api/v1/namespaces/kube-system", nil)); err == nil {
 		t.Fatal("budget ignored")
 	}

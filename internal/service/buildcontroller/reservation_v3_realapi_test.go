@@ -33,11 +33,51 @@ import (
 	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
+	"k8s.io/client-go/util/flowcontrol"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	kjson "sigs.k8s.io/json"
 )
 
 const capacityPrefix = "kova-v3-capacity-"
+
+const (
+	capacityFailureReserve = 8 * 1024
+	capacityCallLimit      = 3500
+	capacityClientQPS      = 20
+	capacityClientBurst    = 20
+)
+
+type capacityRateLimiter struct {
+	flowcontrol.RateLimiter
+	mu         sync.Mutex
+	waitFailed bool
+}
+
+func (l *capacityRateLimiter) Wait(ctx context.Context) error {
+	l.mu.Lock()
+	closed := l.waitFailed
+	l.mu.Unlock()
+	if closed {
+		return errors.New("capacity local rate wait already refused; stop and retain")
+	}
+	err := l.RateLimiter.Wait(ctx)
+	if err != nil {
+		l.mu.Lock()
+		l.waitFailed = true
+		l.mu.Unlock()
+	}
+	return err
+}
+
+func capacityClientConfig(original *rest.Config) *rest.Config {
+	cfg := rest.CopyConfig(original)
+	// One finite limiter is shared by every typed/controller REST client.
+	// Per-resource default 5 QPS buckets cannot fit this exact direct-read
+	// lifecycle within its unchanged three-minute context.
+	cfg.QPS, cfg.Burst = capacityClientQPS, capacityClientBurst
+	cfg.RateLimiter = &capacityRateLimiter{RateLimiter: flowcontrol.NewTokenBucketRateLimiter(cfg.QPS, cfg.Burst)}
+	return cfg
+}
 
 type capacityNamespace struct {
 	Name string `json:"name"`
@@ -206,7 +246,7 @@ func (g *capacityTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if g.unknown || r.URL.Scheme+"://"+r.URL.Host != g.origin || r.URL.User != nil || r.URL.RawPath != "" || r.URL.Fragment != "" ||
-		!capacityQueryAllowed(r) || g.calls >= 1500 {
+		!capacityQueryAllowed(r) || g.calls >= capacityCallLimit {
 		return nil, errors.New("capacity API request escaped origin/path/read budget")
 	}
 	g.calls++
@@ -434,6 +474,50 @@ func capacityNamespaceReason(ns *corev1.Namespace, pin capacityNamespace, prepar
 		return "NAMESPACE_FRESHNESS_CHANGED"
 	}
 	return ""
+}
+
+func capacityFailureRow(ctx context.Context, reason string, g *capacityTransport, limiter flowcontrol.RateLimiter) map[string]any {
+	switch reason {
+	case "NAMESPACE_READ_UNKNOWN", "NAMESPACE_UID_CHANGED", "NAMESPACE_DELETING", "NAMESPACE_NOT_ACTIVE", "NAMESPACE_FRESHNESS_CHANGED", "RECEIPT_LIST_PREFLIGHT_UNKNOWN":
+	default:
+		reason = "UNCLASSIFIED"
+	}
+	if limited, ok := limiter.(*capacityRateLimiter); ok {
+		limited.mu.Lock()
+		if limited.waitFailed {
+			reason = "LOCAL_RATE_LIMIT_WAIT_REFUSED"
+		}
+		limited.mu.Unlock()
+	}
+	switch ctx.Err() {
+	case context.DeadlineExceeded:
+		reason = "LOCAL_CONTEXT_DEADLINE"
+	case context.Canceled:
+		reason = "LOCAL_CONTEXT_CANCELLED"
+	}
+	row := map[string]any{"stage": "unknown-retained", "reason": reason, "podPostsPermitted": false, "runtimeCancellationProved": false}
+	if g != nil {
+		g.mu.Lock()
+		defer g.mu.Unlock()
+		owned, digests := map[string]string{}, map[string]string{}
+		for path, uid := range g.owned {
+			owned[path] = uid
+		}
+		for path, digest := range g.receiptDigests {
+			digests[path] = digest
+		}
+		row["apiTransportCalls"], row["apiTransportMutationAttempts"] = g.calls, g.mutations
+		row["apiUpstreamCalls"], row["apiUpstreamMutations"], row["apiWireAttemptsUpperBound"] = g.wireCalls, g.wireMutations, g.wireCalls
+		row["podPosts"], row["ownedUIDs"], row["receiptDataDigests"] = g.wirePodPosts, owned, digests
+	}
+	return row
+}
+
+func (g *capacityTransport) counters() map[string]int {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return map[string]int{"apiTransportCalls": g.calls, "apiTransportMutationAttempts": g.mutations,
+		"apiUpstreamCalls": g.wireCalls, "apiUpstreamMutations": g.wireMutations, "apiWireAttemptsUpperBound": g.wireCalls, "podPosts": g.wirePodPosts}
 }
 
 func (g *capacityTransport) forward(r *http.Request) (*http.Response, error) {
@@ -803,20 +887,22 @@ func TestRealAPIGenesisV3FullTableLifecycle(t *testing.T) {
 		t.Fatal("fresh private output receipt cannot be created")
 	}
 	complete, unknownReason := false, "UNCLASSIFIED"
+	var transport *capacityTransport
 	defer func() {
 		if !complete {
-			_ = json.NewEncoder(file).Encode(map[string]any{"stage": "unknown-retained", "reason": unknownReason, "podPostsPermitted": false, "runtimeCancellationProved": false})
-			_ = file.Sync()
+			if raw, err := json.Marshal(capacityFailureRow(ctx, unknownReason, transport, apiConfig.RateLimiter)); err == nil && len(raw)+1 <= capacityFailureReserve {
+				_, _ = file.Write(append(raw, '\n'))
+				_ = file.Sync()
+			}
 		}
 		_ = file.Close()
 	}()
 	stageCount, receiptBytes := 0, 0
-	var transport *capacityTransport
 	journal := func(row map[string]any) error {
 		stageCount++
 		raw, err := json.Marshal(row)
 		receiptBytes += len(raw) + 1
-		if err != nil || stageCount > 20 || len(raw) > 16*1024 || receiptBytes > 64*1024-256 {
+		if err != nil || stageCount > 20 || len(raw) > 16*1024 || receiptBytes > 64*1024-capacityFailureReserve {
 			return errors.New("capacity journal size/stage budget exceeded")
 		}
 		if n, err := file.Write(append(raw, '\n')); err != nil || n != len(raw)+1 {
@@ -832,12 +918,16 @@ func TestRealAPIGenesisV3FullTableLifecycle(t *testing.T) {
 			"genesisUID": original.GenesisUID, "podPostsPermitted": false, "runtimeCancellationProved": false}
 		if transport != nil {
 			row["ownedUIDs"], row["receiptDataDigests"] = transport.owned, transport.receiptDigests
+			for field, count := range transport.counters() {
+				row[field] = count
+			}
 		}
 		if journal(row) != nil {
 			t.Fatal("capacity output receipt unavailable; retain API objects")
 		}
 	}
 	write("begin-retain-all")
+	apiConfig = capacityClientConfig(apiConfig)
 	apiConfig.ContentType, apiConfig.AcceptContentTypes = "application/json", "application/json"
 	upstream, err := capacitySingleWireTransport(apiConfig)
 	if err != nil {
