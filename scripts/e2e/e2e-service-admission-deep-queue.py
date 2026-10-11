@@ -25,6 +25,7 @@ import secrets
 import shutil
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import tarfile
@@ -84,6 +85,7 @@ OPENER = build_opener(ProxyHandler({}))
 FIXTURE: dict = {}
 CONTRACT: dict = {}
 FIXTURE_SHA = ""
+EXECUTION_DEADLINE: float | None = None
 
 
 def configure_fixture() -> dict:
@@ -186,6 +188,7 @@ def qualify_build_receipts(
         objects,
         FIXTURE,
         CONTRACT,
+        canonical_pod_digest,
     )
     return objects
 
@@ -263,18 +266,137 @@ def quiet_seconds() -> int:
     return seconds
 
 
+def start_execution_budget() -> float:
+    """Start one budget before preflight; live must not renew it."""
+    global EXECUTION_DEADLINE
+    EXECUTION_DEADLINE = time.monotonic() + RUN_DEADLINE_SECONDS
+    return EXECUTION_DEADLINE
+
+
+def budget_timeout(maximum: float) -> float:
+    # Pure helper regressions can run without a live execution scope. The
+    # authoritative check/run entrypoints always start the shared budget.
+    if EXECUTION_DEADLINE is None:
+        return maximum
+    remaining = EXECUTION_DEADLINE - time.monotonic()
+    if remaining <= 0:
+        fail("end-to-end preflight/live execution budget expired")
+    return min(maximum, remaining)
+
+
+def live_deadline() -> float:
+    if EXECUTION_DEADLINE is None:
+        fail("live has no original preflight execution budget")
+    budget_timeout(RUN_DEADLINE_SECONDS)
+    return EXECUTION_DEADLINE
+
+
+def pause(seconds: float) -> None:
+    time.sleep(budget_timeout(seconds))
+
+
 def command(
-    argv: list[str], *, input_text: str | None = None, timeout: int = 20
+    argv: list[str], *, input_text: str | None = None, timeout: int = 20,
+    environment: dict[str, str] | None = None,
 ) -> str:
+    bounded_timeout = budget_timeout(timeout)
     try:
         result = subprocess.run(
-            argv, input=input_text, text=True, capture_output=True, timeout=timeout, check=False
+            argv,
+            input=input_text,
+            text=True,
+            capture_output=True,
+            timeout=bounded_timeout,
+            check=False,
+            env=environment,
         )
     except (OSError, subprocess.TimeoutExpired) as error:
         fail(f"{argv[0]} did not complete: {type(error).__name__}")
     if result.returncode != 0:
         fail(f"{Path(argv[0]).name} returned nonzero status")
+    budget_timeout(timeout)
     return result.stdout
+
+
+def qualify_template_binary() -> Path:
+    path = Path(FIXTURE["pod_template_binary"])
+    if not path.is_absolute() or path.resolve() != path or path.is_symlink():
+        fail("Pod-template binary path is not canonical")
+    def stable(info: os.stat_result) -> tuple:
+        # Hashing a newly built file may update atime under Linux relatime.
+        return (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid,
+                info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+    before = path.stat()
+    if (
+        not stat.S_ISREG(before.st_mode)
+        or before.st_uid != os.getuid()
+        or before.st_mode & 0o022
+        or not before.st_mode & 0o100
+        or not 0 < before.st_size <= 512 * 1024 * 1024
+    ):
+        fail("Pod-template binary is not an owned bounded executable")
+    digest = hashlib.sha256()
+    with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW), "rb") as source:
+        if stable(os.fstat(source.fileno())) != stable(before):
+            fail("Pod-template binary was replaced before its verification read")
+        while block := source.read(1024 * 1024):
+            budget_timeout(5)
+            digest.update(block)
+        if stable(os.fstat(source.fileno())) != stable(before):
+            fail("Pod-template binary changed during its verification read")
+    if stable(path.stat()) != stable(before) or digest.hexdigest() != FIXTURE["pod_template_binary_sha256"]:
+        fail("original candidate Pod-template binary changed")
+    return path
+
+
+def native_template_result(mode: str, raw: bytes, fields: set[str]) -> dict:
+    if mode not in ("1", "identity"):
+        fail("unsupported native Pod-template operation")
+    binary = qualify_template_binary()
+    output = command(
+        [
+            str(binary),
+            "-test.run=^TestE2EPodTemplateDigestStdin$",
+            "-test.count=1",
+            "-test.timeout=5s",
+            "-test.v=false",
+        ],
+        input_text=raw.decode(),
+        timeout=5,
+        environment={"KOVA_E2E_POD_TEMPLATE_STDIN": mode},
+    )
+    qualify_template_binary()
+    lines = output.splitlines()
+    prefix = "KOVA_E2E_POD_TEMPLATE " if mode == "1" else "KOVA_E2E_POD_TEMPLATE_IDENTITY "
+    if len(lines) != 2 or not lines[0].startswith(prefix) or lines[1] != "PASS":
+        fail("native Pod-template result framing differs")
+    result = V3.keys(
+        V3.decode(lines[0][len(prefix):]),
+        fields,
+        "native Pod-template result fields differ",
+    )
+    if result["candidate_commit"] != FIXTURE["candidate_commit"]:
+        fail("native Pod-template binary candidate differs")
+    return result
+
+
+def canonical_pod_digest(pod: dict) -> str:
+    """Direct Pod bytes -> pinned native product projection, never stamp trust."""
+    raw = V3.encoded(pod)
+    if len(raw) > 128 * 1024:
+        fail("direct Pod exceeds the native template input bound")
+    result = native_template_result(
+        "1", raw, {"candidate_commit", "input_sha256", "pod_uid", "pod_template_digest"}
+    )
+    if (
+        result["input_sha256"] != hashlib.sha256(raw).hexdigest()
+        or result["pod_uid"] != pod["metadata"]["uid"]
+        or type(result["pod_template_digest"]) is not str
+        or V3.DIGEST.fullmatch(result["pod_template_digest"]) is None
+    ):
+        fail("native Pod-template result does not bind this source and direct Pod")
+    return result["pod_template_digest"]
 
 
 def kctl(*args: str, timeout: int = 20) -> str:
@@ -752,12 +874,13 @@ def parse_oci_saved_image(
 
 
 def saved_image_fact(reference: str, manifest_digest: str, revision: str) -> dict:
+    save_timeout = budget_timeout(90)
     try:
         process = subprocess.Popen(
             [
                 "timeout",
                 "--kill-after=5s",
-                "90s",
+                f"{save_timeout:.6f}s",
                 "docker",
                 "image",
                 "save",
@@ -772,7 +895,9 @@ def saved_image_fact(reference: str, manifest_digest: str, revision: str) -> dic
         fail(f"Docker OCI image save could not start: {type(error).__name__}")
     try:
         assert process.stdout is not None
-        result = parse_oci_saved_image(process.stdout, reference, manifest_digest, revision)
+        result = parse_oci_saved_image(
+            process.stdout, reference, manifest_digest, revision
+        )
     except BaseException as error:
         if process.poll() is None:
             process.kill()
@@ -791,6 +916,7 @@ def saved_image_fact(reference: str, manifest_digest: str, revision: str) -> dic
         fail("Docker OCI image save did not exit after streaming")
     if exit_code != 0:
         fail(f"Docker OCI image save returned {exit_code}")
+    budget_timeout(90)
     return result
 
 
@@ -1030,14 +1156,17 @@ def resource_sample(
 def request_json(
     port: int, method: str, path: str, token: str = "", payload: dict | None = None
 ) -> tuple[int, dict, float, dict]:
+    bounded_timeout = budget_timeout(15)
     data = json.dumps(payload).encode() if payload is not None else None
     headers = {"Content-Type": "application/json"}
     if token:
         headers["Authorization"] = f"Bearer {token}"
-    req = Request(f"http://127.0.0.1:{port}{path}", data=data, headers=headers, method=method)
+    req = Request(
+        f"http://127.0.0.1:{port}{path}", data=data, headers=headers, method=method
+    )
     started = time.monotonic()
     try:
-        with OPENER.open(req, timeout=15) as response:
+        with OPENER.open(req, timeout=bounded_timeout) as response:
             status, raw, response_headers = (
                 response.status,
                 response.read(HTTP_BODY_MAX + 1),
@@ -1051,13 +1180,20 @@ def request_json(
         )
     except (OSError, URLError) as error:
         fail(f"{method} {path} transport outcome is unknown: {type(error).__name__}")
+    budget_timeout(15)
     if len(raw) > HTTP_BODY_MAX:
-        fail(f"{method} {path} response exceeds {HTTP_BODY_MAX} bytes; outcome needs review")
+        fail(
+            f"{method} {path} response exceeds {HTTP_BODY_MAX} bytes; outcome needs review"
+        )
     if token and (
         token.encode() in raw
-        or any(token in key or token in value for key, value in response_headers.items())
+        or any(
+            token in key or token in value for key, value in response_headers.items()
+        )
     ):
-        fail(f"{method} {path} response reflected the request credential; receipt withheld")
+        fail(
+            f"{method} {path} response reflected the request credential; receipt withheld"
+        )
     response_headers = {key.lower(): value for key, value in response_headers.items()}
     elapsed = time.monotonic() - started
     try:
@@ -1129,20 +1265,39 @@ def delete_build_with_uid(name: str, uid: str, kubeconfig_sha256: str) -> dict:
 
 
 def check_runner(blocker_id: str, blocker_uid: str) -> dict:
-    runners = kjson(
-        "-n", NAMESPACE, "get", "pods", "-l", "app.kubernetes.io/name=kova-runner", "-o", "json"
-    )["items"]
+    listing = kjson(
+        "-n",
+        NAMESPACE,
+        "get",
+        "pods",
+        "-l",
+        "app.kubernetes.io/name=kova-runner",
+        "-o",
+        "json",
+    )
+    # kubectl's generic JSON printer wraps selector results in v1/List.
+    if listing.get("apiVersion") != "v1" or listing.get("kind") != "List":
+        fail("runner inventory is not the typed kubectl List")
+    runners = listing["items"]
     if len(runners) != 1 or runners[0]["metadata"]["name"] != f"kova-job-{blocker_id}":
         fail("queued builds gained a runner Pod or blocker Pod is absent")
-    pod = runners[0]
+    # Hash a fresh named GET, not an inferred/defaulted List item TypeMeta.
+    original_uid = runners[0]["metadata"].get("uid")
+    pod = kjson("-n", NAMESPACE, "get", "pod", f"kova-job-{blocker_id}", "-o", "json")
+    if pod.get("apiVersion") != "v1" or pod.get("kind") != "Pod":
+        fail("direct runner observation is not a typed Pod")
+    V3.identity(pod, f"kova-job-{blocker_id}", NAMESPACE, original_uid)
     if (
-        pod["spec"].get("nodeSelector", {}).get("never") != "true"
+        pod["metadata"].get("deletionTimestamp") is not None
+        or pod["spec"].get("nodeSelector", {}).get("never") != "true"
         or pod["spec"].get("nodeName")
         or pod["status"].get("phase") != "Pending"
     ):
         fail("blocker runner is not unscheduled and Pending")
     owners = [
-        owner for owner in pod["metadata"].get("ownerReferences", []) if owner.get("controller")
+        owner
+        for owner in pod["metadata"].get("ownerReferences", [])
+        if owner.get("controller")
     ]
     if (
         len(owners) != 1
@@ -1170,9 +1325,37 @@ def metrics_forwards(pre: dict, deadline: float) -> list:
             )
         return forwards
     except BaseException:
-        for forward in forwards:
-            forward.close()
+        close_local_processes(forwards, None, None, deadline)
         raise
+
+
+def close_local_processes(metrics: list, forward: object, proxy: object,
+                          deadline: float | None = None) -> None:
+    """Stop only our own local children, with one shared ten-second bound."""
+    until = time.monotonic() + 10
+    if deadline is not None:
+        until = min(until, deadline)
+    children = [item.process for item in metrics]
+    children += [item for item in (forward, proxy) if item is not None]
+    for child in children:
+        if child.poll() is None:
+            child.terminate()
+    unresolved = False
+    for child in children:
+        if child.poll() is None:
+            try:
+                child.wait(timeout=max(0, until - time.monotonic()))
+            except subprocess.TimeoutExpired:
+                child.kill()
+                try:
+                    child.wait(timeout=max(0, until - time.monotonic()))
+                except subprocess.TimeoutExpired:
+                    unresolved = True
+    for item in metrics:
+        if item.process.stdout is not None:
+            item.process.stdout.close()
+    if unresolved:
+        fail("owned local child shutdown did not resolve within its shared bound")
 
 
 def normal_receipt_absence(objects: dict[str, dict], deadline: float) -> None:
@@ -1283,7 +1466,7 @@ def full_capacity_recovery(
                 {original_receipt_name: original_receipt}, release_deadline
             )
             break
-        time.sleep(1)
+        pause(1)
     else:
         fail("original queued UID/receipt did not release within bounded deadline")
     del expected_ids[victim]
@@ -1447,9 +1630,14 @@ def leader_handoff(
         fail("leader changed before the sole planned UID deletion")
     uid = pod["metadata"]["uid"]
     path = f"/api/v1/namespaces/{CONTROL_NAMESPACE}/pods/{leader}"
-    effect = {"qualified_original_leader_uid": uid, "qualified_original_leader_name": leader,
-              "delete_wire_attempted": False, "http_ack_code": None,
-              "original_leader_direct_absent": False, "other_original_uids_last_verified": None}
+    effect = {
+        "qualified_original_leader_uid": uid,
+        "qualified_original_leader_name": leader,
+        "delete_wire_attempted": False,
+        "http_ack_code": None,
+        "original_leader_direct_absent": False,
+        "other_original_uids_last_verified": None,
+    }
     pre["leader_handoff_effect"] = effect
     append_jsonl(
         directory / "events.jsonl",
@@ -1497,12 +1685,12 @@ def leader_handoff(
             current_lease, elected = leader_observation()
             pods = service_pods()
         except BenchError:
-            time.sleep(1)
+            pause(1)
             continue
         if current_lease["metadata"]["uid"] != lease["metadata"]["uid"]:
             fail("Lease UID changed during handoff")
         if current_lease["spec"]["holderIdentity"] == lease["spec"]["holderIdentity"]:
-            time.sleep(1)
+            pause(1)
             continue
         current = {item["metadata"]["name"]: item["metadata"]["uid"] for item in pods}
         if (
@@ -1516,7 +1704,7 @@ def leader_handoff(
         for item in pods:
             qualify_service_owner(item, pre)
         if request_json(API_PROXY_PORT, "GET", path)[0] != 404:
-            time.sleep(1)
+            pause(1)
             continue
         effect["original_leader_direct_absent"] = True
         effect["other_original_uids_last_verified"] = dict(survivors)
@@ -1575,7 +1763,8 @@ def wait_queue_state(
         if set(by_name) != expected | {blocker_id}:
             fail("KovaBuild set differs from the exact accepted benchmark IDs")
         if expected_uids and any(
-            by_name[name]["metadata"]["uid"] != uid for name, uid in expected_uids.items()
+            by_name[name]["metadata"]["uid"] != uid
+            for name, uid in expected_uids.items()
         ):
             fail("an accepted KovaBuild UID changed during the benchmark")
         blocker = by_name[blocker_id]
@@ -1590,7 +1779,9 @@ def wait_queue_state(
             for name in expected
         ):
             fail("a queued KovaBuild differs from its exact immutable request")
-        phases = {name: by_name[name].get("status", {}).get("phase", "") for name in expected}
+        phases = {
+            name: by_name[name].get("status", {}).get("phase", "") for name in expected
+        }
         if any(phase not in ("", "Queued") for phase in phases.values()):
             fail("a queued KovaBuild entered an unexpected phase")
         check_runner(blocker_id, blocker_uid)
@@ -1635,7 +1826,7 @@ def wait_queue_state(
                 },
             )
             return builds
-        time.sleep(2)
+        pause(2)
     fail("queued CR status/ledger did not converge before the bounded deadline")
 
 
@@ -1765,6 +1956,9 @@ def guard_api(
 
 def preflight() -> dict:
     global CONTRACT
+    if EXECUTION_DEADLINE is None:
+        start_execution_budget()
+    budget_timeout(RUN_DEADLINE_SECONDS)
     if sys.platform != "linux":
         fail("deep-queue acceptance runs only on an isolated Linux Kind host")
     if os.environ.get("KIND_CLUSTER", CLUSTER) != CLUSTER or os.environ.get(
@@ -1775,6 +1969,9 @@ def preflight() -> dict:
         )
     if not FIXTURE or kova_fixture_changed():
         fail("original v3 fixture file is unavailable or changed")
+    native_identity = native_template_result("identity", b"", {"candidate_commit", "os", "architecture"})
+    if native_identity["os"] != "linux" or native_identity["architecture"] != "amd64":
+        fail("native Pod-template binary platform differs")
     for binary in ("kind", "kubectl", "docker", "helm", "git", "timeout"):
         if shutil.which(binary) is None:
             fail(f"missing required command {binary}")
@@ -1867,7 +2064,9 @@ def preflight() -> dict:
         for container in deployment["spec"]["template"]["spec"]["containers"]
         if container["name"] == "kova-service"
     )
-    runner_arg = next(arg for arg in service_container["args"] if arg.startswith("--runner-image="))
+    runner_arg = next(
+        arg for arg in service_container["args"] if arg.startswith("--runner-image=")
+    )
     token_env = [
         item
         for item in service_container.get("env", [])
@@ -1878,7 +2077,10 @@ def preflight() -> dict:
         "key": "token",
     }:
         fail("Service static token source differs from the dedicated test Secret")
-    if len(worker_containers) != 1 or worker_containers[0].get("imagePullPolicy") != "Never":
+    if (
+        len(worker_containers) != 1
+        or worker_containers[0].get("imagePullPolicy") != "Never"
+    ):
         fail("worker image must be preloaded with imagePullPolicy Never")
     image_facts = {
         "controller": local_image_fact(service_container["image"]),
@@ -1950,14 +2152,22 @@ def preflight() -> dict:
     if kjson("get", "kovabuilds", "--all-namespaces", "-o", "json")["items"]:
         fail("another KovaBuild exists in the dedicated Kind cluster")
     if kjson(
-        "get", "pods", "--all-namespaces", "-l", "app.kubernetes.io/name=kova-runner", "-o", "json"
+        "get",
+        "pods",
+        "--all-namespaces",
+        "-l",
+        "app.kubernetes.io/name=kova-runner",
+        "-o",
+        "json",
     )["items"]:
         fail("another runner Pod exists in the dedicated Kind cluster")
     queue_ledgers(0)
     if kjson("-n", NAMESPACE, "get", "pods", "-o", "json")["items"]:
         fail("fresh runner namespace contains pre-existing Pods")
     empty_receipts()
-    docker_root = Path(command(["docker", "info", "--format", "{{.DockerRootDir}}"]).strip())
+    docker_root = Path(
+        command(["docker", "info", "--format", "{{.DockerRootDir}}"]).strip()
+    )
     if not docker_root.is_dir():
         fail("Docker data root is unavailable")
     api_metrics()
@@ -2132,7 +2342,11 @@ def service_owned_pod_projection(deployment_uid: str) -> list[dict]:
 
 def emergency_stop(pre: dict, run_dir: Path, token: str) -> dict:
     """Stop only this exact Deployment; preserve all builds, ledgers and receipts."""
-    outcome = {"status": "unconfirmed", "started_at": now(), "original_service_pods_deleted": False}
+    outcome = {
+        "status": "unconfirmed",
+        "started_at": now(),
+        "original_service_pods_deleted": False,
+    }
     snapshots = run_dir / "failure-snapshots"
     snapshots.mkdir(exist_ok=True)
     os.chmod(snapshots, 0o700)
@@ -2148,7 +2362,9 @@ def emergency_stop(pre: dict, run_dir: Path, token: str) -> dict:
             outcome["node_uid_observation"] = f"unavailable: {safe_error(error, token)}"
         try:
             before_pods = service_owned_pod_projection(pre["service_deployment"]["uid"])
-            save_without_token(snapshots / "pre-stop-service-pods.json", before_pods, token)
+            save_without_token(
+                snapshots / "pre-stop-service-pods.json", before_pods, token
+            )
             outcome["original_service_pods_changed"] = any(
                 item["uid"] != pre["service_pods"].get(item["name"])
                 or item["image_ids"].get("kova-service")
@@ -2156,7 +2372,9 @@ def emergency_stop(pre: dict, run_dir: Path, token: str) -> dict:
                 for item in before_pods
             )
         except Exception as error:
-            outcome["pre_stop_pods_snapshot"] = f"unavailable: {safe_error(error, token)}"
+            outcome["pre_stop_pods_snapshot"] = (
+                f"unavailable: {safe_error(error, token)}"
+            )
         for attempt in range(3):
             deployment = kjson(
                 "-n", NAMESPACE, "get", "deployment", f"{RELEASE}-service", "-o", "json"
@@ -2170,7 +2388,9 @@ def emergency_stop(pre: dict, run_dir: Path, token: str) -> dict:
                 or metadata.get("deletionTimestamp")
                 or object_sha256(metadata.get("labels", {}))
                 != pre["service_deployment"]["labels_sha256"]
-                or object_sha256({key: value for key, value in spec.items() if key != "replicas"})
+                or object_sha256(
+                    {key: value for key, value in spec.items() if key != "replicas"}
+                )
                 != pre["service_deployment"]["spec_except_replicas_sha256"]
             ):
                 fail(
@@ -2198,7 +2418,9 @@ def emergency_stop(pre: dict, run_dir: Path, token: str) -> dict:
                     token,
                 )
             except Exception as error:
-                outcome["pre_stop_deployment_snapshot"] = f"unavailable: {safe_error(error, token)}"
+                outcome["pre_stop_deployment_snapshot"] = (
+                    f"unavailable: {safe_error(error, token)}"
+                )
             image_index = pre["service_deployment"]["image_container_index"]
             patch = [
                 {"op": "test", "path": "/metadata/uid", "value": metadata["uid"]},
@@ -2231,7 +2453,7 @@ def emergency_stop(pre: dict, run_dir: Path, token: str) -> dict:
             except BenchError:
                 if attempt == 2:
                     raise
-                time.sleep(1)
+                pause(1)
         deadline = time.monotonic() + EMERGENCY_STOP_DEADLINE_SECONDS
         while time.monotonic() < deadline:
             if exact_kind_identity() != pre["kubeconfig_fingerprint"]:
@@ -2239,8 +2461,13 @@ def emergency_stop(pre: dict, run_dir: Path, token: str) -> dict:
             current = kjson(
                 "-n", NAMESPACE, "get", "deployment", f"{RELEASE}-service", "-o", "json"
             )
-            current_pods = service_owned_pod_projection(pre["service_deployment"]["uid"])
-            if current.get("metadata", {}).get("uid") != pre["service_deployment"]["uid"]:
+            current_pods = service_owned_pod_projection(
+                pre["service_deployment"]["uid"]
+            )
+            if (
+                current.get("metadata", {}).get("uid")
+                != pre["service_deployment"]["uid"]
+            ):
                 fail("Service Deployment UID changed after emergency stop")
             if current.get("spec", {}).get("replicas") != 0:
                 fail("Service Deployment did not retain zero replicas")
@@ -2277,9 +2504,11 @@ def emergency_stop(pre: dict, run_dir: Path, token: str) -> dict:
                         token,
                     )
                 except Exception as error:
-                    outcome["post_stop_snapshot"] = f"unavailable: {safe_error(error, token)}"
+                    outcome["post_stop_snapshot"] = (
+                        f"unavailable: {safe_error(error, token)}"
+                    )
                 return outcome
-            time.sleep(2)
+            pause(2)
         fail("Service Pods did not disappear before the emergency-stop deadline")
     except Exception as error:
         outcome["error"] = safe_error(error, token)
@@ -2375,7 +2604,7 @@ def observe_long_quiet(
         def guard() -> None:
             nonlocal api_guard_before, api_guard_at, samples
             if time.monotonic() >= overall_deadline:
-                fail("long quiet observation exceeded the one-hour run deadline")
+                fail("long quiet observation exceeded the shared execution deadline")
             observe_blocked_runtime(
                 expected_ids,
                 blocker_id,
@@ -2394,7 +2623,7 @@ def observe_long_quiet(
         save_json(window_dir / "api-before.json", before_api)
         measured_start = time.monotonic()
         for _ in range(window_seconds // QUIET_SAMPLE_SECONDS):
-            time.sleep(QUIET_SAMPLE_SECONDS)
+            pause(QUIET_SAMPLE_SECONDS)
             guard()
         after_api = api_metrics()
         measured_seconds = time.monotonic() - measured_start
@@ -2413,7 +2642,9 @@ def observe_long_quiet(
             "planned_seconds": window_seconds,
             "measured_seconds": measured_seconds,
             "api": metric_delta(before_api, after_api, measured_seconds),
-            "reconcile": {"availability": "unavailable: not collected by this benchmark"},
+            "reconcile": {
+                "availability": "unavailable: not collected by this benchmark"
+            },
             "resource_peaks": resource_peaks(window_dir),
             "observer": {
                 "guard_samples": samples,
@@ -2444,6 +2675,7 @@ def observe_long_quiet(
 
 
 def live(pre: dict, token: str) -> Path:
+    overall_deadline = live_deadline()
     run_id = (
         "deep-queue-"
         + datetime.now(timezone.utc).strftime("%Y%m%dt%H%M%S")  # noqa: UP017 (Python 3.10)
@@ -2480,7 +2712,6 @@ def live(pre: dict, token: str) -> Path:
     forward = None
     proxy = None
     metrics = []
-    overall_deadline = time.monotonic() + RUN_DEADLINE_SECONDS
     success = False
     cleanup_started = False
     admission_attempted = False
@@ -2502,6 +2733,7 @@ def live(pre: dict, token: str) -> Path:
             if name != pre["initial_leader"]
         )
         with (run_dir / "port-forward.log").open("w", encoding="utf-8") as log:
+            budget_timeout(15)
             forward = subprocess.Popen(
                 [
                     "kubectl",
@@ -2519,6 +2751,7 @@ def live(pre: dict, token: str) -> Path:
                 stderr=subprocess.STDOUT,
             )
         for _ in range(30):
+            budget_timeout(15)
             if forward.poll() is not None:
                 fail("Service Pod port-forward exited")
             try:
@@ -2526,7 +2759,7 @@ def live(pre: dict, token: str) -> Path:
                     break
             except BenchError:
                 pass
-            time.sleep(1)
+            pause(1)
         else:
             fail("Service Pod did not become ready through the local port-forward")
 
@@ -2539,11 +2772,15 @@ def live(pre: dict, token: str) -> Path:
         blocker_id = build_id(blocker_key)
         blocker_dir = run_dir / "blocker"
         blocker_dir.mkdir()
-        append_jsonl(blocker_dir / "candidates.jsonl", {"key": blocker_key, "id": blocker_id})
+        append_jsonl(
+            blocker_dir / "candidates.jsonl", {"key": blocker_key, "id": blocker_id}
+        )
         blocker_payload = {
             "source_uri": source_uri,
             "source_digest": SOURCE_DIGEST,
-            "targets": [{"target": f"{target_prefix}:blocker", "platform": pre["platform"]}],
+            "targets": [
+                {"target": f"{target_prefix}:blocker", "platform": pre["platform"]}
+            ],
             "format": "oci",
             "concurrency": 1,
             "idempotency_key": blocker_key,
@@ -2563,7 +2800,9 @@ def live(pre: dict, token: str) -> Path:
                 "body_fingerprint": body_fingerprint,
                 "build_id_header_matches_expected": observed_id == blocker_id,
                 "build_id_header_length": len(observed_id),
-                "build_id_header_sha256": hashlib.sha256(observed_id.encode()).hexdigest(),
+                "build_id_header_sha256": hashlib.sha256(
+                    observed_id.encode()
+                ).hexdigest(),
                 "elapsed_seconds": elapsed,
             },
         )
@@ -2611,7 +2850,7 @@ def live(pre: dict, token: str) -> Path:
                         save_without_token(blocker_dir / "build.json", blocker, token)
                         save_without_token(blocker_dir / "runner.json", pod, token)
                         break
-            time.sleep(1)
+            pause(1)
         else:
             fail(
                 "blocker did not acquire exactly one active grant and Pending owned runner"
@@ -2731,7 +2970,7 @@ def live(pre: dict, token: str) -> Path:
             save_json(stage_dir / "api-before.json", before)
             measured_start = time.monotonic()
             for _ in range(STEADY_SECONDS // POLL_SECONDS):
-                time.sleep(POLL_SECONDS)
+                pause(POLL_SECONDS)
                 stage_guard(force_api=True)
             measured_seconds = time.monotonic() - measured_start
             after = api_metrics()
@@ -2824,13 +3063,19 @@ def live(pre: dict, token: str) -> Path:
             expected_uids=expected_uids,
         )
         if time.monotonic() >= overall_deadline - 120:
-            fail("insufficient one-hour budget remains for exact cleanup")
-        if hashlib.sha256(KUBECONFIG.read_bytes()).hexdigest() != pre["kubeconfig_sha256"]:
+            fail("insufficient shared preflight/live budget remains for exact cleanup")
+        if (
+            hashlib.sha256(KUBECONFIG.read_bytes()).hexdigest()
+            != pre["kubeconfig_sha256"]
+        ):
             fail("dedicated kubeconfig bytes changed before API proxy launch")
-        cleanup_deadline = min(time.monotonic() + CLEANUP_DEADLINE_SECONDS, overall_deadline)
+        cleanup_deadline = min(
+            time.monotonic() + CLEANUP_DEADLINE_SECONDS, overall_deadline
+        )
         with socket.socket() as proxy_probe:
             proxy_probe.bind(("127.0.0.1", API_PROXY_PORT))
         with (run_dir / "kubectl-proxy.log").open("w", encoding="utf-8") as log:
+            budget_timeout(15)
             proxy = subprocess.Popen(
                 [
                     "kubectl",
@@ -2848,11 +3093,14 @@ def live(pre: dict, token: str) -> Path:
             if proxy.poll() is not None:
                 fail("UID-precondition Kubernetes API proxy exited")
             try:
-                if request_json(API_PROXY_PORT, "GET", build_api_path(blocker_id))[0] == 200:
+                if (
+                    request_json(API_PROXY_PORT, "GET", build_api_path(blocker_id))[0]
+                    == 200
+                ):
                     break
             except BenchError:
                 pass
-            time.sleep(1)
+            pause(1)
         else:
             fail("UID-precondition Kubernetes API proxy did not become ready")
         cleanup_started = True
@@ -2867,8 +3115,7 @@ def live(pre: dict, token: str) -> Path:
             token,
             cleanup_deadline,
         )
-        for metric_forward in metrics:
-            metric_forward.close()
+        close_local_processes(metrics, None, None, overall_deadline)
         metrics = []
         checkpoint = "leader-handoff"
         handoff_result = leader_handoff(
@@ -2966,7 +3213,7 @@ def live(pre: dict, token: str) -> Path:
             cleanup_metrics, cleanup_at = guard_api(
                 cleanup_dir, cleanup_metrics, cleanup_at
             )
-            time.sleep(3)
+            pause(3)
         else:
             fail("queued CR cleanup did not drain within its bounded deadline")
         remaining = wait_queue_state(
@@ -2997,9 +3244,12 @@ def live(pre: dict, token: str) -> Path:
         if exact_kind_identity() != pre["kubeconfig_fingerprint"]:
             fail("dedicated Kind identity changed before blocker deletion")
         append_jsonl(
-            cleanup_dir / "delete-batches.jsonl", {"ids": [blocker_id], "started_at": now()}
+            cleanup_dir / "delete-batches.jsonl",
+            {"ids": [blocker_id], "started_at": now()},
         )
-        receipt = delete_build_with_uid(blocker_id, blocker_uid, pre["kubeconfig_sha256"])
+        receipt = delete_build_with_uid(
+            blocker_id, blocker_uid, pre["kubeconfig_sha256"]
+        )
         append_jsonl(cleanup_dir / "delete-responses.jsonl", receipt)
         if not receipt["accepted"]:
             fail(
@@ -3046,7 +3296,7 @@ def live(pre: dict, token: str) -> Path:
             cleanup_metrics, cleanup_at = guard_api(
                 cleanup_dir, cleanup_metrics, cleanup_at
             )
-            time.sleep(1)
+            pause(1)
         else:
             fail(
                 "original challenger did not acquire the released active slot within 120 seconds"
@@ -3091,11 +3341,15 @@ def live(pre: dict, token: str) -> Path:
             cleanup_metrics, cleanup_at = guard_api(
                 cleanup_dir, cleanup_metrics, cleanup_at
             )
-            time.sleep(3)
+            pause(3)
         else:
             fail(
                 "blocker Pod/ledger cleanup did not finish within its bounded deadline"
             )
+        checkpoint = "local-child-shutdown"
+        close_local_processes(metrics, forward, proxy, overall_deadline)
+        metrics, forward, proxy = [], None, None
+        budget_timeout(RUN_DEADLINE_SECONDS)
         save_json(
             run_dir / "result.json",
             {
@@ -3152,7 +3406,10 @@ def live(pre: dict, token: str) -> Path:
             pass
         # Unknown means stop this driver and retain the dedicated fixture.
         # Never infer new cleanup authority or automatically scale a workload.
-        stop = {"status": "not-attempted-retained", "automatic_scale_or_delete_attempted": False}
+        stop = {
+            "status": "not-attempted-retained",
+            "automatic_scale_or_delete_attempted": False,
+        }
         try:
             failure_snapshots = capture_failure_objects(
                 run_dir, token, set(expected_ids) | {build_id(run_id + "-blocker")}
@@ -3172,28 +3429,15 @@ def live(pre: dict, token: str) -> Path:
         save_json(run_dir / "result.json", base_result)
         raise BenchError(error_text) from None
     finally:
-        for metric_forward in metrics:
-            metric_forward.close()
         for signum, previous_handler in previous_handlers.items():
             signal.signal(signum, previous_handler)
-        if forward is not None:
-            forward.terminate()
-            try:
-                forward.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                forward.kill()
-                forward.wait(timeout=5)
-        if proxy is not None:
-            proxy.terminate()
-            try:
-                proxy.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                proxy.kill()
-                proxy.wait(timeout=5)
+        close_local_processes(metrics, forward, proxy)
         if success:
             note(f"PASS; receipts preserved at {run_dir}")
         else:
-            note(f"FAILED; receipts and test-owned CRs retained at {run_dir}; inspect first")
+            note(
+                f"FAILED; receipts and test-owned CRs retained at {run_dir}; inspect first"
+            )
 
 
 def main() -> None:
@@ -3248,12 +3492,16 @@ def main() -> None:
             f"{mode} mode requires DEEP_QUEUE_E2E_ACK={FIXTURE['run_id']}:{FIXTURE_SHA}"
         )
     if mode == "check":
+        start_execution_budget()
         preflight()
-        note(f"read-only preflight passed: {CLUSTER}; 2/2 nodes; two Service Pods; empty ledgers")
+        note(
+            f"read-only preflight passed: {CLUSTER}; 2/2 nodes; two Service Pods; empty ledgers"
+        )
         note("no writes performed; explicit run mode needs DEEP_QUEUE_E2E_ACK")
         return
     if sys.platform != "linux":
         fail("run mode requires an isolated Linux Kind host")
+    start_execution_budget()
     if not HOST_LOCK.parent.is_dir():
         fail("managed host lock directory is unavailable")
     lock_fd = os.open(HOST_LOCK, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
@@ -3264,7 +3512,9 @@ def main() -> None:
         except BlockingIOError:
             fail("another deep-queue run holds the host lock")
         pre = preflight()
-        note(f"locked preflight passed: {CLUSTER}; 2/2 nodes; two Service Pods; empty ledgers")
+        note(
+            f"locked preflight passed: {CLUSTER}; 2/2 nodes; two Service Pods; empty ledgers"
+        )
         token = load_static_token()
         live(pre, token)
     finally:

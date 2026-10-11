@@ -10,6 +10,7 @@ import json
 import os
 import tempfile
 import time
+import types
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -33,6 +34,8 @@ def fixture() -> dict:
         "run_id": run,
         "profile": "representative-short",
         "candidate_commit": "a" * 40,
+        "pod_template_binary": "/private/fixture-capacity.test",
+        "pod_template_binary_sha256": "9" * 64,
         "host_boot_id": uid(1),
         "cluster": cluster,
         "kubeconfig": "/private/fixture.kubeconfig",
@@ -165,6 +168,17 @@ def queued(fix: dict, con: dict, key: str, index: int = 100) -> tuple[dict, dict
         V3.PREFIX + "queue-receipt-digest": receipt_digest,
     }
     return build, intent, receipt
+
+
+def mock_pod_digest(pod: dict) -> str:
+    # A directed mock oracle, NOT an implementation of typed Go PodSpec
+    # canonicalization. The native Go regressions separately exercise the real
+    # CanonicalPodTemplateDigest implementation and its defaults/drift rules.
+    projection = {"metadata": copy.deepcopy(pod["metadata"]), "spec": pod["spec"]}
+    for field in ("uid", "resourceVersion"):
+        projection["metadata"].pop(field, None)
+    projection["metadata"]["annotations"].pop(V3.PREFIX + "pod-template-digest", None)
+    return "sha256:" + hashlib.sha256(V3.encoded(projection)).hexdigest()
 
 
 def active(fix: dict, con: dict) -> tuple[dict, dict, dict, dict, dict]:
@@ -315,6 +329,13 @@ def active(fix: dict, con: dict) -> tuple[dict, dict, dict, dict, dict]:
     pod["metadata"]["annotations"] = {
         V3.PREFIX + key: value for key, value in stamps.items()
     }
+    digest = mock_pod_digest(pod)
+    entry["podTemplateDigest"] = digest
+    witness["podTemplateDigest"] = digest
+    pod["metadata"]["annotations"][V3.PREFIX + "pod-template-digest"] = digest
+    create["podTemplateDigest"] = digest
+    create_data["payload"] = json.dumps(create, separators=(",", ":"))
+    entry["podReceiptDigest"] = V3.digest_data(create_data)
     return build, pod, entry, intent, objects
 
 
@@ -364,6 +385,205 @@ class V3QualificationTest(unittest.TestCase):
         ):
             with self.subTest(field=field), self.assertRaises(V3.QualificationError):
                 V3.validate_fixture(dict(self.fix, **{field: value}))
+
+    def test_pending_terminating_runner_cannot_qualify(self) -> None:
+        build, pod, _, _, _ = active(self.fix, self.con)
+        name, identity = build["metadata"]["name"], build["metadata"]["uid"]
+        pod["metadata"]["ownerReferences"] = [
+            {"kind": "KovaBuild", "name": name, "uid": identity, "controller": True}
+        ]
+        pod["spec"]["nodeSelector"] = {"never": "true"}
+        pod["status"] = {"phase": "Pending"}
+        pod.update(apiVersion="v1", kind="Pod")
+
+        def response(*args: str) -> dict:
+            return (
+                {"apiVersion": "v1", "kind": "List", "items": [pod]}
+                if args[3] == "pods"
+                else pod
+            )
+
+        with (
+            patch.object(BENCH, "NAMESPACE", self.fix["runner_namespace"]),
+            patch.object(BENCH, "kjson", side_effect=response),
+        ):
+            self.assertIs(BENCH.check_runner(name, identity), pod)
+            for timestamp in ("2026-10-11T00:00:00Z", "", False):
+                pod["metadata"]["deletionTimestamp"] = timestamp
+                with (
+                    self.subTest(timestamp=timestamp),
+                    self.assertRaises((BENCH.BenchError, V3.QualificationError)),
+                ):
+                    BENCH.check_runner(name, identity)
+
+    def test_one_budget_spent_by_preflight_is_not_renewed_for_live(self) -> None:
+        clock = [100.0]
+        with (
+            patch.object(BENCH, "EXECUTION_DEADLINE", None),
+            patch.object(BENCH, "RUN_DEADLINE_SECONDS", 900),
+            patch.object(BENCH.time, "monotonic", side_effect=lambda: clock[0]),
+        ):
+            self.assertEqual(BENCH.start_execution_budget(), 1000.0)
+            clock[0] += 250  # all three image saves and other read-only preflight work
+            self.assertEqual(BENCH.live_deadline(), 1000.0)
+            self.assertEqual(BENCH.budget_timeout(900), 650.0)
+            clock[0] = 999.5
+            completed = types.SimpleNamespace(returncode=0, stdout="ok")
+            with patch.object(BENCH.subprocess, "run", return_value=completed) as run:
+                self.assertEqual(BENCH.command(["mock-read-only"], timeout=90), "ok")
+                self.assertEqual(run.call_args.kwargs["timeout"], 0.5)
+            clock[0] = 1000
+            with (
+                patch.object(BENCH.subprocess, "run") as run,
+                patch.object(BENCH.OPENER, "open") as wire,
+            ):
+                for action in (
+                    lambda: BENCH.command(["mock-read-only"]),
+                    lambda: BENCH.request_json(18087, "DELETE", "/never-sent"),
+                    BENCH.live_deadline,
+                ):
+                    with self.assertRaises(BENCH.BenchError):
+                        action()
+                run.assert_not_called()
+                wire.assert_not_called()
+
+    def test_streamed_image_save_is_bounded_by_original_budget(self) -> None:
+        process = types.SimpleNamespace(
+            stdout=io.BytesIO(b"mock-archive"),
+            wait=lambda **_: 0,
+        )
+        with (
+            patch.object(BENCH, "EXECUTION_DEADLINE", 1000.0),
+            patch.object(BENCH.time, "monotonic", return_value=999.0),
+            patch.object(BENCH.subprocess, "Popen", return_value=process) as popen,
+            patch.object(BENCH, "parse_oci_saved_image", return_value={"mock": True}),
+        ):
+            BENCH.saved_image_fact("mock-image", "sha256:" + "a" * 64, "b" * 40)
+            self.assertEqual(popen.call_args.args[0][2], "1.000000s")
+
+    def test_template_binary_read_ignores_atime_but_binds_bytes_and_stable_identity(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            binary = Path(directory).resolve() / "candidate.test"
+            binary.write_bytes(b"private-offline-mock-binary")
+            binary.chmod(0o700)
+            fix = dict(
+                self.fix,
+                pod_template_binary=str(binary),
+                pod_template_binary_sha256=hashlib.sha256(
+                    binary.read_bytes()
+                ).hexdigest(),
+            )
+            info = binary.stat()
+            fake = types.SimpleNamespace(
+                **{
+                    key: getattr(info, key)
+                    for key in (
+                        "st_dev",
+                        "st_ino",
+                        "st_mode",
+                        "st_uid",
+                        "st_gid",
+                        "st_size",
+                        "st_mtime_ns",
+                        "st_ctime_ns",
+                    )
+                },
+                st_atime_ns=0,
+            )
+
+            def changed_atime(*_, **__) -> object:
+                fake.st_atime_ns += 1
+                return fake
+
+            with (
+                patch.object(BENCH, "FIXTURE", fix),
+                patch.object(BENCH, "EXECUTION_DEADLINE", None),
+                patch.object(Path, "stat", side_effect=changed_atime),
+            ):
+                self.assertEqual(BENCH.qualify_template_binary(), binary)
+                fake.st_mtime_ns += 1
+                with self.assertRaises(BENCH.BenchError):
+                    BENCH.qualify_template_binary()
+            with patch.object(
+                BENCH, "FIXTURE", dict(fix, pod_template_binary_sha256="0" * 64)
+            ):
+                with self.assertRaises(BENCH.BenchError):
+                    BENCH.qualify_template_binary()
+
+    def test_local_child_shutdown_has_one_shared_bound_and_no_api_operation(
+        self,
+    ) -> None:
+        clock = [100.0]
+        calls = []
+
+        class Child:
+            def __init__(self, name: str, slow: bool = False):
+                self.name, self.slow, self.done = name, slow, False
+                self.stdout = io.BytesIO()
+
+            def poll(self) -> int | None:
+                return 0 if self.done else None
+
+            def terminate(self) -> None:
+                calls.append(("terminate", self.name))
+
+            def kill(self) -> None:
+                calls.append(("kill", self.name))
+                self.done = True
+
+            def wait(self, *, timeout: float) -> int:
+                calls.append(("wait", self.name, timeout))
+                if self.slow and not self.done:
+                    clock[0] += timeout
+                    raise BENCH.subprocess.TimeoutExpired("own-local-child", timeout)
+                self.done = True
+                return 0
+
+        one, two = Child("one", True), Child("two")
+        with (
+            patch.object(BENCH.time, "monotonic", side_effect=lambda: clock[0]),
+            patch.object(BENCH, "kctl") as api,
+        ):
+            BENCH.close_local_processes(
+                [types.SimpleNamespace(process=one)], two, None, 102
+            )
+            self.assertEqual(clock[0], 102)
+            self.assertEqual(calls[:2], [("terminate", "one"), ("terminate", "two")])
+            self.assertTrue(all(call[2] <= 2 for call in calls if call[0] == "wait"))
+            self.assertTrue(one.done and two.done)
+            api.assert_not_called()
+
+    def test_runner_template_uses_named_get_joined_to_original_list_uid(self) -> None:
+        build, pod, _, _, _ = active(self.fix, self.con)
+        name, identity = build["metadata"]["name"], build["metadata"]["uid"]
+        pod.update(apiVersion="v1", kind="Pod", status={"phase": "Pending"})
+        pod["spec"]["nodeSelector"] = {"never": "true"}
+        pod["metadata"]["ownerReferences"] = [
+            {"kind": "KovaBuild", "name": name, "uid": identity, "controller": True}
+        ]
+        listing = {
+            "apiVersion": "v1",
+            "kind": "List",
+            "items": [{"metadata": copy.deepcopy(pod["metadata"])}],
+        }
+        with (
+            patch.object(BENCH, "NAMESPACE", self.fix["runner_namespace"]),
+            patch.object(BENCH, "kjson", side_effect=[listing, pod]) as reads,
+        ):
+            self.assertIs(BENCH.check_runner(name, identity), pod)
+            self.assertEqual(
+                reads.call_args_list[1].args[2:5], ("get", "pod", "kova-job-" + name)
+            )
+        changed = copy.deepcopy(pod)
+        changed["metadata"]["uid"] = uid(999)
+        with (
+            patch.object(BENCH, "NAMESPACE", self.fix["runner_namespace"]),
+            patch.object(BENCH, "kjson", side_effect=[listing, changed]),
+            self.assertRaises(V3.QualificationError),
+        ):
+            BENCH.check_runner(name, identity)
 
     def test_private_fixture_bytes_and_duplicate_fields(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -424,8 +644,18 @@ class V3QualificationTest(unittest.TestCase):
 
     def test_three_receipts_and_original_runner_uid_fence(self) -> None:
         values = active(self.fix, self.con)
-        V3.qualify_active_receipts(*values[:4], values[4], self.fix, self.con)
-        for target in ("grant", "pod", "witness", "fence", "manifest"):
+        V3.qualify_active_receipts(
+            *values[:4], values[4], self.fix, self.con, mock_pod_digest
+        )
+        for target in (
+            "grant",
+            "pod",
+            "witness",
+            "fence",
+            "manifest",
+            "label",
+            "extra-spec",
+        ):
             build, pod, entry, intent, objects = copy.deepcopy(values)
             if target in ("grant", "pod"):
                 entry[target + "ReceiptUID"] = uid(999)
@@ -433,14 +663,67 @@ class V3QualificationTest(unittest.TestCase):
                 build["status"]["admissionGenesisWitness"]["podUID"] = uid(999)
             elif target == "fence":
                 pod["spec"]["containers"][0]["env"][0]["value"] = pod["metadata"]["uid"]
+            elif target == "label":
+                pod["metadata"]["labels"] = {"injected": "true"}
+            elif target == "extra-spec":
+                pod["spec"]["hostNetwork"] = True
             else:
                 pod["spec"]["containers"][0]["image"] = (
                     "example.invalid/other@sha256:" + "d" * 64
                 )
             with self.subTest(target=target), self.assertRaises(V3.QualificationError):
                 V3.qualify_active_receipts(
-                    build, pod, entry, intent, objects, self.fix, self.con
+                    build,
+                    pod,
+                    entry,
+                    intent,
+                    objects,
+                    self.fix,
+                    self.con,
+                    mock_pod_digest,
                 )
+
+    def test_native_digest_result_binds_input_uid_and_candidate(self) -> None:
+        _, pod, _, _, _ = active(self.fix, self.con)
+        raw = V3.encoded(pod)
+        result = {
+            "candidate_commit": self.fix["candidate_commit"],
+            "input_sha256": hashlib.sha256(raw).hexdigest(),
+            "pod_uid": pod["metadata"]["uid"],
+            "pod_template_digest": "sha256:" + "8" * 64,
+        }
+        output = "KOVA_E2E_POD_TEMPLATE " + json.dumps(result) + "\nPASS\n"
+        with (
+            patch.object(BENCH, "FIXTURE", self.fix),
+            patch.object(
+                BENCH,
+                "qualify_template_binary",
+                return_value=Path(self.fix["pod_template_binary"]),
+            ) as qualify,
+            patch.object(BENCH, "command", return_value=output) as command,
+        ):
+            self.assertEqual(
+                BENCH.canonical_pod_digest(pod), result["pod_template_digest"]
+            )
+            self.assertEqual(command.call_args.kwargs["input_text"].encode(), raw)
+            self.assertEqual(
+                command.call_args.kwargs["environment"],
+                {"KOVA_E2E_POD_TEMPLATE_STDIN": "1"},
+            )
+            self.assertEqual(qualify.call_count, 2)
+            for field, value in (
+                ("candidate_commit", "b" * 40),
+                ("input_sha256", "0" * 64),
+                ("pod_uid", uid(999)),
+                ("pod_template_digest", None),
+            ):
+                command.return_value = (
+                    "KOVA_E2E_POD_TEMPLATE "
+                    + json.dumps(dict(result, **{field: value}))
+                    + "\nPASS\n"
+                )
+                with self.subTest(field=field), self.assertRaises(BENCH.BenchError):
+                    BENCH.canonical_pod_digest(pod)
 
     def test_schema2_empty_and_active_charge_are_not_legacy_queued_count(self) -> None:
         build, _, entry, intent, _ = active(self.fix, self.con)
@@ -882,24 +1165,63 @@ class DirectedFlowTest(unittest.TestCase):
             self.assertEqual(
                 pre["service_pods"], {survivor: uid(12), replacement: uid(701)}
             )
-            self.assertTrue(pre["leader_handoff_effect"]["original_leader_direct_absent"])
-            self.assertEqual(pre["leader_handoff_effect"]["other_original_uids_last_verified"], {survivor: uid(12)})
+            self.assertTrue(
+                pre["leader_handoff_effect"]["original_leader_direct_absent"]
+            )
+            self.assertEqual(
+                pre["leader_handoff_effect"]["other_original_uids_last_verified"],
+                {survivor: uid(12)},
+            )
 
-    def test_unknown_leader_delete_keeps_attempt_uid_without_absence_claim(self) -> None:
+    def test_unknown_leader_delete_keeps_attempt_uid_without_absence_claim(
+        self,
+    ) -> None:
         original = "kova-service-one"
-        pre = {"leader_lease_uid": uid(700), "initial_leader": original, "leader_holder": original + "_old",
-               "service_pods": {original: uid(11), "kova-service-two": uid(12)}, "service_deployment": {
-                   "uid": uid(7), "spec_except_replicas_sha256": BENCH.object_sha256({"template": {"fixed": True}})}}
-        lease = {"metadata": {"uid": uid(700)}, "spec": {"holderIdentity": original + "_old"}}
+        pre = {
+            "leader_lease_uid": uid(700),
+            "initial_leader": original,
+            "leader_holder": original + "_old",
+            "service_pods": {original: uid(11), "kova-service-two": uid(12)},
+            "service_deployment": {
+                "uid": uid(7),
+                "spec_except_replicas_sha256": BENCH.object_sha256(
+                    {"template": {"fixed": True}}
+                ),
+            },
+        }
+        lease = {
+            "metadata": {"uid": uid(700)},
+            "spec": {"holderIdentity": original + "_old"},
+        }
         pod = {"metadata": metadata(original, self.fix["control_namespace"], uid(11))}
-        deployment = {"metadata": {"uid": uid(7)}, "spec": {"replicas": 2, "template": {"fixed": True}}}
-        with tempfile.TemporaryDirectory() as directory, patch.object(BENCH, "CONTROL_NAMESPACE", self.fix["control_namespace"]), \
-                patch.object(BENCH, "qualify_epoch"), patch.object(BENCH, "wait_queue_state"), \
-                patch.object(BENCH, "qualify_service_owner"), patch.object(BENCH, "kjson", side_effect=[pod, deployment]), \
-                patch.object(BENCH, "leader_observation", return_value=(lease, original)), \
-                patch.object(BENCH, "request_json", side_effect=BENCH.BenchError("private transport detail")) as request:
+        deployment = {
+            "metadata": {"uid": uid(7)},
+            "spec": {"replicas": 2, "template": {"fixed": True}},
+        }
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.object(BENCH, "CONTROL_NAMESPACE", self.fix["control_namespace"]),
+            patch.object(BENCH, "qualify_epoch"),
+            patch.object(BENCH, "wait_queue_state"),
+            patch.object(BENCH, "qualify_service_owner"),
+            patch.object(BENCH, "kjson", side_effect=[pod, deployment]),
+            patch.object(BENCH, "leader_observation", return_value=(lease, original)),
+            patch.object(
+                BENCH,
+                "request_json",
+                side_effect=BENCH.BenchError("private transport detail"),
+            ) as request,
+        ):
             with self.assertRaises(BENCH.BenchError):
-                BENCH.leader_handoff(pre, Path(directory), {}, {}, "blocker", uid(101), time.monotonic() + 5)
+                BENCH.leader_handoff(
+                    pre,
+                    Path(directory),
+                    {},
+                    {},
+                    "blocker",
+                    uid(101),
+                    time.monotonic() + 5,
+                )
             request.assert_called_once()
             effect = pre["leader_handoff_effect"]
             self.assertEqual(effect["qualified_original_leader_uid"], uid(11))

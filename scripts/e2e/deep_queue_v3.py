@@ -12,6 +12,7 @@ import math
 import os
 import re
 import stat
+from collections.abc import Callable
 from pathlib import Path
 
 UID = re.compile(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\Z")
@@ -122,6 +123,8 @@ def validate_fixture(value: dict) -> None:
             "run_id",
             "profile",
             "candidate_commit",
+            "pod_template_binary",
+            "pod_template_binary_sha256",
             "host_boot_id",
             "cluster",
             "kubeconfig",
@@ -165,6 +168,14 @@ def validate_fixture(value: dict) -> None:
         type(value["candidate_commit"]) is str
         and re.fullmatch(r"[0-9a-f]{40}", value["candidate_commit"]) is not None,
         "candidate is not pinned",
+    )
+    need(
+        type(value["pod_template_binary"]) is str
+        and Path(value["pod_template_binary"]).is_absolute()
+        and ".." not in Path(value["pod_template_binary"]).parts
+        and type(value["pod_template_binary_sha256"]) is str
+        and SHA.fullmatch(value["pod_template_binary_sha256"]),
+        "native Pod-template binary is not pinned",
     )
     need(
         value["cluster"] == "kova-deep-queue-" + run_id,
@@ -637,6 +648,7 @@ def qualify_active_receipts(
     objects: dict[str, dict],
     fixture: dict,
     contract: dict,
+    canonical_pod_digest: Callable[[dict], str],
 ) -> None:
     metadata, spec = build["metadata"], build["spec"]
     pinned = {
@@ -741,6 +753,7 @@ def qualify_active_receipts(
         == "kova-job-" + metadata["name"]
         and create["podAttemptNonce"] == entry["podAttemptNonce"]
         and create["podTemplateDigest"] == entry["podTemplateDigest"]
+        and canonical_pod_digest(pod) == entry["podTemplateDigest"]
         and create["runnerImageDigest"] == contract["runnerImage"].rsplit("@", 1)[1]
         and create["buildRequestId"] == metadata["uid"],
         "Pod-create pre-effect facts differ",
