@@ -1,6 +1,8 @@
 package httpapi
 
 import (
+	"encoding/json"
+	"errors"
 	"net/http"
 	"time"
 
@@ -9,6 +11,7 @@ import (
 
 	"github.com/labstack/echo/v4"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -29,7 +32,6 @@ func (s *Server) handleCancelBuild(c echo.Context) error {
 	if isTerminalPhase(build.Status.Phase) || build.Status.Phase == kovav1.PhaseFailedVerifying {
 		return c.JSON(http.StatusOK, buildJobFromCR(build, s.cfg))
 	}
-	base := build.DeepCopy()
 	if build.Annotations == nil {
 		build.Annotations = map[string]string{}
 	}
@@ -39,7 +41,20 @@ func (s *Server) handleCancelBuild(c echo.Context) error {
 	if err := s.checkGenesis(c.Request().Context()); err != nil {
 		return serviceUnavailable(c, err)
 	}
-	if err := s.client.Patch(c.Request().Context(), build, client.MergeFrom(base)); err != nil {
+	if build.UID == "" || build.ResourceVersion == "" {
+		return internalContractError(c, errors.New("cancellation requires the original build UID and resourceVersion"))
+	}
+	// Bind the write to the same incarnation and version that passed authorization
+	// and the phase check. A changed object must not be retried under this request.
+	patch, err := json.Marshal([]map[string]any{
+		{"op": "test", "path": "/metadata/uid", "value": string(build.UID)},
+		{"op": "test", "path": "/metadata/resourceVersion", "value": build.ResourceVersion},
+		{"op": "add", "path": "/metadata/annotations", "value": build.Annotations},
+	})
+	if err != nil {
+		return internalError(c, err)
+	}
+	if err := s.client.Patch(c.Request().Context(), build, client.RawPatch(types.JSONPatchType, patch)); err != nil {
 		return internalError(c, err)
 	}
 	buildCancels.Add(c.Request().Context(), 1)

@@ -286,6 +286,11 @@ GET  /v1/builds/<id>/logs?tail_lines=100
 POST /v1/builds/<id>/cancel
 ```
 
+Cancellation records a request annotation; it does not directly change the build phase or release admission capacity.
+The annotation write atomically tests the original build UID and resourceVersion that passed authorization and the phase check, preserving other annotations.
+A replacement or concurrently changed build is not cancelled or retried within that request; an uncertain write returns the existing internal-error response and callers must inspect the build before deciding whether to issue another cancellation.
+Terminal builds and `FailedVerifying` retain their fixed outcome without a cancellation write.
+
 Job responses contain the public execution state and a stable `failure_code` for terminal failures.
 After the runner completes, `verifying` is a durable nonterminal state; the response includes verification start/deadline/next-attempt times, attempt count, last error, and pending/succeeded/failed output counts.
 An internally distinct `FailedVerifying` state projects as public `verifying` while Kova checks outputs pushed before a runner failure. It cannot become `succeeded`: even if every earlier push verifies, the final job is `failed` with `build_failed`. The original runner failure is retained in Kubernetes status, and cancellation cannot rewrite the known failed outcome. Existing clients therefore continue waiting for a final `failed` response rather than mistaking partial receipts for a successful build.
