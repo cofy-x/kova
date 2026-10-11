@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/cofy-x/kova/internal/admissioncontract"
@@ -42,6 +44,46 @@ type Server struct {
 	genesisLedger    *admissiongenesis.Guard
 	readinessGenesis admissiongenesis.Checker
 	receipts         recoveryreceipt.ConfigMaps
+	admissionGate    localAdmissionGate
+}
+
+// localAdmissionGate limits only this Server's concurrent queue CAS owners.
+// The Genesis UID/RV/data CAS and one-shot receipt remain the authority across
+// replicas. Waiting is context-aware so a disconnected request cannot later
+// acquire the slot and begin a write.
+type localAdmissionGate struct {
+	once    sync.Once
+	token   chan struct{}
+	waiters atomic.Int32
+}
+
+func (g *localAdmissionGate) acquire(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	// Server values built without NewServer must not wait forever on a nil
+	// channel. Once also makes concurrent first admission calls safe.
+	g.once.Do(func() {
+		g.token = make(chan struct{}, 1)
+		g.token <- struct{}{}
+	})
+	g.waiters.Add(1)
+	defer g.waiters.Add(-1)
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-g.token:
+		// A cancellation racing with release must not authorize a new write.
+		if err := ctx.Err(); err != nil {
+			g.release()
+			return err
+		}
+		return nil
+	}
+}
+
+func (g *localAdmissionGate) release() {
+	g.token <- struct{}{}
 }
 
 // WithRecoveryReceipts supplies the direct, one-attempt ConfigMap transport

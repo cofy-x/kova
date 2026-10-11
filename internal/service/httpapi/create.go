@@ -98,9 +98,27 @@ func (s *Server) handleCreateBuild(c echo.Context) error {
 	if s.genesisLedger != nil && s.receipts == nil {
 		return serviceUnavailable(c, fmt.Errorf("Genesis queue admission lacks a direct recovery receipt client"))
 	}
+	// Bound this process's Genesis queue CAS/receipt contention. The permit
+	// is not authority: every mutation retains its original cross-replica CAS
+	// and one-shot receipt checks. Legacy admission remains unchanged.
+	gateHeld := false
+	releaseGate := func() {
+		if gateHeld {
+			s.admissionGate.release()
+			gateHeld = false
+		}
+	}
+	if s.genesisLedger != nil {
+		if err := s.admissionGate.acquire(c.Request().Context()); err != nil {
+			return serviceUnavailable(c, err)
+		}
+		gateHeld = true
+		defer releaseGate()
+	}
 	store := s.queueStore()
 	intent, fresh, err := store.Reserve(c.Request().Context(), &build)
 	if err != nil {
+		releaseGate()
 		switch {
 		case errors.Is(err, queueadmission.ErrFull):
 			return queueCapacityExceeded(c, "queue limit is reached")
@@ -118,20 +136,26 @@ func (s *Server) handleCreateBuild(c echo.Context) error {
 		if apierrors.IsNotFound(err) {
 			if s.genesisLedger != nil && intent.CleanupKind == "rejected" {
 				if cleanupErr := store.ResumeRejectedCleanup(c.Request().Context(), id, intent.Nonce); cleanupErr != nil {
+					releaseGate()
 					return serviceUnavailable(c, cleanupErr)
 				}
 			}
+			releaseGate()
 			return queueAdmissionPending(c, id)
 		}
 		if err != nil {
+			releaseGate()
 			return internalError(c, err)
 		}
 		if !sameBuildRequest(&existing, request) {
+			releaseGate()
 			return conflict(c, "idempotency key is already used with different build parameters")
 		}
 		if err := s.verifyGenesisHTTPReplay(c.Request().Context(), &existing, request, principal.Username); err != nil {
+			releaseGate()
 			return genesisHTTPReplayFailure(c, err)
 		}
+		releaseGate()
 		return c.JSON(http.StatusOK, buildJobFromCR(&existing, s.cfg))
 	}
 	build.Annotations = map[string]string{queueadmission.IntentAnnotation: intent.Nonce}
@@ -139,9 +163,11 @@ func (s *Server) handleCreateBuild(c echo.Context) error {
 	if s.genesisLedger != nil {
 		receiptIntent, err := store.ReceiptIntent(&build, intent)
 		if err != nil {
+			releaseGate()
 			return queueAdmissionPending(c, id)
 		}
 		if err := store.CheckReceiptNamespace(c.Request().Context()); err != nil {
+			releaseGate()
 			return queueAdmissionPending(c, id)
 		}
 		// Only this fresh queue-CAS owner may make the receipt Create call.
@@ -149,18 +175,22 @@ func (s *Server) handleCreateBuild(c echo.Context) error {
 		queueWitness, err = recoveryreceipt.RecordQueueOnce(c.Request().Context(), s.receipts, receiptIntent)
 		if err != nil {
 			logging.Errorf("KovaBuild %s queue receipt outcome is unknown: %v", id, err)
+			releaseGate()
 			return queueAdmissionPending(c, id)
 		}
 		if err := store.CheckReceiptNamespace(c.Request().Context()); err != nil {
+			releaseGate()
 			return queueAdmissionPending(c, id)
 		}
 		if err := store.PinReceipt(c.Request().Context(), &build, intent, queueWitness); err != nil {
 			logging.Errorf("KovaBuild %s queue receipt pin is unconfirmed: %v", id, err)
+			releaseGate()
 			return queueAdmissionPending(c, id)
 		}
 		build.Annotations[queueadmission.ReceiptUIDAnnotation] = queueWitness.ReceiptUID
 		build.Annotations[queueadmission.ReceiptDigestAnnotation] = queueWitness.DataDigest
 	}
+	releaseGate()
 	// A reserve is not a reusable permission for a later name-addressed CR
 	// Create. On refusal the intent stays held; an absent CR is not proof that
 	// an already-sent Create cannot arrive later.
