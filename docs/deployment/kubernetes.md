@@ -161,7 +161,9 @@ requires an external, stopped-writer installation.
 The new Service binary requires the exact receipt; there is no legacy startup mode.
 An enabled Helm Service without that receipt fails rendering, including a zero-replica deployment.
 Existing deployments must remain on their old version until an explicit stop-and-drain migration to a new runner namespace is possible.
-This candidate is not yet qualified for the next RC: the live serving-API and committed-ledger-loss repair gates below remain open.
+The rc.11 prerelease decision defers the wider committed-ledger-loss repair acceptance; it does not qualify incident cleanup or cross-epoch capacity release.
+See the [rc.11 release scope and known limits](../release-notes/v0.1.0-rc.11.md).
+The live serving-API checks below remain installation requirements.
 Before installing, stop **every** old Service writer and
 direct/admin submission route, use a never-before-used runner Namespace
 **name**, and retain the original Namespace UID, Genesis UID, random
@@ -219,11 +221,11 @@ serving `/status` API must round-trip both `admissionGenesisWitness` and
 `admissionGenesisStopIntent` without pruning. The current
 `probe-kovabuild-status.sh --expect-persisted` checks older verification
 fields, **not** those Genesis fields; it is not sufficient for this gate.
-Committed-ledger loss still retains capacity and finalizers without a bounded
-repair path, so Genesis remains out of the next RC. The separately tracked
-drain-only recovery work does not retroactively make a deleted original
-ledger safe to recreate. The local fake-API tests and Helm rendering are not
-substitutes for these live gates.
+Committed-ledger loss still retains capacity and finalizers without a fully
+qualified bounded repair path.
+Rc.11 ships Genesis with that known limitation; the deferred recovery acceptance is not a PASS.
+The separately implemented drain-only recovery work does not retroactively make a deleted original ledger safe to recreate.
+The local fake-API tests and Helm rendering are not substitutes for the live installation checks or the deferred incident acceptance.
 
 Replace `vX.Y.Z` with an exact tag from the
 [GitHub release page](https://github.com/cofy-x/kova/releases). Keep the same
@@ -341,7 +343,8 @@ The HTTP queue slot remains charged through active execution until terminal clea
 Do not delete either `kova-service-admission` or `kova-service-queue-admission` while the Service is running.
 Direct/admin CR writes are outside the HTTP queue quota, though active limits still apply.
 Unknown Create results may retain capacity until exact operator evidence resolves them.
-Receipt instrumentation and external signature verification alone do not authorize committed-loss disposal or capacity release; the bounded executor and full live drain acceptance remain release blockers.
+Receipt instrumentation and external signature verification alone do not authorize committed-loss disposal or capacity release.
+Full live drain acceptance is deferred for rc.11 and remains required before claiming a qualified committed-loss incident procedure; administrative issue closure is not that evidence.
 The supported settings are `maxActiveJobs` 1–128, `workerSlots` 1–65535 and `maxQueuedJobs` 1–1000, with each per-requester limit no greater than its global limit. Both ledgers enforce separate 768 KiB encoded data budgets with room for an in-flight nonce, cleanup marker, fence and cursor at full supported occupancy. An existing ledger above the new bounds requires draining and migration to a fresh runner namespace; do not edit or delete it to force startup.
 
 This protocol **requires a stop-and-drain upgrade**: stop submissions, finish/delete old queued and active builds, verify all old runner Pods are gone, stop every old controller and HTTP replica, apply the updated CRD, and start the new version with a new runner namespace and fresh ledgers. A mixed-version or in-place rolling upgrade can bypass the fence. See the [admission design and recovery rules](../service-admission-design.md); real-apiserver migration validation is still required before claiming a deployed strict quota.
