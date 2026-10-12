@@ -1,7 +1,8 @@
 # Fresh Admission Bootstrap Recovery Proposal
 
-Status: local candidate for [#57](https://github.com/cofy-x/kova/issues/57); bootstrap and runtime are wired and deterministic checks pass, but isolated product acceptance and committed-loss recovery remain incomplete.
-The existing two-ledger admission contract remains authoritative until this protocol, [#58](https://github.com/cofy-x/kova/issues/58), migration, and isolated runtime gates pass.
+Status: implemented Genesis v3 contract; this historical proposal and its acceptance scope do not claim complete runtime incident recovery.
+Rc.11 uses the v3 two-ledger contract and explicitly defers the remaining incident acceptance under the [maintainer release decision](release-notes/v0.1.0-rc.11.md).
+Older receipts and ledgers cannot be adopted in place; installation and migration safety requirements below remain mandatory.
 Do not use this note to repair a released or live namespace.
 
 ## Decision and trust root
@@ -137,6 +138,8 @@ The separate opt-in `kova-recovery dispose-exact` operator executable now suppli
 It still provides no signer, namespace deletion, route writer, capacity-release method or physical-retirement detector, and is not a complete incident procedure.
 Its signatures authenticate the exact record, not the truth of namespace retirement, complete inventory, durable result escrow, or one-successor capacity transfer.
 The source-bound actual Service control-plane gate is implemented and covered by local safety tests, but still requires separately approved fresh real-API fixtures; it does not qualify runner execution or full drain.
-That separate recovery gap remains a hard no-go for the next RC.
+That separate recovery gap remains unqualified.
+The maintainer explicitly deferred its original next-RC gate for rc.11; administrative closure of [#62](https://github.com/cofy-x/kova/issues/62) is not a runtime PASS or permission to release unknown capacity.
+Do not claim a completed incident procedure until the full target-environment retirement, archival, cleanup, and cutover evidence is available.
 
 Sources for the proposed Kubernetes mechanisms: [API resourceVersion and conditional JSON Patch](https://kubernetes.io/docs/reference/using-api/api-concepts/#updates-to-existing-resources) and [immutable ConfigMap behavior](https://kubernetes.io/docs/concepts/configuration/configmap/#configmap-immutable).
