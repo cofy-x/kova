@@ -5,7 +5,7 @@ go 1.26.9
 require (
 	github.com/evanphx/json-patch/v5 v5.9.11
 	github.com/google/go-containerregistry v0.22.1
-	github.com/labstack/echo/v4 v4.16.0
+	github.com/labstack/echo/v4 v4.16.1
 	github.com/prometheus/client_golang v1.24.1
 	github.com/urfave/cli/v2 v2.27.7
 	go.opentelemetry.io/otel v1.46.0
